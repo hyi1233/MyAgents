@@ -30,6 +30,8 @@ export interface SessionMetadata {
     cronTaskId?: string;
     /** Session origin — undefined or 'desktop' for Desktop, IM sources for Telegram */
     source?: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
+    /** Preview of the last user message (truncated, for Task Center display) */
+    lastMessagePreview?: string;
 }
 
 /**

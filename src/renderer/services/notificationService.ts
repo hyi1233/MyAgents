@@ -125,6 +125,13 @@ export function notifyAskUserQuestion(): void {
 }
 
 /**
+ * Notify that AI is requesting plan mode approval (EnterPlanMode or ExitPlanMode)
+ */
+export function notifyPlanModeRequest(): void {
+    void notify('MyAgents - 方案审核', 'AI 等待您审核方案');
+}
+
+/**
  * Initialize notification service
  * Call this early in app lifecycle to pre-request permission
  */

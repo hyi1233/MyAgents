@@ -194,6 +194,7 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
           } else {
             response = await fetch(endpoint);
           }
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const blob = await response.blob();
           const dataUrl = await new Promise<string>((resolve) => {
             const reader = new FileReader();

@@ -293,7 +293,7 @@ export default function GlobalAgentsPanel() {
 
             {/* Sync conflict dialog */}
             {showSyncConflictDialog && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
                     <div className="w-[420px] rounded-xl border border-[var(--line)] bg-[var(--paper)] p-6 shadow-xl">
                         <h3 className="text-base font-semibold text-[var(--ink)]">同步冲突</h3>
                         <p className="mt-2 text-sm text-[var(--ink-muted)]">

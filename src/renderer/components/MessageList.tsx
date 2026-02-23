@@ -4,6 +4,8 @@ import { memo, useMemo, useState, useEffect, useRef, type CSSProperties, type Re
 import Message from '@/components/Message';
 import { PermissionPrompt, type PermissionRequest } from '@/components/PermissionPrompt';
 import { AskUserQuestionPrompt, type AskUserQuestionRequest } from '@/components/AskUserQuestionPrompt';
+import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
+import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { Message as MessageType } from '@/types/chat';
 
 /**
@@ -37,6 +39,9 @@ interface MessageListProps {
   pendingAskUserQuestion?: AskUserQuestionRequest | null;
   onAskUserQuestionSubmit?: (requestId: string, answers: Record<string, string>) => void;
   onAskUserQuestionCancel?: (requestId: string) => void;
+  pendingExitPlanMode?: ExitPlanModeRequest | null;
+  onExitPlanModeApprove?: () => void;
+  onExitPlanModeReject?: () => void;
   systemStatus?: string | null;  // SDK system status (e.g., 'compacting')
   isStreaming?: boolean;          // AI 回复中（传递给 Message 隐藏回溯按钮）
   onRewind?: (messageId: string) => void;
@@ -116,6 +121,15 @@ const StatusTimer = memo(function StatusTimer({ message }: { message: string }) 
   );
 });
 
+/** Check if a message contains an ExitPlanMode tool call */
+function hasExitPlanModeTool(message: MessageType): boolean {
+  if (message.role !== 'assistant' || typeof message.content === 'string') return false;
+  return message.content.some(
+    block => (block.type === 'tool_use' || block.type === 'server_tool_use')
+      && block.tool?.name === 'ExitPlanMode'
+  );
+}
+
 const MessageList = memo(function MessageList({
   historyMessages,
   streamingMessage,
@@ -127,6 +141,9 @@ const MessageList = memo(function MessageList({
   pendingAskUserQuestion,
   onAskUserQuestionSubmit,
   onAskUserQuestionCancel,
+  pendingExitPlanMode,
+  onExitPlanModeApprove,
+  onExitPlanModeReject,
   systemStatus,
   isStreaming,
   onRewind,
@@ -141,6 +158,35 @@ const MessageList = memo(function MessageList({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only change when message count changes
     [historyMessages.length]
   );
+
+  // Find the LAST message (history or streaming) containing ExitPlanMode tool.
+  // The card always renders right after this message, regardless of resolved state.
+  // Only the latest ExitPlanMode gets the card (avoids duplicates after reject → re-plan).
+  const exitPlanModeAnchorId = useMemo(() => {
+    if (!pendingExitPlanMode) return null;
+    // Check streaming message first (ExitPlanMode may still be streaming)
+    if (streamingMessage && hasExitPlanModeTool(streamingMessage)) return streamingMessage.id;
+    // Then search history from the end
+    for (let i = historyMessages.length - 1; i >= 0; i--) {
+      if (hasExitPlanModeTool(historyMessages[i])) return historyMessages[i].id;
+    }
+    return null;
+  }, [pendingExitPlanMode, streamingMessage, historyMessages]);
+
+  // Stable slot JSX for ExitPlanMode card — useMemo keeps reference stable
+  // so history messages won't re-render during streaming.
+  const exitPlanModeSlot = useMemo(() => {
+    if (!pendingExitPlanMode || !onExitPlanModeApprove || !onExitPlanModeReject) return undefined;
+    return (
+      <div className="py-2">
+        <ExitPlanModePrompt
+          request={pendingExitPlanMode}
+          onApprove={onExitPlanModeApprove}
+          onReject={onExitPlanModeReject}
+        />
+      </div>
+    );
+  }, [pendingExitPlanMode, onExitPlanModeApprove, onExitPlanModeReject]);
 
   // Determine status display
   const showStatus = isLoading || !!systemStatus;
@@ -159,6 +205,7 @@ const MessageList = memo(function MessageList({
             isLoading={false}
             isStreaming={isStreaming}
             onRewind={onRewind}
+            exitPlanModeSlot={message.id === exitPlanModeAnchorId ? exitPlanModeSlot : undefined}
           />
         ))}
         {/* Streaming message — only this component re-renders during streaming */}
@@ -169,6 +216,7 @@ const MessageList = memo(function MessageList({
             isLoading={isLoading}
             isStreaming={isStreaming}
             onRewind={onRewind}
+            exitPlanModeSlot={streamingMessage.id === exitPlanModeAnchorId ? exitPlanModeSlot : undefined}
           />
         )}
         {/* Permission prompt inline after messages */}

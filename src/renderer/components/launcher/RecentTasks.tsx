@@ -1,210 +1,116 @@
 /**
- * RecentTasks - Displays the 3 most recent sessions globally
- * Shows session title + workspace folder icon + workspace name
- *
- * Includes retry mechanism for cases where Global Sidecar startup
- * is delayed (e.g., macOS permission dialogs)
+ * RecentTasks - Dual-tab mini view: Sessions | CronTasks
+ * Shows 5 items per tab, with tags and "查看全部" entry to overlay
  */
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, Clock, FolderOpen, MessageSquare, RefreshCw } from 'lucide-react';
+import { memo, useCallback, useMemo, useState } from 'react';
+import { AlertCircle, ArrowRight, BarChart2, Clock, FolderOpen, MessageSquare, RefreshCw, Timer, Trash2 } from 'lucide-react';
 
-import { getSessions, type SessionMetadata } from '@/api/sessionClient';
-import { getAllCronTasks } from '@/api/cronTaskClient';
+import { useTaskCenterData } from '@/hooks/useTaskCenterData';
+import { deleteSession } from '@/api/sessionClient';
+import { deactivateSession } from '@/api/tauriClient';
+import SessionTagBadge from '@/components/SessionTagBadge';
+import SessionStatsModal from '@/components/SessionStatsModal';
+import ConfirmDialog from '@/components/ConfirmDialog';
+import { useToast } from '@/components/Toast';
+import { getFolderName, formatTime, getSessionDisplayText, formatMessageCount } from '@/utils/taskCenterUtils';
+import type { SessionMetadata } from '@/api/sessionClient';
 import type { CronTask } from '@/types/cronTask';
+import {
+    getCronStatusText,
+    getCronStatusColor,
+    formatNextExecution,
+} from '@/types/cronTask';
 import type { Project } from '@/config/types';
-import { isTauriEnvironment } from '@/utils/browserMock';
-import type { ImBotStatus } from '../../../shared/types/im';
 
-/**
- * Extract folder name from path (cross-platform, handles both / and \)
- */
-function getFolderName(path: string): string {
-    if (!path) return 'Workspace';
-    const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
-    const parts = normalized.split('/');
-    return parts[parts.length - 1] || 'Workspace';
-}
+const DISPLAY_COUNT = 5;
 
 interface RecentTasksProps {
     projects: Project[];
     onOpenTask: (session: SessionMetadata, project: Project) => void;
+    onOpenOverlay: () => void;
+    onOpenCronDetail: (task: CronTask) => void;
     isActive?: boolean;
 }
 
-// Constants for retry behavior
-const MAX_AUTO_RETRIES = 3;
-const RETRY_DELAY_MS = 2000;
+type ActiveTab = 'sessions' | 'cron';
 
-// Section header component (defined outside to avoid recreation on each render)
-function SectionHeader() {
-    return (
-        <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/60">
-            最近任务
-        </h3>
-    );
-}
+export default memo(function RecentTasks({
+    projects,
+    onOpenTask,
+    onOpenOverlay,
+    onOpenCronDetail,
+    isActive,
+}: RecentTasksProps) {
+    const { sessions, cronTasks, sessionTagsMap, cronBotInfoMap, isLoading, error, refresh, removeSession } =
+        useTaskCenterData({ isActive });
+    const toast = useToast();
 
-export default memo(function RecentTasks({ projects, onOpenTask, isActive }: RecentTasksProps) {
-    const [recentSessions, setRecentSessions] = useState<SessionMetadata[]>([]);
-    const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
-    const [isLoading, setIsLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
-    const [_retryCount, setRetryCount] = useState(0);
-    const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const [activeTab, setActiveTab] = useState<ActiveTab>('sessions');
+    const [pendingDeleteSession, setPendingDeleteSession] = useState<{ id: string; title: string } | null>(null);
+    const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
 
-    // Map sessionId to active cron task (running only)
-    const sessionCronTaskMap = useMemo(() => {
-        return new Map(
-            cronTasks
-                .filter(t => t.status === 'running')
-                .map(t => [t.sessionId, t])
-        );
+    // Top 5 sessions
+    const displaySessions = useMemo(() => sessions.slice(0, DISPLAY_COUNT), [sessions]);
+
+    // Sorted cron tasks: running first, then by nextExecutionAt, take 5
+    const displayCronTasks = useMemo(() => {
+        return [...cronTasks]
+            .sort((a, b) => {
+                if (a.status === 'running' && b.status !== 'running') return -1;
+                if (a.status !== 'running' && b.status === 'running') return 1;
+                if (a.nextExecutionAt && b.nextExecutionAt) {
+                    return new Date(a.nextExecutionAt).getTime() - new Date(b.nextExecutionAt).getTime();
+                }
+                return 0;
+            })
+            .slice(0, DISPLAY_COUNT);
     }, [cronTasks]);
 
-    // Map sessionId to IM bot platform name (only for currently active sessions)
-    const [imBotStatuses, setImBotStatuses] = useState<Record<string, ImBotStatus>>({});
-    const sessionImBotMap = useMemo(() => {
-        const map = new Map<string, string>(); // sessionId → platform display name
-        for (const status of Object.values(imBotStatuses)) {
-            if (status.status !== 'online' && status.status !== 'connecting') continue;
-            for (const activeSession of status.activeSessions) {
-                // sessionKey format: "im:telegram:private:12345" → extract platform
-                const parts = activeSession.sessionKey.split(':');
-                const platform = parts[1]; // 'telegram', 'feishu', etc.
-                const displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
-                map.set(activeSession.sessionId, displayName);
-            }
-        }
-        return map;
-    }, [imBotStatuses]);
+    const getProjectForSession = useCallback(
+        (session: SessionMetadata): Project | undefined =>
+            projects.find(p => p.path === session.agentDir),
+        [projects]
+    );
 
-    const fetchSessions = useCallback(async (currentRetryCount = 0) => {
-        if (currentRetryCount === 0) {
-            setIsLoading(true);
-        }
-        setError(null);
+    const cronProtectedSessionIds = useMemo(
+        () => new Set(cronTasks.filter(t => t.status === 'running').map(t => t.sessionId)),
+        [cronTasks]
+    );
 
+    const handleDeleteClick = useCallback((e: React.MouseEvent, session: SessionMetadata) => {
+        e.stopPropagation();
+        setPendingDeleteSession({ id: session.id, title: getSessionDisplayText(session) });
+    }, []);
+
+    const handleConfirmDelete = useCallback(async () => {
+        if (!pendingDeleteSession) return;
+        const { id } = pendingDeleteSession;
+        setPendingDeleteSession(null);
         try {
-            // Fetch sessions, cron tasks, and IM bot statuses in parallel
-            const imStatusPromise = isTauriEnvironment()
-                ? import('@tauri-apps/api/core')
-                    .then(({ invoke }) => invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status'))
-                    .catch(() => ({} as Record<string, ImBotStatus>))
-                : Promise.resolve({} as Record<string, ImBotStatus>);
-
-            const [sessions, tasks, imStatuses] = await Promise.all([
-                getSessions(),
-                getAllCronTasks().catch(() => [] as CronTask[]), // Cron tasks are optional
-                imStatusPromise,
-            ]);
-            // Sort by lastActiveAt descending and take top 3
-            const sorted = sessions
-                .sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime())
-                .slice(0, 3);
-            setRecentSessions(sorted);
-            setCronTasks(tasks);
-            setImBotStatuses(imStatuses);
-            setRetryCount(0); // Reset retry count on success
-        } catch (err) {
-            console.error('[RecentTasks] Failed to load sessions:', err);
-
-            // Auto-retry if under max retries
-            if (currentRetryCount < MAX_AUTO_RETRIES) {
-                const nextRetry = currentRetryCount + 1;
-                console.log(`[RecentTasks] Auto-retry ${nextRetry}/${MAX_AUTO_RETRIES} in ${RETRY_DELAY_MS}ms`);
-                setRetryCount(nextRetry);
-                retryTimeoutRef.current = setTimeout(() => {
-                    void fetchSessions(nextRetry);
-                }, RETRY_DELAY_MS);
+            const success = await deleteSession(id);
+            if (success) {
+                await deactivateSession(id);
+                removeSession(id);
+                toast.success('已删除');
             } else {
-                setError('加载失败，请稍后重试');
+                toast.error('删除失败，请重试');
             }
-        } finally {
-            setIsLoading(false);
+        } catch (err) {
+            console.error('[RecentTasks] Delete session failed:', err);
+            toast.error('删除失败');
         }
+    }, [pendingDeleteSession, removeSession, toast]);
+
+    const handleShowStats = useCallback((e: React.MouseEvent, session: SessionMetadata) => {
+        e.stopPropagation();
+        setStatsSession({ id: session.id, title: getSessionDisplayText(session) });
     }, []);
-
-    useEffect(() => {
-        void fetchSessions(0);
-
-        return () => {
-            if (retryTimeoutRef.current) {
-                clearTimeout(retryTimeoutRef.current);
-            }
-        };
-    }, [fetchSessions]);
-
-    // Refresh sessions when tab becomes active (inactive → active transition).
-    // Without this, sessions created/modified in other tabs remain stale.
-    const prevIsActiveRef = useRef(isActive);
-    useEffect(() => {
-        const wasInactive = !prevIsActiveRef.current;
-        prevIsActiveRef.current = isActive;
-        if (!wasInactive || !isActive) return;
-        void fetchSessions(0);
-    }, [isActive, fetchSessions]);
-
-    // Listen for cron task stopped events to refresh the badge display
-    useEffect(() => {
-        if (!isTauriEnvironment()) return;
-
-        let isMounted = true;
-        let unlisten: (() => void) | null = null;
-
-        (async () => {
-            const { listen } = await import('@tauri-apps/api/event');
-            // Check if component was unmounted during async import
-            if (!isMounted) return;
-
-            unlisten = await listen<{ taskId: string; exitReason?: string }>('cron:task-stopped', () => {
-                // Refresh cron tasks to update the "心跳" badge
-                // Guard against calling setState after unmount
-                if (!isMounted) return;
-                getAllCronTasks()
-                    .then(tasks => {
-                        if (isMounted) setCronTasks(tasks);
-                    })
-                    .catch(() => { /* ignore errors */ });
-            });
-        })();
-
-        return () => {
-            isMounted = false;
-            if (unlisten) unlisten();
-        };
-    }, []);
-
-    const handleManualRetry = useCallback(() => {
-        setRetryCount(0);
-        void fetchSessions(0);
-    }, [fetchSessions]);
-
-    const getProjectForSession = (session: SessionMetadata): Project | undefined => {
-        return projects.find((p) => p.path === session.agentDir);
-    };
-
-    const formatTime = (isoString: string) => {
-        const date = new Date(isoString);
-        const now = new Date();
-        const diffMs = now.getTime() - date.getTime();
-        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-        if (diffDays === 0) {
-            return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-        } else if (diffDays === 1) {
-            return '昨天';
-        } else if (diffDays < 7) {
-            return `${diffDays}天前`;
-        } else {
-            return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
-        }
-    };
 
     if (isLoading) {
         return (
             <div className="mb-8">
-                <SectionHeader />
+                <TabHeader activeTab={activeTab} onTabChange={setActiveTab} />
                 <div className="py-4 text-[13px] text-[var(--ink-muted)]/70">加载中...</div>
             </div>
         );
@@ -213,12 +119,12 @@ export default memo(function RecentTasks({ projects, onOpenTask, isActive }: Rec
     if (error) {
         return (
             <div className="mb-8">
-                <SectionHeader />
+                <TabHeader activeTab={activeTab} onTabChange={setActiveTab} />
                 <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
                     <AlertCircle className="mx-auto mb-2 h-4 w-4 text-amber-500/70" />
                     <p className="mb-2 text-[13px] text-[var(--ink-muted)]">{error}</p>
                     <button
-                        onClick={handleManualRetry}
+                        onClick={refresh}
                         className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     >
                         <RefreshCw className="h-3.5 w-3.5" />
@@ -229,69 +135,213 @@ export default memo(function RecentTasks({ projects, onOpenTask, isActive }: Rec
         );
     }
 
-    if (recentSessions.length === 0) {
-        return (
-            <div className="mb-8">
-                <SectionHeader />
-                <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
-                    <MessageSquare className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
-                    <p className="text-[13px] text-[var(--ink-muted)]/70">暂无最近任务</p>
-                </div>
-            </div>
-        );
-    }
-
     return (
         <div className="mb-8">
-            <SectionHeader />
-            <div className="space-y-1">
-                {recentSessions.map((session) => {
-                    const project = getProjectForSession(session);
-                    if (!project) return null;
+            <TabHeader activeTab={activeTab} onTabChange={setActiveTab} />
 
-                    const hasCronTask = sessionCronTaskMap.has(session.id);
-                    const imBotPlatform = sessionImBotMap.get(session.id);
+            {/* Sessions tab */}
+            {activeTab === 'sessions' && (
+                <div>
+                    {displaySessions.length === 0 ? (
+                        <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
+                            <MessageSquare className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
+                            <p className="text-[13px] text-[var(--ink-muted)]/70">暂无对话记录</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-0.5">
+                            {displaySessions.map(session => {
+                                const project = getProjectForSession(session);
+                                if (!project) return null;
+                                const tags = sessionTagsMap.get(session.id) ?? [];
+                                const displayText = getSessionDisplayText(session);
+                                const msgCount = formatMessageCount(session);
 
-                    return (
-                        <button
-                            key={session.id}
-                            onClick={() => onOpenTask(session, project)}
-                            className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--paper-inset)]"
-                        >
-                            {/* Time - fixed width to prevent layout shift */}
-                            <div className="flex w-14 shrink-0 items-center gap-1 text-[11px] text-[var(--ink-muted)]/50">
-                                <Clock className="h-2.5 w-2.5" />
-                                <span>{formatTime(session.lastActiveAt)}</span>
-                            </div>
+                                const isCronProtected = cronProtectedSessionIds.has(session.id);
+                                return (
+                                    <div
+                                        key={session.id}
+                                        role="button"
+                                        onClick={() => onOpenTask(session, project)}
+                                        className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--paper-inset)]"
+                                    >
+                                        <div className="flex w-14 shrink-0 items-center gap-1 text-[11px] text-[var(--ink-muted)]/50">
+                                            <Clock className="h-2.5 w-2.5" />
+                                            <span>{formatTime(session.lastActiveAt)}</span>
+                                        </div>
+                                        {tags.map((tag, i) => (
+                                            <SessionTagBadge key={i} tag={tag} />
+                                        ))}
+                                        <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
+                                            {displayText}
+                                            {msgCount && (
+                                                <span className="ml-1.5 text-[11px] text-[var(--ink-muted)]/40">
+                                                    {msgCount}
+                                                </span>
+                                            )}
+                                        </span>
+                                        <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
+                                            <FolderOpen className="h-3 w-3" />
+                                            <span className="max-w-[80px] truncate">
+                                                {getFolderName(project.path)}
+                                            </span>
+                                        </div>
 
-                            {/* IM bot tag (only when bot is actively using this session) */}
-                            {imBotPlatform && (
-                                <span className="flex-shrink-0 rounded bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-                                    {imBotPlatform}
-                                </span>
-                            )}
+                                        {/* Hover actions overlay */}
+                                        <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
+                                            <div className="h-full w-10 bg-gradient-to-r from-transparent to-[var(--paper-inset)]" />
+                                            <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
+                                                <button
+                                                    onClick={e => handleShowStats(e, session)}
+                                                    title="查看统计"
+                                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
+                                                >
+                                                    <BarChart2 className="h-3.5 w-3.5" />
+                                                </button>
+                                                {isCronProtected ? (
+                                                    <button
+                                                        disabled
+                                                        title="请先停止定时任务后再删除"
+                                                        className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
+                                                    >
+                                                        <Trash2 className="h-3.5 w-3.5" />
+                                                    </button>
+                                                ) : (
+                                                    <button
+                                                        onClick={e => handleDeleteClick(e, session)}
+                                                        title="删除"
+                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
+                                                    >
+                                                        <Trash2 className="h-3.5 w-3.5" />
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            )}
 
-                            {/* Cron task tag */}
-                            {hasCronTask && (
-                                <span className="flex-shrink-0 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-600 dark:text-red-400">
-                                    心跳
-                                </span>
-                            )}
+            {/* CronTasks tab */}
+            {activeTab === 'cron' && (
+                <div>
+                    {displayCronTasks.length === 0 ? (
+                        <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
+                            <Timer className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
+                            <p className="text-[13px] text-[var(--ink-muted)]/70">暂无定时任务</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-0.5">
+                            {displayCronTasks.map(task => {
+                                const botInfo = task.sourceBotId
+                                    ? cronBotInfoMap.get(task.sourceBotId)
+                                    : undefined;
+                                const displayName =
+                                    task.name ||
+                                    task.prompt.slice(0, 30) + (task.prompt.length > 30 ? '...' : '');
 
-                            {/* Session title */}
-                            <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
-                                {session.title}
-                            </span>
+                                return (
+                                    <button
+                                        key={task.id}
+                                        onClick={() => onOpenCronDetail(task)}
+                                        className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--paper-inset)]"
+                                    >
+                                        <span
+                                            className={`w-14 shrink-0 text-[11px] font-medium ${getCronStatusColor(task.status)}`}
+                                        >
+                                            {getCronStatusText(task.status)}
+                                        </span>
+                                        <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
+                                            {displayName}
+                                        </span>
+                                        <div className="flex shrink-0 items-center gap-2 text-[11px] text-[var(--ink-muted)]/45">
+                                            <span className="max-w-[100px] truncate">
+                                                {botInfo ? `${botInfo.name}` : getFolderName(task.workspacePath)}
+                                            </span>
+                                            {task.status === 'running' && (
+                                                <span className="text-[10px]">
+                                                    {formatNextExecution(task.nextExecutionAt, task.status)}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            )}
 
-                            {/* Workspace info */}
-                            <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
-                                <FolderOpen className="h-3 w-3" />
-                                <span className="max-w-[80px] truncate">{getFolderName(project.path)}</span>
-                            </div>
-                        </button>
-                    );
-                })}
+            {/* Bottom: "查看全部" */}
+            <div className="mt-2 flex justify-center">
+                <button
+                    onClick={onOpenOverlay}
+                    className="inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-[12px] text-[var(--ink-muted)]/60 transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink-muted)]"
+                >
+                    查看全部
+                    <ArrowRight className="h-3 w-3" />
+                </button>
             </div>
+
+            {pendingDeleteSession && (
+                <ConfirmDialog
+                    title="删除对话"
+                    message={`确定要删除「${pendingDeleteSession.title}」吗？此操作不可撤销。`}
+                    confirmText="删除"
+                    confirmVariant="danger"
+                    onConfirm={handleConfirmDelete}
+                    onCancel={() => setPendingDeleteSession(null)}
+                />
+            )}
+            {statsSession && (
+                <SessionStatsModal
+                    sessionId={statsSession.id}
+                    sessionTitle={statsSession.title}
+                    onClose={() => setStatsSession(null)}
+                />
+            )}
         </div>
     );
 });
+
+// Tab header sub-component
+function TabHeader({
+    activeTab,
+    onTabChange,
+}: {
+    activeTab: ActiveTab;
+    onTabChange: (tab: ActiveTab) => void;
+}) {
+    return (
+        <div className="mb-3 flex items-center gap-4">
+            <button
+                onClick={() => onTabChange('sessions')}
+                className={`relative text-[11px] font-semibold uppercase tracking-[0.12em] transition-colors ${
+                    activeTab === 'sessions'
+                        ? 'text-[var(--ink-muted)]'
+                        : 'text-[var(--ink-muted)]/40 hover:text-[var(--ink-muted)]/60'
+                }`}
+            >
+                最近任务
+                {activeTab === 'sessions' && (
+                    <div className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full bg-[var(--accent)]" />
+                )}
+            </button>
+            <button
+                onClick={() => onTabChange('cron')}
+                className={`relative text-[11px] font-semibold uppercase tracking-[0.12em] transition-colors ${
+                    activeTab === 'cron'
+                        ? 'text-[var(--ink-muted)]'
+                        : 'text-[var(--ink-muted)]/40 hover:text-[var(--ink-muted)]/60'
+                }`}
+            >
+                定时任务
+                {activeTab === 'cron' && (
+                    <div className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full bg-[var(--accent)]" />
+                )}
+            </button>
+        </div>
+    );
+}

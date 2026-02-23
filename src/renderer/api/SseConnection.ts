@@ -46,6 +46,8 @@ const JSON_EVENTS = new Set([
     'chat:agent-error',
     'permission:request', // Permission prompt for tool usage
     'ask-user-question:request', // AskUserQuestion tool prompt
+    'exit-plan-mode:request',  // ExitPlanMode tool - AI submits plan for review
+    'enter-plan-mode:request', // EnterPlanMode tool - AI requests plan mode
     'cron:task-exit-requested', // AI requested cron task exit via exit_cron_task tool
     'queue:added',     // Message queued (confirmation)
     'queue:started',   // Queued message started executing

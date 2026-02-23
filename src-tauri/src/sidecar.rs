@@ -625,6 +625,15 @@ impl SidecarManager {
         self.sidecars.get_mut(session_id)
     }
 
+    /// Get session IDs that have a BackgroundCompletion owner
+    /// Used by Task Center to show [后台] tags on sessions
+    pub fn get_background_session_ids(&self) -> Vec<String> {
+        self.sidecars.iter()
+            .filter(|(_, sc)| sc.owners.iter().any(|o| matches!(o, SidecarOwner::BackgroundCompletion(_))))
+            .map(|(sid, _)| sid.clone())
+            .collect()
+    }
+
     /// Insert a new SessionSidecar
     /// Reserved for future use (currently used internally via ensure_session_sidecar)
     #[allow(dead_code)]
@@ -2246,6 +2255,15 @@ pub fn cmd_cancel_background_completion(
     sessionId: String,
 ) -> Result<bool, String> {
     cancel_background_completion(&state, &sessionId)
+}
+
+/// Get session IDs that have active background completions
+#[tauri::command]
+pub fn cmd_get_background_sessions(
+    state: tauri::State<'_, ManagedSidecarManager>,
+) -> Result<Vec<String>, String> {
+    let manager = state.lock().map_err(|e| e.to_string())?;
+    Ok(manager.get_background_session_ids())
 }
 
 /// Stop all sidecar instances and clean up child processes

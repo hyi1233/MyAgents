@@ -196,7 +196,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
     // Use portal to render at document root for true fullscreen overlay
     return createPortal(
         <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
             onMouseDown={handleBackdropMouseDown}
             onClick={handleBackdropClick}
         >

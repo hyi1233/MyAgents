@@ -19,6 +19,7 @@ interface CustomSelectProps {
     placeholder?: string;
     triggerIcon?: ReactNode;
     className?: string;
+    compact?: boolean;
     footerAction?: {
         label: string;
         icon?: ReactNode;
@@ -33,6 +34,7 @@ export default function CustomSelect({
     placeholder = '请选择',
     triggerIcon,
     className,
+    compact,
     footerAction,
 }: CustomSelectProps) {
     const [isOpen, setIsOpen] = useState(false);
@@ -63,7 +65,7 @@ export default function CustomSelect({
             <button
                 type="button"
                 onClick={() => setIsOpen(!isOpen)}
-                className="flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-left text-xs transition-colors hover:border-[var(--ink-subtle)]"
+                className={`flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] text-left transition-colors hover:border-[var(--ink-subtle)] ${compact ? 'px-2 py-1 text-[11px]' : 'px-3 py-2 text-xs'}`}
             >
                 {triggerIcon && (
                     <span className="shrink-0 text-[var(--ink-muted)]">{triggerIcon}</span>

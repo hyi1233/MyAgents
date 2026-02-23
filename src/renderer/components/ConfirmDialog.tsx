@@ -1,3 +1,4 @@
+import { useEffect, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
 
 interface ConfirmDialogProps {
@@ -28,12 +29,32 @@ export default function ConfirmDialog({
     onCancel
 }: ConfirmDialogProps) {
     // Support both old and new props
-    const finalConfirmText = confirmText || confirmLabel || 'Confirm';
-    const finalCancelText = cancelText || cancelLabel || 'Cancel';
+    const finalConfirmText = confirmText || confirmLabel || '确认';
+    const finalCancelText = cancelText || cancelLabel || '取消';
     const isDanger = confirmVariant === 'danger' || danger;
 
+    // Keyboard: Enter to confirm, Escape to cancel
+    const handleKeyDown = useCallback((e: KeyboardEvent) => {
+        if (loading) return;
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            onConfirm();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            onCancel();
+        }
+    }, [loading, onConfirm, onCancel]);
+
+    useEffect(() => {
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, [handleKeyDown]);
+
     return (
-        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
+        <div
+            className="fixed inset-0 z-[300] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm"
+            onMouseDown={(e) => { if (e.target === e.currentTarget && !loading) onCancel(); }}
+        >
             <div className="glass-panel w-full max-w-sm">
                 <div className="border-b border-[var(--line)] px-5 py-4">
                     <div className="text-[14px] font-semibold text-[var(--ink)]">{title}</div>
@@ -46,7 +67,7 @@ export default function ConfirmDialog({
                         type="button"
                         onClick={onCancel}
                         disabled={loading}
-                        className="action-button px-4 py-1.5 text-[12px] font-semibold disabled:opacity-50"
+                        className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-[12px] font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
                     >
                         {finalCancelText}
                     </button>

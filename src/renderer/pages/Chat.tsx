@@ -64,6 +64,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     systemStatus,
     pendingPermission,
     pendingAskUserQuestion,
+    pendingExitPlanMode,
+    pendingEnterPlanMode,
+    respondExitPlanMode,
     toolCompleteCount,
     setMessages,
     setIsLoading,
@@ -122,6 +125,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Cron task state
   const [showCronSettings, setShowCronSettings] = useState(false);
   const [cronPrompt, setCronPrompt] = useState('');
+
+  // Track permission mode before AI-triggered plan mode (for restore on ExitPlanMode)
+  const prePlanPermissionModeRef = useRef<PermissionMode | null>(null);
 
   // Startup overlay state (for auto-send from Launcher)
   const [showStartupOverlay, setShowStartupOverlay] = useState(!!initialMessage);
@@ -981,6 +987,31 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     void respondAskUserQuestion(null);
   }, [respondAskUserQuestion]);
 
+  const handleExitPlanModeApprove = useCallback(() => {
+    void respondExitPlanMode(true);
+    // Mode restore is handled by the useEffect below reacting to resolved='approved'
+  }, [respondExitPlanMode]);
+
+  const handleExitPlanModeReject = useCallback(() => {
+    void respondExitPlanMode(false);
+  }, [respondExitPlanMode]);
+
+  // React to plan mode changes: auto-approved by SDK, or user-approved via card
+  // Single source of truth for permission mode switch during plan mode
+  useEffect(() => {
+    if (pendingEnterPlanMode?.resolved === 'approved' && permissionMode !== 'plan') {
+      prePlanPermissionModeRef.current = permissionMode;
+      setPermissionMode('plan');
+    }
+  }, [pendingEnterPlanMode?.resolved, pendingEnterPlanMode?.requestId]); // eslint-disable-line react-hooks/exhaustive-deps -- read permissionMode without dep to avoid loop
+
+  useEffect(() => {
+    if (pendingExitPlanMode?.resolved === 'approved' && prePlanPermissionModeRef.current) {
+      setPermissionMode(prePlanPermissionModeRef.current);
+      prePlanPermissionModeRef.current = null;
+    }
+  }, [pendingExitPlanMode?.resolved, pendingExitPlanMode?.requestId]);
+
   // Stable callback for time rewind — uses ref for messages to keep reference stable
   const handleRewind = useCallback((messageId: string) => {
     const msgs = messagesRef.current;
@@ -1226,6 +1257,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               pendingAskUserQuestion={pendingAskUserQuestion}
               onAskUserQuestionSubmit={handleAskUserQuestionSubmit}
               onAskUserQuestionCancel={handleAskUserQuestionCancel}
+              pendingExitPlanMode={pendingExitPlanMode}
+              onExitPlanModeApprove={handleExitPlanModeApprove}
+              onExitPlanModeReject={handleExitPlanModeReject}
               systemStatus={rewindStatus || systemStatus}
               isStreaming={isLoading || sessionState === 'running'}
               onRewind={handleRewind}

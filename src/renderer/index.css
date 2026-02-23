@@ -26,6 +26,23 @@
   cursor: pointer !important;
 }
 
+/* Overlay entry animations */
+@keyframes overlayFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes overlayPanelIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* Toast slide-down animation */
 @keyframes slideDown {
   from {

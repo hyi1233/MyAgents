@@ -151,6 +151,18 @@ const childToolToParent: Map<string, string> = new Map();
 let messageSequence = 0;
 let sessionId = randomUUID();
 
+// Reset guard: prevents enqueueUserMessage from racing with async resetSession()/switchToSession()
+// Single promise — non-null means a reset is in progress; enqueueUserMessage awaits it.
+let resetPromise: Promise<void> | null = null;
+
+/** Mark the start of an async reset. Returns a cleanup function for the finally block. */
+function beginReset(): () => void {
+  if (resetPromise) console.warn('[agent] beginReset: already resetting — possible reentrancy');
+  let resolve: () => void;
+  resetPromise = new Promise(r => { resolve = r; });
+  return () => { resetPromise = null; resolve!(); };
+}
+
 // Pre-warm: start SDK subprocess + MCP servers before user sends first message
 let isPreWarming = false;
 let preWarmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -170,6 +182,8 @@ const messageQueue: MessageQueueItem[] = [];
 const _pendingAttachments: MessageAttachment[] = [];
 // Current permission mode for the session (updates on each user message)
 let currentPermissionMode: PermissionMode = 'auto';
+// Permission mode before AI-triggered plan mode (for restore on ExitPlanMode)
+let prePlanPermissionMode: PermissionMode | null = null;
 // Current model for the session (updates on each user message if changed)
 let currentModel: string | undefined = undefined;
 // Provider environment config (baseUrl, apiKey, authType) for third-party providers
@@ -573,10 +587,11 @@ export function setSessionModel(model: string): void {
   currentModel = model;
   console.log(`[agent] session model set: ${oldModel ?? 'undefined'} -> ${model}`);
 
-  // If a session is actively running (not pre-warming), apply model change to subprocess.
-  // This ensures dropdown model switches take effect immediately, even if the sync
-  // arrives before the next user message triggers applySessionConfig.
-  if (querySession && !isPreWarming) {
+  // Apply model change to SDK subprocess immediately (including during pre-warm).
+  // Without this, changing model during pre-warm creates a desync:
+  //   currentModel is updated but SDK subprocess keeps the old model,
+  //   and applySessionConfig() on first message sees no diff → skips the SDK call.
+  if (querySession) {
     querySession.setModel(model).catch(err => {
       console.error('[agent] failed to apply model to running session:', err);
     });
@@ -909,10 +924,28 @@ const pendingPermissions = new Map<string, {
 import type { AskUserQuestionInput } from '../shared/types/askUserQuestion';
 export type { AskUserQuestionInput, AskUserQuestion, AskUserQuestionOption } from '../shared/types/askUserQuestion';
 
+// PlanMode types - import from shared
+import type { ExitPlanModeAllowedPrompt } from '../shared/types/planMode';
+export type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedPrompt } from '../shared/types/planMode';
+
 // Pending AskUserQuestion requests waiting for user response
 const pendingAskUserQuestions = new Map<string, {
   resolve: (answers: Record<string, string> | null) => void;
   input: AskUserQuestionInput;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+// Pending ExitPlanMode requests waiting for user approval
+const pendingExitPlanMode = new Map<string, {
+  resolve: (approved: boolean) => void;
+  plan?: string;
+  allowedPrompts?: ExitPlanModeAllowedPrompt[];
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+// Pending EnterPlanMode requests waiting for user approval
+const pendingEnterPlanMode = new Map<string, {
+  resolve: (approved: boolean) => void;
   timer: ReturnType<typeof setTimeout>;
 }>();
 
@@ -1020,6 +1053,134 @@ export function handleAskUserQuestionResponse(
     pending.resolve(answers);
   }
 
+  return true;
+}
+
+/**
+ * Handle ExitPlanMode tool - AI submits a plan for user review
+ */
+async function handleExitPlanMode(
+  input: unknown,
+  signal?: AbortSignal
+): Promise<boolean> {
+  console.log('[ExitPlanMode] Requesting user approval');
+
+  const obj = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  const plan = typeof obj.plan === 'string' ? obj.plan : undefined;
+  const allowedPrompts = Array.isArray(obj.allowedPrompts)
+    ? (obj.allowedPrompts as ExitPlanModeAllowedPrompt[])
+    : undefined;
+
+  const requestId = `exitplan_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+  broadcast('exit-plan-mode:request', { requestId, plan, allowedPrompts });
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (pendingExitPlanMode.has(requestId)) {
+        cleanup();
+        console.warn('[ExitPlanMode] Timed out after 10 minutes');
+        resolve(false);
+      }
+    }, 10 * 60 * 1000);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      pendingExitPlanMode.delete(requestId);
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    const onAbort = () => {
+      console.debug('[ExitPlanMode] Aborted by SDK signal');
+      cleanup();
+      resolve(false);
+    };
+
+    signal?.addEventListener('abort', onAbort);
+    pendingExitPlanMode.set(requestId, { resolve, plan, allowedPrompts, timer });
+  });
+}
+
+/**
+ * Handle user's ExitPlanMode response from frontend
+ */
+export function handleExitPlanModeResponse(requestId: string, approved: boolean): boolean {
+  console.debug(`[ExitPlanMode] handleResponse: requestId=${requestId}, approved=${approved}`);
+  const pending = pendingExitPlanMode.get(requestId);
+  if (!pending) {
+    console.warn(`[ExitPlanMode] Unknown request: ${requestId}`);
+    return false;
+  }
+  clearTimeout(pending.timer);
+  pendingExitPlanMode.delete(requestId);
+  // Restore currentPermissionMode so applySessionConfig won't override SDK's internal state
+  if (approved && prePlanPermissionMode) {
+    currentPermissionMode = prePlanPermissionMode;
+    prePlanPermissionMode = null;
+    console.debug(`[ExitPlanMode] Restored currentPermissionMode to: ${currentPermissionMode}`);
+  }
+  pending.resolve(approved);
+  return true;
+}
+
+/**
+ * Handle EnterPlanMode tool - AI requests to enter plan mode
+ */
+async function handleEnterPlanMode(
+  _input: unknown,
+  signal?: AbortSignal
+): Promise<boolean> {
+  console.log('[EnterPlanMode] Requesting user approval');
+
+  const requestId = `enterplan_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+  broadcast('enter-plan-mode:request', { requestId });
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (pendingEnterPlanMode.has(requestId)) {
+        cleanup();
+        console.warn('[EnterPlanMode] Timed out after 10 minutes');
+        resolve(false);
+      }
+    }, 10 * 60 * 1000);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      pendingEnterPlanMode.delete(requestId);
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    const onAbort = () => {
+      console.debug('[EnterPlanMode] Aborted by SDK signal');
+      cleanup();
+      resolve(false);
+    };
+
+    signal?.addEventListener('abort', onAbort);
+    pendingEnterPlanMode.set(requestId, { resolve, timer });
+  });
+}
+
+/**
+ * Handle user's EnterPlanMode response from frontend
+ */
+export function handleEnterPlanModeResponse(requestId: string, approved: boolean): boolean {
+  console.debug(`[EnterPlanMode] handleResponse: requestId=${requestId}, approved=${approved}`);
+  const pending = pendingEnterPlanMode.get(requestId);
+  if (!pending) {
+    console.warn(`[EnterPlanMode] Unknown request: ${requestId}`);
+    return false;
+  }
+  clearTimeout(pending.timer);
+  pendingEnterPlanMode.delete(requestId);
+  // Sync currentPermissionMode so applySessionConfig won't override SDK's plan mode
+  if (approved) {
+    prePlanPermissionMode = currentPermissionMode;
+    currentPermissionMode = 'plan';
+    console.debug(`[EnterPlanMode] Saved prePlanPermissionMode=${prePlanPermissionMode}, switched to plan`);
+  }
+  pending.resolve(approved);
   return true;
 }
 
@@ -1190,6 +1351,9 @@ export function clearSessionPermissions(): void {
   sessionAlwaysAllowed.clear();
   pendingPermissions.clear();
   pendingAskUserQuestions.clear();
+  pendingExitPlanMode.clear();
+  pendingEnterPlanMode.clear();
+  prePlanPermissionMode = null;
 }
 
 /**
@@ -1197,10 +1361,10 @@ export function clearSessionPermissions(): void {
  * Used to replay these to newly connected SSE clients (e.g., Tab joining shared session).
  */
 export function getPendingInteractiveRequests(): Array<{
-  type: 'permission:request' | 'ask-user-question:request';
+  type: 'permission:request' | 'ask-user-question:request' | 'exit-plan-mode:request' | 'enter-plan-mode:request';
   data: unknown;
 }> {
-  const result: Array<{ type: 'permission:request' | 'ask-user-question:request'; data: unknown }> = [];
+  const result: Array<{ type: 'permission:request' | 'ask-user-question:request' | 'exit-plan-mode:request' | 'enter-plan-mode:request'; data: unknown }> = [];
   for (const [requestId, p] of pendingPermissions) {
     result.push({
       type: 'permission:request',
@@ -1215,6 +1379,18 @@ export function getPendingInteractiveRequests(): Array<{
     result.push({
       type: 'ask-user-question:request',
       data: { requestId, questions: q.input.questions },
+    });
+  }
+  for (const [requestId, p] of pendingExitPlanMode) {
+    result.push({
+      type: 'exit-plan-mode:request',
+      data: { requestId, plan: p.plan, allowedPrompts: p.allowedPrompts },
+    });
+  }
+  for (const [requestId] of pendingEnterPlanMode) {
+    result.push({
+      type: 'enter-plan-mode:request',
+      data: { requestId },
     });
   }
   return result;
@@ -1257,8 +1433,18 @@ function persistMessagesToStorage(
     };
   });
   saveSessionMessages(sessionId, sessionMessages);
-  // Update lastActiveAt
-  updateSessionMetadata(sessionId, { lastActiveAt: new Date().toISOString() });
+  // Compute lastMessagePreview from last user message
+  let lastMessagePreview: string | undefined;
+  for (let i = sessionMessages.length - 1; i >= 0; i--) {
+    if (sessionMessages[i].role === 'user') {
+      const content = sessionMessages[i].content;
+      const text = typeof content === 'string' ? content : '';
+      lastMessagePreview = text.trim().slice(0, 60) || undefined;
+      break;
+    }
+  }
+  // Update lastActiveAt and lastMessagePreview
+  updateSessionMetadata(sessionId, { lastActiveAt: new Date().toISOString(), lastMessagePreview });
 }
 
 export function getSessionId(): string {
@@ -1579,18 +1765,19 @@ function parseSystemInitInfo(message: unknown): SystemInitInfo | null {
  * - A status message with status: null (clearing the status)
  * - A status message with status: 'compacting' etc.
  */
-function parseSystemStatus(message: unknown): { isStatusMessage: boolean; status: string | null } {
+function parseSystemStatus(message: unknown): { isStatusMessage: boolean; status: string | null; permissionMode: string | null } {
   if (!message || typeof message !== 'object') {
-    return { isStatusMessage: false, status: null };
+    return { isStatusMessage: false, status: null, permissionMode: null };
   }
   const record = message as Record<string, unknown>;
   if (record.type !== 'system' || record.subtype !== 'status') {
-    return { isStatusMessage: false, status: null };
+    return { isStatusMessage: false, status: null, permissionMode: null };
   }
-  // This IS a status message, status can be 'compacting' or null
+  // This IS a status message, status can be 'compacting' or null, permissionMode can be 'plan'/'acceptEdits'/etc.
   return {
     isStatusMessage: true,
-    status: typeof record.status === 'string' ? record.status : null
+    status: typeof record.status === 'string' ? record.status : null,
+    permissionMode: typeof record.permissionMode === 'string' ? record.permissionMode : null,
   };
 }
 
@@ -2269,14 +2456,37 @@ function extractAgentError(sdkMessage: unknown): string | null {
   }
   const candidate = (sdkMessage as { error?: unknown }).error;
   if (candidate) {
+    let errorStr: string;
     if (typeof candidate === 'string') {
-      return candidate;
+      errorStr = candidate;
+    } else {
+      try {
+        errorStr = JSON.stringify(candidate);
+      } catch {
+        errorStr = String(candidate);
+      }
     }
-    try {
-      return JSON.stringify(candidate);
-    } catch {
-      return String(candidate);
+
+    // Try to get a more descriptive message from assistant content or result field
+    let detail: string | null = null;
+    if ('message' in sdkMessage) {
+      const assistantMessage = (sdkMessage as { message?: { content?: unknown } }).message;
+      const contentText = formatAssistantContent(assistantMessage?.content);
+      if (contentText) {
+        detail = contentText;
+      }
     }
+    if (!detail && 'result' in sdkMessage) {
+      const result = (sdkMessage as { result?: unknown }).result;
+      if (typeof result === 'string' && result.length > 0) {
+        detail = result;
+      }
+    }
+
+    if (detail) {
+      return `${errorStr}: ${detail}`;
+    }
+    return errorStr;
   }
 
   if (
@@ -2383,6 +2593,8 @@ function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
 export async function resetSession(): Promise<void> {
   console.log('[agent] resetSession: starting new conversation');
 
+  const endReset = beginReset();
+  try {
   // 1. Properly terminate the SDK session (same pattern as switchToSession)
   // Must abort persistent session so the generator exits and subprocess terminates
   if (querySession || sessionTerminationPromise) {
@@ -2453,6 +2665,9 @@ export async function resetSession(): Promise<void> {
 
   // Pre-warm with fresh session so next message is fast
   schedulePreWarm();
+  } finally {
+    endReset();
+  }
 }
 
 /**
@@ -2545,6 +2760,8 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     return false;
   }
 
+  const endReset = beginReset();
+  try {
   // Properly terminate the old session if one is running
   // Must abort persistent session so the generator exits and subprocess terminates
   // Otherwise the old session continues processing messages with stale settings
@@ -2625,6 +2842,9 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // Pre-warm with resumed session so subprocess + MCP are ready before user types
   schedulePreWarm();
   return true;
+  } finally {
+    endReset();
+  }
 }
 
 type ImagePayload = {
@@ -2680,6 +2900,15 @@ export async function enqueueUserMessage(
   providerEnv?: ProviderEnv,
   metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group'; sourceId?: string; senderName?: string },
 ): Promise<EnqueueResult> {
+  // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
+  // 这些函数是异步的（await sessionTerminationPromise 需要数秒），
+  // 在此期间投递的消息会被随后的 clearMessageState() 清除导致消息丢失
+  if (resetPromise) {
+    console.log('[agent] enqueueUserMessage: waiting for session reset to complete...');
+    await resetPromise;
+    console.log('[agent] enqueueUserMessage: session reset completed, proceeding');
+  }
+
   // 等待进行中的时间回溯完成，防止并发写入 messages/session 状态
   if (rewindPromise) {
     await rewindPromise;
@@ -3281,6 +3510,32 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
+        // Special handling for ExitPlanMode - user reviews the plan
+        if (toolName === 'ExitPlanMode') {
+          console.log('[canUseTool] ExitPlanMode detected, requesting user approval');
+          const approved = await handleExitPlanMode(input, options.signal);
+          if (!approved) {
+            return { behavior: 'deny' as const, message: '用户拒绝了方案' };
+          }
+          return {
+            behavior: 'allow' as const,
+            updatedInput: input as Record<string, unknown>
+          };
+        }
+
+        // Special handling for EnterPlanMode - user approves entering plan mode
+        if (toolName === 'EnterPlanMode') {
+          console.log('[canUseTool] EnterPlanMode detected, requesting user approval');
+          const approved = await handleEnterPlanMode(input, options.signal);
+          if (!approved) {
+            return { behavior: 'deny' as const, message: '用户拒绝进入计划模式' };
+          }
+          return {
+            behavior: 'allow' as const,
+            updatedInput: input as Record<string, unknown>
+          };
+        }
+
         const decision = await checkToolPermission(
           toolName,
           input,
@@ -3407,11 +3662,24 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
       }
 
-      // Handle system status (e.g., compacting)
+      // Handle system status (e.g., compacting, plan mode changes)
       const statusResult = parseSystemStatus(sdkMessage);
       if (statusResult.isStatusMessage) {
         console.log(`[agent] System status: ${statusResult.status}`);
         broadcast('chat:system-status', { status: statusResult.status });
+
+        // Detect SDK-initiated plan mode changes (EnterPlanMode is auto-allowed by SDK)
+        if (statusResult.permissionMode === 'plan' && currentPermissionMode !== 'plan') {
+          prePlanPermissionMode = currentPermissionMode;
+          currentPermissionMode = 'plan';
+          broadcast('enter-plan-mode:request', { requestId: `sdk_auto_${Date.now()}`, autoApproved: true });
+          console.log(`[agent] SDK auto-entered plan mode, saved prePlanPermissionMode=${prePlanPermissionMode}`);
+        } else if (statusResult.permissionMode && statusResult.permissionMode !== 'plan' && prePlanPermissionMode) {
+          // SDK exited plan mode (e.g. after ExitPlanMode approval)
+          currentPermissionMode = prePlanPermissionMode;
+          prePlanPermissionMode = null;
+          console.log(`[agent] SDK exited plan mode, restored currentPermissionMode=${currentPermissionMode}`);
+        }
       }
 
       const agentError = extractAgentError(sdkMessage);

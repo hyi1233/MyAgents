@@ -25,6 +25,14 @@ export interface CronEndConditions {
 }
 
 /**
+ * Flexible schedule types for cron tasks (mirrors Rust CronSchedule)
+ */
+export type CronSchedule =
+  | { kind: 'at'; at: string }
+  | { kind: 'every'; minutes: number }
+  | { kind: 'cron'; expr: string; tz?: string };
+
+/**
  * A scheduled cron task (returned from Rust)
  * Note: Uses camelCase to match Rust's serde(rename_all = "camelCase")
  */
@@ -47,6 +55,14 @@ export interface CronTask {
   model?: string;
   providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai' };
   lastError?: string;
+  /** Source IM Bot ID that created this task */
+  sourceBotId?: string;
+  /** Flexible schedule (overrides intervalMinutes when present) */
+  schedule?: CronSchedule;
+  /** Human-readable name for the task */
+  name?: string;
+  /** Computed next execution time (enriched by Rust) */
+  nextExecutionAt?: string;
 }
 
 /**
@@ -155,4 +171,70 @@ export function getCronStatusColor(status: CronTaskStatus): string {
     default:
       return 'text-[var(--ink-muted)]';
   }
+}
+
+/**
+ * Format schedule description for display
+ */
+export function formatScheduleDescription(task: CronTask): string {
+  if (task.schedule) {
+    switch (task.schedule.kind) {
+      case 'at':
+        return `定时执行: ${new Date(task.schedule.at).toLocaleString('zh-CN')}`;
+      case 'every':
+        return `每 ${formatCronInterval(task.schedule.minutes)}`;
+      case 'cron':
+        return `Cron: ${task.schedule.expr}${task.schedule.tz ? ` (${task.schedule.tz})` : ''}`;
+    }
+  }
+  return `每 ${formatCronInterval(task.intervalMinutes)}`;
+}
+
+/**
+ * Check if a stopped task can be meaningfully resumed.
+ * Returns { canResume: true } or { canResume: false, reason: string }.
+ */
+export function checkCanResume(task: CronTask): { canResume: true } | { canResume: false; reason: string } {
+    if (task.status !== 'stopped') {
+        return { canResume: false, reason: '任务正在运行中' };
+    }
+
+    // One-shot (schedule.kind === 'at') that has already executed → auto-deleted, shouldn't appear, but guard anyway
+    if (task.schedule?.kind === 'at' && task.executionCount > 0) {
+        return { canResume: false, reason: '单次定时任务已执行完毕' };
+    }
+
+    // Deadline already passed
+    if (task.endConditions.deadline) {
+        if (new Date(task.endConditions.deadline).getTime() <= Date.now()) {
+            return { canResume: false, reason: '截止时间已过' };
+        }
+    }
+
+    // Max executions already reached
+    if (task.endConditions.maxExecutions != null) {
+        if (task.executionCount >= task.endConditions.maxExecutions) {
+            return { canResume: false, reason: '已达最大执行次数' };
+        }
+    }
+
+    return { canResume: true };
+}
+
+/**
+ * Format next execution time for display
+ */
+export function formatNextExecution(nextAt: string | undefined, status: CronTaskStatus): string {
+  if (status === 'stopped') return '已停止';
+  if (!nextAt) return '—';
+  const date = new Date(nextAt);
+  const now = new Date();
+  const diffMs = date.getTime() - now.getTime();
+  if (diffMs <= 0) return '即将执行';
+  const diffMins = Math.floor(diffMs / (1000 * 60));
+  if (diffMins < 1) return '不到 1 分钟后';
+  if (diffMins < 60) return `${diffMins} 分钟后`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `${diffHours} 小时后`;
+  return date.toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }

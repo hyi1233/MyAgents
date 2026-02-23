@@ -364,6 +364,7 @@ pub async fn start_im_bot<R: Runtime>(
             health.set_bot_username(Some(username)).await;
             health.set_status(ImStatus::Online).await;
             health.set_error(None).await;
+            let _ = app_handle.emit("im:status-changed", json!({ "event": "online" }));
         }
         Err(e) => {
             let err_msg = format!("Bot connection verification failed: {}", e);
@@ -1282,6 +1283,7 @@ pub async fn start_im_bot<R: Runtime>(
                                 task_router.lock().await.active_sessions(),
                             )
                             .await;
+                        let _ = task_app.emit("im:status-changed", json!({ "event": "sessions_updated" }));
 
                         // 8. Buffer replay (same session only — per-peer lock is held)
                         let mut replayed = 0u32;
@@ -2463,11 +2465,14 @@ pub async fn cmd_start_im_bot(
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_stop_im_bot(
+    app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
     sidecarManager: tauri::State<'_, ManagedSidecarManager>,
     botId: String,
 ) -> Result<(), String> {
-    stop_im_bot(&imState, &sidecarManager, &botId).await
+    stop_im_bot(&imState, &sidecarManager, &botId).await?;
+    let _ = app_handle.emit("im:status-changed", json!({ "event": "stopped" }));
+    Ok(())
 }
 
 #[tauri::command]

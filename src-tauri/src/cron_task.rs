@@ -221,6 +221,9 @@ pub struct CronTask {
     /// Human-readable name for the task
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Computed next execution time (enriched at read time, not persisted)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_execution_at: Option<String>,
 }
 
 /// Configuration for creating a new cron task
@@ -333,6 +336,48 @@ pub struct CronRecoveryFailedTask {
     pub task_id: String,
     pub workspace_path: String,
     pub error: String,
+}
+
+/// Compute the next execution time for a cron task (enrichment helper)
+/// Returns an ISO 8601 string or None if the task is stopped or cannot be computed
+fn compute_next_execution(task: &CronTask) -> Option<String> {
+    if task.status != TaskStatus::Running {
+        return None;
+    }
+
+    match &task.schedule {
+        Some(CronSchedule::At { at }) => {
+            // One-shot: the target time itself
+            Some(at.clone())
+        }
+        Some(CronSchedule::Every { minutes }) => {
+            let base = task.last_executed_at.unwrap_or(task.created_at);
+            let next = base + chrono::Duration::minutes(*minutes as i64);
+            Some(next.to_rfc3339())
+        }
+        Some(CronSchedule::Cron { expr, tz }) => {
+            // Use existing next_cron_fire_duration to compute
+            match next_cron_fire_duration(expr, tz.as_deref()) {
+                Ok(duration) => {
+                    let next = Utc::now() + chrono::Duration::seconds(duration.as_secs() as i64);
+                    Some(next.to_rfc3339())
+                }
+                Err(_) => None,
+            }
+        }
+        None => {
+            // Legacy: use interval_minutes
+            let base = task.last_executed_at.unwrap_or(task.created_at);
+            let next = base + chrono::Duration::minutes(task.interval_minutes as i64);
+            Some(next.to_rfc3339())
+        }
+    }
+}
+
+/// Enrich a CronTask with computed next_execution_at
+fn enrich_task(mut task: CronTask) -> CronTask {
+    task.next_execution_at = compute_next_execution(&task);
+    task
 }
 
 /// Manager for cron tasks
@@ -899,6 +944,7 @@ impl CronTaskManager {
             delivery: config.delivery,
             schedule: config.schedule,
             name: config.name,
+            next_execution_at: None, // Enriched at read time
         };
 
         let mut tasks = self.tasks.write().await;
@@ -911,19 +957,19 @@ impl CronTaskManager {
         Ok(task)
     }
 
-    /// Get a task by ID
+    /// Get a task by ID (enriched with next_execution_at)
     pub async fn get_task(&self, task_id: &str) -> Option<CronTask> {
         let tasks = self.tasks.read().await;
-        tasks.get(task_id).cloned()
+        tasks.get(task_id).cloned().map(enrich_task)
     }
 
-    /// Get all tasks
+    /// Get all tasks (enriched with next_execution_at)
     pub async fn get_all_tasks(&self) -> Vec<CronTask> {
         let tasks = self.tasks.read().await;
-        tasks.values().cloned().collect()
+        tasks.values().cloned().map(enrich_task).collect()
     }
 
-    /// Get tasks for a specific workspace
+    /// Get tasks for a specific workspace (enriched with next_execution_at)
     /// Uses normalized path comparison to handle trailing slashes and other inconsistencies
     pub async fn get_tasks_for_workspace(&self, workspace_path: &str) -> Vec<CronTask> {
         let tasks = self.tasks.read().await;
@@ -932,6 +978,7 @@ impl CronTaskManager {
             .values()
             .filter(|t| normalize_path(&t.workspace_path) == normalized_query)
             .cloned()
+            .map(enrich_task)
             .collect();
 
         log::debug!(
@@ -942,31 +989,34 @@ impl CronTaskManager {
         result
     }
 
-    /// Get active task for a specific session (running only)
+    /// Get active task for a specific session (running only, enriched)
     pub async fn get_active_task_for_session(&self, session_id: &str) -> Option<CronTask> {
         let tasks = self.tasks.read().await;
         tasks
             .values()
             .find(|t| t.session_id == session_id && t.status == TaskStatus::Running)
             .cloned()
+            .map(enrich_task)
     }
 
-    /// Get active task for a specific tab (running only)
+    /// Get active task for a specific tab (running only, enriched)
     pub async fn get_active_task_for_tab(&self, tab_id: &str) -> Option<CronTask> {
         let tasks = self.tasks.read().await;
         tasks
             .values()
             .find(|t| t.tab_id.as_deref() == Some(tab_id) && t.status == TaskStatus::Running)
             .cloned()
+            .map(enrich_task)
     }
 
-    /// Get tasks created by a specific IM Bot (v0.1.21)
+    /// Get tasks created by a specific IM Bot (v0.1.21, enriched)
     pub async fn get_tasks_for_bot(&self, bot_id: &str) -> Vec<CronTask> {
         let tasks = self.tasks.read().await;
         tasks
             .values()
             .filter(|t| t.source_bot_id.as_deref() == Some(bot_id))
             .cloned()
+            .map(enrich_task)
             .collect()
     }
 
@@ -1185,13 +1235,14 @@ impl CronTaskManager {
         false
     }
 
-    /// Get tasks that need to be recovered (running status on app restart)
+    /// Get tasks that need to be recovered (running status on app restart, enriched)
     pub async fn get_tasks_to_recover(&self) -> Vec<CronTask> {
         let tasks = self.tasks.read().await;
         tasks
             .values()
             .filter(|t| t.status == TaskStatus::Running)
             .cloned()
+            .map(enrich_task)
             .collect()
     }
 
@@ -1521,9 +1572,14 @@ pub async fn cmd_stop_cron_task(task_id: String, exit_reason: Option<String>) ->
 
 /// Delete a cron task
 #[tauri::command]
-pub async fn cmd_delete_cron_task(task_id: String) -> Result<(), String> {
+pub async fn cmd_delete_cron_task(
+    app_handle: tauri::AppHandle,
+    task_id: String,
+) -> Result<(), String> {
     let manager = get_cron_task_manager();
-    manager.delete_task(&task_id).await
+    manager.delete_task(&task_id).await?;
+    let _ = app_handle.emit("cron:task-deleted", serde_json::json!({ "taskId": task_id }));
+    Ok(())
 }
 
 /// Get a cron task by ID

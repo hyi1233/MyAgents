@@ -21,6 +21,7 @@ import type { SystemInitInfo } from '../../shared/types/system';
 import type { PermissionMode } from '@/config/types';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
+import type { ExitPlanModeRequest, EnterPlanModeRequest } from '../../shared/types/planMode';
 
 export type SessionState = 'idle' | 'running' | 'stopping' | 'error';
 
@@ -51,6 +52,10 @@ export interface TabState {
 
     // AskUserQuestion prompt state
     pendingAskUserQuestion: AskUserQuestionRequest | null;
+
+    // PlanMode prompt states
+    pendingExitPlanMode: ExitPlanModeRequest | null;
+    pendingEnterPlanMode: EnterPlanModeRequest | null;
 
     // File operation tool completion counter (triggers workspace refresh)
     toolCompleteCount: number;
@@ -108,6 +113,9 @@ export interface TabContextValue extends TabState {
     // AskUserQuestion handling
     respondAskUserQuestion: (answers: Record<string, string> | null) => Promise<void>;
 
+    // PlanMode handling
+    respondExitPlanMode: (approved: boolean) => Promise<void>;
+
     // Queue actions
     cancelQueuedMessage: (queueId: string) => Promise<string | null>;
     forceExecuteQueuedMessage: (queueId: string) => Promise<boolean>;
@@ -135,6 +143,8 @@ const defaultContextValue: TabContextValue = {
     systemStatus: null,
     pendingPermission: null,
     pendingAskUserQuestion: null,
+    pendingExitPlanMode: null,
+    pendingEnterPlanMode: null,
     toolCompleteCount: 0,
     queuedMessages: [],
     isConnected: false,
@@ -158,6 +168,7 @@ const defaultContextValue: TabContextValue = {
     apiDelete: async () => { throw new Error('Not in TabProvider'); },
     respondPermission: async () => { },
     respondAskUserQuestion: async () => { },
+    respondExitPlanMode: async () => { },
     cancelQueuedMessage: async () => null,
     forceExecuteQueuedMessage: async () => false,
     onCronTaskExitRequested: { current: null },

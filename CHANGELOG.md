@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.25] - 2026-02-23
+
+### Added
+- **任务中心（Task Center）**：新增全局任务面板，集中查看所有会话（对话、定时任务、IM Bot 后台会话）
+  - 会话列表支持分类标签（对话/定时/IM）和最后一条消息预览
+  - 定时任务详情面板，展示 cron 信息和运行状态
+  - 后端支持 cron 信息聚合、后台会话查询、IM 事件上报
+- **会话列表 Hover 菜单**：会话列表项支持悬停显示统计信息和删除操作，ConfirmDialog 支持键盘操作（Enter/Escape）
+- **PlanMode 方案审核**：接入 SDK 的 ExitPlanMode/EnterPlanMode 工具
+  - ExitPlanMode 卡片展示 AI 生成的方案内容，用户可批准/拒绝
+  - 卡片在用户决策后保留显示「已批准/已拒绝」状态
+  - 支持权限模式热切换（运行中切换 Plan ↔ Auto）
+  - EnterPlanMode 自动批准，无需用户手动确认
+
+### Fixed
+- **中文文件名图片预览 500 错误**：含中文字符的图片路径导致预览接口返回 500
+- **Agent 错误展示**：报错时展示详细错误描述，而非仅显示错误码
+- **ExitPlanMode 卡片位置错位**：卡片从 Message 外部移入内部（slot 模式），解决用户批准后新内容「插入」到卡片上方的视觉问题
+
+### Changed
+- **全局 Overlay 毛玻璃遮罩统一**：所有 Overlay 遮罩统一使用 `bg-black/30 backdrop-blur-sm`
+- **ExitPlanMode 卡片样式**：宽度与工具行对齐（撑满父容器），方案内容区高度增加 30%
+- **ProcessRow 简化**：移除 thinking 指示器的特殊颜色样式
+
+---
+
 ## [0.1.24] - 2026-02-23
 
 ### Added

@@ -13,6 +13,8 @@ import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import PathInputDialog from '@/components/PathInputDialog';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import TaskCenterOverlay from '@/components/TaskCenterOverlay';
+import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import { BrandSection, RecentTasks, WorkspaceCard } from '@/components/launcher';
 import { useConfig } from '@/hooks/useConfig';
 import { type Project, type Provider, type PermissionMode, type McpServerDefinition } from '@/config/types';
@@ -20,8 +22,10 @@ import {
     getAllMcpServers,
     getEnabledMcpServerIds,
 } from '@/config/configService';
+import { deleteCronTask, stopCronTask, startCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
 import type { SessionMetadata } from '@/api/sessionClient';
+import type { CronTask } from '@/types/cronTask';
 import type { InitialMessage } from '@/types/tab';
 
 interface LauncherProps {
@@ -55,6 +59,8 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [launchingProjectId, setLaunchingProjectId] = useState<string | null>(null);
     const [showLogs, setShowLogs] = useState(false);
     const [projectToRemove, setProjectToRemove] = useState<Project | null>(null);
+    const [showOverlay, setShowOverlay] = useState(false);
+    const [selectedCronTask, setSelectedCronTask] = useState<CronTask | null>(null);
 
     // ===== Launcher-specific state for BrandSection =====
 
@@ -264,6 +270,60 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         handleLaunch(project, session.id);
     }, [handleLaunch]);
 
+    const handleOpenOverlay = useCallback(() => setShowOverlay(true), []);
+    const handleCloseOverlay = useCallback(() => setShowOverlay(false), []);
+    const handleOpenCronDetail = useCallback((task: CronTask) => setSelectedCronTask(task), []);
+    const handleCloseCronDetail = useCallback(() => setSelectedCronTask(null), []);
+
+    // Derive bot info for selected cron task from config
+    const selectedTaskBotInfo = useMemo(() => {
+        if (!selectedCronTask?.sourceBotId || !config.imBotConfigs) return undefined;
+        const bot = config.imBotConfigs.find(b => b.id === selectedCronTask.sourceBotId);
+        return bot ? { name: bot.name, platform: bot.platform } : undefined;
+    }, [selectedCronTask?.sourceBotId, config.imBotConfigs]);
+
+    // Stable callback for overlay session open (avoids inline function in render)
+    const handleOverlayOpenTask = useCallback((session: SessionMetadata, project: Project) => {
+        handleOpenTask(session, project);
+        handleCloseOverlay();
+    }, [handleOpenTask, handleCloseOverlay]);
+
+    const handleCronDelete = useCallback(async (taskId: string) => {
+        await deleteCronTask(taskId);
+        setSelectedCronTask(null);
+        toastRef.current.success('定时任务已删除');
+    }, []);
+
+    const handleCronResume = useCallback(async (taskId: string) => {
+        try {
+            await startCronTask(taskId);
+            await startCronScheduler(taskId);
+            setSelectedCronTask(null);
+            toastRef.current.success('任务已恢复运行');
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            // Task was deleted elsewhere — close stale detail panel
+            if (msg.includes('not found')) {
+                setSelectedCronTask(null);
+            }
+            toastRef.current.error(`恢复失败: ${msg}`);
+        }
+    }, []);
+
+    const handleCronStop = useCallback(async (taskId: string) => {
+        try {
+            await stopCronTask(taskId, '手动停止');
+            setSelectedCronTask(null);
+            toastRef.current.success('任务已停止');
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg.includes('not found')) {
+                setSelectedCronTask(null);
+            }
+            toastRef.current.error(`停止失败: ${msg}`);
+        }
+    }, []);
+
     const handleAddProject = async () => {
         setAddError(null);
         console.log('[Launcher] handleAddProject called');
@@ -403,7 +463,13 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 <section className="launcher-workspaces flex flex-col overflow-hidden">
                     {/* Recent Tasks */}
                     <div className="flex-shrink-0 px-6 pt-6">
-                        <RecentTasks projects={projects} onOpenTask={handleOpenTask} isActive={isActive} />
+                        <RecentTasks
+                            projects={projects}
+                            onOpenTask={handleOpenTask}
+                            onOpenOverlay={handleOpenOverlay}
+                            onOpenCronDetail={handleOpenCronDetail}
+                            isActive={isActive}
+                        />
                     </div>
 
                     {/* Workspaces Header */}
@@ -475,6 +541,29 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     </div>
                 </section>
             </main>
+
+            {/* Task Center Overlay */}
+            {showOverlay && (
+                <TaskCenterOverlay
+                    projects={projects}
+                    onOpenTask={handleOverlayOpenTask}
+                    onOpenCronDetail={handleOpenCronDetail}
+                    onClose={handleCloseOverlay}
+                    isActive={isActive}
+                />
+            )}
+
+            {/* Cron Task Detail Panel */}
+            {selectedCronTask && (
+                <CronTaskDetailPanel
+                    task={selectedCronTask}
+                    botInfo={selectedTaskBotInfo}
+                    onClose={handleCloseCronDetail}
+                    onDelete={handleCronDelete}
+                    onResume={handleCronResume}
+                    onStop={handleCronStop}
+                />
+            )}
         </div>
     );
 }

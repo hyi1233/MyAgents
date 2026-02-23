@@ -342,10 +342,12 @@ await updateImBotConfig(botId, updates);
 | `useConfig` 写盘用 React `config` 状态 | 覆盖其他字段（如 API Key） | `await loadAppConfig()` 从磁盘读 |
 | 新增配置同步不考虑 pre-warm | 首消息阻塞延迟 | 确保变量在 pre-warm 前设置 |
 | IM config 写盘后不 `refreshConfig()` | 列表/详情显示过期数据 | 写盘后调用 `await refreshConfig()` |
+| Overlay 遮罩不用 `bg-black/30 backdrop-blur-sm` | 视觉不统一 | 统一毛玻璃遮罩（ImagePreview 例外用 `bg-black/80`） |
 | 提交前不 typecheck | CI 失败 | `npm run typecheck` |
 | 提交前不检查分支 | 误提交到错误分支 | `git branch --show-current` |
 | 在 main 分支直接提交 | 破坏主分支稳定性 | 切换到 dev 分支 |
 | 未经确认合并到 main | 绕过测试流程 | 先询问用户确认 |
+| 后端新增 SSE 事件不注册白名单 | 前端永远收不到该事件（静默丢弃） | 在 `SseConnection.ts` 的 `JSON_EVENTS` 中注册新事件名 |
 
 ---
 
@@ -477,7 +479,7 @@ log::info!("internal message");
 | 问题 | 排查方向 |
 |------|----------|
 | Tab 切换后功能异常 | 检查是否用了全局 API 而非 Tab-scoped API |
-| SSE 事件未收到 | 确认连接状态、事件名格式 `sse:${tabId}:${event}` |
+| SSE 事件未收到 | **首先检查 `SseConnection.ts` 的 `JSON_EVENTS` 白名单是否注册了该事件**，然后确认连接状态、事件名格式 `sse:${tabId}:${event}` |
 | useEffect 频繁触发 | 检查依赖数组是否有不稳定引用 |
 | 保存文件弹权限框 | Context 不稳定导致 loadData 重复执行 |
 | 新对话后旧消息重现 | 使用 `resetSession()` 而非直接清理状态 |

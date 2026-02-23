@@ -106,6 +106,12 @@ export const updateCronTaskSession = (taskId: string, sessionId: string): Promis
 export const getTasksToRecover = (): Promise<CronTask[]> =>
   invokeCommandWithFallback('cmd_get_tasks_to_recover', undefined, []);
 
+// ============= Background Session Queries =============
+
+/** Get session IDs that have active background completions */
+export const getBackgroundSessions = (): Promise<string[]> =>
+  invokeCommandWithFallback('cmd_get_background_sessions', undefined, []);
+
 // ============= Cron Scheduler Control =============
 
 /** Start the scheduler for a task (called after task is started) */
