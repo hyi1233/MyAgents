@@ -1,3 +1,4 @@
+import { useEffect, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
 
 interface ConfirmDialogProps {
@@ -31,6 +32,23 @@ export default function ConfirmDialog({
     const finalConfirmText = confirmText || confirmLabel || 'Confirm';
     const finalCancelText = cancelText || cancelLabel || 'Cancel';
     const isDanger = confirmVariant === 'danger' || danger;
+
+    // Keyboard: Enter to confirm, Escape to cancel
+    const handleKeyDown = useCallback((e: KeyboardEvent) => {
+        if (loading) return;
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            onConfirm();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            onCancel();
+        }
+    }, [loading, onConfirm, onCancel]);
+
+    useEffect(() => {
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, [handleKeyDown]);
 
     return (
         <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
