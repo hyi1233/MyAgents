@@ -162,7 +162,7 @@ export default memo(function TaskCenterOverlay({
             }}
         >
             <div
-                className="glass-panel flex max-h-[85vh] min-h-[50vh] w-full max-w-5xl flex-col"
+                className="glass-panel flex h-[85vh] w-full max-w-5xl flex-col"
                 style={{ padding: '2vh 2vw', animation: 'overlayPanelIn 250ms ease-out' }}
                 onClick={e => e.stopPropagation()}
             >
