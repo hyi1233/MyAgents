@@ -155,7 +155,7 @@ export default memo(function TaskCenterOverlay({
 
     return (
         <div
-            className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+            className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 backdrop-blur-sm"
             style={{ animation: 'overlayFadeIn 200ms ease-out' }}
             onMouseDown={(e) => {
                 if (e.target === e.currentTarget) onClose();

@@ -2185,7 +2185,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
 
             {/* Builtin MCP Settings Modal */}
             {builtinMcpSettings && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -2343,7 +2343,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
 
             {/* Add MCP Modal */}
             {showMcpForm && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -2711,7 +2711,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
 
             {/* Custom Provider Modal */}
             {showCustomForm && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
                     <div className="mx-4 w-full max-w-md rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
                         <div className="mb-5 flex items-center justify-between">
                             <h3 className="text-lg font-semibold text-[var(--ink)]">添加自定义供应商</h3>
@@ -2933,7 +2933,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
 
             {/* Provider Management Modal */}
             {editingProvider && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
                     <div className="mx-4 w-full max-w-md rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
                         <div className="mb-5 flex items-center justify-between">
                             <h3 className="text-lg font-semibold text-[var(--ink)]">
@@ -3152,7 +3152,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
 
             {/* Delete Confirmation Modal */}
             {deleteConfirmProvider && (
-                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 backdrop-blur-sm">
                     <div className="mx-4 w-full max-w-sm rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
                         <div className="mb-4 flex items-center gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--error-bg)]">
@@ -3183,7 +3183,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
 
             {/* Runtime not found dialog */}
             {runtimeDialog.show && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
                     <div className="mx-4 w-full max-w-sm rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
                         <div className="flex items-center gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--warning-bg)]">

@@ -1,7 +1,7 @@
 # MyAgents Design Guide
 
-> **Version**: 1.5.0
-> **Last Updated**: 2026-02-11
+> **Version**: 1.6.0
+> **Last Updated**: 2026-02-23
 > **Status**: Active
 > **Platform**: macOS / Windows Desktop Client
 
@@ -395,7 +395,39 @@ Item 选中: 文字 var(--accent-warm)
 光标: cursor-pointer, 加载中 cursor-wait, 禁用 cursor-not-allowed
 ```
 
-### 6.7 Section 标题 (Section Headers)
+### 6.7 Overlay 遮罩层 (Overlay Backdrop)
+
+所有模态框、全屏面板、弹层等 Overlay 统一使用**毛玻璃遮罩**，营造层次感和沉浸式体验。
+
+```
+背景: bg-black/30
+模糊: backdrop-blur-sm
+```
+
+**Tailwind 类名**：
+```jsx
+<div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm">
+  <div className="rounded-2xl bg-[var(--paper)] p-6 shadow-2xl">
+    弹层内容
+  </div>
+</div>
+```
+
+**适用范围**：
+- 模态框（ConfirmDialog、SessionStatsModal 等）
+- 全屏面板（WorkspaceConfigPanel、Settings 弹层等）
+- 选择器弹层（SkillDialogs、PathInputDialog 等）
+- 日志面板（UnifiedLogsPanel）
+- 任务中心 Overlay（TaskCenterOverlay）
+
+**例外**：
+- 图片预览（ImagePreview）使用 `bg-black/80 backdrop-blur-sm`，深色背景便于查看图片内容
+
+**点击遮罩关闭**：
+- 支持点击遮罩层区域触发关闭（等同于取消操作）
+- 实现方式：`onMouseDown` + `e.target === e.currentTarget` 防止冒泡误触
+
+### 6.8 Section 标题 (Section Headers)
 
 用于 Launcher、Settings 等页面的区块标题，统一样式确保页面一致性。
 
@@ -1090,6 +1122,7 @@ Hover 状态:
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 1.6.0 | 2026-02-23 | 新增 Overlay 遮罩层规范：统一 `bg-black/30 backdrop-blur-sm` 毛玻璃效果，点击遮罩关闭 |
 | 1.5.0 | 2026-02-11 | Toggle 规范对齐实际实现（ON=accent, OFF=line-strong）；Settings 双栏布局；卡片分主/紧凑两级；按钮补充危险/强调/文字链；变量别名重新定位 |
 | 1.4.0 | 2026-01-30 | 新增 Launcher 页面规范、Section 标题规范、透明度层级规范；统一文件夹图标为暖色调 |
 | 1.3.0 | 2026-01-22 | 按钮尺寸规范：工具栏按钮 13px + h-3.5 图标，主按钮 14px |

@@ -342,6 +342,7 @@ await updateImBotConfig(botId, updates);
 | `useConfig` 写盘用 React `config` 状态 | 覆盖其他字段（如 API Key） | `await loadAppConfig()` 从磁盘读 |
 | 新增配置同步不考虑 pre-warm | 首消息阻塞延迟 | 确保变量在 pre-warm 前设置 |
 | IM config 写盘后不 `refreshConfig()` | 列表/详情显示过期数据 | 写盘后调用 `await refreshConfig()` |
+| Overlay 遮罩不用 `bg-black/30 backdrop-blur-sm` | 视觉不统一 | 统一毛玻璃遮罩（ImagePreview 例外用 `bg-black/80`） |
 | 提交前不 typecheck | CI 失败 | `npm run typecheck` |
 | 提交前不检查分支 | 误提交到错误分支 | `git branch --show-current` |
 | 在 main 分支直接提交 | 破坏主分支稳定性 | 切换到 dev 分支 |

@@ -300,7 +300,7 @@ export default function FilePreviewModal({
         <>
             {/* Modal backdrop */}
             <div
-                className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+                className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 backdrop-blur-sm"
                 style={{ padding: '2vh 2vw' }}
                 onMouseDown={handleBackdropMouseDown}
                 onClick={handleBackdropClick}

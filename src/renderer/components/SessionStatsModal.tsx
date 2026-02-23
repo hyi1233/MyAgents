@@ -71,7 +71,7 @@ export default function SessionStatsModal({
 
     return (
         <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
             style={{ padding: '4vh 4vw' }}
             onMouseDown={handleBackdropMouseDown}
             onClick={handleBackdropClick}

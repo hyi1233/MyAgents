@@ -154,7 +154,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
 
     return createPortal(
         <div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 backdrop-blur-md"
+            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
             onClick={handleClose}
         >
             {/* Main Panel */}

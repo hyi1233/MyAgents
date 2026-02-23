@@ -28,7 +28,7 @@ export function CreateDialog({
     loading
 }: CreateDialogProps) {
     return (
-        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/30 backdrop-blur-sm">
             <div className="w-full max-w-md rounded-2xl bg-[var(--paper)] p-6 shadow-2xl">
                 <h3 className="text-lg font-semibold text-[var(--ink)]">{title}</h3>
                 <div className="mt-4 space-y-4">
@@ -148,7 +148,7 @@ export function NewSkillChooser({
     const canImportFolder = isTauriEnvironment() && !!onImportFolder;
 
     return (
-        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/30 backdrop-blur-sm">
             <div className="w-full max-w-md rounded-2xl bg-[var(--paper)] p-6 shadow-2xl">
                 <div className="flex items-center justify-between">
                     <h3 className="text-lg font-semibold text-[var(--ink)]">新建技能</h3>
