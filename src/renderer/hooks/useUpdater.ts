@@ -79,11 +79,14 @@ export function useUpdater(): UseUpdaterResult {
             return 'error';
         }
         // Use refs for guards — immune to stale closure on rapid clicks
-        if (updateReadyRef.current) return 'up-to-date';  // Already ready, no need to check
+        if (updateReadyRef.current) return 'downloading';  // Already downloaded, pending restart
         if (checkingRef.current || downloadingRef.current) return 'downloading';  // In progress
 
         checkingRef.current = true;
         setChecking(true);
+        // When background download is already in progress, we keep the downloading
+        // spinner visible and let the updater:ready-to-restart event clear it.
+        let keepDownloadingState = false;
         try {
             // Step 1: Get remote version
             const result = await invoke('test_update_connectivity') as string;
@@ -117,18 +120,25 @@ export function useUpdater(): UseUpdaterResult {
                 setUpdateReady(true);
                 return 'downloading';
             }
-            // Rust updater decided no update — clear orphan version state
-            setUpdateVersion(null);
-            return 'up-to-date';
+            // check_and_download_update returned false, but we already confirmed
+            // comparison > 0 (newer version exists). This typically means the Rust
+            // background download is already in progress (UPDATE_IN_PROGRESS lock).
+            // Keep downloading spinner visible — updater:ready-to-restart event will
+            // call setDownloading(false) and setUpdateReady(true) when background finishes.
+            keepDownloadingState = true;
+            return 'downloading';
         } catch (err) {
             console.error('[useUpdater] Manual check failed:', err);
             return 'error';
         } finally {
-            // Always reset both guards — ensures clean state regardless of exit path
+            // Always reset checking guards
             checkingRef.current = false;
             setChecking(false);
-            downloadingRef.current = false;
-            setDownloading(false);
+            // Only reset downloading if not handed off to background download
+            if (!keepDownloadingState) {
+                downloadingRef.current = false;
+                setDownloading(false);
+            }
         }
     }, []); // Stable reference — all mutable state accessed via refs
 
