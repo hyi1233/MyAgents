@@ -5,7 +5,7 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
-import { getAllMcpServers, getEnabledMcpServerIds, removeImBotConfig, updateImBotConfig } from '@/config/configService';
+import { getAllMcpServers, getEnabledMcpServerIds } from '@/config/configService';
 import { getProviderModels, type McpServerDefinition } from '@/config/types';
 import CustomSelect from '@/components/CustomSelect';
 import BotTokenInput from './components/BotTokenInput';
@@ -70,11 +70,12 @@ export default function ImBotDetail({
         return () => { isMountedRef.current = false; };
     }, []);
 
-    // Save bot config to disk and sync React state
-    const saveBotField = useCallback(async (updates: Partial<ImBotConfig>) => {
-        await updateImBotConfig(botId, updates);
-        await refreshConfig();
-    }, [botId, refreshConfig]);
+    // Invoke Rust to update bot config (persists + pushes to Sidecar + emits event)
+    const invokePatch = useCallback(async (patch: Record<string, unknown>) => {
+        if (!isTauriEnvironment()) return;
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('cmd_update_im_bot_config', { botId, patch });
+    }, [botId]);
 
     // Ref for bot config (used in effects without re-triggering)
     const botConfigRef = useRef(botConfig);
@@ -106,7 +107,9 @@ export default function ImBotDetail({
                                 ? `@${status.botUsername}`
                                 : status.botUsername;
                             if (botConfigRef.current?.name !== displayName) {
-                                updateImBotConfig(botId, { name: displayName }).catch(err => {
+                                import('@tauri-apps/api/core').then(({ invoke }) =>
+                                    invoke('cmd_update_im_bot_config', { botId, patch: { name: displayName } })
+                                ).catch(err => {
                                     console.error('[ImBotDetail] Failed to sync bot name:', err);
                                 });
                             }
@@ -156,8 +159,7 @@ export default function ImBotDetail({
                 const displayName = username || userId;
 
                 toastRef.current.success(`用户 ${displayName} 已通过二维码绑定`);
-                // Refresh config from disk to pick up Rust-persisted bound user
-                refreshConfig();
+                // Config refresh handled by im:bot-config-changed listener
             }).then(fn => {
                 if (cancelled) fn();
                 else unlisten = fn;
@@ -170,7 +172,7 @@ export default function ImBotDetail({
         };
     }, [botId, refreshConfig]);
 
-    // Listen for AI config changes (Rust /provider or /model commands persist to config.json)
+    // Listen for bot config changes (Rust unified event for all config mutations)
     useEffect(() => {
         if (!isTauriEnvironment()) return;
         let cancelled = false;
@@ -178,7 +180,7 @@ export default function ImBotDetail({
 
         import('@tauri-apps/api/event').then(({ listen }) => {
             if (cancelled) return;
-            listen<{ botId: string }>('im:ai-config-changed', (event) => {
+            listen<{ botId: string }>('im:bot-config-changed', (event) => {
                 if (!isMountedRef.current || event.payload.botId !== botId) return;
                 refreshConfig();
             }).then(fn => {
@@ -193,32 +195,9 @@ export default function ImBotDetail({
         };
     }, [botId, refreshConfig]);
 
-    // Build start params
+    // Build start params — providerEnvJson is already persisted on disk by Rust,
+    // so we read it directly from the config instead of rebuilding from React state.
     const buildStartParams = useCallback(async (cfg: ImBotConfig) => {
-        const selectedProvider = providers.find(p => p.id === cfg.providerId);
-        let providerEnvJson: string | undefined;
-        if (selectedProvider && selectedProvider.type !== 'subscription') {
-            providerEnvJson = JSON.stringify({
-                baseUrl: selectedProvider.config.baseUrl,
-                apiKey: apiKeys[selectedProvider.id],
-                authType: selectedProvider.authType,
-                apiProtocol: selectedProvider.apiProtocol,
-            });
-        }
-
-        const availableProviders = providers
-            .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
-            .map(p => ({
-                id: p.id,
-                name: p.name,
-                primaryModel: p.primaryModel,
-                baseUrl: p.config.baseUrl,
-                authType: p.authType,
-                apiProtocol: p.apiProtocol,
-                apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
-                models: p.models.map(m => ({ model: m.model, modelName: m.modelName })),
-            }));
-
         const allServers = await getAllMcpServers();
         const globalEnabled = await getEnabledMcpServerIds();
         const botMcpIds = cfg.mcpEnabledServers ?? [];
@@ -233,15 +212,14 @@ export default function ImBotDetail({
             permissionMode: cfg.permissionMode,
             workspacePath: cfg.defaultWorkspacePath || '',
             model: cfg.model || null,
-            providerEnvJson: providerEnvJson || null,
+            providerEnvJson: cfg.providerEnvJson || null,
             mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
-            availableProvidersJson: availableProviders.length > 0 ? JSON.stringify(availableProviders) : null,
             platform: cfg.platform,
             feishuAppId: cfg.feishuAppId || null,
             feishuAppSecret: cfg.feishuAppSecret || null,
             heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
         };
-    }, [providers, apiKeys]);
+    }, []);
 
     // Toggle bot
     const botStatusRef = useRef(botStatus);
@@ -261,7 +239,7 @@ export default function ImBotDetail({
                 if (isMountedRef.current) {
                     toastRef.current.success('Bot 已停止');
                     setBotStatus(null);
-                    await saveBotField({ enabled: false });
+                    await invokePatch({ enabled: false });
                 }
             } else {
                 const cfg = botConfigRef.current;
@@ -277,11 +255,7 @@ export default function ImBotDetail({
                 await invoke('cmd_start_im_bot', params);
                 if (isMountedRef.current) {
                     toastRef.current.success('Bot 已启动');
-                    await saveBotField({
-                        enabled: true,
-                        providerEnvJson: params.providerEnvJson || undefined,
-                        availableProvidersJson: params.availableProvidersJson || undefined,
-                    });
+                    await invokePatch({ enabled: true });
                 }
             }
         } catch (err) {
@@ -291,24 +265,17 @@ export default function ImBotDetail({
         } finally {
             if (isMountedRef.current) setToggling(false);
         }
-    }, [botId, buildStartParams, saveBotField]);
+    }, [botId, buildStartParams, invokePatch]);
 
     // Delete bot (called after ConfirmDialog confirmation)
     const executeDelete = useCallback(async () => {
         setDeleting(true);
         try {
-            // Stop if running
             if (isTauriEnvironment()) {
-                try {
-                    const { invoke } = await import('@tauri-apps/api/core');
-                    await invoke('cmd_stop_im_bot', { botId });
-                } catch {
-                    // May not be running
-                }
+                const { invoke } = await import('@tauri-apps/api/core');
+                // Rust cmd_remove_im_bot_config stops the bot, removes from config, emits event
+                await invoke('cmd_remove_im_bot_config', { botId });
             }
-
-            // Remove from config — onBack (goToList) handles refreshConfig + view switch
-            await removeImBotConfig(botId);
             toastRef.current.success('Bot 已删除');
             onBack();
         } catch (err) {
@@ -358,24 +325,10 @@ export default function ImBotDetail({
         return '';
     }, [botConfig?.model, selectedProvider?.primaryModel, modelOptions]);
 
-    // Helper: invoke hot-update Tauri command if bot is currently running
-    const hotUpdateRunning = useCallback(async (command: string, params: Record<string, unknown>) => {
-        const status = botStatusRef.current;
-        if ((status?.status === 'online' || status?.status === 'connecting') && isTauriEnvironment()) {
-            try {
-                const { invoke } = await import('@tauri-apps/api/core');
-                await invoke(command, { botId, ...params });
-            } catch (err) {
-                console.error(`[ImBotDetail] Hot-update ${command} failed:`, err);
-            }
-        }
-    }, [botId]);
-
     const handleWorkspaceChange = useCallback(async (path: string) => {
         if (!path) return;
-        await saveBotField({ defaultWorkspacePath: path });
-        await hotUpdateRunning('cmd_update_im_bot_workspace', { workspacePath: path });
-    }, [saveBotField, hotUpdateRunning]);
+        await invokePatch({ defaultWorkspacePath: path });
+    }, [invokePatch]);
 
     if (!botConfig) {
         return (
@@ -457,9 +410,9 @@ export default function ImBotDetail({
                                         toastRef.current.error('该飞书应用凭证已被其他 Bot 使用');
                                         return;
                                     }
-                                    saveBotField({ feishuAppId: appId });
+                                    invokePatch({ feishuAppId: appId });
                                 }}
-                                onAppSecretChange={(appSecret) => saveBotField({ feishuAppSecret: appSecret })}
+                                onAppSecretChange={(appSecret) => invokePatch({ feishuAppSecret: appSecret })}
                                 verifyStatus={verifyStatus}
                                 botName={botUsername}
                             />
@@ -472,7 +425,7 @@ export default function ImBotDetail({
                                         toastRef.current.error('该 Bot Token 已被其他 Bot 使用');
                                         return;
                                     }
-                                    saveBotField({ botToken: token });
+                                    invokePatch({ botToken: token });
                                 }}
                                 verifyStatus={verifyStatus}
                                 botUsername={botUsername}
@@ -516,8 +469,7 @@ export default function ImBotDetail({
                         <WhitelistManager
                             users={botConfig.allowedUsers}
                             onChange={async (users) => {
-                                await saveBotField({ allowedUsers: users });
-                                await hotUpdateRunning('cmd_update_im_bot_allowed_users', { allowedUsers: users });
+                                await invokePatch({ allowedUsers: users });
                             }}
                             platform={botConfig.platform}
                         />
@@ -569,8 +521,7 @@ export default function ImBotDetail({
                 <PermissionModeSelect
                     value={botConfig.permissionMode}
                     onChange={async (mode) => {
-                        await saveBotField({ permissionMode: mode });
-                        await hotUpdateRunning('cmd_update_im_bot_permission_mode', { permissionMode: mode });
+                        await invokePatch({ permissionMode: mode });
                     }}
                 />
             </div>
@@ -584,7 +535,6 @@ export default function ImBotDetail({
                 onProviderChange={async (providerId) => {
                     const provider = providers.find(p => p.id === providerId);
                     const newModel = provider ? provider.primaryModel : undefined;
-                    // Build provider env for both persistence and hot-update
                     let providerEnvJson: string | undefined;
                     if (provider && provider.type !== 'subscription') {
                         providerEnvJson = JSON.stringify({
@@ -594,28 +544,14 @@ export default function ImBotDetail({
                             apiProtocol: provider.apiProtocol,
                         });
                     }
-                    const availableProvidersList = providers
-                        .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
-                        .map(p => ({
-                            id: p.id, name: p.name, primaryModel: p.primaryModel,
-                            baseUrl: p.config.baseUrl, authType: p.authType,
-                            apiProtocol: p.apiProtocol,
-                            apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
-                            models: p.models.map(m => ({ model: m.model, modelName: m.modelName })),
-                        }));
-                    // Persist providerId + model + providerEnvJson + availableProvidersJson
-                    const availableProvidersJsonStr = availableProvidersList.length > 0 ? JSON.stringify(availableProvidersList) : undefined;
-                    await saveBotField({ providerId: providerId || undefined, model: newModel, providerEnvJson, availableProvidersJson: availableProvidersJsonStr });
-                    await hotUpdateRunning('cmd_update_im_bot_ai_config', {
-                        model: newModel || null,
-                        // Empty string = explicit clear (subscription); null would mean "don't change"
-                        providerEnvJson: providerEnvJson ?? '',
-                        availableProvidersJson: availableProvidersList.length > 0 ? JSON.stringify(availableProvidersList) : '',
+                    await invokePatch({
+                        providerId: providerId || undefined,
+                        model: newModel,
+                        providerEnvJson,
                     });
                 }}
                 onModelChange={async (model) => {
-                    await saveBotField({ model: model || undefined });
-                    await hotUpdateRunning('cmd_update_im_bot_ai_config', { model: model || null });
+                    await invokePatch({ model: model || undefined });
                 }}
             />
 
@@ -628,12 +564,11 @@ export default function ImBotDetail({
                     const updated = current.includes(serverId)
                         ? current.filter(id => id !== serverId)
                         : [...current, serverId];
-                    await saveBotField({ mcpEnabledServers: updated.length > 0 ? updated : undefined });
-                    // Hot-update MCP: build JSON from enabled + globally-enabled servers
                     const enabledDefs = mcpServers.filter(
                         s => globalMcpEnabled.includes(s.id) && updated.includes(s.id)
                     );
-                    await hotUpdateRunning('cmd_update_im_bot_mcp_servers', {
+                    await invokePatch({
+                        mcpEnabledServers: updated.length > 0 ? updated : undefined,
                         mcpServersJson: enabledDefs.length > 0 ? JSON.stringify(enabledDefs) : null,
                     });
                 }}
@@ -643,19 +578,7 @@ export default function ImBotDetail({
             <HeartbeatConfigCard
                 heartbeat={botConfig.heartbeat}
                 onChange={async (hb) => {
-                    await saveBotField({ heartbeat: hb });
-                    // Hot-update running heartbeat config
-                    if (isRunning && isTauriEnvironment() && hb) {
-                        try {
-                            const { invoke } = await import('@tauri-apps/api/core');
-                            await invoke('cmd_update_heartbeat_config', {
-                                botId,
-                                heartbeatConfigJson: JSON.stringify(hb),
-                            });
-                        } catch {
-                            // Non-critical: config will take effect on next bot restart
-                        }
-                    }
+                    await invokePatch({ heartbeatConfigJson: hb ? JSON.stringify(hb) : undefined });
                 }}
             />
 

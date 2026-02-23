@@ -580,6 +580,18 @@ export function getSessionModel(): string | undefined {
   return currentModel;
 }
 
+export function getSessionPermissionMode(): PermissionMode {
+  return currentPermissionMode;
+}
+
+/** Set permission mode (called by Rust IM router via /api/session/permission-mode) */
+export function setSessionPermissionMode(mode: PermissionMode): void {
+  if (mode === currentPermissionMode) return;
+  const oldMode = currentPermissionMode;
+  currentPermissionMode = mode;
+  console.log(`[agent] session permission mode set: ${oldMode} -> ${mode}`);
+}
+
 export function setSessionModel(model: string): void {
   if (model === currentModel) return;
 

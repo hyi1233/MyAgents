@@ -154,13 +154,11 @@ pub fn run() {
             im::cmd_im_bot_status,
             im::cmd_im_all_bots_status,
             im::cmd_im_conversations,
-            im::cmd_update_heartbeat_config,
-            // IM Bot hot-update commands
-            im::cmd_update_im_bot_ai_config,
-            im::cmd_update_im_bot_permission_mode,
-            im::cmd_update_im_bot_mcp_servers,
-            im::cmd_update_im_bot_allowed_users,
-            im::cmd_update_im_bot_workspace,
+            // IM Bot unified config commands (v0.1.26)
+            im::cmd_update_im_bot_config,
+            im::cmd_get_im_bot_runtime_config,
+            im::cmd_add_im_bot_config,
+            im::cmd_remove_im_bot_config,
         ])
         .setup(|app| {
             // Initialize logging for all builds

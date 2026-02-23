@@ -2,9 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, Plus } from 'lucide-react';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
-import { useConfig } from '@/hooks/useConfig';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
-import { getAllMcpServers, getEnabledMcpServerIds, updateImBotConfig } from '@/config/configService';
+import { getAllMcpServers, getEnabledMcpServerIds } from '@/config/configService';
 import type { ImBotConfig, ImBotStatus } from '../../../shared/types/im';
 import telegramIcon from './assets/telegram.png';
 import feishuIcon from './assets/feishu.jpeg';
@@ -21,7 +20,6 @@ export default function ImBotList({
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
-    const { providers, apiKeys } = useConfig();
     const isMountedRef = useRef(true);
 
     // Bot statuses: botId → status
@@ -87,31 +85,9 @@ export default function ImBotList({
         return () => clearInterval(interval);
     }, []);
 
-    // Build start params for a bot config
+    // Build start params — providerEnvJson is already persisted on disk by Rust,
+    // so we read it directly from the config instead of rebuilding from React state.
     const buildStartParams = useCallback(async (cfg: ImBotConfig) => {
-        const selectedProvider = providers.find(p => p.id === cfg.providerId);
-        let providerEnvJson: string | undefined;
-        if (selectedProvider && selectedProvider.type !== 'subscription') {
-            providerEnvJson = JSON.stringify({
-                baseUrl: selectedProvider.config.baseUrl,
-                apiKey: apiKeys[selectedProvider.id],
-                authType: selectedProvider.authType,
-                apiProtocol: selectedProvider.apiProtocol,
-            });
-        }
-
-        const availableProviders = providers
-            .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
-            .map(p => ({
-                id: p.id,
-                name: p.name,
-                primaryModel: p.primaryModel,
-                baseUrl: p.config.baseUrl,
-                authType: p.authType,
-                apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
-                models: p.models.map(m => ({ model: m.model, modelName: m.modelName })),
-            }));
-
         const allServers = await getAllMcpServers();
         const globalEnabled = await getEnabledMcpServerIds();
         const botMcpIds = cfg.mcpEnabledServers ?? [];
@@ -126,15 +102,14 @@ export default function ImBotList({
             permissionMode: cfg.permissionMode,
             workspacePath: cfg.defaultWorkspacePath || '',
             model: cfg.model || null,
-            providerEnvJson: providerEnvJson || null,
+            providerEnvJson: cfg.providerEnvJson || null,
             mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
-            availableProvidersJson: availableProviders.length > 0 ? JSON.stringify(availableProviders) : null,
             platform: cfg.platform,
             feishuAppId: cfg.feishuAppId || null,
             feishuAppSecret: cfg.feishuAppSecret || null,
             heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
         };
-    }, [providers, apiKeys]);
+    }, []);
 
     // Toggle bot start/stop
     const toggleBot = useCallback(async (cfg: ImBotConfig) => {
@@ -161,12 +136,7 @@ export default function ImBotList({
                         return next;
                     });
                     toastRef.current.success(`${cfg.name} 已停止`);
-                    await updateImBotConfig(botId, { enabled: false });
-                    // NOTE: Don't call refreshConfig() here — ImBotList's useConfig()
-                    // is a separate instance from ImSettings'. The configs prop comes
-                    // from ImSettings, so refreshing our own config is a no-op.
-                    // The poll now fills missing bots as 'stopped', preventing the
-                    // cfg.enabled fallback from reverting the UI.
+                    await invoke('cmd_update_im_bot_config', { botId, patch: { enabled: false } });
                 }
             } else {
                 const hasCredentials = cfg.platform === 'feishu'
@@ -181,11 +151,7 @@ export default function ImBotList({
                 if (isMountedRef.current) {
                     setStatuses(prev => ({ ...prev, [botId]: newStatus }));
                     toastRef.current.success(`${cfg.name} 已启动`);
-                    await updateImBotConfig(botId, {
-                        enabled: true,
-                        providerEnvJson: params.providerEnvJson || undefined,
-                        availableProvidersJson: params.availableProvidersJson || undefined,
-                    });
+                    await invoke('cmd_update_im_bot_config', { botId, patch: { enabled: true } });
                 }
             }
         } catch (err) {

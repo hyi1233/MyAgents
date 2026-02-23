@@ -26,8 +26,7 @@ import {
     mockSaveProjects,
     mockAddProject,
 } from '@/utils/browserMock';
-import { DEFAULT_IM_BOT_CONFIG } from '../../shared/types/im';
-import type { ImBotConfig } from '../../shared/types/im';
+import { type ImBotConfig, DEFAULT_IM_BOT_CONFIG } from '../../shared/types/im';
 import { isDebugMode } from '@/utils/debug';
 
 // 异步互斥锁 — 序列化读-改-写操作，防止并发损坏
@@ -220,56 +219,53 @@ function migrateImBotConfig(config: AppConfig): AppConfig {
     return config;
 }
 
-// ===== IM Bot Config Helpers =====
-// Centralized read-from-disk → modify → write-back operations for imBotConfigs[].
-// Eliminates duplicated patterns across ImBotDetail, ImBotWizard, ImBotList.
-
 /**
- * Add or update an IM bot config entry (upsert by id).
- * Atomic: read-modify-write is serialized under withConfigLock to prevent races.
+ * Rebuild and persist `availableProvidersJson` to the top-level of config.json.
+ * Called whenever provider configuration changes (API key add/delete, custom providers, etc.)
+ * so that Rust IM command handlers (/provider, /model) always read fresh data from disk.
  */
-export async function addOrUpdateImBotConfig(botConfig: ImBotConfig): Promise<void> {
-    return withConfigLock(async () => {
-        const latest = await loadAppConfig();
-        const configs = [...(latest.imBotConfigs ?? [])];
-        const idx = configs.findIndex(c => c.id === botConfig.id);
-        if (idx >= 0) {
-            configs[idx] = botConfig;
-        } else {
-            configs.push(botConfig);
-        }
-        await _writeAppConfigLocked({ ...latest, imBotConfigs: configs });
-    });
+export async function rebuildAndPersistAvailableProviders(): Promise<void> {
+    try {
+        const [allProviders, apiKeys, config] = await Promise.all([
+            getAllProviders(),
+            loadApiKeys(),
+            loadAppConfig(),
+        ]);
+
+        const mergedProviders = mergePresetCustomModels(allProviders, config.presetCustomModels);
+        const availableProviders = mergedProviders
+            .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
+            .map(p => ({
+                id: p.id, name: p.name, primaryModel: p.primaryModel,
+                baseUrl: p.config.baseUrl, authType: p.authType,
+                apiProtocol: p.apiProtocol,
+                apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
+                models: p.models.map(m => ({ model: m.model, modelName: m.modelName })),
+            }));
+
+        const json = availableProviders.length > 0 ? JSON.stringify(availableProviders) : undefined;
+        await atomicModifyConfig(c => ({ ...c, availableProvidersJson: json }));
+    } catch (err) {
+        console.warn('[configService] Failed to rebuild availableProvidersJson:', err);
+    }
 }
 
-/**
- * Partially update an IM bot config by merging fields.
- * Atomic: read-modify-write is serialized under withConfigLock to prevent races.
- */
-export async function updateImBotConfig(
-    botId: string,
-    updates: Partial<ImBotConfig>,
-): Promise<void> {
-    return withConfigLock(async () => {
-        const latest = await loadAppConfig();
-        const configs = [...(latest.imBotConfigs ?? [])];
-        const idx = configs.findIndex(c => c.id === botId);
-        if (idx >= 0) {
-            configs[idx] = { ...configs[idx], ...updates };
-            await _writeAppConfigLocked({ ...latest, imBotConfigs: configs });
-        }
-    });
-}
-
-/**
- * Remove an IM bot config by id.
- * Atomic: read-modify-write is serialized under withConfigLock to prevent races.
- */
-export async function removeImBotConfig(botId: string): Promise<void> {
-    return withConfigLock(async () => {
-        const latest = await loadAppConfig();
-        const configs = (latest.imBotConfigs ?? []).filter(c => c.id !== botId);
-        await _writeAppConfigLocked({ ...latest, imBotConfigs: configs });
+// Helper: Merge preset custom models into providers (also used by rebuildAndPersistAvailableProviders)
+function mergePresetCustomModels(
+    providers: Provider[],
+    presetCustomModels: Record<string, import('./types').ModelEntity[]> | undefined,
+): Provider[] {
+    if (!presetCustomModels || Object.keys(presetCustomModels).length === 0) {
+        return providers;
+    }
+    return providers.map(provider => {
+        if (!provider.isBuiltin) return provider;
+        const customModels = presetCustomModels[provider.id];
+        if (!customModels || customModels.length === 0) return provider;
+        return {
+            ...provider,
+            models: [...provider.models, ...customModels],
+        };
     });
 }
 
@@ -329,8 +325,7 @@ export async function saveAppConfig(config: AppConfig): Promise<void> {
  * Atomically read-modify-write the app config.
  * The modifier callback receives the latest config from disk and returns the
  * modified version. Both the read and write happen inside withConfigLock,
- * preventing races with other atomic config operations (updateImBotConfig,
- * saveApiKey, etc.).
+ * preventing races with other atomic config operations (saveApiKey, etc.).
  *
  * Returns the final config so callers can update React state with the
  * authoritative version.

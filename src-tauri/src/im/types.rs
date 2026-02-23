@@ -5,6 +5,30 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// Partial update patch for IM Bot config.
+/// Each `None` field means "no change"; `Some("")` means "clear the field".
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotConfigPatch {
+    pub model: Option<String>,
+    pub provider_id: Option<String>,
+    pub provider_env_json: Option<String>,
+    pub permission_mode: Option<String>,
+    /// Complete MCP server definitions JSON (pushed to Sidecar at runtime, NOT persisted)
+    pub mcp_servers_json: Option<String>,
+    /// Enabled MCP server ID list (persisted to imBotConfigs)
+    pub mcp_enabled_servers: Option<Vec<String>>,
+    pub allowed_users: Option<Vec<String>>,
+    pub default_workspace_path: Option<String>,
+    pub heartbeat_config_json: Option<String>,
+    pub name: Option<String>,
+    pub bot_token: Option<String>,
+    pub feishu_app_id: Option<String>,
+    pub feishu_app_secret: Option<String>,
+    pub enabled: Option<bool>,
+    pub setup_completed: Option<bool>,
+}
+
 /// IM platform type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -109,9 +133,6 @@ pub struct ImConfig {
     pub provider_env_json: Option<String>,
     #[serde(default)]
     pub mcp_servers_json: Option<String>,
-    /// Available providers for /provider command: [{id, name, primaryModel, baseUrl?, authType?, apiKey?}]
-    #[serde(default)]
-    pub available_providers_json: Option<String>,
     // ===== Heartbeat (v0.1.21) =====
     #[serde(default)]
     pub heartbeat_config: Option<HeartbeatConfig>,
@@ -136,7 +157,6 @@ impl Default for ImConfig {
             model: None,
             provider_env_json: None,
             mcp_servers_json: None,
-            available_providers_json: None,
             heartbeat_config: None,
         }
     }

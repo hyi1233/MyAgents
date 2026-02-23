@@ -4474,20 +4474,38 @@ async function main() {
         }
       }
 
+      // POST /api/session/permission-mode - Set permission mode for this session (called by Rust IM router)
+      if (pathname === '/api/session/permission-mode' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { permissionMode?: string };
+          if (!payload?.permissionMode) {
+            return jsonResponse({ success: false, error: 'permissionMode is required' }, 400);
+          }
+          const { setSessionPermissionMode } = await import('./agent-session');
+          setSessionPermissionMode(payload.permissionMode as import('./agent-session').PermissionMode);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/session/permission-mode] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set permission mode' }, 500);
+        }
+      }
+
       // GET /api/session/config - Read sidecar's current config state
       // Used by Tabs joining an existing sidecar (e.g. IM Bot session) to adopt
       // the session's config instead of pushing their own.
       if (pathname === '/api/session/config' && request.method === 'GET') {
         try {
-          const { getSessionModel, getMcpServers, getAgents } = await import('./agent-session');
+          const { getSessionModel, getMcpServers, getAgents, getSessionPermissionMode } = await import('./agent-session');
           const model = getSessionModel();
           const mcpServers = getMcpServers();
           const agents = getAgents();
+          const permissionMode = getSessionPermissionMode();
           return jsonResponse({
             success: true,
             model: model ?? null,
             mcpServerIds: mcpServers?.map(s => s.id) ?? null,
             agentNames: agents ? Object.keys(agents) : null,
+            permissionMode,
           });
         } catch (error) {
           console.error('[api/session/config] Error:', error);

@@ -530,6 +530,15 @@ impl SessionRouter {
         }
     }
 
+    /// Sync permission mode to a Sidecar.
+    pub async fn sync_permission_mode(&self, port: u16, mode: &str) {
+        let url = format!("http://127.0.0.1:{}/api/session/permission-mode", port);
+        match self.http_client.post(&url).json(&json!({ "permissionMode": mode })).send().await {
+            Ok(_) => ulog_info!("[im-router] Synced permission mode '{}' to port {}", mode, port),
+            Err(e) => ulog_warn!("[im-router] Failed to sync permission mode to port {}: {}", port, e),
+        }
+    }
+
     /// Release all sessions (shutdown)
     pub fn release_all(&mut self, manager: &ManagedSidecarManager) {
         let keys: Vec<String> = self.peer_sessions.keys().cloned().collect();

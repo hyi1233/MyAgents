@@ -51,7 +51,6 @@ export interface ImBotConfig {
   providerId?: string;          // Provider ID (e.g. 'anthropic-sub', 'deepseek')
   model?: string;               // Model ID (e.g. 'claude-sonnet-4-6')
   providerEnvJson?: string;     // Persisted {baseUrl, apiKey, authType} for Rust auto-start
-  availableProvidersJson?: string; // Persisted [{id,name,primaryModel,models,...}] for Rust auto-start /provider & /model
   permissionMode: string;       // 'plan' | 'auto' | 'fullAgency'
   mcpEnabledServers?: string[]; // Bot-enabled MCP server IDs
 

@@ -3,7 +3,7 @@ import { ArrowLeft, ArrowRight, Check, Copy, FolderOpen, FolderPlus, Loader2, Pl
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
-import { getAllMcpServers, getEnabledMcpServerIds, addOrUpdateImBotConfig, addProject, loadAppConfig, loadProjects, removeImBotConfig, removeProject, updateImBotConfig } from '@/config/configService';
+import { getAllMcpServers, getEnabledMcpServerIds, addProject, loadAppConfig, loadProjects, removeProject } from '@/config/configService';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import CustomSelect from '@/components/CustomSelect';
 import BotTokenInput from './components/BotTokenInput';
@@ -66,7 +66,7 @@ export default function ImBotWizard({
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
-    const { config, providers, apiKeys, projects, refreshConfig } = useConfig();
+    const { config, projects, refreshConfig } = useConfig();
     const isMountedRef = useRef(true);
 
     const isFeishu = platform === 'feishu';
@@ -157,9 +157,12 @@ export default function ImBotWizard({
         };
     }, [step, bindingStep, botId]);
 
-    // Save bot config to disk and sync React state
+    // Save new bot config via Rust and sync React state
     const saveBotConfig = useCallback(async (cfg: ImBotConfig) => {
-        await addOrUpdateImBotConfig(cfg);
+        if (isTauriEnvironment()) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('cmd_add_im_bot_config', { botConfig: cfg });
+        }
         await refreshConfig();
     }, [refreshConfig]);
 
@@ -168,31 +171,9 @@ export default function ImBotWizard({
         ? feishuAppId.trim() && feishuAppSecret.trim()
         : botToken.trim();
 
-    // Build start params for cmd_start_im_bot (reusable helper)
+    // Build start params — providerEnvJson is already persisted on disk by Rust,
+    // so we read it directly from the config instead of rebuilding from React state.
     const buildStartParams = useCallback(async (cfg: ImBotConfig) => {
-        const selectedProvider = providers.find(p => p.id === cfg.providerId);
-        let providerEnvJson: string | undefined;
-        if (selectedProvider && selectedProvider.type !== 'subscription') {
-            providerEnvJson = JSON.stringify({
-                baseUrl: selectedProvider.config.baseUrl,
-                apiKey: apiKeys[selectedProvider.id],
-                authType: selectedProvider.authType,
-                apiProtocol: selectedProvider.apiProtocol,
-            });
-        }
-
-        const availableProviders = providers
-            .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
-            .map(p => ({
-                id: p.id,
-                name: p.name,
-                primaryModel: p.primaryModel,
-                baseUrl: p.config.baseUrl,
-                authType: p.authType,
-                apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
-                models: p.models.map(m => ({ model: m.model, modelName: m.modelName })),
-            }));
-
         const allServers = await getAllMcpServers();
         const globalEnabled = await getEnabledMcpServerIds();
         const botMcpIds = cfg.mcpEnabledServers ?? [];
@@ -207,15 +188,14 @@ export default function ImBotWizard({
             permissionMode: cfg.permissionMode,
             workspacePath: cfg.defaultWorkspacePath || '',
             model: cfg.model || null,
-            providerEnvJson: providerEnvJson || null,
+            providerEnvJson: cfg.providerEnvJson || null,
             mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
-            availableProvidersJson: availableProviders.length > 0 ? JSON.stringify(availableProviders) : null,
             platform: cfg.platform,
             feishuAppId: cfg.feishuAppId || null,
             feishuAppSecret: cfg.feishuAppSecret || null,
             heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
         };
-    }, [providers, apiKeys]);
+    }, []);
 
     // Handle "Next" for all steps
     const handleNext = useCallback(async () => {
@@ -262,12 +242,12 @@ export default function ImBotWizard({
                     newWorkspacePath = selectedExistingPath;
                 }
 
-                // Update bot config with the chosen workspace
-                await updateImBotConfig(botId, { defaultWorkspacePath: newWorkspacePath });
-                await refreshConfig();
-                // Restart bot with the correct workspace so binding step uses it
+                // Update bot config with the chosen workspace + restart with correct workspace
                 if (isTauriEnvironment()) {
                     const { invoke } = await import('@tauri-apps/api/core');
+                    await invoke('cmd_update_im_bot_config', { botId, patch: { defaultWorkspacePath: newWorkspacePath } });
+                    await refreshConfig();
+
                     try {
                         await invoke('cmd_stop_im_bot', { botId });
                     } catch {
@@ -280,11 +260,6 @@ export default function ImBotWizard({
                     if (latestBotConfig) {
                         const params = await buildStartParams(latestBotConfig);
                         const status = await invoke<ImBotStatus>('cmd_start_im_bot', params);
-                        // Write back providerEnvJson + availableProvidersJson for Rust auto-start
-                        await updateImBotConfig(botId, {
-                            providerEnvJson: params.providerEnvJson || undefined,
-                            availableProvidersJson: params.availableProvidersJson || undefined,
-                        });
                         if (isMountedRef.current) {
                             setBotStatus(status);
                         }
@@ -360,11 +335,6 @@ export default function ImBotWizard({
             const { invoke } = await import('@tauri-apps/api/core');
             const params = await buildStartParams(newConfig);
             const status = await invoke<ImBotStatus>('cmd_start_im_bot', params);
-            // Write back providerEnvJson + availableProvidersJson for Rust auto-start
-            await updateImBotConfig(botId, {
-                providerEnvJson: params.providerEnvJson || undefined,
-                availableProvidersJson: params.availableProvidersJson || undefined,
-            });
 
             if (isMountedRef.current) {
                 setVerifyStatus('valid');
@@ -373,7 +343,7 @@ export default function ImBotWizard({
                 // Save bot name from verification
                 if (status.botUsername) {
                     const displayName = isFeishu ? status.botUsername : `@${status.botUsername}`;
-                    await updateImBotConfig(botId, { name: displayName });
+                    await invoke('cmd_update_im_bot_config', { botId, patch: { name: displayName } });
                     await refreshConfig();
                 }
                 setStep(2);
@@ -397,7 +367,13 @@ export default function ImBotWizard({
         const latest = await loadAppConfig();
         const diskUsers = (latest.imBotConfigs ?? []).find(c => c.id === botId)?.allowedUsers ?? [];
         const mergedUsers = [...new Set([...diskUsers, ...allowedUsers])];
-        await updateImBotConfig(botId, { setupCompleted: true, allowedUsers: mergedUsers });
+        if (isTauriEnvironment()) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('cmd_update_im_bot_config', {
+                botId,
+                patch: { setupCompleted: true, allowedUsers: mergedUsers },
+            });
+        }
         await refreshConfig();
         if (isMountedRef.current) onComplete(botId);
     }, [botId, allowedUsers, onComplete, refreshConfig]);
@@ -407,12 +383,12 @@ export default function ImBotWizard({
         if (isTauriEnvironment()) {
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
-                await invoke('cmd_stop_im_bot', { botId });
+                // Rust cmd_remove_im_bot_config stops the bot + removes config
+                await invoke('cmd_remove_im_bot_config', { botId });
             } catch {
-                // Bot might not be running
+                // Bot might not exist yet
             }
         }
-        await removeImBotConfig(botId);
 
         // Clean up workspace created during this wizard session (registration + disk directory)
         if (createdWorkspacePathRef.current) {

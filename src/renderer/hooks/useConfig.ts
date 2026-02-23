@@ -19,7 +19,7 @@ import {
     saveCustomProvider as saveCustomProviderService,
     deleteCustomProvider as deleteCustomProviderService,
     ensureBundledWorkspace,
-    updateImBotConfig,
+    rebuildAndPersistAvailableProviders,
 } from '@/config/configService';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
@@ -132,32 +132,8 @@ export function useConfig(): UseConfigResult {
                 loadProviderVerifyStatusService(),
             ]);
 
-            // Migration: ensure enabled IM bots have availableProvidersJson persisted
-            // This runs BEFORE Rust schedule_auto_start (3s delay), so auto-started bots get the data
-            const imBots = loadedConfig.imBotConfigs ?? [];
-            const botsNeedingSync = imBots.filter(b => b.enabled && !b.availableProvidersJson);
-            if (botsNeedingSync.length > 0) {
-                const mergedProviders = mergePresetCustomModels(loadedProviders, loadedConfig.presetCustomModels);
-                const availableProviders = mergedProviders
-                    .filter(p => p.type === 'subscription' || (p.type === 'api' && loadedApiKeys[p.id]))
-                    .map(p => ({
-                        id: p.id, name: p.name, primaryModel: p.primaryModel,
-                        baseUrl: p.config.baseUrl, authType: p.authType,
-                        apiKey: p.type !== 'subscription' ? loadedApiKeys[p.id] : undefined,
-                        models: p.models.map(m => ({ model: m.model, modelName: m.modelName })),
-                    }));
-                if (availableProviders.length > 0) {
-                    const json = JSON.stringify(availableProviders);
-                    // Write to disk before Rust auto-start (3s delay) picks up config.json
-                    for (const bot of botsNeedingSync) {
-                        try {
-                            await updateImBotConfig(bot.id, { availableProvidersJson: json });
-                        } catch (e) {
-                            console.warn(`[useConfig] Failed to sync availableProvidersJson for bot ${bot.id}:`, e);
-                        }
-                    }
-                }
-            }
+            // Rebuild global availableProvidersJson before Rust auto-start (3s delay) reads it
+            await rebuildAndPersistAvailableProviders();
 
             setConfig(loadedConfig);
             setProjects(loadedProjects);
@@ -178,7 +154,7 @@ export function useConfig(): UseConfigResult {
 
     const updateConfig = useCallback(async (updates: Partial<AppConfig>) => {
         // Atomic read-modify-write: read + merge + write all happen inside the config lock,
-        // preventing races with other atomic config operations (e.g., updateImBotConfig).
+        // preventing races with other atomic config operations.
         const newConfig = await atomicModifyConfig(config => ({ ...config, ...updates }));
         setConfig(newConfig);
         // Notify other components (e.g., App.tsx) that config has changed
@@ -228,6 +204,7 @@ export function useConfig(): UseConfigResult {
     const saveApiKey = useCallback(async (providerId: string, apiKey: string) => {
         await saveApiKeyService(providerId, apiKey);
         setApiKeys((prev) => ({ ...prev, [providerId]: apiKey }));
+        await rebuildAndPersistAvailableProviders();
     }, []);
 
     const deleteApiKey = useCallback(async (providerId: string) => {
@@ -243,6 +220,7 @@ export function useConfig(): UseConfigResult {
             delete next[providerId];
             return next;
         });
+        await rebuildAndPersistAvailableProviders();
     }, []);
 
     const saveProviderVerifyStatus = useCallback(async (
@@ -300,6 +278,7 @@ export function useConfig(): UseConfigResult {
         await saveCustomProviderService(provider);
         // Refresh providers list to include the new one
         await refreshProviders();
+        await rebuildAndPersistAvailableProviders();
     }, [refreshProviders]);
 
     // Update an existing custom provider
@@ -327,6 +306,7 @@ export function useConfig(): UseConfigResult {
             delete next[providerId];
             return next;
         });
+        await rebuildAndPersistAvailableProviders();
     }, [refreshProviders]);
 
     // Save custom models for a preset provider
@@ -342,6 +322,7 @@ export function useConfig(): UseConfigResult {
             return { ...config, presetCustomModels: newPresetCustomModels };
         });
         setConfig(newConfig);
+        await rebuildAndPersistAvailableProviders();
     }, []);
 
     // Remove a single custom model from a preset provider

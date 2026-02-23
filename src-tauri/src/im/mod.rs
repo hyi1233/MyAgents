@@ -58,7 +58,7 @@ use router::{
     create_sidecar_stream_client, RouteError, SessionRouter, GLOBAL_CONCURRENCY,
 };
 use telegram::TelegramAdapter;
-use types::{ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImPlatform, ImSourceType, ImStatus};
+use types::{BotConfigPatch, ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImPlatform, ImSourceType, ImStatus};
 
 /// Platform-agnostic adapter enum — avoids dyn dispatch overhead.
 pub(crate) enum AnyAdapter {
@@ -207,7 +207,6 @@ pub struct ImBotInstance {
     pub(crate) current_provider_env: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
     pub(crate) permission_mode: Arc<tokio::sync::RwLock<String>>,
     pub(crate) mcp_servers_json: Arc<tokio::sync::RwLock<Option<String>>>,
-    pub(crate) available_providers_json: Arc<tokio::sync::RwLock<Option<String>>>,
     pub(crate) allowed_users: Arc<tokio::sync::RwLock<Vec<String>>>,
 }
 
@@ -482,8 +481,6 @@ pub async fn start_im_bot<R: Runtime>(
         .as_ref()
         .and_then(|json_str| serde_json::from_str(json_str).ok());
     let current_provider_env = Arc::new(tokio::sync::RwLock::new(provider_env));
-    // Available providers list (for /provider command menu) — hot-reloadable
-    let available_providers_json = Arc::new(tokio::sync::RwLock::new(config.available_providers_json.clone()));
     // MCP servers JSON — hot-reloadable
     let mcp_servers_json = Arc::new(tokio::sync::RwLock::new(config.mcp_servers_json.clone()));
     let bind_code_for_loop = bind_code.clone();
@@ -491,7 +488,6 @@ pub async fn start_im_bot<R: Runtime>(
     let allowed_users_for_loop = Arc::clone(&allowed_users);
     let current_model_for_loop = Arc::clone(&current_model);
     let current_provider_env_for_loop = Arc::clone(&current_provider_env);
-    let available_providers_for_loop = Arc::clone(&available_providers_json);
     let permission_mode_for_loop = Arc::clone(&permission_mode);
     let mcp_servers_json_for_loop = Arc::clone(&mcp_servers_json);
     let pending_approvals_for_loop = Arc::clone(&pending_approvals);
@@ -678,16 +674,22 @@ pub async fn start_im_bot<R: Runtime>(
                             // Persist to config.json directly (doesn't rely on frontend being mounted)
                             {
                                 let bid = bot_id_for_loop.clone();
-                                let uid = user_id_str.clone();
+                                let new_users = allowed_users_for_loop.read().await.clone();
                                 tokio::task::spawn_blocking(move || {
-                                    persist_bound_user_to_config(&bid, &uid);
+                                    let patch = BotConfigPatch {
+                                        allowed_users: Some(new_users),
+                                        ..Default::default()
+                                    };
+                                    if let Err(e) = persist_bot_config_patch(&bid, &patch) {
+                                        ulog_warn!("[im] Failed to persist bound user: {}", e);
+                                    }
                                 });
                             }
 
                             let reply = format!("✅ 绑定成功！你好 {}，现在可以直接和我聊天了。", display);
                             let _ = adapter_for_reply.send_message(&chat_id, &reply).await;
 
-                            // Emit Tauri event so frontend can update UI (toast, refresh list)
+                            // Emit Tauri events so frontend can update UI
                             let _ = app_clone.emit(
                                 "im:user-bound",
                                 serde_json::json!({
@@ -695,6 +697,10 @@ pub async fn start_im_bot<R: Runtime>(
                                     "userId": user_id_str,
                                     "username": msg.sender_name,
                                 }),
+                            );
+                            let _ = app_clone.emit(
+                                "im:bot-config-changed",
+                                serde_json::json!({ "botId": bot_id_for_loop }),
                             );
                         } else {
                             let _ = adapter_for_reply.send_message(
@@ -784,7 +790,7 @@ pub async fn start_im_bot<R: Runtime>(
                                 .switch_workspace(&session_key, path_arg, &app_clone, &manager_clone)
                                 .await
                             {
-                                Ok(_) => format!("✅ 已切换工作区: {}", path_arg),
+                                Ok(_) => format!("✅ 已切换工作区: {}\n⚠️ 仅对当前对话生效，重启后恢复默认工作区", path_arg),
                                 Err(e) => format!("❌ 切换失败: {}", e),
                             }
                         };
@@ -817,10 +823,11 @@ pub async fn start_im_bot<R: Runtime>(
                     if text.starts_with("/model") {
                         let arg = text.strip_prefix("/model").unwrap_or("").trim().to_string();
 
-                        // Find current provider's models from available_providers_json
+                        // Find current provider's models from availableProvidersJson (lazy-read from disk)
                         let models: Vec<serde_json::Value> = {
                             let providers: Vec<serde_json::Value> = {
-                                let ap = available_providers_for_loop.read().await;
+                                let ap = tokio::task::spawn_blocking(read_available_providers_from_disk)
+                                    .await.ok().flatten();
                                 ap.as_ref()
                                     .and_then(|json| serde_json::from_str(json).ok())
                                     .unwrap_or_default()
@@ -902,9 +909,15 @@ pub async fn start_im_bot<R: Runtime>(
                                     let bid = bot_id_for_loop.clone();
                                     let model_str = id.clone();
                                     tokio::task::spawn_blocking(move || {
-                                        persist_ai_config_to_disk(&bid, Some(&model_str), None, None);
+                                        let patch = BotConfigPatch {
+                                            model: Some(model_str),
+                                            ..Default::default()
+                                        };
+                                        if let Err(e) = persist_bot_config_patch(&bid, &patch) {
+                                            ulog_warn!("[im] /model persist failed: {}", e);
+                                        }
                                     });
-                                    let _ = app_clone.emit("im:ai-config-changed", json!({
+                                    let _ = app_clone.emit("im:bot-config-changed", json!({
                                         "botId": bot_id_for_loop,
                                     }));
                                 }
@@ -923,9 +936,10 @@ pub async fn start_im_bot<R: Runtime>(
                     if text.starts_with("/provider") {
                         let arg = text.strip_prefix("/provider").unwrap_or("").trim().to_string();
 
-                        // Parse available providers from config (hot-reloadable)
+                        // Parse available providers from config (lazy-read from disk)
                         let providers: Vec<serde_json::Value> = {
-                            let ap = available_providers_for_loop.read().await;
+                            let ap = tokio::task::spawn_blocking(read_available_providers_from_disk)
+                                .await.ok().flatten();
                             ap.as_ref()
                                 .and_then(|json| serde_json::from_str(json).ok())
                                 .unwrap_or_default()
@@ -1005,14 +1019,17 @@ pub async fn start_im_bot<R: Runtime>(
                                     // Persist to config.json + notify frontend
                                     let bid = bot_id_for_loop.clone();
                                     tokio::task::spawn_blocking(move || {
-                                        persist_ai_config_to_disk(
-                                            &bid,
-                                            model_for_persist.as_deref(),
-                                            penv_json.as_deref(),
-                                            pid_str.as_deref(),
-                                        );
+                                        let patch = BotConfigPatch {
+                                            model: model_for_persist,
+                                            provider_env_json: penv_json,
+                                            provider_id: pid_str,
+                                            ..Default::default()
+                                        };
+                                        if let Err(e) = persist_bot_config_patch(&bid, &patch) {
+                                            ulog_warn!("[im] /provider persist failed: {}", e);
+                                        }
                                     });
-                                    let _ = app_clone.emit("im:ai-config-changed", json!({
+                                    let _ = app_clone.emit("im:bot-config-changed", json!({
                                         "botId": bot_id_for_loop,
                                     }));
                                 }
@@ -1077,6 +1094,22 @@ pub async fn start_im_bot<R: Runtime>(
                                 &chat_id,
                                 &format!("✅ 权限模式已切换\n\n{}", display),
                             ).await;
+
+                            // Persist to config.json + notify frontend
+                            let bid = bot_id_for_loop.clone();
+                            let mode_str = new_mode.to_string();
+                            tokio::task::spawn_blocking(move || {
+                                let patch = BotConfigPatch {
+                                    permission_mode: Some(mode_str),
+                                    ..Default::default()
+                                };
+                                if let Err(e) = persist_bot_config_patch(&bid, &patch) {
+                                    ulog_warn!("[im] /mode persist failed: {}", e);
+                                }
+                            });
+                            let _ = app_clone.emit("im:bot-config-changed", json!({
+                                "botId": bot_id_for_loop,
+                            }));
                         }
                         continue;
                     }
@@ -1512,7 +1545,6 @@ pub async fn start_im_bot<R: Runtime>(
         current_provider_env,
         permission_mode,
         mcp_servers_json,
-        available_providers_json,
         allowed_users,
     });
 
@@ -2200,210 +2232,6 @@ fn migrate_provider_env(
     );
 }
 
-/// Persist a newly bound user to `~/.myagents/config.json`.
-///
-/// This runs directly from the Rust bind handler so the user is saved to disk
-/// regardless of whether the frontend UI is mounted. Uses the same atomic write
-/// pattern as the frontend `safeWriteJson` (write .tmp → backup .bak → rename).
-fn persist_bound_user_to_config(bot_id: &str, user_id: &str) {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => {
-            ulog_warn!("[im] Cannot persist bound user: home dir not found");
-            return;
-        }
-    };
-    let config_path = home.join(".myagents").join("config.json");
-    let tmp_path = config_path.with_extension("json.tmp.rust");
-    let bak_path = config_path.with_extension("json.bak");
-
-    // Read current config as generic JSON to preserve all fields
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            ulog_warn!("[im] Cannot read config.json to persist bound user: {}", e);
-            return;
-        }
-    };
-    let mut config: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            ulog_warn!("[im] Cannot parse config.json to persist bound user: {}", e);
-            return;
-        }
-    };
-
-    // Find the bot entry and add user to allowedUsers
-    let modified = if let Some(bots) = config.get_mut("imBotConfigs").and_then(|v| v.as_array_mut()) {
-        if let Some(bot) = bots.iter_mut().find(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id)) {
-            let users = bot.get_mut("allowedUsers")
-                .and_then(|v| v.as_array_mut());
-            match users {
-                Some(arr) => {
-                    let user_val = serde_json::Value::String(user_id.to_string());
-                    if !arr.contains(&user_val) {
-                        arr.push(user_val);
-                        true
-                    } else {
-                        false // already present
-                    }
-                }
-                None => {
-                    // allowedUsers field missing or not an array — create it
-                    bot["allowedUsers"] = serde_json::json!([user_id]);
-                    true
-                }
-            }
-        } else {
-            ulog_warn!("[im] Bot {} not found in config.json, cannot persist bound user", bot_id);
-            false
-        }
-    } else {
-        ulog_warn!("[im] No imBotConfigs in config.json, cannot persist bound user");
-        false
-    };
-
-    if !modified {
-        return;
-    }
-
-    // Atomic write: .tmp → backup .bak → rename .tmp → main
-    let new_content = match serde_json::to_string_pretty(&config) {
-        Ok(c) => c,
-        Err(e) => {
-            ulog_warn!("[im] Cannot serialize config for bound user: {}", e);
-            return;
-        }
-    };
-
-    if let Err(e) = std::fs::write(&tmp_path, &new_content) {
-        ulog_warn!("[im] Cannot write tmp config for bound user: {}", e);
-        return;
-    }
-
-    // Backup current → .bak (best-effort)
-    if config_path.exists() {
-        let _ = std::fs::rename(&config_path, &bak_path);
-    }
-
-    // Rename .tmp → main
-    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
-        ulog_warn!("[im] Cannot rename tmp config for bound user: {}", e);
-        // Rollback: .bak → main
-        if bak_path.exists() && !config_path.exists() {
-            let _ = std::fs::rename(&bak_path, &config_path);
-        }
-        return;
-    }
-
-    ulog_info!("[im] Persisted bound user {} for bot {} to config.json", user_id, bot_id);
-}
-
-/// Persist AI config changes (model / providerEnvJson / providerId) to `~/.myagents/config.json`.
-///
-/// Each `Option` parameter: `None` = leave unchanged, `Some("")` = clear the field,
-/// `Some(value)` = set the field.  Uses the same atomic write pattern as `persist_bound_user_to_config`.
-fn persist_ai_config_to_disk(
-    bot_id: &str,
-    model: Option<&str>,
-    provider_env_json: Option<&str>,
-    provider_id: Option<&str>,
-) {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => {
-            ulog_warn!("[im] Cannot persist AI config: home dir not found");
-            return;
-        }
-    };
-    let config_path = home.join(".myagents").join("config.json");
-    let tmp_path = config_path.with_extension("json.tmp.rust");
-    let bak_path = config_path.with_extension("json.bak");
-
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            ulog_warn!("[im] Cannot read config.json to persist AI config: {}", e);
-            return;
-        }
-    };
-    let mut config: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            ulog_warn!("[im] Cannot parse config.json to persist AI config: {}", e);
-            return;
-        }
-    };
-
-    let modified = if let Some(bots) = config.get_mut("imBotConfigs").and_then(|v| v.as_array_mut()) {
-        if let Some(bot) = bots.iter_mut().find(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id)) {
-            let mut changed = false;
-            if let Some(m) = model {
-                if m.is_empty() {
-                    if let Some(o) = bot.as_object_mut() { o.remove("model"); }
-                } else {
-                    bot["model"] = serde_json::json!(m);
-                }
-                changed = true;
-            }
-            if let Some(penv) = provider_env_json {
-                if penv.is_empty() {
-                    if let Some(o) = bot.as_object_mut() { o.remove("providerEnvJson"); }
-                } else {
-                    bot["providerEnvJson"] = serde_json::json!(penv);
-                }
-                changed = true;
-            }
-            if let Some(pid) = provider_id {
-                if pid.is_empty() {
-                    if let Some(o) = bot.as_object_mut() { o.remove("providerId"); }
-                } else {
-                    bot["providerId"] = serde_json::json!(pid);
-                }
-                changed = true;
-            }
-            changed
-        } else {
-            ulog_warn!("[im] Bot {} not found in config.json, cannot persist AI config", bot_id);
-            false
-        }
-    } else {
-        ulog_warn!("[im] No imBotConfigs in config.json, cannot persist AI config");
-        false
-    };
-
-    if !modified {
-        return;
-    }
-
-    let new_content = match serde_json::to_string_pretty(&config) {
-        Ok(c) => c,
-        Err(e) => {
-            ulog_warn!("[im] Cannot serialize config for AI config: {}", e);
-            return;
-        }
-    };
-
-    if let Err(e) = std::fs::write(&tmp_path, &new_content) {
-        ulog_warn!("[im] Cannot write tmp config for AI config: {}", e);
-        return;
-    }
-
-    if config_path.exists() {
-        let _ = std::fs::rename(&config_path, &bak_path);
-    }
-
-    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
-        ulog_warn!("[im] Cannot rename tmp config for AI config: {}", e);
-        if bak_path.exists() && !config_path.exists() {
-            let _ = std::fs::rename(&bak_path, &config_path);
-        }
-        return;
-    }
-
-    ulog_info!("[im] Persisted AI config for bot {} to config.json (model={:?}, provider={:?})",
-        bot_id, model, provider_id);
-}
 
 // ===== Tauri Commands =====
 
@@ -2421,7 +2249,6 @@ pub async fn cmd_start_im_bot(
     model: Option<String>,
     providerEnvJson: Option<String>,
     mcpServersJson: Option<String>,
-    availableProvidersJson: Option<String>,
     platform: Option<String>,
     feishuAppId: Option<String>,
     feishuAppSecret: Option<String>,
@@ -2448,7 +2275,6 @@ pub async fn cmd_start_im_bot(
         model,
         provider_env_json: providerEnvJson,
         mcp_servers_json: mcpServersJson,
-        available_providers_json: availableProvidersJson,
         heartbeat_config,
     };
 
@@ -2524,168 +2350,377 @@ pub async fn cmd_im_conversations(
     }
 }
 
+// ===== Unified Config Commands (v0.1.26) =====
+
+/// Persist a partial patch to a single bot's entry in `~/.myagents/config.json`.
+/// Uses atomic write (.tmp.rust → .bak → rename). `None` = no change, `Some("")` = clear.
+/// `mcp_servers_json` is intentionally NOT persisted (runtime-only, pushed to Sidecar).
+fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
+    let config_path = home.join(".myagents").join("config.json");
+    let tmp_path = config_path.with_extension("json.tmp.rust");
+    let bak_path = config_path.with_extension("json.bak");
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("[im] Cannot read config.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
+
+    let bots = config.get_mut("imBotConfigs")
+        .and_then(|v| v.as_array_mut())
+        .ok_or_else(|| format!("[im] No imBotConfigs in config.json"))?;
+    let bot = bots.iter_mut()
+        .find(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id))
+        .ok_or_else(|| format!("[im] Bot {} not found in config.json", bot_id))?;
+
+    // Apply patch fields: None = skip, Some("") = remove field, Some(val) = set
+    macro_rules! apply_string_field {
+        ($field:ident, $key:expr) => {
+            if let Some(ref val) = patch.$field {
+                if val.is_empty() {
+                    if let Some(o) = bot.as_object_mut() { o.remove($key); }
+                } else {
+                    bot[$key] = serde_json::json!(val);
+                }
+            }
+        };
+    }
+    apply_string_field!(model, "model");
+    apply_string_field!(provider_id, "providerId");
+    apply_string_field!(provider_env_json, "providerEnvJson");
+    apply_string_field!(permission_mode, "permissionMode");
+    apply_string_field!(default_workspace_path, "defaultWorkspacePath");
+    apply_string_field!(name, "name");
+    apply_string_field!(bot_token, "botToken");
+    apply_string_field!(feishu_app_id, "feishuAppId");
+    apply_string_field!(feishu_app_secret, "feishuAppSecret");
+
+    // mcp_enabled_servers → persisted as "mcpEnabledServers"
+    if let Some(ref servers) = patch.mcp_enabled_servers {
+        bot["mcpEnabledServers"] = serde_json::json!(servers);
+    }
+
+    // allowed_users → persisted as "allowedUsers"
+    if let Some(ref users) = patch.allowed_users {
+        bot["allowedUsers"] = serde_json::json!(users);
+    }
+
+    // heartbeat_config_json → deserialized and written as "heartbeat" object
+    if let Some(ref hcj) = patch.heartbeat_config_json {
+        if hcj.is_empty() || hcj == "null" {
+            if let Some(o) = bot.as_object_mut() { o.remove("heartbeat"); }
+        } else if let Ok(hb) = serde_json::from_str::<serde_json::Value>(hcj) {
+            bot["heartbeat"] = hb;
+        }
+    }
+
+    // enabled / setup_completed → boolean fields
+    if let Some(val) = patch.enabled {
+        bot["enabled"] = serde_json::json!(val);
+    }
+    if let Some(val) = patch.setup_completed {
+        bot["setupCompleted"] = serde_json::json!(val);
+    }
+
+    // NOTE: mcp_servers_json is NOT persisted (runtime only, pushed to Sidecar)
+
+    // Atomic write
+    let new_content = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("[im] Cannot serialize config: {}", e))?;
+    std::fs::write(&tmp_path, &new_content)
+        .map_err(|e| format!("[im] Cannot write tmp config: {}", e))?;
+    if config_path.exists() {
+        let _ = std::fs::rename(&config_path, &bak_path);
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
+        if bak_path.exists() && !config_path.exists() {
+            let _ = std::fs::rename(&bak_path, &config_path);
+        }
+        return Err(format!("[im] Cannot rename tmp config: {}", e));
+    }
+
+    Ok(())
+}
+
+/// Core 4-step config update: disk → Arc → emit → Sidecar push.
+async fn update_bot_config_internal<R: Runtime>(
+    app: &AppHandle<R>,
+    im_state: &ManagedImBots,
+    bot_id: &str,
+    patch: &BotConfigPatch,
+) -> Result<(), String> {
+    // 1. Persist to disk (blocking I/O)
+    let bid = bot_id.to_string();
+    let patch_model = patch.model.clone();
+    let patch_provider_id = patch.provider_id.clone();
+    let patch_provider_env = patch.provider_env_json.clone();
+    let patch_perm = patch.permission_mode.clone();
+    let patch_mcp_json = patch.mcp_servers_json.clone();
+    let patch_mcp_enabled = patch.mcp_enabled_servers.clone();
+    let patch_workspace = patch.default_workspace_path.clone();
+    let patch_hb_json = patch.heartbeat_config_json.clone();
+    let patch_allowed = patch.allowed_users.clone();
+    let patch_enabled = patch.enabled;
+    let patch_setup = patch.setup_completed;
+    let patch_name = patch.name.clone();
+    let patch_bot_token = patch.bot_token.clone();
+    let patch_feishu_id = patch.feishu_app_id.clone();
+    let patch_feishu_secret = patch.feishu_app_secret.clone();
+
+    let disk_patch = BotConfigPatch {
+        model: patch_model.clone(),
+        provider_id: patch_provider_id.clone(),
+        provider_env_json: patch_provider_env.clone(),
+        permission_mode: patch_perm.clone(),
+        mcp_servers_json: None, // Not persisted
+        mcp_enabled_servers: patch_mcp_enabled,
+        allowed_users: patch_allowed.clone(),
+        default_workspace_path: patch_workspace.clone(),
+        heartbeat_config_json: patch_hb_json.clone(),
+        name: patch_name,
+        bot_token: patch_bot_token,
+        feishu_app_id: patch_feishu_id,
+        feishu_app_secret: patch_feishu_secret,
+        enabled: patch_enabled,
+        setup_completed: patch_setup,
+    };
+    let bid_for_disk = bid.clone();
+    tokio::task::spawn_blocking(move || {
+        persist_bot_config_patch(&bid_for_disk, &disk_patch)
+    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+
+    // 2. Update Arc fields if bot is running
+    {
+        let bots = im_state.lock().await;
+        if let Some(inst) = bots.get(&bid) {
+            if let Some(ref m) = patch_model {
+                *inst.current_model.write().await = if m.is_empty() { None } else { Some(m.clone()) };
+            }
+            if let Some(ref s) = patch_provider_env {
+                if s.is_empty() {
+                    *inst.current_provider_env.write().await = None;
+                } else {
+                    *inst.current_provider_env.write().await = serde_json::from_str(s).ok();
+                }
+            }
+            if let Some(ref pm) = patch_perm {
+                *inst.permission_mode.write().await = pm.clone();
+            }
+            if let Some(ref mj) = patch_mcp_json {
+                *inst.mcp_servers_json.write().await = if mj.is_empty() { None } else { Some(mj.clone()) };
+            }
+            if let Some(ref users) = patch_allowed {
+                *inst.allowed_users.write().await = users.clone();
+            }
+            if let Some(ref hcj) = patch_hb_json {
+                if let Some(ref config_arc) = inst.heartbeat_config {
+                    if let Ok(hb) = serde_json::from_str::<types::HeartbeatConfig>(hcj) {
+                        *config_arc.write().await = hb;
+                    }
+                }
+            }
+
+            // 4. Sidecar push (model / MCP / workspace / permissionMode)
+            {
+                let mut router = inst.router.lock().await;
+                // Workspace (mut, sync)
+                if let Some(ref wp) = patch_workspace {
+                    if !wp.is_empty() {
+                        router.set_default_workspace(PathBuf::from(wp));
+                    }
+                }
+                let ports = router.active_sidecar_ports();
+                // Model sync
+                if patch_model.is_some() {
+                    for port in &ports {
+                        router.sync_ai_config(*port, patch_model.as_deref(), None).await;
+                    }
+                }
+                // MCP sync (runtime JSON, not enabled-list)
+                if patch_mcp_json.is_some() {
+                    for port in &ports {
+                        router.sync_ai_config(*port, None, patch_mcp_json.as_deref()).await;
+                    }
+                }
+                // Permission mode sync to Sidecar
+                if let Some(ref pm) = patch_perm {
+                    for port in &ports {
+                        router.sync_permission_mode(*port, pm).await;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Emit event so frontend can refreshConfig()
+    let _ = app.emit("im:bot-config-changed", json!({ "botId": bid }));
+
+    Ok(())
+}
+
+/// Add a new bot entry to `~/.myagents/config.json`.
+fn add_bot_config_to_disk(bot_config: &serde_json::Value) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
+    let config_path = home.join(".myagents").join("config.json");
+    let tmp_path = config_path.with_extension("json.tmp.rust");
+    let bak_path = config_path.with_extension("json.bak");
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("[im] Cannot read config.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
+
+    // Ensure imBotConfigs array exists
+    if config.get("imBotConfigs").is_none() {
+        config["imBotConfigs"] = serde_json::json!([]);
+    }
+    let bots = config.get_mut("imBotConfigs").unwrap().as_array_mut().unwrap();
+
+    // Upsert: if bot with same id exists, replace it; otherwise append
+    let bot_id = bot_config.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if let Some(pos) = bots.iter().position(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id)) {
+        bots[pos] = bot_config.clone();
+    } else {
+        bots.push(bot_config.clone());
+    }
+
+    // Atomic write
+    let new_content = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("[im] Cannot serialize config: {}", e))?;
+    std::fs::write(&tmp_path, &new_content)
+        .map_err(|e| format!("[im] Cannot write tmp config: {}", e))?;
+    if config_path.exists() {
+        let _ = std::fs::rename(&config_path, &bak_path);
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
+        if bak_path.exists() && !config_path.exists() {
+            let _ = std::fs::rename(&bak_path, &config_path);
+        }
+        return Err(format!("[im] Cannot rename tmp config: {}", e));
+    }
+
+    Ok(())
+}
+
+/// Remove a bot entry from `~/.myagents/config.json`.
+fn remove_bot_config_from_disk(bot_id: &str) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
+    let config_path = home.join(".myagents").join("config.json");
+    let tmp_path = config_path.with_extension("json.tmp.rust");
+    let bak_path = config_path.with_extension("json.bak");
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("[im] Cannot read config.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
+
+    if let Some(bots) = config.get_mut("imBotConfigs").and_then(|v| v.as_array_mut()) {
+        bots.retain(|b| b.get("id").and_then(|v| v.as_str()) != Some(bot_id));
+    }
+
+    let new_content = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("[im] Cannot serialize config: {}", e))?;
+    std::fs::write(&tmp_path, &new_content)
+        .map_err(|e| format!("[im] Cannot write tmp config: {}", e))?;
+    if config_path.exists() {
+        let _ = std::fs::rename(&config_path, &bak_path);
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
+        if bak_path.exists() && !config_path.exists() {
+            let _ = std::fs::rename(&bak_path, &config_path);
+        }
+        return Err(format!("[im] Cannot rename tmp config: {}", e));
+    }
+
+    Ok(())
+}
+
+/// Read `availableProvidersJson` from the top-level field of `~/.myagents/config.json`.
+fn read_available_providers_from_disk() -> Option<String> {
+    let home = dirs::home_dir()?;
+    let config_path = home.join(".myagents").join("config.json");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    config.get("availableProvidersJson")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Unified config update command: replaces all 6 old hot-update commands.
 #[tauri::command]
 #[allow(non_snake_case)]
-pub async fn cmd_update_heartbeat_config(
+pub async fn cmd_update_im_bot_config(
+    app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
     botId: String,
-    heartbeatConfigJson: String,
+    patch: BotConfigPatch,
 ) -> Result<(), String> {
-    let new_config: types::HeartbeatConfig = serde_json::from_str(&heartbeatConfigJson)
-        .map_err(|e| format!("Invalid heartbeat config JSON: {}", e))?;
+    update_bot_config_internal(&app_handle, &imState, &botId, &patch).await
+}
 
+/// Read runtime config snapshot from a running bot's Arc fields.
+/// Returns the hot-reloadable config as a JSON object; returns null fields if bot is not running.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_get_im_bot_runtime_config(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+) -> Result<serde_json::Value, String> {
     let im_guard = imState.lock().await;
     if let Some(instance) = im_guard.get(&botId) {
-        if let Some(ref config_arc) = instance.heartbeat_config {
-            let mut cfg = config_arc.write().await;
-            *cfg = new_config;
-            ulog_info!("[im] Heartbeat config updated for bot {}", botId);
-            Ok(())
-        } else {
-            Err(format!("Bot {} has no heartbeat runner", botId))
-        }
+        let model = instance.current_model.read().await.clone();
+        let provider_env = instance.current_provider_env.read().await.clone();
+        let permission_mode = instance.permission_mode.read().await.clone();
+        let mcp_servers_json = instance.mcp_servers_json.read().await.clone();
+        let allowed_users = instance.allowed_users.read().await.clone();
+        Ok(json!({
+            "running": true,
+            "model": model,
+            "providerEnv": provider_env,
+            "permissionMode": permission_mode,
+            "mcpServersJson": mcp_servers_json,
+            "allowedUsers": allowed_users,
+        }))
     } else {
-        Err(format!("Bot {} not found", botId))
+        Ok(json!({ "running": false }))
     }
 }
 
-/// Hot-update AI config (model + provider env + available providers) for a running bot.
-/// Model is synced to all active Sidecars via POST /api/model/set (SDK hot-switch).
-/// Provider env is updated in memory — next message automatically uses the new value.
+/// Add a new bot config to disk.
 #[tauri::command]
 #[allow(non_snake_case)]
-pub async fn cmd_update_im_bot_ai_config(
-    imState: tauri::State<'_, ManagedImBots>,
-    botId: String,
-    model: Option<String>,
-    providerEnvJson: Option<String>,
-    availableProvidersJson: Option<String>,
+pub async fn cmd_add_im_bot_config(
+    app_handle: AppHandle,
+    botConfig: serde_json::Value,
 ) -> Result<(), String> {
-    let (router, current_model, current_provider_env, available_providers) = {
-        let bots = imState.lock().await;
-        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
-        (
-            Arc::clone(&inst.router),
-            Arc::clone(&inst.current_model),
-            Arc::clone(&inst.current_provider_env),
-            Arc::clone(&inst.available_providers_json),
-        )
-    };
-
-    // Selective update: None = don't change, Some("") = clear, Some(json) = set.
-    // This allows model-only updates without wiping provider config.
-    if let Some(ref m) = model {
-        *current_model.write().await = if m.is_empty() { None } else { Some(m.clone()) };
-    }
-    if let Some(ref s) = providerEnvJson {
-        if s.is_empty() {
-            *current_provider_env.write().await = None;
-        } else {
-            let penv = serde_json::from_str(s).ok();
-            *current_provider_env.write().await = penv;
-        }
-    }
-    if let Some(ref s) = availableProvidersJson {
-        if s.is_empty() {
-            *available_providers.write().await = None;
-        } else {
-            *available_providers.write().await = Some(s.clone());
-        }
-    }
-
-    // Sync model to all active Sidecars (SDK hot-switch, no session restart needed)
-    if model.is_some() {
-        let router = router.lock().await;
-        for port in router.active_sidecar_ports() {
-            router.sync_ai_config(port, model.as_deref(), None).await;
-        }
-    }
-
-    ulog_info!("[im] AI config hot-updated for bot {}", botId);
+    let config_clone = botConfig.clone();
+    tokio::task::spawn_blocking(move || {
+        add_bot_config_to_disk(&config_clone)
+    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+    let bot_id = botConfig.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": bot_id }));
+    ulog_info!("[im] Bot config added: {}", bot_id);
     Ok(())
 }
 
-/// Hot-update permission mode for a running bot.
-/// Permission mode is read from memory on each message — update takes effect immediately.
+/// Remove a bot config from disk (stops the bot first if running).
 #[tauri::command]
 #[allow(non_snake_case)]
-pub async fn cmd_update_im_bot_permission_mode(
+pub async fn cmd_remove_im_bot_config(
+    app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
+    sidecarManager: tauri::State<'_, ManagedSidecarManager>,
     botId: String,
-    permissionMode: String,
 ) -> Result<(), String> {
-    let perm = {
-        let bots = imState.lock().await;
-        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
-        Arc::clone(&inst.permission_mode)
-    };
-    *perm.write().await = permissionMode;
-    ulog_info!("[im] Permission mode hot-updated for bot {}", botId);
-    Ok(())
-}
+    // Stop bot if running
+    stop_im_bot(&imState, &sidecarManager, &botId).await?;
 
-/// Hot-update MCP servers for a running bot.
-/// Syncs to all active Sidecars via POST /api/mcp/set — Sidecar internally handles
-/// abort+resume (or deferred restart if a turn is in progress).
-#[tauri::command]
-#[allow(non_snake_case)]
-pub async fn cmd_update_im_bot_mcp_servers(
-    imState: tauri::State<'_, ManagedImBots>,
-    botId: String,
-    mcpServersJson: Option<String>,
-) -> Result<(), String> {
-    let (router, mcp_servers) = {
-        let bots = imState.lock().await;
-        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
-        (Arc::clone(&inst.router), Arc::clone(&inst.mcp_servers_json))
-    };
+    let bid = botId.clone();
+    tokio::task::spawn_blocking(move || {
+        remove_bot_config_from_disk(&bid)
+    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
 
-    *mcp_servers.write().await = mcpServersJson.clone();
-
-    // Sync to all active Sidecars — setMcpServers() handles abort+resume internally
-    let router = router.lock().await;
-    for port in router.active_sidecar_ports() {
-        router.sync_ai_config(port, None, mcpServersJson.as_deref()).await;
-    }
-
-    ulog_info!("[im] MCP servers hot-updated for bot {}", botId);
-    Ok(())
-}
-
-/// Hot-update allowed users whitelist for a running bot.
-/// The adapter shares the same Arc — change takes effect immediately on next message auth check.
-#[tauri::command]
-#[allow(non_snake_case)]
-pub async fn cmd_update_im_bot_allowed_users(
-    imState: tauri::State<'_, ManagedImBots>,
-    botId: String,
-    allowedUsers: Vec<String>,
-) -> Result<(), String> {
-    let users = {
-        let bots = imState.lock().await;
-        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
-        Arc::clone(&inst.allowed_users)
-    };
-    *users.write().await = allowedUsers;
-    ulog_info!("[im] Allowed users hot-updated for bot {}", botId);
-    Ok(())
-}
-
-/// Hot-update default workspace for a running bot.
-/// Only affects new sessions — existing sessions keep their current workspace.
-#[tauri::command]
-#[allow(non_snake_case)]
-pub async fn cmd_update_im_bot_workspace(
-    imState: tauri::State<'_, ManagedImBots>,
-    botId: String,
-    workspacePath: String,
-) -> Result<(), String> {
-    let router = {
-        let bots = imState.lock().await;
-        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
-        Arc::clone(&inst.router)
-    };
-    router.lock().await.set_default_workspace(PathBuf::from(&workspacePath));
-    ulog_info!("[im] Workspace hot-updated for bot {}: {}", botId, workspacePath);
+    let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));
+    ulog_info!("[im] Bot config removed: {}", botId);
     Ok(())
 }
