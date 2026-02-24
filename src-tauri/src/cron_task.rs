@@ -22,6 +22,7 @@ use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 use uuid::Uuid;
 
+use crate::{ulog_info, ulog_warn};
 use crate::sidecar::{
     execute_cron_task, CronExecutePayload, ManagedSidecarManager, ProviderEnv,
     SidecarOwner, ensure_session_sidecar, release_session_sidecar,
@@ -1922,7 +1923,7 @@ async fn deliver_cron_result_to_bot(
     let im_state: tauri::State<'_, crate::im::ManagedImBots> = match handle.try_state() {
         Some(s) => s,
         None => {
-            log::warn!("[CronTask] Cannot deliver result: IM state not available");
+            ulog_warn!("[CronTask] Cannot deliver result: IM state not available");
             return;
         }
     };
@@ -1934,7 +1935,7 @@ async fn deliver_cron_result_to_bot(
         let instance = match im_guard.get(&delivery.bot_id) {
             Some(i) => i,
             None => {
-                log::warn!("[CronTask] Cannot deliver result: Bot {} not found", delivery.bot_id);
+                ulog_warn!("[CronTask] Cannot deliver result: Bot {} not found", delivery.bot_id);
                 return;
             }
         };
@@ -1949,7 +1950,7 @@ async fn deliver_cron_result_to_bot(
     let sidecar_manager = match handle.try_state::<ManagedSidecarManager>() {
         Some(s) => s,
         None => {
-            log::warn!("[CronTask] Cannot deliver result: SidecarManager state not available");
+            ulog_warn!("[CronTask] Cannot deliver result: SidecarManager state not available");
             return;
         }
     };
@@ -1968,7 +1969,7 @@ async fn deliver_cron_result_to_bot(
             match router_guard.ensure_sidecar(&session_key, handle, &sidecar_manager).await {
                 Ok(result) => result,
                 Err(e) => {
-                    log::warn!("[CronTask] Failed to ensure sidecar for bot {}: {}", delivery.bot_id, e);
+                    ulog_warn!("[CronTask] Failed to ensure sidecar for bot {}: {}", delivery.bot_id, e);
                     // Still try to wake heartbeat below
                     (0, false)
                 }
@@ -1982,11 +1983,14 @@ async fn deliver_cron_result_to_bot(
             router.lock().await
                 .sync_ai_config(port, model.as_deref(), mcp.as_deref())
                 .await;
-            log::info!("[CronTask] Woke up sidecar for bot {} on port {}", delivery.bot_id, port);
+            ulog_info!("[CronTask] Woke up sidecar for bot {} on port {}", delivery.bot_id, port);
         }
 
         if port > 0 {
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .no_proxy() // All requests are to local Sidecars (127.0.0.1)
+                .build()
+                .unwrap_or_default();
             let url = format!("http://127.0.0.1:{}/api/im/system-event", port);
             let body = serde_json::json!({
                 "event": "cron_complete",
@@ -1994,8 +1998,8 @@ async fn deliver_cron_result_to_bot(
                 "taskId": task_id,
             });
             match client.post(&url).json(&body).send().await {
-                Ok(_) => log::info!("[CronTask] Delivered system event to bot {} sidecar", delivery.bot_id),
-                Err(e) => log::warn!("[CronTask] Failed to deliver system event: {}", e),
+                Ok(_) => ulog_info!("[CronTask] Delivered system event to bot {} sidecar", delivery.bot_id),
+                Err(e) => ulog_warn!("[CronTask] Failed to deliver system event: {}", e),
             }
         }
     }
@@ -2007,9 +2011,9 @@ async fn deliver_cron_result_to_bot(
             summary: summary.to_string(),
         };
         if let Err(e) = wake_tx.send(reason).await {
-            log::warn!("[CronTask] Failed to wake heartbeat: {}", e);
+            ulog_warn!("[CronTask] Failed to wake heartbeat: {}", e);
         } else {
-            log::info!("[CronTask] Heartbeat wake sent for bot {}", delivery.bot_id);
+            ulog_info!("[CronTask] Heartbeat wake sent for bot {}", delivery.bot_id);
         }
     }
 }
