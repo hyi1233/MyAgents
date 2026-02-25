@@ -66,6 +66,8 @@ export interface CronTask {
   /** Internal SDK session ID where conversation data is stored.
    *  Differs from sessionId (Sidecar session key) for IM Bot cron tasks. */
   internalSessionId?: string;
+  /** Last activity timestamp — updated on create, start, stop, execute */
+  updatedAt?: string;
 }
 
 /**

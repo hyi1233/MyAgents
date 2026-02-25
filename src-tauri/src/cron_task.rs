@@ -231,6 +231,10 @@ pub struct CronTask {
     /// SDK session UUID for frontend to load conversation history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_session_id: Option<String>,
+    /// Last activity timestamp — updated on create, start, stop, execute.
+    /// Used by frontend to sort tasks by most recent activity.
+    #[serde(default = "chrono::Utc::now")]
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Configuration for creating a new cron task
@@ -920,8 +924,10 @@ impl CronTaskManager {
                         {
                             let mut tasks_guard = tasks.write().await;
                             if let Some(t) = tasks_guard.get_mut(&task_id_owned) {
+                                let now = Utc::now();
                                 t.execution_count += 1;
-                                t.last_executed_at = Some(Utc::now());
+                                t.last_executed_at = Some(now);
+                                t.updated_at = now;
                                 t.last_error = None;
                                 // Track the internal SDK session ID for frontend session loading
                                 if internal_sid.is_some() {
@@ -1105,6 +1111,7 @@ impl CronTaskManager {
             name: config.name,
             next_execution_at: None, // Enriched at read time
             internal_session_id: None, // Set after first execution
+            updated_at: Utc::now(),
         };
 
         let mut tasks = self.tasks.write().await;
@@ -1226,6 +1233,7 @@ impl CronTaskManager {
         }
 
         task.status = TaskStatus::Running;
+        task.updated_at = Utc::now();
         let task_clone = task.clone();
         drop(tasks);
 
@@ -1246,6 +1254,7 @@ impl CronTaskManager {
         let session_id = task.session_id.clone();
         task.status = TaskStatus::Stopped;
         task.exit_reason = exit_reason.clone();
+        task.updated_at = Utc::now();
         let task_clone = task.clone();
         drop(tasks);
 
@@ -1360,8 +1369,10 @@ impl CronTaskManager {
         let task = tasks.get_mut(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
+        let now = Utc::now();
         task.execution_count += 1;
-        task.last_executed_at = Some(Utc::now());
+        task.last_executed_at = Some(now);
+        task.updated_at = now;
 
         // Check end conditions
         let should_stop = self.check_end_conditions(task);

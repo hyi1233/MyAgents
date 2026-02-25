@@ -101,7 +101,7 @@ export default memo(function TaskCenterOverlay({
         });
     }, [sessions, sessionTagsMap, statusFilter, workspaceFilter, projects]);
 
-    // Sort cron tasks: running first (by nextExecutionAt ASC), then stopped (by createdAt DESC)
+    // Sort cron tasks: running first (by nextExecutionAt ASC), then stopped (by updatedAt DESC)
     const sortedCronTasks = useMemo(() => {
         return [...cronTasks].sort((a, b) => {
             // Primary: running tasks first
@@ -116,8 +116,10 @@ export default memo(function TaskCenterOverlay({
                 return 0;
             }
 
-            // Within stopped: newest first (by createdAt DESC)
-            return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+            // Within stopped: most recently active first
+            const aTime = new Date(a.updatedAt || a.createdAt).getTime();
+            const bTime = new Date(b.updatedAt || b.createdAt).getTime();
+            return bTime - aTime;
         });
     }, [cronTasks]);
 
