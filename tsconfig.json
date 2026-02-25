@@ -19,5 +19,6 @@
       "@/*": ["./src/renderer/*"]
     }
   },
-  "include": ["src/**/*", ".claude/skills/**/*.ts", "vite.config.ts"]
+  "include": ["src/**/*", ".claude/skills/**/*.ts", "vite.config.ts"],
+  "exclude": [".claude/skills/*/cli/**"]
 }
