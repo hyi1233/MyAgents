@@ -27,6 +27,9 @@ pub struct BotConfigPatch {
     pub feishu_app_secret: Option<String>,
     pub enabled: Option<bool>,
     pub setup_completed: Option<bool>,
+    pub group_permissions: Option<Vec<GroupPermission>>,
+    pub group_activation: Option<String>,
+    pub group_tools_deny: Option<Vec<String>>,
 }
 
 /// IM platform type
@@ -64,6 +67,57 @@ pub enum ImSourceType {
     Group,
 }
 
+/// Group permission status
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupPermissionStatus {
+    Pending,
+    Approved,
+}
+
+/// Group chat permission record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupPermission {
+    pub group_id: String,
+    pub group_name: String,
+    pub platform: ImPlatform,
+    pub status: GroupPermissionStatus,
+    pub discovered_at: String,
+    pub added_by: Option<String>,
+}
+
+/// Group activation mode (when bot responds in groups)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupActivation {
+    /// Only respond when @mentioned, replied-to, or /ask
+    Mention,
+    /// Respond to all messages (with NO_REPLY option)
+    Always,
+}
+
+impl Default for GroupActivation {
+    fn default() -> Self {
+        Self::Mention
+    }
+}
+
+/// Group lifecycle events from platform adapters
+#[derive(Debug, Clone)]
+pub enum GroupEvent {
+    BotAdded {
+        chat_id: String,
+        chat_title: String,
+        platform: ImPlatform,
+        added_by_name: Option<String>,
+    },
+    BotRemoved {
+        chat_id: String,
+        platform: ImPlatform,
+    },
+}
+
 /// Attachment type determines processing path
 #[derive(Debug, Clone)]
 pub enum ImAttachmentType {
@@ -95,6 +149,10 @@ pub struct ImMessage {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub attachments: Vec<ImAttachment>,
     pub media_group_id: Option<String>,
+    /// Whether this message triggers bot response (@mention, /ask, reply-to-bot)
+    pub is_mention: bool,
+    /// Whether this is specifically a reply to bot's message
+    pub reply_to_bot: bool,
 }
 
 impl ImMessage {
@@ -136,6 +194,13 @@ pub struct ImConfig {
     // ===== Heartbeat (v0.1.21) =====
     #[serde(default)]
     pub heartbeat_config: Option<HeartbeatConfig>,
+    // ===== Group Chat (v0.1.28) =====
+    #[serde(default)]
+    pub group_permissions: Vec<GroupPermission>,
+    #[serde(default)]
+    pub group_activation: Option<String>,
+    #[serde(default)]
+    pub group_tools_deny: Vec<String>,
 }
 
 fn default_platform() -> ImPlatform {
@@ -158,6 +223,9 @@ impl Default for ImConfig {
             provider_env_json: None,
             mcp_servers_json: None,
             heartbeat_config: None,
+            group_permissions: Vec::new(),
+            group_activation: None,
+            group_tools_deny: Vec::new(),
         }
     }
 }
@@ -251,6 +319,12 @@ pub struct BufferedMessage {
     /// Cached session key for efficient pop_for_session matching
     #[serde(default)]
     pub session_key: String,
+    /// Whether this message triggers bot response (@mention, /ask, reply-to-bot)
+    #[serde(default)]
+    pub is_mention: bool,
+    /// Whether this is specifically a reply to bot's message
+    #[serde(default)]
+    pub reply_to_bot: bool,
 }
 
 impl BufferedMessage {
@@ -266,6 +340,8 @@ impl BufferedMessage {
             platform: msg.platform.clone(),
             timestamp: msg.timestamp.to_rfc3339(),
             retry_count: 0,
+            is_mention: msg.is_mention,
+            reply_to_bot: msg.reply_to_bot,
         }
     }
 
@@ -285,6 +361,8 @@ impl BufferedMessage {
                 .unwrap_or_else(|_| chrono::Utc::now()),
             attachments: Vec::new(),
             media_group_id: None,
+            is_mention: self.is_mention,
+            reply_to_bot: self.reply_to_bot,
         }
     }
 }

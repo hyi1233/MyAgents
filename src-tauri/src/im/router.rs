@@ -190,6 +190,11 @@ impl SessionRouter {
         Ok((port, true))
     }
 
+    /// Get a reference to a peer session by session_key.
+    pub fn get_peer_session(&self, session_key: &str) -> Option<&PeerSession> {
+        self.peer_sessions.get(session_key)
+    }
+
     /// Record a successful AI response — increment message_count and refresh activity.
     /// Note: session_id is NOT updated here. Use `upgrade_peer_session_id` when the
     /// Bun sidecar creates a new session internally (e.g., provider switch).
@@ -407,6 +412,7 @@ impl SessionRouter {
     pub fn find_any_peer_session(&self) -> Option<(String, String, String)> {
         self.peer_sessions
             .values()
+            .filter(|ps| ps.source_type == ImSourceType::Private) // Skip groups for heartbeat
             .max_by_key(|ps| ps.last_active)
             .map(|ps| {
                 (ps.session_key.clone(), session_key_to_source_str(&ps.session_key), ps.source_id.clone())

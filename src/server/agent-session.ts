@@ -144,6 +144,8 @@ const toolResultIndexToId: Map<number, string> = new Map();
 // IM Draft Stream: callback for streaming text to Telegram
 type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string) => void;
 let imStreamCallback: ImStreamCallback | null = null;
+// Group chat tool deny list (v0.1.28): set per IM message, cleared on next non-group request
+let currentGroupToolsDeny: string[] = [];
 // Flag: auto-reset session after image content pollutes conversation history
 let shouldResetSessionAfterError = false;
 // Track text block indices for detecting text-type content_block_stop
@@ -1505,6 +1507,11 @@ function localizeImError(rawError: string): string {
     return rawError.substring(0, 100) + '...';
   }
   return rawError;
+}
+
+/** Set group tool deny list for current IM request (v0.1.28) */
+export function setGroupToolsDeny(tools: string[]): void {
+  currentGroupToolsDeny = tools;
 }
 
 export function setImStreamCallback(cb: ImStreamCallback | null): void {
@@ -3521,6 +3528,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
       ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
         ? { agents: currentAgentDefinitions, allowedTools: ['Task'] } : {}),
+      // Group chat tool deny list (v0.1.28): use SDK disallowedTools instead of canUseTool
+      // because canUseTool is skipped in bypassPermissions mode (IM Bot default: fullAgency)
+      ...(currentGroupToolsDeny.length > 0 ? { disallowedTools: [...currentGroupToolsDeny] } : {}),
       // Custom permission handling - check rules and prompt user for unknown tools
       // Effective when permissionMode is 'default' or 'acceptEdits' (not 'bypassPermissions')
       canUseTool: async (toolName: string, input: unknown, options: { signal: AbortSignal }) => {

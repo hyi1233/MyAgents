@@ -30,6 +30,28 @@ export type ImStatus = 'online' | 'connecting' | 'error' | 'stopped';
 export type ImSourceType = 'private' | 'group';
 
 /**
+ * Group permission status
+ */
+export type GroupPermissionStatus = 'pending' | 'approved';
+
+/**
+ * Group activation mode
+ */
+export type GroupActivation = 'mention' | 'always';
+
+/**
+ * Group chat permission record
+ */
+export interface GroupPermission {
+  groupId: string;
+  groupName: string;
+  platform: ImPlatform;
+  status: GroupPermissionStatus;
+  discoveredAt: string;
+  addedBy?: string;
+}
+
+/**
  * IM Bot configuration (stored in AppConfig)
  * Designed for multi-bot architecture (currently single bot)
  */
@@ -65,6 +87,11 @@ export interface ImBotConfig {
 
   // ===== Heartbeat (v0.1.21) =====
   heartbeat?: HeartbeatConfig;
+
+  // ===== Group Chat (v0.1.28) =====
+  groupPermissions?: GroupPermission[];
+  groupActivation?: GroupActivation;
+  groupToolsDeny?: string[];
 }
 
 /**

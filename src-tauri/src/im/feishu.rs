@@ -18,7 +18,7 @@ use prost::Message as ProstMessage;
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType};
+use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType, GroupEvent};
 use super::util::{mime_to_ext, sanitize_filename};
 use super::ApprovalCallback;
 use crate::{proxy_config, ulog_info, ulog_warn, ulog_error, ulog_debug};
@@ -506,6 +506,13 @@ pub struct FeishuAdapter {
     dedup_last_persist_ms: AtomicU64,
     /// Channel for forwarding approval callbacks from card button clicks
     approval_tx: mpsc::Sender<ApprovalCallback>,
+    /// Channel for group lifecycle events (bot added/removed from groups)
+    group_event_tx: mpsc::Sender<GroupEvent>,
+    /// Bot's own open_id (for @mention and reply-to-bot detection)
+    bot_open_id: Arc<RwLock<Option<String>>>,
+    /// User name cache: open_id → (display_name, fetched_at)
+    /// LRU-style: max 1000 entries, 24h TTL
+    user_name_cache: Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
 }
 
 impl FeishuAdapter {
@@ -515,6 +522,7 @@ impl FeishuAdapter {
         allowed_users: Arc<RwLock<Vec<String>>>,
         approval_tx: mpsc::Sender<ApprovalCallback>,
         dedup_path: Option<PathBuf>,
+        group_event_tx: mpsc::Sender<GroupEvent>,
     ) -> Self {
         let client_builder = Client::builder()
             .timeout(Duration::from_secs(30));
@@ -543,6 +551,9 @@ impl FeishuAdapter {
             dedup_persist_path: dedup_path,
             dedup_last_persist_ms: AtomicU64::new(0),
             approval_tx,
+            group_event_tx,
+            bot_open_id: Arc::new(RwLock::new(None)),
+            user_name_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -830,6 +841,11 @@ impl FeishuAdapter {
         let bot = &resp["bot"];
         let name = bot["app_name"].as_str().unwrap_or("Feishu Bot");
         *self.bot_name.write().await = Some(name.to_string());
+        // Store bot's open_id for @mention and reply-to-bot detection
+        if let Some(open_id) = bot["open_id"].as_str() {
+            *self.bot_open_id.write().await = Some(open_id.to_string());
+            ulog_info!("[feishu] Bot open_id: {}", open_id);
+        }
         Ok(name.to_string())
     }
 
@@ -1114,17 +1130,43 @@ impl FeishuAdapter {
             _ => ImSourceType::Private, // "p2p" or default
         };
 
+        // @Bot mention detection: check mentions array for bot's open_id
+        let bot_oid = self.bot_open_id.read().await;
+        let is_at_mention = bot_oid.is_some() && message.get("mentions")
+            .and_then(|m| m.as_array())
+            .map(|mentions| {
+                mentions.iter().any(|m| {
+                    m["id"]["open_id"].as_str() == bot_oid.as_deref()
+                })
+            })
+            .unwrap_or(false);
+        drop(bot_oid);
+
+        // Reply-to-bot detection: Feishu doesn't include parent message sender info in events.
+        // Accurately detecting reply-to-bot would require tracking all sent message IDs or
+        // an API call per reply (GET /im/v1/messages/{parent_id}), both adding complexity.
+        // Pragmatic: only @mention and /ask trigger the bot in Feishu groups.
+        // This is a known platform limitation vs Telegram (which provides reply_to_message.from.id).
+        let reply_to_bot = false;
+
+        let is_mention = is_at_mention;
+
+        // Sender name: fetch via user name cache (GET /contact/v3/users/{open_id})
+        let sender_name_str = self.get_user_name(&sender_id).await;
+
         Some(ImMessage {
             chat_id,
             message_id,
             text: combined_text,
             sender_id,
-            sender_name: None, // Feishu events don't always include display name
+            sender_name: sender_name_str,
             source_type,
             platform: ImPlatform::Feishu,
             timestamp: chrono::Utc::now(),
             attachments,
             media_group_id: None,
+            is_mention,
+            reply_to_bot,
         })
     }
 
@@ -1482,6 +1524,106 @@ impl FeishuAdapter {
         Ok(())
     }
 
+    /// Parse group lifecycle events: bot added/removed from group chats.
+    async fn parse_group_event(&self, event: &Value) -> Option<GroupEvent> {
+        let event_type = event["header"]["event_type"].as_str()?;
+        match event_type {
+            "im.chat.member.bot.added_v1" => {
+                let event_data = event.get("event")?;
+                let chat_id = event_data["chat_id"].as_str()?.to_string();
+                let operator_id = event_data["operator_id"]["open_id"].as_str().unwrap_or("").to_string();
+
+                // Fetch group name via API
+                let chat_title = match self.get_chat_info(&chat_id).await {
+                    Ok(name) => name,
+                    Err(e) => {
+                        ulog_warn!("[feishu] Failed to get chat info for {}: {}", chat_id, e);
+                        "Unknown Group".to_string()
+                    }
+                };
+
+                // Resolve operator name from open_id
+                let added_by_name = if !operator_id.is_empty() {
+                    self.get_user_name(&operator_id).await.or(Some(operator_id))
+                } else {
+                    None
+                };
+
+                ulog_info!("[feishu] Bot added to group: {} ({})", chat_title, chat_id);
+                Some(GroupEvent::BotAdded {
+                    chat_id,
+                    chat_title,
+                    platform: ImPlatform::Feishu,
+                    added_by_name,
+                })
+            }
+            "im.chat.member.bot.deleted_v1" => {
+                let event_data = event.get("event")?;
+                let chat_id = event_data["chat_id"].as_str()?.to_string();
+                ulog_info!("[feishu] Bot removed from group: {}", chat_id);
+                Some(GroupEvent::BotRemoved {
+                    chat_id,
+                    platform: ImPlatform::Feishu,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Get chat/group name by chat_id.
+    async fn get_chat_info(&self, chat_id: &str) -> Result<String, String> {
+        let url = format!("{}/im/v1/chats/{}", FEISHU_API_BASE, chat_id);
+        let resp = self.api_call("GET", &url, None).await?;
+        let name = resp["data"]["name"].as_str().unwrap_or("Unknown Group");
+        Ok(name.to_string())
+    }
+
+    /// Get user display name by open_id, with LRU cache (1000 entries, 24h TTL).
+    async fn get_user_name(&self, open_id: &str) -> Option<String> {
+        const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+        const MAX_CACHE_SIZE: usize = 1000;
+
+        // Check cache first
+        {
+            let cache = self.user_name_cache.lock().await;
+            if let Some((name, fetched_at)) = cache.get(open_id) {
+                if fetched_at.elapsed() < CACHE_TTL {
+                    return Some(name.clone());
+                }
+            }
+        }
+
+        // Cache miss or expired — call API
+        let url = format!(
+            "{}/contact/v3/users/{}?user_id_type=open_id",
+            FEISHU_API_BASE, open_id
+        );
+        match self.api_call("GET", &url, None).await {
+            Ok(resp) => {
+                let name = resp["data"]["user"]["name"].as_str()
+                    .map(|s| s.to_string());
+                if let Some(ref n) = name {
+                    let mut cache = self.user_name_cache.lock().await;
+                    // Evict oldest entry if at capacity
+                    if cache.len() >= MAX_CACHE_SIZE && !cache.contains_key(open_id) {
+                        if let Some(oldest_key) = cache.iter()
+                            .min_by_key(|(_, (_, t))| *t)
+                            .map(|(k, _)| k.clone())
+                        {
+                            cache.remove(&oldest_key);
+                        }
+                    }
+                    cache.insert(open_id.to_string(), (n.clone(), std::time::Instant::now()));
+                }
+                name
+            }
+            Err(e) => {
+                ulog_warn!("[feishu] Failed to fetch user name for {}: {}", open_id, e);
+                None
+            }
+        }
+    }
+
     /// Parse a card.action.trigger event into an ApprovalCallback.
     fn parse_card_action(&self, event: &Value) -> Option<ApprovalCallback> {
         let event_type = event["header"]["event_type"].as_str()?;
@@ -1539,6 +1681,14 @@ impl FeishuAdapter {
             ulog_debug!("[feishu] No header or data in event payload");
             return;
         };
+
+        // Handle group lifecycle events (bot added/removed)
+        if let Some(ge) = self.parse_group_event(&event).await {
+            if self.group_event_tx.send(ge).await.is_err() {
+                ulog_error!("[feishu] Group event channel closed");
+            }
+            return;
+        }
 
         // Handle card.action.trigger (approval button clicks)
         if let Some(cb) = self.parse_card_action(&event) {

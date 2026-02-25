@@ -18,7 +18,8 @@ import BindCodePanel from './components/BindCodePanel';
 import AiConfigCard from './components/AiConfigCard';
 import McpToolsCard from './components/McpToolsCard';
 import HeartbeatConfigCard from './components/HeartbeatConfigCard';
-import type { ImBotConfig, ImBotStatus } from '../../../shared/types/im';
+import GroupPermissionList from './components/GroupPermissionList';
+import type { ImBotConfig, ImBotStatus, GroupActivation } from '../../../shared/types/im';
 
 export default function ImBotDetail({
     botId,
@@ -53,6 +54,7 @@ export default function ImBotDetail({
     const [deleting, setDeleting] = useState(false);
     const [credentialsExpanded, setCredentialsExpanded] = useState<boolean | null>(null);
     const [bindingExpanded, setBindingExpanded] = useState<boolean | null>(null);
+    const [groupsExpanded, setGroupsExpanded] = useState<boolean | null>(null);
 
     // Whether credentials are filled
     const hasCredentials = botConfig
@@ -170,9 +172,29 @@ export default function ImBotDetail({
             cancelled = true;
             unlisten?.();
         };
-    }, [botId, refreshConfig]);
+    }, [botId]); // refreshConfig not used in this effect; config refresh handled by im:bot-config-changed listener
 
     // im:bot-config-changed listener moved to ConfigProvider (shared state auto-updates)
+
+    // Listen for group permission changes (new group added/removed) — show toast
+    useEffect(() => {
+        if (!isTauriEnvironment()) return;
+        let cancelled = false;
+        let unlisten: (() => void) | undefined;
+        import('@tauri-apps/api/event').then(({ listen }) => {
+            if (cancelled) return;
+            listen<{ botId: string; event: string; groupName?: string }>('im:group-permission-changed', (ev) => {
+                if (!isMountedRef.current || ev.payload.botId !== botId) return;
+                if (ev.payload.event === 'added') {
+                    toastRef.current.info(`群聊「${ev.payload.groupName ?? ''}」待审核`);
+                }
+            }).then(fn => {
+                if (cancelled) fn();
+                else unlisten = fn;
+            });
+        });
+        return () => { cancelled = true; unlisten?.(); };
+    }, [botId]);
 
     // Build start params — providerEnvJson is already persisted on disk by Rust,
     // so we read it directly from the config instead of rebuilding from React state.
@@ -455,6 +477,93 @@ export default function ImBotDetail({
                     </div>
                 )}
             </div>
+
+            {/* Group Permissions (v0.1.28) */}
+            {(() => {
+                const groupPerms = botConfig.groupPermissions ?? [];
+                const hasGroups = groupPerms.length > 0;
+                const pendingCount = groupPerms.filter(g => g.status === 'pending').length;
+                const approvedCount = groupPerms.filter(g => g.status === 'approved').length;
+                // Auto-expand when there are pending groups, collapse when empty
+                const isGroupsExpanded = groupsExpanded ?? (pendingCount > 0 || hasGroups);
+                return (
+                    <div className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]">
+                        <button
+                            type="button"
+                            onClick={() => setGroupsExpanded(!isGroupsExpanded)}
+                            className="flex w-full items-center justify-between p-5"
+                        >
+                            <div className="flex items-center gap-2">
+                                <h3 className="text-sm font-semibold text-[var(--ink)]">群聊管理</h3>
+                                {!isGroupsExpanded && hasGroups && (
+                                    <span className="text-xs text-[var(--ink-muted)]">
+                                        {approvedCount > 0 && `${approvedCount} 个群聊`}
+                                        {pendingCount > 0 && approvedCount > 0 && '，'}
+                                        {pendingCount > 0 && `${pendingCount} 个待审核`}
+                                    </span>
+                                )}
+                                {pendingCount > 0 && (
+                                    <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--warning)] px-1.5 text-[10px] font-bold text-white">
+                                        {pendingCount}
+                                    </span>
+                                )}
+                            </div>
+                            <ChevronDown className={`h-4 w-4 text-[var(--ink-muted)] transition-transform ${isGroupsExpanded ? '' : '-rotate-90'}`} />
+                        </button>
+                        {isGroupsExpanded && (
+                            <div className="space-y-4 px-5 pb-5">
+                                {/* Group activation mode */}
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <p className="text-sm font-medium text-[var(--ink)]">群聊触发方式</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            {(botConfig.groupActivation ?? 'mention') === 'mention'
+                                                ? '仅在 @Bot 或回复 Bot 时响应'
+                                                : '收到所有群消息，AI 自行判断是否回复'}
+                                        </p>
+                                    </div>
+                                    <div className="flex rounded-lg bg-[var(--paper-contrast)] p-0.5">
+                                        {(['mention', 'always'] as GroupActivation[]).map(mode => (
+                                            <button
+                                                key={mode}
+                                                onClick={async () => {
+                                                    await invokePatch({ groupActivation: mode });
+                                                }}
+                                                className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
+                                                    (botConfig.groupActivation ?? 'mention') === mode
+                                                        ? 'bg-[var(--accent)] text-white'
+                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                }`}
+                                            >
+                                                {mode === 'mention' ? '@提及' : '全部消息'}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                {/* Group list */}
+                                <GroupPermissionList
+                                    permissions={groupPerms}
+                                    onApprove={async (groupId) => {
+                                        if (!isTauriEnvironment()) return;
+                                        const { invoke } = await import('@tauri-apps/api/core');
+                                        await invoke('cmd_approve_group', { botId, groupId });
+                                    }}
+                                    onReject={async (groupId) => {
+                                        if (!isTauriEnvironment()) return;
+                                        const { invoke } = await import('@tauri-apps/api/core');
+                                        await invoke('cmd_reject_group', { botId, groupId });
+                                    }}
+                                    onRemove={async (groupId) => {
+                                        if (!isTauriEnvironment()) return;
+                                        const { invoke } = await import('@tauri-apps/api/core');
+                                        await invoke('cmd_remove_group', { botId, groupId });
+                                    }}
+                                />
+                            </div>
+                        )}
+                    </div>
+                );
+            })()}
 
             {/* Default Workspace */}
             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">

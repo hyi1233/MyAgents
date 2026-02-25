@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 
-use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType, TelegramError};
+use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType, TelegramError, GroupEvent};
 use super::util::{mime_to_ext, sanitize_filename};
 use super::ApprovalCallback;
 use crate::{proxy_config, ulog_info, ulog_warn, ulog_error, ulog_debug};
@@ -46,6 +46,9 @@ struct PendingBatch {
     sender_name: Option<String>,
     source_type: ImSourceType,
     platform: ImPlatform,
+    // OR'd across all fragments — true if ANY fragment had mention/reply-to-bot
+    is_mention: bool,
+    reply_to_bot: bool,
 }
 
 /// Merges fragmented messages (Telegram splits >4096 char pastes)
@@ -99,6 +102,9 @@ impl MessageCoalescer {
                 batch.fragments.push(msg.text.clone());
                 batch.last_msg_id = msg_id_i64;
                 batch.last_received = now;
+                // OR mention flags: if any fragment has mention, the merged msg does too
+                batch.is_mention = batch.is_mention || msg.is_mention;
+                batch.reply_to_bot = batch.reply_to_bot || msg.reply_to_bot;
                 return ready; // Still waiting for more fragments
             }
 
@@ -123,6 +129,8 @@ impl MessageCoalescer {
                     sender_name: msg.sender_name.clone(),
                     source_type: msg.source_type.clone(),
                     platform: msg.platform.clone(),
+                    is_mention: msg.is_mention,
+                    reply_to_bot: msg.reply_to_bot,
                 },
             );
         } else {
@@ -169,6 +177,8 @@ impl MessageCoalescer {
             timestamp: chrono::Utc::now(),
             attachments: Vec::new(),
             media_group_id: None,
+            is_mention: batch.is_mention,
+            reply_to_bot: batch.reply_to_bot,
         })
     }
 }
@@ -182,10 +192,14 @@ pub struct TelegramAdapter {
     message_tx: mpsc::Sender<ImMessage>,
     coalescer: Arc<Mutex<MessageCoalescer>>,
     bot_username: Arc<Mutex<Option<String>>>,
+    /// Bot's numeric user ID (from getMe), used for reply-to-bot detection
+    bot_user_id: Arc<Mutex<Option<i64>>>,
     /// Channel for forwarding approval callbacks from inline keyboard button clicks
     approval_tx: mpsc::Sender<ApprovalCallback>,
     /// Short ID → (full request_id, created_at) mapping (callback_data has 64 byte limit)
     short_id_map: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    /// Channel for group lifecycle events (bot added/removed from groups)
+    group_event_tx: mpsc::Sender<GroupEvent>,
 }
 
 impl TelegramAdapter {
@@ -194,6 +208,7 @@ impl TelegramAdapter {
         message_tx: mpsc::Sender<ImMessage>,
         allowed_users: Arc<RwLock<Vec<String>>>,
         approval_tx: mpsc::Sender<ApprovalCallback>,
+        group_event_tx: mpsc::Sender<GroupEvent>,
     ) -> Self {
         let client_builder = Client::builder()
             .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10));
@@ -213,8 +228,10 @@ impl TelegramAdapter {
             message_tx,
             coalescer: Arc::new(Mutex::new(MessageCoalescer::new())),
             bot_username: Arc::new(Mutex::new(None)),
+            bot_user_id: Arc::new(Mutex::new(None)),
             approval_tx,
             short_id_map: Arc::new(Mutex::new(HashMap::new())),
+            group_event_tx,
         }
     }
 
@@ -327,6 +344,9 @@ impl TelegramAdapter {
         if let Some(username) = result["username"].as_str() {
             *self.bot_username.lock().await = Some(username.to_string());
         }
+        if let Some(id) = result["id"].as_i64() {
+            *self.bot_user_id.lock().await = Some(id);
+        }
         Ok(result)
     }
 
@@ -353,7 +373,7 @@ impl TelegramAdapter {
             "offset": offset,
             "limit": 100,
             "timeout": LONG_POLL_TIMEOUT,
-            "allowed_updates": ["message", "callback_query"]
+            "allowed_updates": ["message", "callback_query", "my_chat_member"]
         });
         let result = self.api_call("getUpdates", &body).await?;
         Ok(result.as_array().cloned().unwrap_or_default())
@@ -695,6 +715,14 @@ impl TelegramAdapter {
                         // Update offset to acknowledge this update
                         if let Some(update_id) = update["update_id"].as_i64() {
                             offset = update_id + 1;
+                        }
+
+                        // Handle my_chat_member (bot added/removed from groups)
+                        if let Some(event) = self.process_my_chat_member(&update) {
+                            if self.group_event_tx.send(event).await.is_err() {
+                                ulog_error!("[telegram] Group event channel closed");
+                            }
+                            continue;
                         }
 
                         // Handle callback_query (inline keyboard button clicks)
@@ -1054,8 +1082,12 @@ impl TelegramAdapter {
         // Allow /start BIND_ messages to bypass whitelist (QR code binding flow)
         let is_bind_request = combined_text.starts_with("/start BIND_");
 
-        // Whitelist check (bypassed for bind requests)
-        if !is_bind_request && !self.is_allowed(sender_id, sender_name.as_deref()).await {
+        // Whitelist check for private chats (bypassed for bind requests and group messages —
+        // group access control is handled in mod.rs)
+        if source_type == ImSourceType::Private
+            && !is_bind_request
+            && !self.is_allowed(sender_id, sender_name.as_deref()).await
+        {
             ulog_debug!(
                 "[telegram] Rejected message from non-whitelisted user: {} ({:?})",
                 sender_id,
@@ -1064,19 +1096,29 @@ impl TelegramAdapter {
             return None;
         }
 
-        // Group chat: only respond to @Bot, /ask, or bind requests
-        if source_type == ImSourceType::Group && !is_bind_request {
-            let bot_username = self.bot_username.lock().await;
-            let is_mention = bot_username
-                .as_ref()
-                .map(|u| combined_text.contains(&format!("@{}", u)))
-                .unwrap_or(false);
-            let is_ask = combined_text.starts_with("/ask");
+        // Detect @Bot mention, /ask command, and reply-to-bot
+        let bot_username = self.bot_username.lock().await;
+        let is_at_mention = bot_username
+            .as_ref()
+            .map(|u| {
+                // Telegram usernames are case-insensitive
+                let mention = format!("@{}", u).to_lowercase();
+                combined_text.to_lowercase().contains(&mention)
+            })
+            .unwrap_or(false);
+        let is_ask = combined_text.starts_with("/ask");
+        drop(bot_username);
 
-            if !is_mention && !is_ask {
-                return None;
-            }
-        }
+        // Reply-to-bot detection: check if replying to bot's own message
+        let reply_to_bot = if let Some(reply_msg) = message.get("reply_to_message") {
+            let reply_from_id = reply_msg["from"]["id"].as_i64();
+            let my_id = self.bot_user_id.lock().await;
+            reply_from_id.is_some() && reply_from_id == *my_id
+        } else {
+            false
+        };
+
+        let is_mention = is_at_mention || is_ask || reply_to_bot || is_bind_request;
 
         // Strip @mention and /ask prefix from text
         let cleaned_text = clean_message_text(&combined_text, &*self.bot_username.lock().await);
@@ -1097,7 +1139,50 @@ impl TelegramAdapter {
             timestamp: chrono::Utc::now(),
             attachments,
             media_group_id,
+            is_mention,
+            reply_to_bot,
         })
+    }
+
+    /// Process my_chat_member update (bot added/removed from a group).
+    fn process_my_chat_member(&self, update: &Value) -> Option<GroupEvent> {
+        let member_update = update.get("my_chat_member")?;
+        let chat = &member_update["chat"];
+        let chat_type = chat["type"].as_str().unwrap_or("");
+        // Only handle group/supergroup
+        if chat_type != "group" && chat_type != "supergroup" {
+            return None;
+        }
+
+        let chat_id = chat["id"].as_i64()?.to_string();
+        let chat_title = chat["title"].as_str().unwrap_or("Unknown Group").to_string();
+        let new_status = member_update["new_chat_member"]["status"].as_str()?;
+        let added_by_name = {
+            let first = member_update["from"]["first_name"].as_str().unwrap_or("");
+            let last = member_update["from"]["last_name"].as_str().unwrap_or("");
+            let full = format!("{} {}", first, last).trim().to_string();
+            if full.is_empty() { None } else { Some(full) }
+        };
+
+        match new_status {
+            "member" | "administrator" => {
+                ulog_info!("[telegram] Bot added to group: {} ({})", chat_title, chat_id);
+                Some(GroupEvent::BotAdded {
+                    chat_id,
+                    chat_title,
+                    platform: ImPlatform::Telegram,
+                    added_by_name,
+                })
+            }
+            "left" | "kicked" => {
+                ulog_info!("[telegram] Bot removed from group: {}", chat_id);
+                Some(GroupEvent::BotRemoved {
+                    chat_id,
+                    platform: ImPlatform::Telegram,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Check if a user is in the whitelist
@@ -1137,16 +1222,22 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
-        // Try to find a good break point
-        let search_range = &remaining[..max_len];
+        // Find a char-boundary-safe upper bound (max_len may fall mid-character for CJK/emoji)
+        let mut safe_end = max_len.min(remaining.len());
+        while !remaining.is_char_boundary(safe_end) {
+            safe_end -= 1;
+        }
+
+        // Try to find a good break point within the safe range
+        let search_range = &remaining[..safe_end];
         let break_point = search_range
             .rfind("\n\n") // Paragraph break
             .or_else(|| search_range.rfind('\n')) // Line break
             .or_else(|| search_range.rfind(". ")) // Sentence
             .or_else(|| search_range.rfind(' ')) // Word
-            .unwrap_or(max_len); // Hard cut
+            .unwrap_or(safe_end); // Hard cut at char boundary
 
-        let break_at = if break_point == 0 { max_len } else { break_point };
+        let break_at = if break_point == 0 { safe_end } else { break_point };
 
         chunks.push(remaining[..break_at].to_string());
         remaining = remaining[break_at..].trim_start();
@@ -1159,9 +1250,20 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
 fn clean_message_text(text: &str, bot_username: &Option<String>) -> String {
     let mut cleaned = text.to_string();
 
-    // Remove @BotUsername
+    // Remove @BotUsername (case-insensitive, Telegram usernames are case-insensitive)
     if let Some(username) = bot_username {
-        cleaned = cleaned.replace(&format!("@{}", username), "");
+        let mention = format!("@{}", username);
+        // Case-insensitive removal: find and replace all occurrences
+        let lower = cleaned.to_lowercase();
+        let mention_lower = mention.to_lowercase();
+        let mut result = String::new();
+        let mut start = 0;
+        while let Some(pos) = lower[start..].find(&mention_lower) {
+            result.push_str(&cleaned[start..start + pos]);
+            start += pos + mention.len();
+        }
+        result.push_str(&cleaned[start..]);
+        cleaned = result;
     }
 
     // Trim before checking /ask (removing @mention may leave leading space)
@@ -1346,6 +1448,8 @@ mod tests {
             timestamp: chrono::Utc::now(),
             attachments: Vec::new(),
             media_group_id: None,
+            is_mention: false,
+            reply_to_bot: false,
         }
     }
 

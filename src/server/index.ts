@@ -98,6 +98,7 @@ import {
   resetSession,
   waitForSessionIdle,
   setImStreamCallback,
+  setGroupToolsDeny,
   setSystemPromptConfig,
   clearSystemPromptConfig,
   rewindSession,
@@ -4707,6 +4708,14 @@ async function main() {
             model?: string;
             images?: Array<{ name: string; mimeType: string; data: string }>;
             botId?: string;
+            // Group context fields (v0.1.28)
+            sourceType?: 'group';
+            groupName?: string;
+            groupPlatform?: string;
+            groupActivation?: 'mention' | 'always';
+            isFirstGroupTurn?: boolean;
+            pendingHistory?: string;
+            groupToolsDeny?: string[];
           };
 
           const hasContent = payload.message?.trim() || (payload.images && payload.images.length > 0);
@@ -4741,6 +4750,40 @@ async function main() {
             content: `\n\n## HEARTBEAT 心跳机制\n\nYou will periodically receive heartbeat messages (a user message wrapped in tags like \`<HEARTBEAT>\\nThis is a heartbeat from the system.\\n……\\n</HEARTBEAT>\`).\nWhen you receive one, follow its instructions.`,
           });
 
+          // Build final message with group context (v0.1.28)
+          let finalMessage = payload.message || '';
+          if (payload.sourceType === 'group') {
+            const parts: string[] = [];
+            // System-level group context (first turn only)
+            if (payload.isFirstGroupTurn) {
+              const platformLabel = payload.groupPlatform ?? '';
+              let groupInfo = `[群聊信息]\n你正在「${payload.groupName ?? '未知群聊'}」${platformLabel}群聊中。\n你的回复会自动发送到群里，直接回复即可。\n群内不同人的消息会以 [from: 名字] 标注发送者。`;
+              if (payload.groupActivation === 'always') {
+                groupInfo += '\n你会收到群里的所有消息。如果你认为不需要回复当前消息，请只回复 <NO_REPLY>，不要添加任何其他内容。';
+              }
+              parts.push(groupInfo);
+            }
+            // Pending history (accumulated non-triggered messages)
+            if (payload.pendingHistory) {
+              parts.push(payload.pendingHistory);
+            }
+            // Add sender identity tag + original message
+            const senderTag = payload.senderName ? `[from: ${payload.senderName}]\n` : '';
+            parts.push(`${senderTag}${finalMessage}`);
+            finalMessage = parts.join('\n\n');
+          }
+
+          // Set group tool deny list (v0.1.28): block dangerous tools in group context
+          // Default: ['Bash', 'Edit', 'Write'] when in group mode with no explicit config
+          const DEFAULT_GROUP_TOOLS_DENY = ['Bash', 'Edit', 'Write'];
+          if (payload.sourceType === 'group') {
+            // undefined = not configured → use default; explicit [] = allow all tools
+            const denyList = payload.groupToolsDeny !== undefined ? payload.groupToolsDeny : DEFAULT_GROUP_TOOLS_DENY;
+            setGroupToolsDeny(denyList);
+          } else {
+            setGroupToolsDeny([]);
+          }
+
           const metadata = {
             source: payload.source,
             sourceId: payload.sourceId,
@@ -4749,7 +4792,7 @@ async function main() {
 
           // Use enqueueUserMessage — shares the same persistent generator as Desktop
           const result = await enqueueUserMessage(
-            payload.message || '',
+            finalMessage,
             payload.images, // forward image attachments from Telegram
             (payload.permissionMode as PermissionMode) ?? 'plan',
             payload.model ?? undefined, // model: per-message from Rust /model command
@@ -4784,6 +4827,7 @@ async function main() {
           let safetyTimer: ReturnType<typeof setTimeout> | null = null;
           let closed = false;
           let imAccText = ''; // Current block's accumulated text
+          let lastBlockText = ''; // Preserved across block-end for NO_REPLY detection
 
           const stream = new ReadableStream({
             start(controller) {
@@ -4831,9 +4875,22 @@ async function main() {
                   imAccText += data;
                   sendEvent({ type: 'partial', text: imAccText });
                 } else if (event === 'block-end') {
+                  lastBlockText = imAccText; // Preserve for NO_REPLY detection in 'complete'
                   sendEvent({ type: 'block-end', text: imAccText });
                   imAccText = ''; // Reset for next block
                 } else if (event === 'complete') {
+                  // Group "always" mode: detect <NO_REPLY> → send silent complete
+                  // Check lastBlockText because imAccText is already cleared by block-end
+                  if (payload.sourceType === 'group' && payload.groupActivation === 'always') {
+                    const trimmed = (imAccText || lastBlockText).trim();
+                    if (trimmed === '<NO_REPLY>' || trimmed === 'NO_REPLY') {
+                      imAccText = '';
+                      sendEvent({ type: 'complete', sessionId: getSessionId(), silent: true });
+                      broadcast('im:response_sent', { sessionId: getSessionId() });
+                      closeStream();
+                      return;
+                    }
+                  }
                   // Flush any un-ended text
                   if (imAccText) {
                     sendEvent({ type: 'block-end', text: imAccText });

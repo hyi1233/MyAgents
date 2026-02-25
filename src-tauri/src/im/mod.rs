@@ -4,6 +4,7 @@
 pub mod adapter;
 pub mod buffer;
 pub mod feishu;
+pub mod group_history;
 pub mod health;
 pub mod heartbeat;
 pub mod router;
@@ -58,7 +59,8 @@ use router::{
     create_sidecar_stream_client, RouteError, SessionRouter, GLOBAL_CONCURRENCY,
 };
 use telegram::TelegramAdapter;
-use types::{BotConfigPatch, ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImPlatform, ImSourceType, ImStatus};
+use group_history::{GroupHistoryBuffer, GroupHistoryEntry};
+use types::{BotConfigPatch, GroupActivation, GroupEvent, GroupPermission, GroupPermissionStatus, ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImPlatform, ImSourceType, ImStatus};
 
 /// Platform-agnostic adapter enum — avoids dyn dispatch overhead.
 pub(crate) enum AnyAdapter {
@@ -208,6 +210,11 @@ pub struct ImBotInstance {
     pub(crate) permission_mode: Arc<tokio::sync::RwLock<String>>,
     pub(crate) mcp_servers_json: Arc<tokio::sync::RwLock<Option<String>>>,
     pub(crate) allowed_users: Arc<tokio::sync::RwLock<Vec<String>>>,
+    // ===== Group Chat (v0.1.28) =====
+    pub(crate) group_permissions: Arc<tokio::sync::RwLock<Vec<GroupPermission>>>,
+    pub(crate) group_activation: Arc<tokio::sync::RwLock<GroupActivation>>,
+    pub(crate) group_tools_deny: Arc<tokio::sync::RwLock<Vec<String>>>,
+    pub(crate) group_history: Arc<Mutex<GroupHistoryBuffer>>,
 }
 
 /// Create the managed IM Bot state (called during app setup)
@@ -328,6 +335,27 @@ pub async fn start_im_bot<R: Runtime>(
     let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalCallback>(32);
     let pending_approvals: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
 
+    // Create group event channel for bot added/removed from groups
+    let (group_event_tx, mut group_event_rx) = mpsc::channel::<GroupEvent>(32);
+
+    // Initialize group chat state from config (loaded from disk)
+    let initial_activation = match config.group_activation.as_deref() {
+        Some("always") => GroupActivation::Always,
+        _ => GroupActivation::Mention,
+    };
+    let group_permissions: Arc<tokio::sync::RwLock<Vec<GroupPermission>>> = Arc::new(
+        tokio::sync::RwLock::new(config.group_permissions.clone()),
+    );
+    let group_activation: Arc<tokio::sync::RwLock<GroupActivation>> = Arc::new(
+        tokio::sync::RwLock::new(initial_activation),
+    );
+    let group_tools_deny: Arc<tokio::sync::RwLock<Vec<String>>> = Arc::new(
+        tokio::sync::RwLock::new(config.group_tools_deny.clone()),
+    );
+    let group_history: Arc<Mutex<GroupHistoryBuffer>> = Arc::new(
+        Mutex::new(GroupHistoryBuffer::new()),
+    );
+
     // Create platform adapter (implements ImAdapter + ImStreamAdapter traits)
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(256);
     let msg_tx_for_reinjection = msg_tx.clone(); // For media group merge re-injection
@@ -337,6 +365,7 @@ pub async fn start_im_bot<R: Runtime>(
             msg_tx,
             Arc::clone(&allowed_users),
             approval_tx.clone(),
+            group_event_tx.clone(),
         )))),
         ImPlatform::Feishu => {
             let dedup_path = Some(health::bot_dedup_path(&bot_id));
@@ -346,6 +375,7 @@ pub async fn start_im_bot<R: Runtime>(
                 Arc::clone(&allowed_users),
                 approval_tx.clone(),
                 dedup_path,
+                group_event_tx.clone(),
             ))))
         }
     };
@@ -393,7 +423,7 @@ pub async fn start_im_bot<R: Runtime>(
     // Start approval callback handler
     let pending_approvals_for_handler = Arc::clone(&pending_approvals);
     let adapter_for_approval = Arc::clone(&adapter);
-    let approval_client = Client::new();
+    let approval_client = crate::local_http::json_client(std::time::Duration::from_secs(30));
     let mut approval_shutdown_rx = shutdown_rx.clone();
     let approval_handle = tokio::spawn(async move {
         loop {
@@ -492,6 +522,10 @@ pub async fn start_im_bot<R: Runtime>(
     let mcp_servers_json_for_loop = Arc::clone(&mcp_servers_json);
     let pending_approvals_for_loop = Arc::clone(&pending_approvals);
     let approval_tx_for_loop = approval_tx.clone();
+    let group_permissions_for_loop = Arc::clone(&group_permissions);
+    let group_activation_for_loop = Arc::clone(&group_activation);
+    let group_tools_deny_for_loop = Arc::clone(&group_tools_deny);
+    let group_history_for_loop = Arc::clone(&group_history);
     let mut process_shutdown_rx = shutdown_rx.clone();
 
     // Concurrency primitives (live outside the router for lock-free access)
@@ -500,6 +534,7 @@ pub async fn start_im_bot<R: Runtime>(
     // the Arc is cloned here for the processing loop.
     let peer_locks_for_loop = Arc::clone(&peer_locks);
     let stream_client = create_sidecar_stream_client();
+    let platform_for_loop = config.platform.clone();
 
     let process_handle = tokio::spawn(async move {
         let mut in_flight: JoinSet<()> = JoinSet::new();
@@ -751,7 +786,16 @@ pub async fn start_im_bot<R: Runtime>(
                     }
 
                     if text == "/new" {
+                        // Group auth check: only allowedUsers can /new in groups
+                        if msg.source_type == ImSourceType::Group {
+                            let is_allowed = allowed_users_for_loop.read().await.contains(&msg.sender_id);
+                            if !is_allowed {
+                                continue; // Silently skip unauthorized /new
+                            }
+                        }
                         adapter_for_reply.ack_processing(&chat_id, &message_id).await;
+                        // Clear pending group history so the fresh session doesn't get stale context
+                        group_history_for_loop.lock().await.clear(&session_key);
                         let result = router_clone
                             .lock()
                             .await
@@ -767,6 +811,19 @@ pub async fn start_im_bot<R: Runtime>(
                                 let _ = adapter_for_reply.send_message(&chat_id, &format!("❌ 创建失败: {}", e)).await;
                             }
                         }
+                        continue;
+                    }
+
+                    // Private-only commands: silently skip in group chats (v0.1.28)
+                    // Note: /start and /help are already handled above (before this point),
+                    // so they don't need to be listed here.
+                    if msg.source_type == ImSourceType::Group
+                        && (text.starts_with("/workspace")
+                            || text.starts_with("/model")
+                            || text.starts_with("/provider")
+                            || text.starts_with("/mode")
+                            || text == "/status")
+                    {
                         continue;
                     }
 
@@ -1141,6 +1198,38 @@ pub async fn start_im_bot<R: Runtime>(
                         // No pending approval — fall through to regular message handling
                     }
 
+                    // ── Group access control (v0.1.28) ──────────
+                    if msg.source_type == ImSourceType::Group {
+                        // Check if sender is a whitelisted user OR group is approved
+                        let is_allowed_user = {
+                            let users = allowed_users_for_loop.read().await;
+                            users.contains(&msg.sender_id)
+                        };
+                        let group_approved = {
+                            let perms = group_permissions_for_loop.read().await;
+                            perms.iter().any(|g| g.group_id == msg.chat_id && g.status == GroupPermissionStatus::Approved)
+                        };
+
+                        if !is_allowed_user && !group_approved {
+                            // Not authorized — skip silently
+                            continue;
+                        }
+
+                        // Trigger check: in Mention mode, non-triggered messages go to history buffer
+                        let activation = group_activation_for_loop.read().await.clone();
+                        if activation == GroupActivation::Mention && !msg.is_mention {
+                            group_history_for_loop.lock().await.push(
+                                &session_key,
+                                GroupHistoryEntry {
+                                    sender_name: msg.sender_name.clone().unwrap_or_else(|| msg.sender_id.clone()),
+                                    text: msg.text.clone(),
+                                    timestamp: std::time::Instant::now(),
+                                },
+                            );
+                            continue;
+                        }
+                    }
+
                     // ── Regular message → spawn concurrent task ──────────
                     ulog_info!(
                         "[im] Routing message from {} to Sidecar (session_key={}, {} chars)",
@@ -1165,6 +1254,10 @@ pub async fn start_im_bot<R: Runtime>(
                     let task_locks = Arc::clone(&peer_locks_for_loop);
                     let task_pending_approvals = Arc::clone(&pending_approvals_for_loop);
                     let task_bot_id = bot_id_for_loop.clone();
+                    let task_group_history = Arc::clone(&group_history_for_loop);
+                    let task_group_activation = Arc::clone(&group_activation_for_loop);
+                    let task_group_tools_deny = Arc::clone(&group_tools_deny_for_loop);
+                    let task_group_permissions = Arc::clone(&group_permissions_for_loop);
 
                     in_flight.spawn(async move {
                         // 1. Acquire per-peer lock FIRST (serialize requests to same Sidecar).
@@ -1235,6 +1328,39 @@ pub async fn start_im_bot<R: Runtime>(
                             Vec::new()
                         };
 
+                        // 4d. Group context injection (v0.1.28)
+                        let group_ctx = if msg.source_type == ImSourceType::Group {
+                            // Drain pending history
+                            let history = task_group_history.lock().await.drain(&session_key);
+                            let pending_history = GroupHistoryBuffer::format_as_context(&history);
+                            // Check if this is the first turn for this group session
+                            let is_first_turn = {
+                                let router = task_router.lock().await;
+                                let ps = router.get_peer_session(&session_key);
+                                ps.map_or(true, |p| p.message_count == 0)
+                            };
+                            let activation = task_group_activation.read().await.clone();
+                            let tools_deny = task_group_tools_deny.read().await.clone();
+                            // Get group name from group_permissions config
+                            let group_name = {
+                                let perms = task_group_permissions.read().await;
+                                perms.iter()
+                                    .find(|g| g.group_id == msg.chat_id)
+                                    .map(|g| g.group_name.clone())
+                                    .unwrap_or_else(|| msg.chat_id.clone())
+                            };
+                            Some(GroupStreamContext {
+                                group_name,
+                                platform: msg.platform.clone(),
+                                activation,
+                                is_first_turn,
+                                pending_history,
+                                tools_deny,
+                            })
+                        } else {
+                            None
+                        };
+
                         // 5. SSE stream: route message + stream response to Telegram
                         let penv = task_provider_env.read().await.clone();
                         let task_model_val = task_model.read().await.clone();
@@ -1255,6 +1381,7 @@ pub async fn start_im_bot<R: Runtime>(
                             images,
                             &task_pending_approvals,
                             Some(&task_bot_id),
+                            group_ctx.as_ref(),
                         )
                         .await
                         {
@@ -1338,6 +1465,7 @@ pub async fn start_im_bot<R: Runtime>(
                                         None, // buffered messages don't preserve attachments
                                         &task_pending_approvals,
                                         Some(&task_bot_id),
+                                        None, // buffered messages don't carry group context
                                     )
                                     .await
                                     {
@@ -1388,6 +1516,94 @@ pub async fn start_im_bot<R: Runtime>(
                             }
                         }
                     });
+                }
+                // Handle group lifecycle events (bot added/removed from groups)
+                Some(event) = group_event_rx.recv() => {
+                    match event {
+                        GroupEvent::BotAdded { chat_id, chat_title, platform, added_by_name } => {
+                            ulog_info!("[im] Group event: BotAdded to {} ({})", chat_title, chat_id);
+                            // Create pending GroupPermission
+                            let perm = GroupPermission {
+                                group_id: chat_id.clone(),
+                                group_name: chat_title.clone(),
+                                platform: platform.clone(),
+                                status: GroupPermissionStatus::Pending,
+                                discovered_at: chrono::Utc::now().to_rfc3339(),
+                                added_by: added_by_name.clone(),
+                            };
+                            {
+                                let mut perms = group_permissions_for_loop.write().await;
+                                // Don't downgrade already-approved groups (e.g., platform migration, re-invite while present)
+                                if perms.iter().any(|g| g.group_id == chat_id && g.status == GroupPermissionStatus::Approved) {
+                                    ulog_info!("[im] Group {} already approved, skipping BotAdded", chat_id);
+                                    continue;
+                                }
+                                perms.retain(|g| g.group_id != chat_id);
+                                perms.push(perm.clone());
+                            }
+                            // Persist to config.json
+                            let bid = bot_id_for_loop.clone();
+                            let new_perms = group_permissions_for_loop.read().await.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let patch = BotConfigPatch {
+                                    group_permissions: Some(new_perms),
+                                    ..Default::default()
+                                };
+                                if let Err(e) = persist_bot_config_patch(&bid, &patch) {
+                                    ulog_warn!("[im] Failed to persist group permission: {}", e);
+                                }
+                            });
+                            // Send prompt message to group
+                            let bot_name = health_clone.get_state().await.bot_username
+                                .unwrap_or_else(|| "AI 助手".to_string());
+                            let prompt_msg = format!(
+                                "👋 你好！我是 {}。\n群聊授权申请已发送至管理员，授权后即可使用。\n已绑定的用户可直接 @我 提问。",
+                                bot_name,
+                            );
+                            let _ = adapter_for_reply.send_message(&chat_id, &prompt_msg).await;
+                            // Emit Tauri events
+                            let _ = app_clone.emit("im:group-permission-changed", json!({
+                                "botId": bot_id_for_loop,
+                                "event": "added",
+                                "groupName": chat_title,
+                            }));
+                            let _ = app_clone.emit("im:bot-config-changed", json!({
+                                "botId": bot_id_for_loop,
+                            }));
+                        }
+                        GroupEvent::BotRemoved { chat_id, platform: _ } => {
+                            ulog_info!("[im] Group event: BotRemoved from {}", chat_id);
+                            // Remove group permission record
+                            {
+                                let mut perms = group_permissions_for_loop.write().await;
+                                perms.retain(|g| g.group_id != chat_id);
+                            }
+                            // Clean up group history
+                            {
+                                let session_key = format!("im:{}:group:{}", platform_for_loop, chat_id);
+                                group_history_for_loop.lock().await.clear(&session_key);
+                            }
+                            // Persist
+                            let bid = bot_id_for_loop.clone();
+                            let new_perms = group_permissions_for_loop.read().await.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let patch = BotConfigPatch {
+                                    group_permissions: Some(new_perms),
+                                    ..Default::default()
+                                };
+                                if let Err(e) = persist_bot_config_patch(&bid, &patch) {
+                                    ulog_warn!("[im] Failed to persist group removal: {}", e);
+                                }
+                            });
+                            let _ = app_clone.emit("im:group-permission-changed", json!({
+                                "botId": bot_id_for_loop,
+                                "event": "removed",
+                            }));
+                            let _ = app_clone.emit("im:bot-config-changed", json!({
+                                "botId": bot_id_for_loop,
+                            }));
+                        }
+                    }
                 }
                 // Drain completed tasks (handle panics)
                 Some(result) = in_flight.join_next(), if !in_flight.is_empty() => {
@@ -1546,6 +1762,11 @@ pub async fn start_im_bot<R: Runtime>(
         permission_mode,
         mcp_servers_json,
         allowed_users,
+        // Group Chat (v0.1.28)
+        group_permissions,
+        group_activation,
+        group_tools_deny,
+        group_history,
     });
 
     Ok(status)
@@ -1700,6 +1921,16 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
 // ===== SSE Stream → IM Draft ====
 
 /// Consume Sidecar SSE stream, managing draft message lifecycle for any IM platform.
+/// Group context passed to `stream_to_im` for group chat sessions (v0.1.28).
+struct GroupStreamContext {
+    group_name: String,
+    platform: ImPlatform,
+    activation: GroupActivation,
+    is_first_turn: bool,
+    pending_history: Option<String>,
+    tools_deny: Vec<String>,
+}
+
 /// Each text block → independent IM message (streamed draft edits).
 /// Returns sessionId on success.
 async fn stream_to_im<A: adapter::ImStreamAdapter>(
@@ -1714,6 +1945,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     images: Option<&Vec<serde_json::Value>>,
     pending_approvals: &PendingApprovals,
     bot_id: Option<&str>,
+    group_context: Option<&GroupStreamContext>,
 ) -> Result<Option<String>, RouteError> {
     // Build request body (same as original route_to_sidecar)
     let source = match (&msg.platform, &msg.source_type) {
@@ -1742,6 +1974,26 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     }
     if let Some(bid) = bot_id {
         body["botId"] = json!(bid);
+    }
+    // Group context fields (v0.1.28)
+    if let Some(gc) = group_context {
+        body["sourceType"] = json!("group");
+        body["groupName"] = json!(gc.group_name);
+        body["groupPlatform"] = json!(match gc.platform {
+            ImPlatform::Telegram => "Telegram",
+            ImPlatform::Feishu => "飞书",
+        });
+        body["groupActivation"] = json!(match gc.activation {
+            GroupActivation::Mention => "mention",
+            GroupActivation::Always => "always",
+        });
+        body["isFirstGroupTurn"] = json!(gc.is_first_turn);
+        if let Some(ref history) = gc.pending_history {
+            body["pendingHistory"] = json!(history);
+        }
+        if !gc.tools_deny.is_empty() {
+            body["groupToolsDeny"] = json!(gc.tools_deny);
+        }
     }
     let url = format!("http://127.0.0.1:{}/api/im/chat", port);
     ulog_info!("[im-stream] POST {} (SSE)", url);
@@ -1878,6 +2130,20 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                 }
                 "complete" => {
                     session_id = json_val["sessionId"].as_str().map(String::from);
+                    let silent = json_val["silent"].as_bool().unwrap_or(false);
+
+                    if silent {
+                        // Group "always" mode: AI decided not to reply (NO_REPLY)
+                        // Clean up draft/placeholder without sending anything
+                        if let Some(ref did) = draft_id {
+                            let _ = adapter.delete_message(chat_id, did).await;
+                        }
+                        if let Some(ref pid) = placeholder_id {
+                            let _ = adapter.delete_message(chat_id, pid).await;
+                        }
+                        return Ok(session_id);
+                    }
+
                     // Flush any remaining block text (skip whitespace-only)
                     if !block_text.trim().is_empty() {
                         finalize_block(adapter, chat_id, draft_id.clone(), &block_text).await;
@@ -2262,6 +2528,10 @@ pub async fn cmd_start_im_bot(
         .as_deref()
         .filter(|s| !s.is_empty() && *s != "null")
         .and_then(|s| serde_json::from_str::<types::HeartbeatConfig>(s).ok());
+    // Load persisted group fields from disk so manual start/restart doesn't lose approvals
+    let existing_configs = read_im_configs_from_disk();
+    let existing = existing_configs.iter().find(|(id, _)| id == &botId).map(|(_, c)| c);
+
     let config = ImConfig {
         platform: im_platform,
         bot_token: botToken,
@@ -2276,6 +2546,9 @@ pub async fn cmd_start_im_bot(
         provider_env_json: providerEnvJson,
         mcp_servers_json: mcpServersJson,
         heartbeat_config,
+        group_permissions: existing.map(|c| c.group_permissions.clone()).unwrap_or_default(),
+        group_activation: existing.and_then(|c| c.group_activation.clone()),
+        group_tools_deny: existing.map(|c| c.group_tools_deny.clone()).unwrap_or_default(),
     };
 
     start_im_bot(
@@ -2424,6 +2697,21 @@ fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), 
 
     // NOTE: mcp_servers_json is NOT persisted (runtime only, pushed to Sidecar)
 
+    // Group chat fields (v0.1.28)
+    if let Some(ref perms) = patch.group_permissions {
+        bot["groupPermissions"] = serde_json::json!(perms);
+    }
+    if let Some(ref activation) = patch.group_activation {
+        if activation.is_empty() {
+            if let Some(o) = bot.as_object_mut() { o.remove("groupActivation"); }
+        } else {
+            bot["groupActivation"] = serde_json::json!(activation);
+        }
+    }
+    if let Some(ref tools) = patch.group_tools_deny {
+        bot["groupToolsDeny"] = serde_json::json!(tools);
+    }
+
     // Atomic write
     let new_content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("[im] Cannot serialize config: {}", e))?;
@@ -2466,6 +2754,9 @@ async fn update_bot_config_internal<R: Runtime>(
     let patch_bot_token = patch.bot_token.clone();
     let patch_feishu_id = patch.feishu_app_id.clone();
     let patch_feishu_secret = patch.feishu_app_secret.clone();
+    let patch_group_perms = patch.group_permissions.clone();
+    let patch_group_activation = patch.group_activation.clone();
+    let patch_group_tools_deny = patch.group_tools_deny.clone();
 
     let disk_patch = BotConfigPatch {
         model: patch_model.clone(),
@@ -2483,6 +2774,9 @@ async fn update_bot_config_internal<R: Runtime>(
         feishu_app_secret: patch_feishu_secret,
         enabled: patch_enabled,
         setup_completed: patch_setup,
+        group_permissions: patch_group_perms.clone(),
+        group_activation: patch_group_activation.clone(),
+        group_tools_deny: patch_group_tools_deny.clone(),
     };
     let bid_for_disk = bid.clone();
     tokio::task::spawn_blocking(move || {
@@ -2518,6 +2812,21 @@ async fn update_bot_config_internal<R: Runtime>(
                         *config_arc.write().await = hb;
                     }
                 }
+            }
+
+            // Group chat fields (v0.1.28)
+            if let Some(ref perms) = patch_group_perms {
+                *inst.group_permissions.write().await = perms.clone();
+            }
+            if let Some(ref act) = patch_group_activation {
+                let activation = match act.as_str() {
+                    "always" => GroupActivation::Always,
+                    _ => GroupActivation::Mention,
+                };
+                *inst.group_activation.write().await = activation;
+            }
+            if let Some(ref tools) = patch_group_tools_deny {
+                *inst.group_tools_deny.write().await = tools.clone();
             }
 
             // 4. Sidecar push (model / MCP / workspace / permissionMode)
@@ -2722,5 +3031,138 @@ pub async fn cmd_remove_im_bot_config(
 
     let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));
     ulog_info!("[im] Bot config removed: {}", botId);
+    Ok(())
+}
+
+// ===== Group Permission Commands (v0.1.28) =====
+// Pattern: extract Arc clones under the ManagedImBots lock, drop the lock,
+// then do I/O (disk persist, network send) to avoid blocking other Tauri commands.
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_approve_group(
+    app_handle: AppHandle,
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    groupId: String,
+) -> Result<(), String> {
+    use adapter::ImAdapter;
+
+    let (group_perms, adapter) = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or_else(|| "Bot not running".to_string())?;
+        (Arc::clone(&inst.group_permissions), Arc::clone(&inst.adapter))
+    }; // ManagedImBots lock released here
+
+    // Update permission status to Approved
+    {
+        let mut perms = group_perms.write().await;
+        if let Some(p) = perms.iter_mut().find(|p| p.group_id == groupId) {
+            p.status = GroupPermissionStatus::Approved;
+        } else {
+            return Err(format!("Group {} not found in permissions", groupId));
+        }
+    }
+
+    // Persist (lock-free)
+    let new_perms = group_perms.read().await.clone();
+    let bid = botId.clone();
+    let gid = groupId.clone();
+    tokio::task::spawn_blocking(move || {
+        let patch = BotConfigPatch {
+            group_permissions: Some(new_perms),
+            ..Default::default()
+        };
+        persist_bot_config_patch(&bid, &patch)
+    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+
+    // Send confirmation message to group (lock-free)
+    let _ = adapter.send_message(&groupId, "✅ 群聊已授权！所有成员现在可以 @我 提问互动。").await;
+
+    let _ = app_handle.emit("im:group-permission-changed", json!({ "botId": botId, "event": "approved" }));
+    let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));
+    ulog_info!("[im] Group approved: {} for bot {}", gid, botId);
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_reject_group(
+    app_handle: AppHandle,
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    groupId: String,
+) -> Result<(), String> {
+    let (group_perms, group_history, platform) = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or_else(|| "Bot not running".to_string())?;
+        (Arc::clone(&inst.group_permissions), Arc::clone(&inst.group_history), inst.platform.clone())
+    }; // ManagedImBots lock released here
+
+    // Remove pending permission
+    {
+        let mut perms = group_perms.write().await;
+        perms.retain(|p| p.group_id != groupId);
+    }
+
+    // Clean up group history buffer
+    let session_key = format!("im:{}:group:{}", platform, groupId);
+    group_history.lock().await.clear(&session_key);
+
+    // Persist (lock-free)
+    let new_perms = group_perms.read().await.clone();
+    let bid = botId.clone();
+    tokio::task::spawn_blocking(move || {
+        let patch = BotConfigPatch {
+            group_permissions: Some(new_perms),
+            ..Default::default()
+        };
+        persist_bot_config_patch(&bid, &patch)
+    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+
+    let _ = app_handle.emit("im:group-permission-changed", json!({ "botId": botId, "event": "rejected" }));
+    let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));
+    ulog_info!("[im] Group rejected: {} for bot {}", groupId, botId);
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_remove_group(
+    app_handle: AppHandle,
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    groupId: String,
+) -> Result<(), String> {
+    let (group_perms, group_history, platform) = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or_else(|| "Bot not running".to_string())?;
+        (Arc::clone(&inst.group_permissions), Arc::clone(&inst.group_history), inst.platform.clone())
+    }; // ManagedImBots lock released here
+
+    // Remove approved permission
+    {
+        let mut perms = group_perms.write().await;
+        perms.retain(|p| p.group_id != groupId);
+    }
+
+    // Clean up group history buffer
+    let session_key = format!("im:{}:group:{}", platform, groupId);
+    group_history.lock().await.clear(&session_key);
+
+    // Persist (lock-free)
+    let new_perms = group_perms.read().await.clone();
+    let bid = botId.clone();
+    tokio::task::spawn_blocking(move || {
+        let patch = BotConfigPatch {
+            group_permissions: Some(new_perms),
+            ..Default::default()
+        };
+        persist_bot_config_patch(&bid, &patch)
+    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+
+    let _ = app_handle.emit("im:group-permission-changed", json!({ "botId": botId, "event": "removed" }));
+    let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));
+    ulog_info!("[im] Group removed: {} for bot {}", groupId, botId);
     Ok(())
 }

@@ -161,6 +161,10 @@ pub fn run() {
             im::cmd_get_im_bot_runtime_config,
             im::cmd_add_im_bot_config,
             im::cmd_remove_im_bot_config,
+            // Group permission commands (v0.1.28)
+            im::cmd_approve_group,
+            im::cmd_reject_group,
+            im::cmd_remove_group,
         ])
         .setup(|app| {
             // Initialize logging for all builds
