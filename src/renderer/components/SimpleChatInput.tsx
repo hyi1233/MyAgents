@@ -421,7 +421,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     }
   }, [triggerSkillCopy]);
 
-  // Validate and add image
+  // Validate and add image (resize is handled server-side in enqueueUserMessage)
   const addImage = useCallback((file: File) => {
     if (images.length >= MAX_IMAGES) {
       toastRef.current.warning(`最多只能上传 ${MAX_IMAGES} 张图片`);
@@ -438,11 +438,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
     const reader = new FileReader();
     reader.onload = (e) => {
-      const preview = e.target?.result as string;
+      const dataUrl = e.target?.result as string;
       setImages((prev) => [...prev, {
         id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         file,
-        preview,
+        preview: dataUrl,
       }]);
     };
     reader.readAsDataURL(file);

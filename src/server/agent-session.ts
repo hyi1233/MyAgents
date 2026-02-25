@@ -5,6 +5,7 @@ import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage, type AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir } from './utils/runtime';
 import { getCrossPlatformEnv } from './utils/platform';
+import { resizeImageIfNeeded } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext } from './tools/im-cron-tool';
 
@@ -3103,14 +3104,16 @@ export async function enqueueUserMessage(
   > = [];
 
   // Add images first so Claude can see them before the text query
+  // Images are resized server-side to stay within API limits (max 2000px → 1920px)
   if (hasImages) {
     for (const img of images) {
+      const processed = await resizeImageIfNeeded(img);
       contentBlocks.push({
         type: 'image',
         source: {
           type: 'base64',
-          media_type: img.mimeType,
-          data: img.data,
+          media_type: processed.mimeType,
+          data: processed.data,
         },
       });
     }
