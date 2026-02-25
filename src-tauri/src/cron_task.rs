@@ -1987,10 +1987,7 @@ async fn deliver_cron_result_to_bot(
         }
 
         if port > 0 {
-            let client = reqwest::Client::builder()
-                .no_proxy() // All requests are to local Sidecars (127.0.0.1)
-                .build()
-                .unwrap_or_default();
+            let client = crate::local_http::builder().build().unwrap_or_default();
             let url = format!("http://127.0.0.1:{}/api/im/system-event", port);
             let body = serde_json::json!({
                 "event": "cron_complete",

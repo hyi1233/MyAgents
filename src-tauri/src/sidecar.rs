@@ -1202,9 +1202,8 @@ fn check_sidecar_http_health(port: u16) -> bool {
     let health_url = format!("http://127.0.0.1:{}/health", port);
 
     // Short timeout for quick check - sidecar should respond immediately if healthy
-    let client = match reqwest::blocking::Client::builder()
+    let client = match crate::local_http::blocking_builder()
         .timeout(Duration::from_millis(HTTP_HEALTH_CHECK_TIMEOUT_MS))
-        .no_proxy()
         .build() {
         Ok(c) => c,
         Err(_) => return false,
@@ -2011,9 +2010,8 @@ pub struct BackgroundCompletionResult {
 /// by calling GET /api/session-state
 fn check_sidecar_session_state(port: u16) -> Option<String> {
     let url = format!("http://127.0.0.1:{}/api/session-state", port);
-    let client = match reqwest::blocking::Client::builder()
+    let client = match crate::local_http::blocking_builder()
         .timeout(Duration::from_secs(3))
-        .no_proxy()
         .build() {
         Ok(c) => c,
         Err(_) => return None,
@@ -2775,10 +2773,9 @@ pub async fn execute_cron_task<R: Runtime>(
     );
 
     // Create HTTP client with generous timeout (cron tasks can take long)
-    let client = reqwest::Client::builder()
+    let client = crate::local_http::builder()
         .timeout(Duration::from_secs(3660)) // 61 minutes (slightly more than cron task's 60 min timeout)
         .tcp_nodelay(true)
-        .no_proxy() // Disable proxy for localhost
         .build()
         .map_err(|e| format!("[sidecar] Failed to create HTTP client: {}", e))?;
 

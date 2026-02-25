@@ -173,14 +173,12 @@ async fn connect_sse(
     // Without this, small SSE events may be buffered and delayed, causing UI to feel unresponsive
     // Force HTTP/1.1 for compatibility with Bun server (HTTP/2 may cause connection issues on Windows)
     // Use short-lived connection pool to balance performance and stability
-    // CRITICAL: Disable proxy for localhost - reqwest uses system proxy by default!
-    let client = reqwest::Client::builder()
+    let client = crate::local_http::builder()
         .read_timeout(std::time::Duration::from_secs(SSE_READ_TIMEOUT_SECS))
         .tcp_nodelay(true)
-        .http1_only()  // Force HTTP/1.1 for stability (TODO v0.1.8: test HTTP/2 negotiation)
-        .pool_idle_timeout(std::time::Duration::from_secs(5))  // Recycle idle connections after 5s
-        .pool_max_idle_per_host(2)  // Keep up to 2 connections for reuse
-        .no_proxy()  // Disable proxy for all requests (especially localhost)
+        .http1_only()  // Force HTTP/1.1 for SSE compatibility
+        .pool_idle_timeout(std::time::Duration::from_secs(5))
+        .pool_max_idle_per_host(2)
         .build()
         .map_err(|e| format!("[sse-proxy] Failed to create HTTP client: {}", e))?;
     
@@ -343,14 +341,12 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
     // Enable tcp_nodelay to disable Nagle's algorithm for faster response times
     // Force HTTP/1.1 for compatibility with Bun server (HTTP/2 may cause connection issues on Windows)
     // Use short-lived connection pool to balance performance and stability
-    // CRITICAL: Disable proxy for localhost - reqwest uses system proxy by default!
-    let client = reqwest::Client::builder()
+    let client = crate::local_http::builder()
         .timeout(std::time::Duration::from_secs(HTTP_PROXY_TIMEOUT_SECS))
         .tcp_nodelay(true)
-        .http1_only()  // Force HTTP/1.1 for stability (TODO v0.1.8: test HTTP/2 negotiation)
-        .pool_idle_timeout(std::time::Duration::from_secs(5))  // Recycle idle connections after 5s
-        .pool_max_idle_per_host(2)  // Keep up to 2 connections for reuse
-        .no_proxy()  // Disable proxy for all requests (especially localhost)
+        .http1_only()  // Force HTTP/1.1 for SSE compatibility
+        .pool_idle_timeout(std::time::Duration::from_secs(5))
+        .pool_max_idle_per_host(2)
         .build()
         .map_err(|e| {
             let err = format!("[proxy] Failed to create client: {}", e);

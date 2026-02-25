@@ -391,10 +391,7 @@ async fn wake_bot_handler(
         };
 
         if let Some(port) = port {
-            let client = reqwest::Client::builder()
-                .no_proxy() // All requests are to local Sidecars (127.0.0.1)
-                .build()
-                .unwrap_or_default();
+            let client = crate::local_http::builder().build().unwrap_or_default();
             let body = serde_json::json!({
                 "event": "manual_wake",
                 "content": text,

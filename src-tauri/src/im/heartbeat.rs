@@ -64,11 +64,7 @@ impl HeartbeatRunner {
             bot_label,
             config: Arc::clone(&config),
             last_push_text: Arc::new(Mutex::new(None)),
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(330)) // 5.5 min (heartbeat timeout is 5 min)
-                .no_proxy() // All requests are to local Sidecars (127.0.0.1)
-                .build()
-                .expect("Failed to create heartbeat HTTP client"),
+            http_client: crate::local_http::json_client(Duration::from_secs(330)), // 5.5 min (heartbeat timeout is 5 min)
             executing: Arc::new(Mutex::new(false)),
             current_model,
             mcp_servers_json,

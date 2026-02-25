@@ -4,6 +4,7 @@
 mod commands;
 pub mod cron_task;
 pub mod im;
+pub mod local_http;
 pub mod logger;
 pub mod management_api;
 mod proxy_config;

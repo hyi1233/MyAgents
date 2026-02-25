@@ -73,11 +73,7 @@ pub struct SessionRouter {
 
 /// Create an HTTP client configured for local Sidecar communication.
 pub fn create_sidecar_http_client() -> Client {
-    Client::builder()
-        .timeout(Duration::from_secs(SIDECAR_HTTP_TIMEOUT_SECS))
-        .no_proxy() // All requests are to local Sidecars (127.0.0.1)
-        .build()
-        .expect("Failed to create HTTP client")
+    crate::local_http::json_client(Duration::from_secs(SIDECAR_HTTP_TIMEOUT_SECS))
 }
 
 /// HTTP client for SSE streaming (read_timeout as idle timeout, not overall timeout).
@@ -85,13 +81,7 @@ pub fn create_sidecar_http_client() -> Client {
 /// read_timeout acts as idle timeout: if no bytes arrive within 60s, the connection drops.
 /// Heartbeat from Sidecar is 15s, so 60s provides comfortable margin.
 pub fn create_sidecar_stream_client() -> Client {
-    Client::builder()
-        .read_timeout(Duration::from_secs(60))
-        .tcp_nodelay(true)
-        .http1_only() // Force HTTP/1.1 for SSE compatibility
-        .no_proxy()
-        .build()
-        .expect("Failed to create SSE stream client")
+    crate::local_http::sse_client()
 }
 
 impl SessionRouter {
