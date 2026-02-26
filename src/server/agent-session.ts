@@ -68,7 +68,7 @@ export function getMyAgentsUserDir(): string {
  *
  * Called at session startup (startStreamingSession) and after skill/command CRUD operations.
  */
-export function syncProjectSkills(projectDir: string): void {
+export function syncProjectUserConfig(projectDir: string): void {
   const myagentsDir = getMyAgentsUserDir();
   const isWin = process.platform === 'win32';
 
@@ -171,6 +171,8 @@ export function syncProjectSkills(projectDir: string): void {
       } catch { /* doesn't exist, create it */ }
 
       try {
+        // Note: file symlinks on Windows require Developer Mode (unlike junction for directories).
+        // If this fails, the command won't be available in the project — logged as warning.
         symlinkSync(target, linkPath);
       } catch (err) {
         console.warn(`[command-sync] Failed to symlink command ${entry.name}:`, err);
@@ -869,7 +871,7 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
  * - 'project': <cwd>/.claude/ (project-level config)
  *
  * We use 'project' only:
- * - User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectSkills()
+ * - User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectUserConfig()
  * - Avoids setting CLAUDE_CONFIG_DIR which would break Keychain credential lookup
  * - Project-level: SDK reads project's .claude/skills/, .claude/commands/, CLAUDE.md
  *
@@ -1802,7 +1804,7 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     // DO NOT set CLAUDE_CONFIG_DIR here — it would change the Keychain service name
     // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
-    // into project .claude/skills/ by syncProjectSkills() instead.
+    // into project .claude/skills/ by syncProjectUserConfig() instead.
   };
 
   // Use provided providerEnv or fall back to currentProviderEnv
@@ -3590,7 +3592,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   isPreWarming = preWarm;
   // Sync enabled user-level skills as symlinks into project's .claude/skills/
   // Must happen before buildClaudeSessionEnv() so SDK sees them via settingSources: ['project']
-  syncProjectSkills(agentDir);
+  syncProjectUserConfig(agentDir);
   const env = buildClaudeSessionEnv();
   console.log(`[agent] ${preWarm ? 'pre-warm' : 'start'} session cwd=${agentDir}`);
   shouldAbortSession = false;
@@ -3664,7 +3666,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       enableFileCheckpointing: true,
       maxThinkingTokens: 32_000,
       // Load settings from project scope only (.claude/)
-      // User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectSkills()
+      // User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectUserConfig()
       // CLAUDE_CONFIG_DIR is NOT set — preserves Anthropic subscription Keychain lookup
       settingSources: buildSettingSources(),
       // Permission mode mapping (uses mapToSdkPermissionMode):
@@ -4408,7 +4410,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         const resultText = resultMessage.result || '';
         if (resultText && !currentTurnHasOutput && !currentTurnToolCount) {
           console.warn('[agent] SDK returned result with no API output, surfacing to user:', resultText);
-          broadcast('chat:message-chunk', resultText);
+          if (resultMessage.is_error) {
+            // True SDK error: show as dismissible error banner (not regular assistant text)
+            broadcast('chat:agent-error', { message: resultText });
+          } else {
+            // SDK result without output (e.g. "Unknown skill"): show as message text
+            broadcast('chat:message-chunk', resultText);
+          }
           // Also forward to IM callback (prevents "(No Response)" for non-is_error SDK failures)
           if (imStreamCallback) {
             imStreamCallback('complete', resultText);

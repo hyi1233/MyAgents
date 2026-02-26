@@ -106,7 +106,7 @@ import {
   stripPlaywrightResults,
   setSidecarPort,
   getOpenAiBridgeConfig,
-  syncProjectSkills,
+  syncProjectUserConfig,
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
@@ -3477,7 +3477,7 @@ async function main() {
           writeSkillsConfig(config);
           // Re-sync project skill symlinks if this sidecar has an agentDir
           // (Global Sidecar has no agentDir; Tab Sidecars will sync on next session start)
-          if (agentDir) syncProjectSkills(agentDir);
+          if (agentDir) syncProjectUserConfig(agentDir);
           return jsonResponse({ success: true });
         } catch (error) {
           console.error('[api/skill/toggle-enable] Error:', error);
@@ -3603,7 +3603,7 @@ async function main() {
           }
 
           // Imported user skills — sync symlinks into project
-          if (synced > 0 && agentDir) syncProjectSkills(agentDir);
+          if (synced > 0 && agentDir) syncProjectUserConfig(agentDir);
           return jsonResponse({
             success: true,
             synced,
@@ -3717,7 +3717,7 @@ async function main() {
             writeFileSync(skillPath, content, 'utf-8');
 
             // User skill renamed — re-sync to fix old dangling symlink + create new one
-            if (payload.scope === 'user' && agentDir) syncProjectSkills(agentDir);
+            if (payload.scope === 'user' && agentDir) syncProjectUserConfig(agentDir);
             return jsonResponse({
               success: true,
               path: skillPath,
@@ -3766,7 +3766,7 @@ async function main() {
 
           rmSync(skillDir, { recursive: true, force: true });
           // User skill deleted — re-sync to remove dangling symlinks in project
-          if (scope === 'user' && agentDir) syncProjectSkills(agentDir);
+          if (scope === 'user' && agentDir) syncProjectUserConfig(agentDir);
           return jsonResponse({ success: true });
         } catch (error) {
           console.error('[api/skill] Error:', error);
@@ -3817,7 +3817,7 @@ async function main() {
           writeFileSync(skillPath, content, 'utf-8');
 
           // New user skill — sync symlink into project so SDK can discover it
-          if (payload.scope === 'user' && agentDir) syncProjectSkills(agentDir);
+          if (payload.scope === 'user' && agentDir) syncProjectUserConfig(agentDir);
           return jsonResponse({ success: true, path: skillPath, folderName });
         } catch (error) {
           console.error('[api/skill/create] Error:', error);
@@ -4253,7 +4253,7 @@ async function main() {
             writeFileSync(cmdPath, content, 'utf-8');
 
             // User command renamed — re-sync to fix old dangling symlink + create new one
-            if (payload.scope === 'user' && agentDir) syncProjectSkills(agentDir);
+            if (payload.scope === 'user' && agentDir) syncProjectUserConfig(agentDir);
             return jsonResponse({
               success: true,
               path: cmdPath,
@@ -4300,7 +4300,7 @@ async function main() {
 
           rmSync(cmdPath);
           // User command deleted — re-sync to remove dangling symlinks in project
-          if (scope === 'user' && agentDir) syncProjectSkills(agentDir);
+          if (scope === 'user' && agentDir) syncProjectUserConfig(agentDir);
           return jsonResponse({ success: true });
         } catch (error) {
           console.error('[api/command-item] Error:', error);
@@ -4350,7 +4350,7 @@ async function main() {
           writeFileSync(cmdPath, content, 'utf-8');
 
           // New user command — sync symlink into project so SDK can discover it
-          if (payload.scope === 'user' && agentDir) syncProjectSkills(agentDir);
+          if (payload.scope === 'user' && agentDir) syncProjectUserConfig(agentDir);
           return jsonResponse({ success: true, path: cmdPath, name: fileName });
         } catch (error) {
           console.error('[api/command-item/create] Error:', error);

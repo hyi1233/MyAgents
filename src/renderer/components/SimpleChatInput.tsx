@@ -372,8 +372,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   }, [fetchCommands]);
 
   // Handle user-level skill selection
-  // No-op: user-level skills are synced as symlinks into project .claude/skills/
-  // by syncProjectSkills() at session startup. No per-invocation copy needed.
+  // No-op: user-level skills/commands are synced as symlinks into project .claude/
+  // by syncProjectUserConfig() at session startup. No per-invocation copy needed.
   const handleSkillSelect = useCallback((_cmd: SlashCommand) => {}, []);
 
   // Validate and add image (resize is handled server-side in enqueueUserMessage)
