@@ -1569,7 +1569,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               e.stopPropagation();
                               setShowProviderSubmenu(!showProviderSubmenu);
                             }}
-                            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                            className="flex items-center gap-1 rounded px-2 py-1.5 text-[10px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
                           >
                             <span>{provider?.name ?? '选择供应商'}</span>
                             <ChevronDown className="h-2.5 w-2.5" />
