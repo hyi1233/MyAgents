@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.29] - 2026-02-27
+
+### Added
+- **火山方舟双供应商拆分**：原「火山引擎」拆分为两个独立供应商
+  - 「火山方舟 Coding Plan」：baseUrl `/api/coding`，预设 Doubao Seed 2.0 Code、GLM 4.7、DeepSeek V3.2、Kimi K2.5
+  - 「火山方舟 API调用」：baseUrl `/api/compatible`，预设 Doubao Seed 2.0 Pro/Code Preview/Lite
+- **用户级 Skill 原生可用**：Skill enable/disable 通过 SDK staging directory 过滤，支持项目级 symlink 同步
+- **远程 MCP 连接验证**：新增 SSE/HTTP 类型 MCP 服务器的连接可达性检测
+- **新增阿里云百炼供应商**：Coding Plan 预设，支持 Qwen 3.5 Plus、Kimi K2.5、GLM 5、MiniMax M2.5
+
+### Fixed
+- **系统代理泄漏导致网络超时**：清理继承的代理环境变量 + 禁用 SDK 非必要流量
+- **IM Bot "No conversation found" 死循环**：过期 session 自动重置
+- **飞书 WebSocket 死连接检测**：增加 read timeout 及时发现断线
+- **Skill symlink 完整性**：CRUD 同步 + 悬空清理 + 死代码清除
+- **全局 Command 同步到项目目录**：SDK 静默错误在持久 Session 中可靠展示
+- **供应商切换按钮可点击区域过小**：增大 hover/click 区域提升交互体验
+
+### Changed
+- **Skill 同步改用项目级 symlink**：避免 CLAUDE_CONFIG_DIR 破坏订阅认证
+- **Code Review 修复**：is_error 错误样式 + 函数重命名 + Windows 注释
+
+---
+
 ## [0.1.28] - 2026-02-26
 
 ### Added
