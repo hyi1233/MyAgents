@@ -1578,7 +1578,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       </div>
                       {/* Provider submenu - opens upward */}
                       {showProviderSubmenu && providers.length > 0 && (
-                        <div className="absolute right-0 bottom-full mb-1 w-48 rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl py-1 z-10">
+                        <div className="absolute right-0 bottom-full mb-1 w-56 max-h-80 overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl py-1 z-10">
                           {providers.map((p) => {
                             const available = isProviderAvailable(p);
                             return (
@@ -1596,7 +1596,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   }
                                 }}
                                 disabled={!available}
-                                className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm ${!available
+                                className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm ${!available
                                   ? 'opacity-50 cursor-not-allowed text-[var(--ink-muted)]'
                                   : provider?.id === p.id
                                     ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
@@ -1604,10 +1604,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   }`}
                                 title={!available
                                   ? (p.type === 'subscription' ? '请在设置页面验证订阅状态' : '请在设置面板配置您的 API-Key')
-                                  : undefined}
+                                  : p.name}
                               >
-                                <span className="font-medium">{p.name}</span>
-                                <span className="text-[9px] text-[var(--ink-muted)] bg-[var(--paper-contrast)] px-1 py-0.5 rounded">
+                                <span className="font-medium truncate">{p.name}</span>
+                                <span className="text-[9px] text-[var(--ink-muted)] bg-[var(--paper-contrast)] px-1 py-0.5 rounded shrink-0">
                                   {p.cloudProvider}
                                 </span>
                               </button>
