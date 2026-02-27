@@ -439,6 +439,49 @@ function writeAgentBrowserWrapper(cliPath: string): boolean {
 }
 
 /**
+ * Ensure Chromium is installed via agent-browser's own playwright-core.
+ * This avoids version mismatch (agent-browser pins a specific Chromium build).
+ * See: https://github.com/vercel-labs/agent-browser/issues/107
+ *
+ * Runs in the background — does not block caller.
+ * @param cliPath Path to agent-browser.js (used to locate node_modules/playwright-core)
+ */
+let chromiumInstallChecked = false;
+function ensureChromiumInstalled(cliPath: string): void {
+  if (chromiumInstallChecked) return;
+  chromiumInstallChecked = true;
+
+  // cliPath: .../agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
+  // We need:  .../agent-browser-cli/node_modules/playwright-core/cli.js
+  const nodeModulesDir = resolve(cliPath, '..', '..', '..');
+  const playwrightCli = join(nodeModulesDir, 'playwright-core', 'cli.js');
+  if (!existsSync(playwrightCli)) {
+    console.log('[agent-browser] playwright-core CLI not found, skipping Chromium install');
+    return;
+  }
+
+  // `playwright install chromium` is idempotent — skips if already present, fast (~1s).
+  // No need for manual directory checks; let playwright handle version matching.
+  console.log('[agent-browser] Ensuring Chromium is installed via bundled playwright-core...');
+  const bunPath = getBundledRuntimePath();
+  const chromiumProc = Bun.spawn([bunPath, playwrightCli, 'install', 'chromium'], {
+    cwd: nodeModulesDir,
+    stdout: 'ignore',
+    stderr: 'pipe',
+  });
+  chromiumProc.exited.then(async (code) => {
+    if (code === 0) {
+      console.log('[agent-browser] Chromium ready');
+    } else {
+      const stderr = await new Response(chromiumProc.stderr).text();
+      console.warn(`[agent-browser] Chromium install failed (exit ${code}):`, stderr.slice(0, 500));
+    }
+  }).catch((err) => {
+    console.error('[agent-browser] Chromium install error:', err);
+  });
+}
+
+/**
  * Auto-install agent-browser to ~/.myagents/agent-browser-cli/ using bundled bun or system npm.
  * Runs in the background so it doesn't block Sidecar startup.
  */
@@ -503,26 +546,7 @@ function autoInstallAgentBrowser(): void {
       return;
     }
     writeAgentBrowserWrapper(cliPath);
-
-    // Install Chromium using agent-browser's own playwright-core (avoids version mismatch).
-    // See: https://github.com/vercel-labs/agent-browser/issues/107
-    const playwrightCli = join(installDir, 'node_modules', 'playwright-core', 'cli.js');
-    if (existsSync(playwrightCli)) {
-      console.log('[agent-browser] Installing Chromium via bundled playwright-core...');
-      const bunPath = getBundledRuntimePath();
-      const chromiumProc = Bun.spawn([bunPath, playwrightCli, 'install', 'chromium'], {
-        cwd: installDir,
-        stdout: 'ignore',
-        stderr: 'pipe',
-      });
-      const chromiumCode = await chromiumProc.exited;
-      if (chromiumCode === 0) {
-        console.log('[agent-browser] Chromium installed successfully');
-      } else {
-        const stderr = await new Response(chromiumProc.stderr).text();
-        console.warn(`[agent-browser] Chromium install failed (exit ${chromiumCode}):`, stderr.slice(0, 500));
-      }
-    }
+    ensureChromiumInstalled(cliPath);
     rmSync(lockFile, { force: true });
   }).catch((err) => {
     rmSync(lockFile, { force: true });
@@ -535,6 +559,7 @@ function setupAgentBrowserWrapper(): void {
     const cliPath = getAgentBrowserCliPath();
     if (cliPath) {
       writeAgentBrowserWrapper(cliPath);
+      ensureChromiumInstalled(cliPath);  // Background — won't block startup
       return;
     }
 
