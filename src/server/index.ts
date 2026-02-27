@@ -446,22 +446,32 @@ function writeAgentBrowserWrapper(cliPath: string): boolean {
  * Runs in the background — does not block caller.
  * @param cliPath Path to agent-browser.js (used to locate node_modules/playwright-core)
  */
-let chromiumInstallChecked = false;
+/**
+ * Check whether Chromium needs installing, using a file-system lock so only one
+ * Sidecar process across the whole app performs the download.
+ */
 function ensureChromiumInstalled(cliPath: string): void {
-  if (chromiumInstallChecked) return;
-  chromiumInstallChecked = true;
-
   // cliPath: .../agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
   // We need:  .../agent-browser-cli/node_modules/playwright-core/cli.js
   const nodeModulesDir = resolve(cliPath, '..', '..', '..');
   const playwrightCli = join(nodeModulesDir, 'playwright-core', 'cli.js');
-  if (!existsSync(playwrightCli)) {
-    console.log('[agent-browser] playwright-core CLI not found, skipping Chromium install');
-    return;
-  }
+  if (!existsSync(playwrightCli)) return;
 
-  // `playwright install chromium` is idempotent — skips if already present, fast (~1s).
-  // No need for manual directory checks; let playwright handle version matching.
+  // File-system lock: only one process installs; others skip.
+  const homeDir = getHomeDirOrNull();
+  if (!homeDir) return;
+  const lockFile = join(homeDir, '.myagents', '.chromium-installing');
+  if (existsSync(lockFile)) {
+    try {
+      const lockTime = statSync(lockFile).mtimeMs;
+      if (Date.now() - lockTime < 10 * 60 * 1000) return; // another process is working (<10 min)
+      rmSync(lockFile, { force: true }); // stale lock
+    } catch { return; }
+  }
+  try {
+    writeFileSync(lockFile, String(process.pid), { flag: 'wx' }); // exclusive create
+  } catch { return; } // another process won the race
+
   console.log('[agent-browser] Ensuring Chromium is installed via bundled playwright-core...');
   const bunPath = getBundledRuntimePath();
   const chromiumProc = Bun.spawn([bunPath, playwrightCli, 'install', 'chromium'], {
@@ -470,6 +480,7 @@ function ensureChromiumInstalled(cliPath: string): void {
     stderr: 'pipe',
   });
   chromiumProc.exited.then(async (code) => {
+    rmSync(lockFile, { force: true });
     if (code === 0) {
       console.log('[agent-browser] Chromium ready');
     } else {
@@ -477,6 +488,7 @@ function ensureChromiumInstalled(cliPath: string): void {
       console.warn(`[agent-browser] Chromium install failed (exit ${code}):`, stderr.slice(0, 500));
     }
   }).catch((err) => {
+    rmSync(lockFile, { force: true });
     console.error('[agent-browser] Chromium install error:', err);
   });
 }
