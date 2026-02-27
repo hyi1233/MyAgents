@@ -3911,13 +3911,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     console.log('[agent] session started');
     console.log('[agent] starting for-await loop on querySession');
 
-    // Startup timeout: if no SDK message arrives within 60s, abort
+    // Startup timeout: if no system_init arrives within 60s, abort.
+    // IMPORTANT: Only system_init clears this timeout, NOT other messages like rate_limit_event.
+    // Otherwise a rate_limit_event arriving before system_init would cancel the timeout,
+    // leaving the session as a zombie (stuck in for-await loop forever without system_init).
     const STARTUP_TIMEOUT_MS = 60_000;
-    let firstMessageReceived = false;
+    let systemInitReceived = false;
 
     startupTimeoutId = setTimeout(() => {
-        if (!firstMessageReceived && !shouldAbortSession) {
-            console.error(`[agent] Startup timeout: no SDK message in ${STARTUP_TIMEOUT_MS / 1000}s`);
+        if (!systemInitReceived && !shouldAbortSession) {
+            console.error(`[agent] Startup timeout: no system_init in ${STARTUP_TIMEOUT_MS / 1000}s`);
             abortedByTimeout = true;
             if (!isPreWarming) {
                 broadcast('chat:agent-error', {
@@ -3935,10 +3938,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     for await (const sdkMessage of querySession) {
       messageCount++;
-      if (!firstMessageReceived) {
-          firstMessageReceived = true;
-          clearTimeout(startupTimeoutId);
-      }
       console.log(`[agent][sdk] message #${messageCount} type=${sdkMessage.type}`);
       try {
         const line = `${new Date().toISOString()} ${JSON.stringify(sdkMessage)}`;
@@ -3949,6 +3948,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       }
       const nextSystemInit = parseSystemInitInfo(sdkMessage);
       if (nextSystemInit) {
+        // system_init received — clear startup timeout
+        if (!systemInitReceived) {
+          systemInitReceived = true;
+          clearTimeout(startupTimeoutId);
+        }
         systemInitInfo = nextSystemInit;
         // Buffer system_init during pre-warm; replay when first user message arrives
         if (!isPreWarming) {
