@@ -1817,6 +1817,14 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     essentialPaths.push(bundledBunDir);
   }
 
+  // MyAgents bin directory (agent-browser wrapper etc.)
+  if (home) {
+    const myagentsBinDir = isWindows
+      ? resolve(home, '.myagents', 'bin')
+      : `${home}/.myagents/bin`;
+    essentialPaths.push(myagentsBinDir);
+  }
+
   // System bun/runtime installations (fallback)
   if (isWindows) {
     // Windows paths

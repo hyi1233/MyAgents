@@ -332,6 +332,24 @@ try {
     Copy-Item "$sdkSrc\vendor" $sdkDest -Recurse -Force
     Write-Host "    OK - SDK 依赖复制完成" -ForegroundColor Green
 
+    # 预装 agent-browser CLI
+    Write-Host "  预装 agent-browser CLI..." -ForegroundColor Cyan
+    $agentBrowserDir = Join-Path $ProjectDir "src-tauri\resources\agent-browser-cli"
+    if (Test-Path $agentBrowserDir) {
+        Remove-Item -Recurse -Force $agentBrowserDir
+    }
+    New-Item -ItemType Directory -Path $agentBrowserDir -Force | Out-Null
+    & npm install --prefix $agentBrowserDir agent-browser@0.15.1 --omit=dev
+    if ($LASTEXITCODE -ne 0) {
+        throw "agent-browser 预装失败"
+    }
+    # 删除不需要的 Rust native binary（使用 Bun + JS fallback）
+    $nativeBins = Get-ChildItem -Path "$agentBrowserDir\node_modules\agent-browser\bin" -Filter "agent-browser-*" -ErrorAction SilentlyContinue
+    if ($nativeBins) {
+        $nativeBins | Remove-Item -Force
+    }
+    Write-Host "    OK - agent-browser CLI 预装完成" -ForegroundColor Green
+
     # 构建前端 (增加内存限制避免 OOM)
     Write-Host "  构建前端..." -ForegroundColor Cyan
     $env:NODE_OPTIONS = "--max-old-space-size=4096"

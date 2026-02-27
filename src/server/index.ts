@@ -112,7 +112,7 @@ import {
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
-import { getScriptDir } from './utils/runtime';
+import { getScriptDir, getAgentBrowserCliPath, getBundledRuntimePath } from './utils/runtime';
 import { buildDirectoryTree, expandDirectory } from './dir-info';
 import {
   createSession,
@@ -401,6 +401,49 @@ function seedBundledSkills(): void {
     }
   } catch (err) {
     console.error('[seed] Error seeding bundled skills:', err);
+  }
+}
+
+/**
+ * Generate wrapper script for agent-browser CLI in ~/.myagents/bin/.
+ * This makes `agent-browser` available as a bare command in SDK subprocess PATH.
+ * The wrapper delegates to `{bun} {agent-browser.js}`.
+ */
+function setupAgentBrowserWrapper(): void {
+  try {
+    const cliPath = getAgentBrowserCliPath();
+    if (!cliPath) {
+      console.log('[agent-browser] CLI not found, skipping wrapper setup');
+      return;
+    }
+
+    const bunPath = getBundledRuntimePath();
+    const homeDir = getHomeDirOrNull();
+    if (!homeDir) {
+      console.warn('[agent-browser] Home directory not found, skipping wrapper setup');
+      return;
+    }
+    const binDir = join(homeDir, '.myagents', 'bin');
+
+    if (!existsSync(binDir)) mkdirSync(binDir, { recursive: true });
+
+    const isWin = process.platform === 'win32';
+
+    if (isWin) {
+      // Windows: generate .cmd wrapper
+      const wrapperPath = join(binDir, 'agent-browser.cmd');
+      const content = `@"${bunPath}" "${cliPath}" %*\r\n`;
+      writeFileSync(wrapperPath, content);
+    } else {
+      // macOS/Linux: generate shell wrapper
+      const wrapperPath = join(binDir, 'agent-browser');
+      const content = `#!/bin/sh\nexec "${bunPath}" "${cliPath}" "$@"\n`;
+      writeFileSync(wrapperPath, content, { mode: 0o755 });
+    }
+
+    console.log(`[agent-browser] Wrapper created: ${binDir}/agent-browser`);
+  } catch (err) {
+    console.error('[agent-browser] Error setting up wrapper:', err);
   }
 }
 
@@ -693,6 +736,9 @@ async function main() {
 
   // Seed bundled skills to ~/.myagents/skills/ on first launch
   seedBundledSkills();
+
+  // Generate agent-browser CLI wrapper in ~/.myagents/bin/
+  setupAgentBrowserWrapper();
 
   await initializeAgent(currentAgentDir, initialPrompt, initialSessionId);
 

@@ -6,7 +6,7 @@
  */
 
 import { existsSync } from 'fs';
-import { dirname, resolve } from 'path';
+import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 /**
@@ -247,6 +247,35 @@ export function getBundledRuntimePath(): string {
 
   // Last resort fallback - rely on PATH
   return 'node';
+}
+
+/**
+ * Get the path to the bundled agent-browser CLI entry point (agent-browser.js).
+ *
+ * Directory structure:
+ * - Production (macOS): Contents/Resources/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
+ * - Production (Windows): <install-dir>/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
+ * - Development: <project-root>/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
+ *
+ * @returns Absolute path to agent-browser.js, or null if not found
+ */
+export function getAgentBrowserCliPath(): string | null {
+  const scriptDir = getScriptDir();
+  const relPath = join('agent-browser-cli', 'node_modules', 'agent-browser', 'bin', 'agent-browser.js');
+
+  // Production: agent-browser-cli is alongside server-dist.js in Resources
+  const prodPath = resolve(scriptDir, relPath);
+  if (existsSync(prodPath)) return prodPath;
+
+  // Development: walk up from scriptDir to find agent-browser-cli at project root
+  let dir = scriptDir;
+  for (let i = 0; i < 5; i++) {
+    const devPath = resolve(dir, relPath);
+    if (existsSync(devPath)) return devPath;
+    dir = dirname(dir);
+  }
+
+  return null;
 }
 
 /**

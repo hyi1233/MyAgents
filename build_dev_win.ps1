@@ -127,6 +127,12 @@ if (-not (Test-Path $resourcesDir)) {
 }
 "// dev placeholder" | Out-File -FilePath (Join-Path $PROJECT_DIR "src-tauri/resources/server-dist.js") -Encoding UTF8
 
+# agent-browser-cli 占位符目录（满足 tauri build 资源校验）
+$agentBrowserPlaceholder = Join-Path $PROJECT_DIR "src-tauri/resources/agent-browser-cli"
+if (-not (Test-Path $agentBrowserPlaceholder)) {
+    New-Item -ItemType Directory -Path $agentBrowserPlaceholder -Force | Out-Null
+}
+
 Write-ColorOutput "✓ 已清理并创建占位符" "Green"
 Write-Host ""
 

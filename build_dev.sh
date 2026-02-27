@@ -63,6 +63,7 @@ echo -e "${BLUE}[准备] 清理旧构建...${NC}"
 rm -rf "${PROJECT_DIR}/dist"
 # 创建占位符资源 (关键: 满足 tauri build 需求，但 sidecar.rs 在 debug 模式下会忽略它们)
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/claude-agent-sdk"
+mkdir -p "${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
 echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/server-dist.js"
 
 # 清理 debug 构建产物（确保 resources 被重新复制）

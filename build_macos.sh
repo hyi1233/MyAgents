@@ -226,6 +226,21 @@ cp "${SDK_SRC}/sdk.mjs" "${SDK_DEST}/"
 cp "${SDK_SRC}"/*.wasm "${SDK_DEST}/"
 cp -R "${SDK_SRC}/vendor" "${SDK_DEST}/"
 
+# 预装 agent-browser CLI
+echo -e "  ${CYAN}预装 agent-browser CLI...${NC}"
+AGENT_BROWSER_DIR="${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
+rm -rf "${AGENT_BROWSER_DIR}"
+mkdir -p "${AGENT_BROWSER_DIR}"
+npm install --prefix "${AGENT_BROWSER_DIR}" agent-browser@0.15.1 --omit=dev
+if [ $? -ne 0 ]; then
+    echo -e "${RED}✗ agent-browser 预装失败${NC}"
+    exit 1
+fi
+chmod 755 "${AGENT_BROWSER_DIR}/node_modules/agent-browser/bin/agent-browser.js"
+# 删除不需要的 Rust native binary（使用 Bun + JS fallback）
+rm -rf "${AGENT_BROWSER_DIR}/node_modules/agent-browser/bin/agent-browser-"* 2>/dev/null || true
+echo -e "${GREEN}  ✓ agent-browser CLI 预装完成${NC}"
+
 # 构建前端
 echo -e "  ${CYAN}构建前端...${NC}"
 bun run build:web
