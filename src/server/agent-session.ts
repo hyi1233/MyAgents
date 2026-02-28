@@ -107,7 +107,8 @@ export function syncProjectUserConfig(projectDir: string): void {
         // Disabled: remove symlink if we created one (never remove real dirs)
         try {
           if (existsSync(linkPath) && lstatSync(linkPath).isSymbolicLink()) {
-            rmSync(linkPath);
+            // recursive: true needed on Windows — junctions are directories, rmSync() alone throws EPERM
+            rmSync(linkPath, { recursive: true });
           }
         } catch { /* ignore */ }
         continue;
@@ -117,7 +118,7 @@ export function syncProjectUserConfig(projectDir: string): void {
       try {
         if (existsSync(linkPath)) {
           if (!lstatSync(linkPath).isSymbolicLink()) continue; // real dir, skip
-          rmSync(linkPath); // stale symlink, recreate
+          rmSync(linkPath, { recursive: true }); // recursive for Windows junctions
         }
       } catch { /* doesn't exist, create it */ }
 
@@ -138,7 +139,7 @@ export function syncProjectUserConfig(projectDir: string): void {
           const target = readlinkSync(linkPath);
           const resolvedTarget = resolve(projectSkillsDir, target);
           if (resolvedTarget.startsWith(userSkillsDir + sep) && !managedSkillNames.has(entry.name)) {
-            rmSync(linkPath);
+            rmSync(linkPath, { recursive: true });
           }
         } catch { /* ignore individual errors */ }
       }
