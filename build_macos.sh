@@ -252,6 +252,11 @@ fi
 # npm 包内含全平台 native binary，仅保留 darwin 的（删除 linux/win32 避免公证扫描）
 AB_BIN_DIR="${AGENT_BROWSER_DIR}/node_modules/agent-browser/bin"
 rm -f "${AB_BIN_DIR}/agent-browser-linux-"* "${AB_BIN_DIR}/agent-browser-win32-"* 2>/dev/null || true
+# 验证非 darwin 二进制已全部删除
+if find "${AB_BIN_DIR}" -type f \( -name "agent-browser-linux-*" -o -name "agent-browser-win32-*" \) | grep -q .; then
+    echo -e "${RED}✗ 删除非 darwin agent-browser 二进制失败${NC}"
+    exit 1
+fi
 chmod 755 "${AB_BIN_DIR}"/agent-browser-darwin-* 2>/dev/null || true
 # 验证 native binary 存在
 NATIVE_BIN="${AB_BIN_DIR}/agent-browser-darwin-$(uname -m)"

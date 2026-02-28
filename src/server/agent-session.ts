@@ -168,7 +168,7 @@ export function syncProjectUserConfig(projectDir: string): void {
       try {
         if (existsSync(linkPath)) {
           if (!lstatSync(linkPath).isSymbolicLink()) continue; // real file, skip
-          rmSync(linkPath); // stale symlink, recreate
+          rmSync(linkPath, { recursive: true }); // stale symlink, recreate
         }
       } catch { /* doesn't exist, create it */ }
 
@@ -190,7 +190,7 @@ export function syncProjectUserConfig(projectDir: string): void {
           const target = readlinkSync(linkPath);
           const resolvedTarget = resolve(projectCommandsDir, target);
           if (resolvedTarget.startsWith(userCommandsDir + sep) && !managedCommandFiles.has(entry.name)) {
-            rmSync(linkPath);
+            rmSync(linkPath, { recursive: true });
           }
         } catch { /* ignore individual errors */ }
       }
@@ -579,69 +579,6 @@ let currentMcpServers: McpServerDefinition[] | null = null;
 // Current sub-agent definitions (set per-query via /api/agents/set)
 // null = no agents configured, {} = explicitly set to none
 let currentAgentDefinitions: Record<string, AgentDefinition> | null = null;
-
-// Preset MCP servers (same as renderer/config/types.ts)
-const PRESET_MCP_SERVERS: McpServerDefinition[] = [
-  {
-    id: 'playwright',
-    name: 'Playwright 浏览器',
-    description: '浏览器自动化能力，支持网页浏览、截图、表单填写等',
-    type: 'stdio',
-    command: 'npx',
-    // --user-data-dir is configured by user via config.mcpServerArgs for browser state persistence
-    args: ['@playwright/mcp@latest'],
-    env: {},
-    isBuiltin: true,
-  },
-];
-
-/**
- * Load MCP config from ~/.myagents/config.json
- * This provides a file-based approach that works across all sidecars
- */
-function loadMcpServersFromConfig(): McpServerDefinition[] {
-  if (isDebugMode) console.log('[agent] ==> loadMcpServersFromConfig() called');
-  try {
-    const configPath = join(getMyAgentsUserDir(), 'config.json');
-    if (isDebugMode) console.log('[agent] Config path:', configPath);
-
-    if (!existsSync(configPath)) {
-      if (isDebugMode) console.log('[agent] No MCP config file found at:', configPath);
-      return [];
-    }
-
-    // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic fs import for config loading
-    const content = require('fs').readFileSync(configPath, 'utf-8');
-    const config = JSON.parse(content);
-
-    // Get globally enabled server IDs
-    const globalEnabledIds: string[] = config.mcpEnabledServers ?? [];
-    if (globalEnabledIds.length === 0) {
-      if (isDebugMode) console.log('[agent] No MCP servers enabled globally');
-      return [];
-    }
-
-    // Get custom servers from config + preset servers
-    const customServers: McpServerDefinition[] = config.mcpServers ?? [];
-    const allServers = [...PRESET_MCP_SERVERS, ...customServers];
-
-    // Filter to only globally enabled servers
-    const enabledServers = allServers.filter(s => globalEnabledIds.includes(s.id));
-
-    // Apply server-specific args and env overrides
-    const serverArgsConfig: Record<string, string[]> = config.mcpServerArgs ?? {};
-    const serverEnvConfig: Record<string, Record<string, string>> = config.mcpServerEnv ?? {};
-
-    return enabledServers.map(server => ({
-      ...server,
-      args: [...(server.args ?? []), ...(serverArgsConfig[server.id] ?? [])],
-      env: { ...server.env, ...(serverEnvConfig[server.id] ?? {}) }
-    }));
-  } catch (error) {
-    console.error('[agent] Failed to load MCP config from file:', error);
-    return [];
-  }
-}
 
 /**
  * Hot-reload proxy configuration into the current process environment.

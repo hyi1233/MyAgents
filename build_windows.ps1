@@ -366,6 +366,11 @@ try {
     $abBinDir = Join-Path $agentBrowserDir "node_modules\agent-browser\bin"
     Get-ChildItem -Path $abBinDir -Filter "agent-browser-darwin-*" -ErrorAction SilentlyContinue | Remove-Item -Force
     Get-ChildItem -Path $abBinDir -Filter "agent-browser-linux-*" -ErrorAction SilentlyContinue | Remove-Item -Force
+    # 验证非 win32 二进制已全部删除
+    $leaked = Get-ChildItem -Path $abBinDir -Filter "agent-browser-*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "agent-browser-win32-*" -and $_.Name -ne "agent-browser.js" }
+    if ($leaked) {
+        throw "删除非 win32 agent-browser 二进制失败: $($leaked.Name -join ', ')"
+    }
     # 验证 native binary 存在
     $nativeBin = Join-Path $abBinDir "agent-browser-win32-x64.exe"
     if (-not (Test-Path $nativeBin)) {
