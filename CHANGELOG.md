@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.30] - 2026-02-28
+
+### Added
+- **agent-browser 内置浏览器自动化**：集成 agent-browser CLI 作为内置技能，支持网页截图、表单填写、数据提取
+  - Chromium 自动安装（文件锁防并发）
+  - 开发模式自动安装 + 首次使用提示
+  - 项目技能右键「同步至全局技能」
+- **IM Bot 多媒体发送**：SDK 自定义工具 send_media，支持发送图片/文档到 IM
+- **代理配置热更新**：Settings 修改代理后实时传播到所有运行中 Sidecar
+- **MCP 添加面板 JSON 批量导入**：支持一次性导入多个 MCP 服务器 + DDG-Search 预设
+- **工作区右键「用默认应用打开」**：文件可用系统默认程序打开
+- **检测并清除 settings.json 环境变量覆盖**：防止 CLAUDE_CONFIG_DIR 等覆盖影响认证
+
+### Fixed
+- **Windows agent-browser 命令找不到**：SDK 使用 Git Bash 不识别 .cmd，改为同时创建 .cmd + POSIX sh 双 wrapper
+- **构建脚本 agent-browser 预装卡死**：bun add 解析 200+ 依赖树无限挂起，改用预生成 lockfile 秒级安装
+- **macOS 公证失败**：签名 agent-browser-cli 的 bare-fs/bare-os/bare-url .bare 原生二进制
+- **构建脚本版本一致性校验**：index.ts 与 lockfile 版本不匹配时 fail fast + 签名失败硬中断
+- **新会话首条消息 loading 状态闪断**：isStreamingRef 防止 session ID 升级时误触 loadSession
+- **Global Sidecar pre-warm 僵尸**：仅 system_init 才清除启动超时，防止 rate_limit_event 误清
+- **Windows 文件重命名导致文件被移到 AppData 目录**
+- **供应商选择菜单溢出**：定高滚动 + 加宽 + 单行截断
+- **工作区文件树大目录无法展开**：提升条目上限至 50000
+- **macOS 全屏退出后 Tab 遮挡红绿灯**：双重延迟检测窗口状态
+
+### Changed
+- **Code Review 修复**：9 项问题修复 + ensureChromiumInstalled 文件锁重构
+
+---
+
 ## [0.1.29] - 2026-02-27
 
 ### Added
