@@ -476,12 +476,11 @@ Anti-detection defaults are pre-configured in `~/.myagents/agent-browser.json` �
 **If a site still blocks:** override per-command with CLI flags (temporary), or edit the config file (persistent). CLI flags always override the config file.
 
 ```bash
-# Temporary: override UA or window size for one command
+# Temporary: override UA for one command
 agent-browser --user-agent "custom UA" open https://target.com
-agent-browser --args "--window-size=1920,1080" open https://target.com
 ```
 
-**Persistent config edits:** edit `~/.myagents/agent-browser.json`. Remove `"_managed_by": "myagents"` to prevent app from overwriting changes. `args` uses **newline** (`\n`) as separator (not comma — `--window-size=1440,900` contains a comma). All CLI flags map to camelCase keys (`--executable-path` → `executablePath`).
+**Persistent config edits:** edit `~/.myagents/agent-browser.json`. Remove `"_managed_by": "myagents"` to prevent app from overwriting changes. `args` field is split by **both comma and newline** — avoid args containing commas (e.g. `--window-size=W,H` will be split incorrectly; use `--start-maximized` instead). All CLI flags map to camelCase keys (`--executable-path` → `executablePath`).
 
 Config priority (lowest → highest): `~/.agent-browser/config.json` < `./agent-browser.json` < env vars < CLI flags.
 

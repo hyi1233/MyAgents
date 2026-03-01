@@ -1034,12 +1034,8 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
       const mcpConfig: SdkMcpServerConfig = {
         command,
         args,
+        env: mcpEnv,  // Always set: proxy vars are stripped above
       };
-
-      // Only set env if we have any overrides
-      if (Object.keys(mcpEnv).length > 0) {
-        mcpConfig.env = mcpEnv;
-      }
 
       result[server.id] = mcpConfig;
     } else if ((server.type === 'sse' || server.type === 'http') && server.url) {
