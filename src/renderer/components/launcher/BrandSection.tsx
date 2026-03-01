@@ -125,7 +125,7 @@ export default memo(function BrandSection({
                     />
                 </div>
                 {!hasAnyProvider && (
-                    <p className="mt-3 text-center text-[13px] text-[var(--ink-muted)]">
+                    <p className="mt-6 text-center text-[13px] text-[var(--ink-muted)]">
                         ✨ 只需一步，即刻开启 AI 之旅 —
                         <button
                             type="button"
