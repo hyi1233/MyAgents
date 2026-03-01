@@ -155,7 +155,7 @@ export function ensureBrowserStealthConfig(): void {
     } catch { /* corrupt file, overwrite */ }
   }
 
-  const profileDir = join(homeDir, '.myagents', 'browser-profile');
+  const profileDir = join(homeDir, '.playwright-mcp-profile');
   const locale = detectSystemLocale();
 
   // Build Chrome launch args for anti-detection.
