@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.32] - 2026-03-02
+
+### Added
+- **AI 智能 Bug 上报**：一键向开发者报告问题，AI 自动收集运行日志、系统环境、对话上下文，生成结构化 Bug Report
+  - 支持图片上传、粘贴和拖拽附加截图
+  - 模型菜单只显示可用 provider，无可用 provider 时引导跳转设置
+  - 重构为 bundled-agents 文件化架构（`bundled-agents/myagents_helper/`）
+- **内置助手 v2**：全新 `myagents_helper` Agent，增加产品定位与开发者愿景、工作区写保护约束
+- **Launcher 无 Provider 引导**：未配置任何 API Key 时显示「配置模型供应商」引导入口
+
+### Fixed
+- **RecentTasks 显示数量修复**：列表条目计数逻辑修正
+- **关闭 AI 对话中的 Tab**：不再弹确认框，改为 toast 提示
+- **`.gitignore` 修正**：只忽略根目录 `.claude/`，允许子目录 `.claude/` 被 Git 跟踪
+
+### Changed
+- **统一系统提示词架构**：重构为三层 Prompt 架构（L1 基础身份 + L2 交互方式 + L3 场景指令），所有场景统一使用 append 模式
+  - AI 始终知道自己运行在 MyAgents 产品中（桌面聊天、IM Bot、Cron 任务）
+  - 旧 SystemPromptConfig（preset/replace/append 三模式）替换为 InteractionScenario 类型
+  - IM Bot 启动时传递 botName，AI 感知自身 Bot 名称
+  - 模板内容内联为字符串常量（bun build 禁止 `__dirname`）
+- **IM Bot 文件存储重构**：运行时状态文件从 `~/.myagents/im_{botId}_*.json` 扁平散落迁移到 `~/.myagents/im_bots/{botId}/` 子目录组织
+  - 三代自动迁移（v1 单 bot → v2 flat 多 bot → v3 子目录）
+  - 孤儿文件启动时自动清理，删除 bot 时清理持久化数据
+- **统一日志优化**：本地化时间戳、减少噪音
+- **Settings 页面 UI 重构**：「报告问题」从「关于」移至「通用」运行日志下方
+
+---
+
 ## [0.1.31] - 2026-03-01
 
 ### Fixed
@@ -17,11 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **agent-browser 反检测参数优化**：禁用自动化控制标志、匹配系统 locale、最大化窗口绕过 viewport 指纹
 
 ### Changed
-- **统一系统提示词架构**：重构为三层 Prompt 架构（L1 基础身份 + L2 交互方式 + L3 场景指令），所有场景统一使用 append 模式
-  - AI 始终知道自己运行在 MyAgents 产品中（桌面聊天、IM Bot、Cron 任务）
-  - 旧 SystemPromptConfig（preset/replace/append 三模式）替换为 InteractionScenario 类型
-  - IM Bot 启动时传递 botName，AI 感知自身 Bot 名称
-  - 模板内容内联为字符串常量（bun build 禁止 `__dirname`）
 - **平台技能屏蔽机制**：新增 `PLATFORM_BLOCKED_SKILLS` 集中配置，支持按平台跳过不可用的内置技能（seed / wrapper / symlink / API 列表统一过滤）
 - **发布脚本集成 GitHub Release 上传**：`publish_release.sh` 和 `publish_windows.ps1` 在 R2 上传后自动将构建产物上传到 GitHub Release
 
