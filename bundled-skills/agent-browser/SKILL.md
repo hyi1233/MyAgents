@@ -469,19 +469,21 @@ agent-browser eval -b "$(echo -n 'Array.from(document.querySelectorAll("a")).map
 - Nested quotes, arrow functions, template literals, or multiline -> use `eval --stdin <<'EVALEOF'`
 - Programmatic/generated scripts -> use `eval -b` with base64
 
-## Configuration File
+## Anti-Detection & Configuration
 
-Create `agent-browser.json` in the project root for persistent settings:
+Anti-detection defaults are pre-configured in `~/.myagents/agent-browser.json` — headed mode, hidden `navigator.webdriver`, realistic window size/UA, persistent profile at `~/.myagents/browser-profile/`. No extra flags needed for normal use.
 
-```json
-{
-  "headed": true,
-  "proxy": "http://localhost:8080",
-  "profile": "./browser-data"
-}
+**If a site still blocks:** override per-command with CLI flags (temporary), or edit the config file (persistent). CLI flags always override the config file.
+
+```bash
+# Temporary: override UA or window size for one command
+agent-browser --user-agent "custom UA" open https://target.com
+agent-browser --args "--window-size=1920,1080" open https://target.com
 ```
 
-Priority (lowest to highest): `~/.agent-browser/config.json` < `./agent-browser.json` < env vars < CLI flags. Use `--config <path>` or `AGENT_BROWSER_CONFIG` env var for a custom config file (exits with error if missing/invalid). All CLI options map to camelCase keys (e.g., `--executable-path` -> `"executablePath"`). Boolean flags accept `true`/`false` values (e.g., `--headed false` overrides config). Extensions from user and project configs are merged, not replaced.
+**Persistent config edits:** edit `~/.myagents/agent-browser.json`. Remove `"_managed_by": "myagents"` to prevent app from overwriting changes. `args` uses **newline** (`\n`) as separator (not comma — `--window-size=1440,900` contains a comma). All CLI flags map to camelCase keys (`--executable-path` → `executablePath`).
+
+Config priority (lowest → highest): `~/.agent-browser/config.json` < `./agent-browser.json` < env vars < CLI flags.
 
 ## Deep-Dive Documentation
 

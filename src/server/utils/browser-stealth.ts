@@ -130,6 +130,26 @@ function detectSystemLocale(): string {
   return 'zh-CN';
 }
 
+/**
+ * Return a realistic browser window size based on the current platform.
+ *
+ * When --window-size is passed, agent-browser disables Playwright's viewport
+ * emulation, so screen/DPR/colorDepth all come from the real OS display.
+ * We just need a window size that looks natural for the platform.
+ */
+function getRealisticWindowSize(): string {
+  if (process.platform === 'darwin') {
+    // macOS: common Chrome window sizes on Retina displays
+    // Not fullscreen (screen === inner is a headless signal)
+    return '1440,900';
+  } else if (process.platform === 'win32') {
+    // Windows: common 1080p monitor, windowed (not maximized)
+    return '1366,768';
+  }
+  // Linux: common resolution
+  return '1366,768';
+}
+
 // ---- Public API ----
 
 /**
@@ -156,12 +176,36 @@ export function ensureBrowserStealthConfig(): void {
   }
 
   const profileDir = join(homeDir, '.myagents', 'browser-profile');
+  const locale = detectSystemLocale();
+
+  // Build Chrome launch args for anti-detection.
+  // agent-browser's Rust CLI splits args by comma or newline (NOT space).
+  // IMPORTANT: We use NEWLINE separator because some args contain commas
+  // (e.g. --window-size=1440,900 — comma would be misinterpreted as separator).
+  const args = [
+    // Remove navigator.webdriver = true (the #1 detection signal)
+    '--disable-blink-features=AutomationControlled',
+    // Set locale for Accept-Language header consistency
+    `--lang=${locale}`,
+    // Use realistic window size — this auto-disables Playwright's viewport emulation
+    // (see browser.js hasWindowSizeArgs logic), so screen/DPR/colorDepth come from
+    // the real display instead of Playwright's 1280x720 defaults.
+    `--window-size=${getRealisticWindowSize()}`,
+    // Place window at a normal position (avoids negative screenX/Y)
+    '--window-position=100,50',
+    // Disable "Chrome is being controlled by automated test software" infobar
+    '--disable-infobars',
+    // Suppress first-run / default-browser prompts that reveal fresh profile
+    '--no-first-run',
+    '--no-default-browser-check',
+  ].join('\n');
+
   const config = {
     _managed_by: 'myagents',
     headed: true,
     profile: profileDir,
     userAgent: buildRealisticUserAgent(),
-    args: `--disable-blink-features=AutomationControlled --lang=${detectSystemLocale()}`,
+    args,
   };
 
   try {
