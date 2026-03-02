@@ -97,8 +97,8 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
         // Double-submit guard for inline inputs (Enter + blur race)
         const submittingRef = useRef(false);
 
-        // Custom tooltip for [+] button
-        const [showAddTip, setShowAddTip] = useState(false);
+        // Custom tooltip for [+] button (fixed positioning to avoid overflow clip)
+        const [addTipPos, setAddTipPos] = useState<{ x: number; y: number } | null>(null);
         const addTipTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
         const addBtnRef = useRef<HTMLButtonElement>(null);
 
@@ -311,6 +311,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                 if (res.success) {
                     toastRef.current.success('文件已删除');
                     setDeleteTarget(null);
+                    setIsEditing(false);
                     await loadRuleFiles();
                     // If deleted the active file, switch to CLAUDE.md
                     if (activeFile.type === 'rule' && activeFile.filename === deleteTarget) {
@@ -456,21 +457,29 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                         return;
                                     }
                                     setIsCreating(true);
-                                    setShowAddTip(false);
+                                    setAddTipPos(null);
                                 }}
                                 onMouseEnter={() => {
-                                    addTipTimer.current = setTimeout(() => setShowAddTip(true), 400);
+                                    addTipTimer.current = setTimeout(() => {
+                                        const rect = addBtnRef.current?.getBoundingClientRect();
+                                        if (rect) {
+                                            setAddTipPos({ x: rect.left + rect.width / 2, y: rect.bottom + 6 });
+                                        }
+                                    }, 400);
                                 }}
                                 onMouseLeave={() => {
                                     if (addTipTimer.current) clearTimeout(addTipTimer.current);
-                                    setShowAddTip(false);
+                                    setAddTipPos(null);
                                 }}
                                 className="flex items-center gap-1 rounded-md px-2 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
                             >
                                 <Plus className="h-3.5 w-3.5" />
                             </button>
-                            {showAddTip && (
-                                <div className="absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 shadow-lg">
+                            {addTipPos && (
+                                <div
+                                    className="fixed z-50 -translate-x-1/2 whitespace-nowrap rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 shadow-lg"
+                                    style={{ left: addTipPos.x, top: addTipPos.y }}
+                                >
                                     <p className="text-[11px] leading-relaxed text-[var(--ink-muted)]">
                                         添加的规则文件均会自动加载到系统提示词 System Prompt 里面
                                     </p>
