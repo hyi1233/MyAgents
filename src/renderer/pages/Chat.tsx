@@ -970,6 +970,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef/currentProviderRef/apiKeysRef/cronStateRef are refs (stable); scrollToBottom/setMessages/setIsLoading/setSessionState are stable
   }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, permissionMode, selectedModel, scrollToBottom]);
 
+  // Ref-stabilize handleSendMessage for handleRetry (avoids frequent re-creation)
+  const handleSendMessageRef = useRef(handleSendMessage);
+  handleSendMessageRef.current = handleSendMessage;
+
   // Cancel a queued message and restore its text (and images if any) to the input box
   const handleCancelQueued = useCallback(async (queueId: string) => {
     // Snapshot the queued message info before it's removed (for image restore)
@@ -1122,6 +1126,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [rewindTarget, apiPost, setMessages, setIsLoading]);
 
   // Retry = rewind to before user message + auto-resend
+  // Uses refs for messagesRef/toastRef/handleSendMessageRef — deps are all stable → reference stable
   const handleRetry = useCallback((assistantMessageId: string) => {
     const msgs = messagesRef.current;
     const aIdx = msgs.findIndex(m => m.id === assistantMessageId);
@@ -1145,6 +1150,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     });
 
     // 2. Rewind + auto-resend
+    let resendFired = false;
     setIsLoading(true);
     setRewindStatus('rewinding');
     apiPost('/chat/rewind', { userMessageId })
@@ -1155,6 +1161,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           return;
         }
         // Rewind succeeded → auto-resend the original message
+        resendFired = true;
         const imageAttachments = attachments?.filter(a =>
           a.isImage || a.mimeType?.startsWith('image/')
         ).map(a => ({
@@ -1162,7 +1169,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           file: new File([], a.name),
           preview: a.previewUrl || '',
         }));
-        handleSendMessage(content, imageAttachments?.length ? imageAttachments : undefined);
+        handleSendMessageRef.current(content, imageAttachments?.length ? imageAttachments : undefined);
       })
       .catch(err => {
         console.error('[Chat] Retry failed:', err);
@@ -1170,9 +1177,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       })
       .finally(() => {
         setRewindStatus(null);
-        setIsLoading(false);
+        // Only clear loading on error — successful resend manages its own loading state
+        if (!resendFired) {
+          setIsLoading(false);
+        }
       });
-  }, [apiPost, setMessages, setIsLoading, handleSendMessage]);
+  }, [apiPost, setMessages, setIsLoading]); // all stable — refs handle the rest
 
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string) => {

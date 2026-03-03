@@ -3449,7 +3449,8 @@ async function main() {
                 let detail = '';
                 try {
                   const body = await response.json() as Record<string, unknown>;
-                  detail = (body.message || body.msg || body.error || '') as string;
+                  const raw = String(body.message || body.msg || body.error || '');
+                  detail = raw.length > 200 ? raw.slice(0, 200) + '…' : raw;
                 } catch { /* body 不是 JSON，忽略 */ }
                 cleanup();
                 return jsonResponse({
@@ -3483,39 +3484,62 @@ async function main() {
                   });
                 }
               } else {
-                // Streamable HTTP: read body then cleanup
+                // Streamable HTTP: server may respond with JSON or SSE (both valid per spec)
                 // (response.ok is guaranteed here — non-ok statuses returned above)
-                try {
-                  const body = await response.json();
-                  cleanup();
-                  if (!body.jsonrpc && !body.result && !body.error) {
-                    return jsonResponse({
-                      success: false,
-                      error: {
-                        type: 'connection_failed',
-                        message: '服务器响应不是有效的 JSON-RPC 格式，请检查 URL 和传输协议',
+                if (contentType.includes('text/event-stream')) {
+                  // SSE response to POST — valid per MCP Streamable HTTP spec.
+                  // Read enough to extract the first JSON-RPC message from SSE data lines.
+                  try {
+                    const text = await response.text();
+                    cleanup();
+                    const dataLine = text.split('\n').find(l => l.startsWith('data:'));
+                    if (dataLine) {
+                      const body = JSON.parse(dataLine.slice(5));
+                      if (!body.jsonrpc && !body.result && !body.error) {
+                        return jsonResponse({
+                          success: false,
+                          error: {
+                            type: 'connection_failed',
+                            message: '服务器 SSE 响应中的数据不是有效的 JSON-RPC 格式',
+                          }
+                        });
                       }
-                    });
-                  }
-                } catch {
-                  cleanup();
-                  // Response is not JSON — might be SSE endpoint
-                  if (contentType.includes('text/event-stream')) {
-                    return jsonResponse({
-                      success: false,
-                      error: {
-                        type: 'connection_failed',
-                        message: '该 URL 是 SSE 端点，请切换传输协议为 "SSE"',
-                      }
-                    });
-                  }
-                  return jsonResponse({
-                    success: false,
-                    error: {
-                      type: 'connection_failed',
-                      message: `服务器响应不是有效的 JSON 格式 (${contentType || 'unknown'})`,
                     }
-                  });
+                    // SSE stream with valid data or empty (server might send events later) — accept
+                  } catch {
+                    cleanup();
+                    return jsonResponse({
+                      success: false,
+                      error: {
+                        type: 'connection_failed',
+                        message: '无法解析服务器的 SSE 响应，请检查 URL 和传输协议',
+                      }
+                    });
+                  }
+                } else {
+                  // JSON response — original path
+                  try {
+                    const body = await response.json();
+                    cleanup();
+                    if (!body.jsonrpc && !body.result && !body.error) {
+                      return jsonResponse({
+                        success: false,
+                        error: {
+                          type: 'connection_failed',
+                          message: '服务器响应不是有效的 JSON-RPC 格式，请检查 URL 和传输协议',
+                        }
+                      });
+                    }
+                  } catch {
+                    cleanup();
+                    return jsonResponse({
+                      success: false,
+                      error: {
+                        type: 'connection_failed',
+                        message: `服务器响应不是有效的 JSON 格式 (${contentType || 'unknown'})`,
+                      }
+                    });
+                  }
                 }
               }
 
