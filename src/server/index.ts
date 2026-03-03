@@ -29,6 +29,9 @@ import {
 } from './tools/cron-tools';
 import { setImCronContext } from './tools/im-cron-tool';
 import { setImMediaContext } from './tools/im-media-tool';
+import { getBuiltinMcp } from './tools/builtin-mcp-registry';
+// NOTE: builtin MCP side-effect imports (registerBuiltinMcp calls) live in agent-session.ts,
+// which is imported by this file — no need to duplicate them here.
 
 // ============= CRASH DIAGNOSTICS =============
 // File-based logging to capture crashes before process dies
@@ -2989,6 +2992,132 @@ async function main() {
         }
       }
 
+      // GET /api/image?path=... - Serve generated images (for browser dev mode)
+      if (pathname === '/api/image' && request.method === 'GET') {
+        try {
+          const imagePath = url.searchParams.get('path');
+          if (!imagePath) {
+            return jsonResponse({ success: false, error: 'Missing path parameter' }, 400);
+          }
+
+          // Security: only allow reading from ~/.myagents/generated/
+          const generatedDir = join(homedir(), '.myagents', 'generated');
+          const resolvedPath = resolve(imagePath);
+          // Ensure path is strictly within generatedDir (prevent prefix confusion like "generated-evil/")
+          const generatedDirWithSep = generatedDir.endsWith('/') ? generatedDir : generatedDir + '/';
+          if (!resolvedPath.startsWith(generatedDirWithSep)) {
+            return jsonResponse({ success: false, error: 'Access denied: path must be within generated directory' }, 403);
+          }
+
+          if (!existsSync(resolvedPath)) {
+            return jsonResponse({ success: false, error: 'Image not found' }, 404);
+          }
+
+          const file = Bun.file(resolvedPath);
+          const ext = resolvedPath.split('.').pop()?.toLowerCase();
+          const mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
+
+          return new Response(file, {
+            headers: {
+              'Content-Type': mimeType,
+              'Cache-Control': 'public, max-age=86400',
+            },
+          });
+        } catch (error) {
+          console.error('[api/image] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to serve image' },
+            500
+          );
+        }
+      }
+
+      // GET /api/audio?path=... - Serve generated audio (for browser dev mode)
+      if (pathname === '/api/audio' && request.method === 'GET') {
+        try {
+          const audioPath = url.searchParams.get('path');
+          if (!audioPath) {
+            return jsonResponse({ success: false, error: 'Missing path parameter' }, 400);
+          }
+
+          // Security: only allow reading from ~/.myagents/generated_audio/
+          const generatedAudioDir = join(homedir(), '.myagents', 'generated_audio');
+          const resolvedPath = resolve(audioPath);
+          const generatedAudioDirWithSep = generatedAudioDir.endsWith(sep) ? generatedAudioDir : generatedAudioDir + sep;
+          if (!resolvedPath.startsWith(generatedAudioDirWithSep)) {
+            return jsonResponse({ success: false, error: 'Access denied: path must be within generated_audio directory' }, 403);
+          }
+
+          if (!existsSync(resolvedPath)) {
+            return jsonResponse({ success: false, error: 'Audio not found' }, 404);
+          }
+
+          const file = Bun.file(resolvedPath);
+          const ext = resolvedPath.split('.').pop()?.toLowerCase();
+          const mimeTypes: Record<string, string> = {
+            mp3: 'audio/mpeg',
+            wav: 'audio/wav',
+            ogg: 'audio/ogg',
+            webm: 'audio/webm',
+          };
+          const mimeType = mimeTypes[ext || ''] || 'audio/mpeg';
+
+          return new Response(file, {
+            headers: {
+              'Content-Type': mimeType,
+              'Cache-Control': 'public, max-age=86400',
+            },
+          });
+        } catch (error) {
+          console.error('[api/audio] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to serve audio' },
+            500
+          );
+        }
+      }
+
+      // POST /api/edge-tts/preview - Preview TTS from Settings (independent of MCP server state)
+      if (pathname === '/api/edge-tts/preview' && request.method === 'POST') {
+        try {
+          const body = await request.json() as {
+            text?: string;
+            voice?: string;
+            rate?: string;
+            volume?: string;
+            pitch?: string;
+            outputFormat?: string;
+          };
+
+          if (!body.text?.trim()) {
+            return jsonResponse({ success: false, error: 'Missing text parameter' }, 400);
+          }
+
+          // Apply same text length limit as the MCP tool
+          if (body.text.length > 10000) {
+            return jsonResponse({ success: false, error: `Text too long (${body.text.length} chars). Maximum is 10000.` }, 400);
+          }
+
+          const { synthesizePreview } = await import('./tools/edge-tts-tool');
+          const result = await synthesizePreview({
+            text: body.text,
+            voice: body.voice || 'zh-CN-XiaoxiaoNeural',
+            rate: body.rate || '0%',
+            volume: body.volume || '0%',
+            pitch: body.pitch || '+0Hz',
+            outputFormat: body.outputFormat || 'audio-24khz-48kbitrate-mono-mp3',
+          });
+
+          return jsonResponse(result);
+        } catch (error) {
+          console.error('[api/edge-tts/preview] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Preview failed' },
+            500
+          );
+        }
+      }
+
       // ============= END FILE MANAGEMENT API =============
 
       // ============= UNIFIED LOGGING API =============
@@ -3352,6 +3481,19 @@ async function main() {
           }
 
           console.log(`[api/mcp/enable] Enabling MCP: ${server.id}, type: ${server.type}, command: ${server.command}`);
+
+          // Built-in MCP (in-process) — delegate validation to registry
+          if (server.command === '__builtin__') {
+            const entry = getBuiltinMcp(server.id);
+            if (entry?.validate) {
+              const error = await entry.validate(server.env || {});
+              if (error) {
+                return jsonResponse({ success: false, error });
+              }
+            }
+            console.log(`[api/mcp/enable] Built-in MCP: ${server.id} — enabled`);
+            return jsonResponse({ success: true });
+          }
 
           // SSE/HTTP types: validate remote URL is reachable and protocol matches
           if (server.type === 'sse' || server.type === 'http') {

@@ -9,6 +9,10 @@ import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext } from './tools/im-cron-tool';
 import { imMediaToolServer, getImMediaContext, clearImMediaContext } from './tools/im-media-tool';
+import { getBuiltinMcp } from './tools/builtin-mcp-registry';
+// Side-effect imports: each registers itself in the builtin MCP registry
+import './tools/gemini-image-tool';
+import './tools/edge-tts-tool';
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
@@ -631,15 +635,13 @@ export function setProxyConfig(proxySettings: {
  * If MCP config changed and a session is running, it will be restarted with resume
  */
 export function setMcpServers(servers: McpServerDefinition[]): void {
-  // Check if MCP config actually changed
-  const currentIds = (currentMcpServers ?? []).map(s => s.id).sort().join(',');
-  const newIds = servers.map(s => s.id).sort().join(',');
-  const mcpChanged = currentIds !== newIds;
+  // Detect config changes: compare full config fingerprint (not just IDs)
+  // so that env/args changes (e.g. API key update) also trigger session restart.
+  const mcpChanged = mcpConfigFingerprint(currentMcpServers ?? []) !== mcpConfigFingerprint(servers);
 
   currentMcpServers = servers;
   if (isDebugMode) {
     console.log(`[agent] MCP servers set: ${servers.map(s => s.id).join(', ') || 'none'}`);
-    // Log servers with custom env vars for debugging
     for (const s of servers) {
       if (s.env && Object.keys(s.env).length > 0) {
         console.log(`[agent] MCP ${s.id}: Has custom env vars: ${Object.keys(s.env).join(', ')}`);
@@ -649,14 +651,15 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
 
   // If MCP changed and session is running, restart with resume to apply new config
   if (mcpChanged && querySession) {
+    const ids = servers.map(s => s.id).join(', ') || 'none';
     if (isProcessing && !isPreWarming) {
       // Active user turn in progress (e.g. IM responding) — defer restart to avoid killing mid-response.
       // The restart will fire after the current turn completes (see signalTurnComplete handler).
       // Pre-warm sessions are safe to abort immediately (no user message to lose).
-      console.log(`[agent] MCP config changed (${currentIds || 'none'} -> ${newIds || 'none'}), deferring restart (active turn)`);
+      console.log(`[agent] MCP config changed → [${ids}], deferring restart (active turn)`);
       pendingConfigRestart = true;
     } else {
-      if (isDebugMode) console.log(`[agent] MCP config changed (${currentIds || 'none'} -> ${newIds || 'none'}), restarting session with resume`);
+      if (isDebugMode) console.log(`[agent] MCP config changed → [${ids}], restarting session with resume`);
       abortPersistentSession();
     }
   }
@@ -666,6 +669,16 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
   if (!isProcessing || isPreWarming) {
     schedulePreWarm();
   }
+}
+
+/** Stable fingerprint of MCP config for change detection (covers id + command + args + env + url + headers) */
+function mcpConfigFingerprint(servers: McpServerDefinition[]): string {
+  return JSON.stringify(
+    servers
+      .slice()
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map(s => ({ id: s.id, type: s.type, command: s.command, args: s.args, url: s.url, env: s.env, headers: s.headers }))
+  );
 }
 
 /**
@@ -899,18 +912,20 @@ function pinMcpPackageVersions(args: string[]): string[] {
 }
 
 /**
- * Convert McpServerDefinition to SDK mcpServers format
+ * Convert McpServerDefinition to SDK mcpServers format.
  *
- * Execution strategy:
+ * Three MCP injection patterns:
+ * 1. Context-injected (cron-tools, im-cron, im-media) — always present based on sidecar context,
+ *    invisible in Settings UI, not user-toggled.
+ * 2. Builtin registry (command='__builtin__') — in-process servers, user-toggled via Settings,
+ *    self-registered via builtin-mcp-registry.ts. Adding a new one = add registerBuiltinMcp()
+ *    call in the tool file + side-effect import below.
+ * 3. External (stdio/sse/http) — subprocess or remote servers, user-configured.
+ *
+ * Execution strategy for external stdio:
  * - For npx commands: Uses bundled bun (bun x), fallback to npx if bun unavailable
  * - For other commands: Uses user-specified command directly (node/python etc.)
- * - Does NOT inject proxy env vars (follows Claude Code's approach)
- *   Child process inherits environment naturally from shell
- *
- * This approach:
- * - Zero external dependencies: bundled bun ensures MCP works without Node.js
- * - Fallback to npx for environments where bun is unavailable
- * - Custom MCP can use any user-preferred tools
+ * - Strips proxy env vars to prevent MCP WebSocket breakage
  */
 function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronToolsServer> {
   // null = MCP not yet configured (e.g. Global sidecar, or Tab pre-warm before /api/mcp/set)
@@ -923,7 +938,7 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
 
   const result: Record<string, SdkMcpServerConfig | typeof cronToolsServer> = {};
 
-  // Add cron tools server if we're in a cron task context
+  // --- Pattern 1: Context-injected MCPs (always present based on sidecar context) ---
   const cronContext = getCronTaskContext();
   if (cronContext.taskId) {
     result['cron-tools'] = cronToolsServer;
@@ -944,15 +959,29 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
     console.log(`[agent] Added im-media MCP server for bot ${imMediaCtx.botId}`);
   }
 
+  // --- Pattern 2: Builtin registry MCPs (in-process, user-toggled) ---
+  for (const server of servers) {
+    if (server.command !== '__builtin__') continue;
+    const entry = getBuiltinMcp(server.id);
+    if (entry) {
+      entry.configure(server.env || {}, { sessionId: sessionId || 'default', workspace: agentDir });
+      result[server.id] = entry.server as typeof cronToolsServer;
+      console.log(`[agent] Added builtin MCP: ${server.id}`);
+    }
+  }
+
+  // --- Pattern 3: External MCPs (stdio/sse/http subprocess or remote) ---
+  const externalServers = servers.filter(s => s.command !== '__builtin__');
+
   // Return early if no user MCP servers (but may have cron-tools)
-  if (servers.length === 0) {
+  if (externalServers.length === 0) {
     if (Object.keys(result).length > 0) {
       console.log(`[agent] Built SDK MCP servers: ${Object.keys(result).join(', ')}`);
     }
     return result;
   }
 
-  for (const server of servers) {
+  for (const server of externalServers) {
     // Log server env for debugging
     if (isDebugMode && server.env && Object.keys(server.env).length > 0) {
       console.log(`[agent] MCP ${server.id}: Custom env vars: ${Object.keys(server.env).join(', ')}`);
@@ -1648,13 +1677,15 @@ function localizeImError(rawError: string): string {
   if (rawError.includes('authentication') || rawError.includes('unauthorized') || rawError.includes('401')) {
     return 'API 认证失败，请检查 API Key 配置';
   }
-  // Rate limiting
+  // Billing / quota errors (check BEFORE rate_limit — quota messages may contain "429")
+  if (rawError.includes('billing') || rawError.includes('insufficient_quota')
+    || rawError.includes('quota_exceeded') || rawError.includes('quota exceeded')
+    || rawError.includes('exceeded your current quota') || rawError.includes('payment required')) {
+    return 'API 余额不足，请充值后重试';
+  }
+  // Rate limiting (transient — safe to retry)
   if (rawError.includes('rate_limit') || rawError.includes('429')) {
     return 'API 请求频率超限，请稍后重试';
-  }
-  // Billing errors
-  if (rawError.includes('billing') || rawError.includes('insufficient_quota') || rawError.includes('quota_exceeded')) {
-    return 'API 余额不足，请充值后重试';
   }
   // Server overloaded
   if (rawError.includes('overloaded') || rawError.includes('503')) {
