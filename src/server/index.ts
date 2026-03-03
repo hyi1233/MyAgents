@@ -5886,7 +5886,7 @@ async function main() {
                 try { controller.close(); } catch { /* already closed */ }
               };
 
-              // 600s safety timeout
+              // 3600s (60 min) safety timeout — aligned with cron task timeout
               safetyTimer = setTimeout(() => {
                 if (!closed) {
                   // Flush any remaining text as final block
@@ -5894,10 +5894,11 @@ async function main() {
                     sendEvent({ type: 'block-end', text: imAccText });
                     imAccText = '';
                   }
-                  sendEvent({ type: 'complete', sessionId: getSessionId() });
+                  // Send 'error' (not 'complete') to prevent Rust from treating timeout as success
+                  sendEvent({ type: 'error', error: 'IM 响应超时（60分钟），请重新发送' });
                   closeStream();
                 }
-              }, 600000);
+              }, 3_600_000);
 
               setImStreamCallback((event, data) => {
                 if (event === 'permission-request') {

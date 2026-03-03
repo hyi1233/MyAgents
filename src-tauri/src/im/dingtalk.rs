@@ -476,9 +476,10 @@ impl DingtalkAdapter {
     /// For regular messages, DingTalk does not support editing → returns Err.
     pub async fn edit_text_message(&self, chat_id: &str, _message_id: &str, text: &str) -> Result<(), String> {
         if !self.use_ai_card {
-            // DingTalk regular messages can't be edited — silently no-op.
-            // The stream pipeline will fall back to sending a new message on finalize.
-            return Ok(());
+            // DingTalk regular messages can't be edited via Robot API.
+            // Returning Err lets callers fall back to delete+send when needed
+            // (e.g., the "(No response)" placeholder path in stream_to_im).
+            return Err("DingTalk regular messages cannot be edited".to_string());
         }
 
         // Look up active card for this chat

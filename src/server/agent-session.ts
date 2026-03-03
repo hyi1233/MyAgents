@@ -319,6 +319,13 @@ const toolResultIndexToId: Map<number, string> = new Map();
 // IM Draft Stream: callback for streaming text to Telegram
 type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string) => void;
 let imStreamCallback: ImStreamCallback | null = null;
+// Cross-turn guard: set to true when imStreamCallback is nulled (timeout/error) or replaced
+// (defense-in-depth) during a turn. Reset to false by messageGenerator before each yield.
+// handleMessageComplete/Stopped only fires 'complete' when flag is false, preventing
+// a stale turn's completion from consuming a subsequent turn's SSE stream.
+// Race-safe: unlike a generation counter snapshot (which can run before setImStreamCallback),
+// this flag is set BY setImStreamCallback itself, so ordering is guaranteed.
+let imCallbackNulledDuringTurn = false;
 // Group chat tool deny list (v0.1.28): set per IM message, cleared on next non-group request
 let currentGroupToolsDeny: string[] = [];
 // Flag: auto-reset session after image content pollutes conversation history
@@ -1680,9 +1687,16 @@ export function setImStreamCallback(cb: ImStreamCallback | null): void {
   // silent callback replacement that would leave the old SSE stream hanging.
   if (cb !== null && imStreamCallback !== null) {
     console.warn('[agent] setImStreamCallback: replacing active callback — notifying old stream');
+    imCallbackNulledDuringTurn = true;
     try {
       imStreamCallback('error', '消息处理被新请求取代');
     } catch { /* old stream may already be closed */ }
+  }
+  // Mark callback as stale when it's being nulled (e.g., SSE safety timeout, closeStream).
+  // handleMessageComplete/Stopped checks this flag to avoid sending 'complete' to a
+  // replacement callback that belongs to a different turn.
+  if (cb === null && imStreamCallback !== null) {
+    imCallbackNulledDuringTurn = true;
   }
   imStreamCallback = cb;
 }
@@ -2328,8 +2342,10 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
 
 function handleMessageComplete(): void {
   isStreamingMessage = false;
-  // Notify IM stream: turn complete
-  if (imStreamCallback) {
+  // Notify IM stream: turn complete — only if callback was NOT nulled/replaced during this turn.
+  // A nulled callback means the SSE stream timed out and a new one may have been set for a
+  // subsequent queued message; firing 'complete' here would consume the wrong stream.
+  if (imStreamCallback && !imCallbackNulledDuringTurn) {
     imStreamCallback('complete', '');
     imStreamCallback = null;
   }
@@ -2364,8 +2380,8 @@ function handleMessageComplete(): void {
 
 function handleMessageStopped(): void {
   isStreamingMessage = false;
-  // Notify IM stream: turn complete (stopped)
-  if (imStreamCallback) {
+  // Notify IM stream: turn complete (stopped) — cross-turn guard prevents misfire
+  if (imStreamCallback && !imCallbackNulledDuringTurn) {
     imStreamCallback('complete', '');
     imStreamCallback = null;
   }
@@ -4060,8 +4076,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   broadcast('chat:message-chunk', streamEvent.delta.text);
                   appendTextChunk(streamEvent.delta.text);
                   currentTurnHasOutput = true;
-                  // IM stream: forward non-subagent text delta
-                  imStreamCallback?.('delta', streamEvent.delta.text);
+                  // IM stream: forward non-subagent text delta (cross-turn guard)
+                  if (!imCallbackNulledDuringTurn) imStreamCallback?.('delta', streamEvent.delta.text);
                 } else {
                   console.log(`[agent] Filtered decorative text from stream (${decorativeCheck.reason})`);
                 }
@@ -4096,8 +4112,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             }
           }
         } else if (streamEvent.type === 'content_block_start') {
-          // IM stream: track text block indices (non-subagent only)
-          if (imStreamCallback && !sdkMessage.parent_tool_use_id) {
+          // IM stream: track text block indices (non-subagent only, cross-turn guard)
+          if (imStreamCallback && !sdkMessage.parent_tool_use_id && !imCallbackNulledDuringTurn) {
             if (streamEvent.content_block.type === 'text') {
               imTextBlockIndices.add(streamEvent.index);
             } else {
@@ -4242,8 +4258,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               toolId: toolId || undefined
             });
             handleContentBlockStop(streamEvent.index, toolId || undefined);
-            // IM stream: signal text block end
-            if (imStreamCallback && imTextBlockIndices.has(streamEvent.index)) {
+            // IM stream: signal text block end (cross-turn guard)
+            if (imStreamCallback && !imCallbackNulledDuringTurn && imTextBlockIndices.has(streamEvent.index)) {
               imStreamCallback('block-end', '');
               imTextBlockIndices.delete(streamEvent.index);
             }
@@ -4494,7 +4510,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             broadcast('chat:message-chunk', nonStreamedText);
             appendTextChunk(nonStreamedText);
             currentTurnHasOutput = true;
-            imStreamCallback?.('delta', nonStreamedText);
+            if (!imCallbackNulledDuringTurn) imStreamCallback?.('delta', nonStreamedText);
           }
         }
       } else if (sdkMessage.type === 'result') {
@@ -4564,7 +4580,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             appendTextChunk(resultText);
           }
           // Forward to IM callback (prevents "(No Response)" for SDK failures)
-          if (imStreamCallback) {
+          // Cross-turn guard: only forward if callback was not nulled/replaced
+          if (imStreamCallback && !imCallbackNulledDuringTurn) {
             imStreamCallback('complete', resultText);
             imStreamCallback = null;
           }
@@ -4839,6 +4856,10 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     }
 
     // Yield 消息到 SDK stdin
+    // Reset cross-turn guard: this turn starts fresh, no timeout/replacement yet.
+    // Unlike a generation snapshot (which races with setImStreamCallback on the event loop),
+    // this flag is SET by setImStreamCallback itself, so ordering is guaranteed.
+    imCallbackNulledDuringTurn = false;
     isStreamingMessage = true;
     console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}`);
     yield {

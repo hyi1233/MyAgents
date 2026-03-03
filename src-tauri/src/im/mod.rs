@@ -2253,11 +2253,17 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                         let _ = adapter.delete_message(chat_id, did).await;
                     }
                     if !any_text_sent {
-                        // Clean up orphaned placeholder (e.g. only thinking/tool_use, no text output)
+                        // Edit placeholder in-place (avoids Feishu "recall" notification).
+                        // Fall back to delete+send on platforms where edit is unsupported
+                        // (e.g., DingTalk without AI Card).
                         if let Some(ref pid) = placeholder_id {
-                            let _ = adapter.delete_message(chat_id, pid).await;
+                            if adapter.edit_message(chat_id, pid, "(No response)").await.is_err() {
+                                let _ = adapter.delete_message(chat_id, pid).await;
+                                let _ = adapter.send_message(chat_id, "(No response)").await;
+                            }
+                        } else {
+                            let _ = adapter.send_message(chat_id, "(No response)").await;
                         }
-                        let _ = adapter.send_message(chat_id, "(No response)").await;
                     }
                     return Ok(session_id);
                 }
@@ -2326,10 +2332,16 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         let _ = adapter.delete_message(chat_id, did).await;
     }
     if !any_text_sent {
+        // Edit placeholder in-place (avoids Feishu "recall" notification).
+        // Fall back to delete+send on platforms where edit is unsupported.
         if let Some(ref pid) = placeholder_id {
-            let _ = adapter.delete_message(chat_id, pid).await;
+            if adapter.edit_message(chat_id, pid, "(No response)").await.is_err() {
+                let _ = adapter.delete_message(chat_id, pid).await;
+                let _ = adapter.send_message(chat_id, "(No response)").await;
+            }
+        } else {
+            let _ = adapter.send_message(chat_id, "(No response)").await;
         }
-        let _ = adapter.send_message(chat_id, "(No response)").await;
     }
     Ok(session_id)
 }
