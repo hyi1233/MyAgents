@@ -917,16 +917,17 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         }
     };
 
+    const fmtTtsRate = (v: number) => v >= 0 ? `+${v}%` : `${v}%`;
+    const fmtTtsPitch = (v: number) => v >= 0 ? `+${v}Hz` : `${v}Hz`;
+
     const handleSaveEdgeTts = async () => {
         if (!edgeTtsSettings) return;
         try {
-            const fmtRate = (v: number) => v >= 0 ? `+${v}%` : `${v}%`;
-            const fmtPitch = (v: number) => v >= 0 ? `+${v}Hz` : `${v}Hz`;
             const env: Record<string, string> = {
                 EDGE_TTS_DEFAULT_VOICE: edgeTtsSettings.defaultVoice,
-                EDGE_TTS_DEFAULT_RATE: fmtRate(edgeTtsSettings.defaultRate),
-                EDGE_TTS_DEFAULT_VOLUME: fmtRate(edgeTtsSettings.defaultVolume),
-                EDGE_TTS_DEFAULT_PITCH: fmtPitch(edgeTtsSettings.defaultPitch),
+                EDGE_TTS_DEFAULT_RATE: fmtTtsRate(edgeTtsSettings.defaultRate),
+                EDGE_TTS_DEFAULT_VOLUME: fmtTtsRate(edgeTtsSettings.defaultVolume),
+                EDGE_TTS_DEFAULT_PITCH: fmtTtsPitch(edgeTtsSettings.defaultPitch),
                 EDGE_TTS_DEFAULT_FORMAT: edgeTtsSettings.defaultOutputFormat,
             };
             await atomicModifyConfig(config => ({
@@ -948,14 +949,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         setTtsPreviewLoading(true);
         setTtsPreviewUrl(null);
         try {
-            const fmtRate = (v: number) => v >= 0 ? `+${v}%` : `${v}%`;
-            const fmtPitch = (v: number) => v >= 0 ? `+${v}Hz` : `${v}Hz`;
             const result = await apiPostJson<{ success: boolean; filePath?: string; error?: string }>('/api/edge-tts/preview', {
                 text: ttsPreviewText,
                 voice: edgeTtsSettings.defaultVoice,
-                rate: fmtRate(edgeTtsSettings.defaultRate),
-                volume: fmtRate(edgeTtsSettings.defaultVolume),
-                pitch: fmtPitch(edgeTtsSettings.defaultPitch),
+                rate: fmtTtsRate(edgeTtsSettings.defaultRate),
+                volume: fmtTtsRate(edgeTtsSettings.defaultVolume),
+                pitch: fmtTtsPitch(edgeTtsSettings.defaultPitch),
                 outputFormat: edgeTtsSettings.defaultOutputFormat,
             });
             if (result.success && result.filePath) {

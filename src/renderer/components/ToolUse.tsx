@@ -4,6 +4,8 @@ import BashOutputTool from './tools/BashOutputTool';
 import BashTool from './tools/BashTool';
 import { CollapsibleTool } from './tools/CollapsibleTool';
 import EditTool from './tools/EditTool';
+import EdgeTtsTool from './tools/EdgeTtsTool';
+import GeminiImageTool from './tools/GeminiImageTool';
 import GlobTool from './tools/GlobTool';
 import GrepTool from './tools/GrepTool';
 import KillShellTool from './tools/KillShellTool';
@@ -52,6 +54,15 @@ export default function ToolUse({ tool }: ToolUseProps) {
     case 'NotebookEdit':
       return <NotebookEditTool tool={tool} />;
     default: {
+      // Route gemini-image MCP tools to custom component
+      if (tool.name.startsWith('mcp__gemini-image__')) {
+        return <GeminiImageTool tool={tool} />;
+      }
+      // Route edge-tts MCP tools to custom component
+      if (tool.name.startsWith('mcp__edge-tts__')) {
+        return <EdgeTtsTool tool={tool} />;
+      }
+
       // Fallback for unknown tools - show raw JSON
       const collapsedContent = (
         <div className="text-sm text-[var(--ink-muted)]">

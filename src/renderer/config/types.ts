@@ -661,6 +661,16 @@ export const PRESET_MCP_SERVERS: McpServerDefinition[] = [
     isBuiltin: true,
     requiresConfig: ['GEMINI_API_KEY'],
   },
+  {
+    id: 'edge-tts',
+    name: 'Edge TTS 语音合成',
+    description: '免费文字转语音，支持 400+ 语音（基于 Microsoft Edge TTS，无需 API Key）',
+    type: 'stdio',
+    command: '__builtin__',
+    args: [],
+    isBuiltin: true,
+    isFree: true,
+  },
 ];
 
 /**

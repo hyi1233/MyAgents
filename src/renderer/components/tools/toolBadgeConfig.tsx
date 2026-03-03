@@ -6,10 +6,12 @@ import {
   FileText,
   Globe,
   ListTodo,
+  Palette,
   Search,
   SearchCode,
   Sparkles,
   Terminal,
+  Volume2,
   Wrench,
   XCircle,
   Zap
@@ -321,6 +323,36 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       };
     // Default - Blue (fallback for unknown tools like MCP tools, server_tool_use)
     default:
+      // Gemini Image tools - Purple
+      if (toolName.startsWith('mcp__gemini-image__')) {
+        return {
+          icon: <Palette className="size-2.5" />,
+          colors: {
+            border: 'border-purple-200/60 dark:border-purple-500/30',
+            bg: 'bg-purple-50/80 dark:bg-purple-500/10',
+            text: 'text-purple-600 dark:text-purple-400',
+            hoverBg: 'hover:bg-purple-100/80 dark:hover:bg-purple-500/20',
+            chevron: 'text-purple-400 dark:text-purple-500',
+            iconColor: 'text-purple-500 dark:text-purple-400'
+          }
+        };
+      }
+
+      // Edge TTS tools - Rose/Pink
+      if (toolName.startsWith('mcp__edge-tts__')) {
+        return {
+          icon: <Volume2 className="size-2.5" />,
+          colors: {
+            border: 'border-rose-200/60 dark:border-rose-500/30',
+            bg: 'bg-rose-50/80 dark:bg-rose-500/10',
+            text: 'text-rose-600 dark:text-rose-400',
+            hoverBg: 'hover:bg-rose-100/80 dark:hover:bg-rose-500/20',
+            chevron: 'text-rose-400 dark:text-rose-500',
+            iconColor: 'text-rose-500 dark:text-rose-400'
+          }
+        };
+      }
+
       return {
         icon: <Wrench className="size-2.5" />,
         colors: {
@@ -342,6 +374,12 @@ export function getToolMainLabel(tool: ToolUseSimple): string {
   if (tool.name === 'Task') {
     const subagentType = getStringProp(tool.parsedInput, 'subagent_type');
     return subagentType || 'Task';
+  }
+  if (tool.name.startsWith('mcp__gemini-image__')) {
+    return tool.name.includes('edit_image') ? '编辑图片' : '生成图片';
+  }
+  if (tool.name.startsWith('mcp__edge-tts__')) {
+    return tool.name.includes('list_voices') ? '查询语音' : '语音合成';
   }
   return tool.name;
 }
@@ -534,6 +572,12 @@ export function getToolExpandedLabel(tool: ToolUseSimple): string {
     case 'KillShell':
       return 'Kill Shell';
     default:
+      if (tool.name.startsWith('mcp__gemini-image__')) {
+        return tool.name.includes('edit_image') ? '编辑图片' : '生成图片';
+      }
+      if (tool.name.startsWith('mcp__edge-tts__')) {
+        return tool.name.includes('list_voices') ? '查询语音' : '语音合成';
+      }
       return tool.name;
   }
 }
