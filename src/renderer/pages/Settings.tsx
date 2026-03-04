@@ -1833,7 +1833,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
-                        工具 & MCP
+                        工具 MCP
                     </button>
                     <button
                         onClick={() => setActiveSection('im')}
@@ -2058,7 +2058,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 {activeSection === 'mcp' && (
                     <div className="mx-auto max-w-4xl px-8 py-8">
                         <div className="mb-8 flex items-center justify-between">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">工具 & MCP</h2>
+                            <h2 className="text-lg font-semibold text-[var(--ink)]">工具 MCP</h2>
                             <button
                                 onClick={() => { resetMcpForm(); setShowMcpForm(true); }}
                                 className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"

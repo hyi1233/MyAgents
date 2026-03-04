@@ -4,7 +4,7 @@ import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, use
 import { useToast } from '@/components/Toast';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useTabApiOptional, type SessionState } from '@/context/TabContext';
-import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, PRESET_PROVIDERS } from '@/config/types';
+import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName } from '@/config/types';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
 import QueuedMessagesPanel from './QueuedMessageBubble';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
@@ -242,7 +242,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Mode and Model dropdown menus
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
-  const [showProviderSubmenu, setShowProviderSubmenu] = useState(false);
   const [showToolMenu, setShowToolMenu] = useState(false);
 
   // Derive current model ID from prop or provider default
@@ -279,7 +278,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     setShowPlusMenu(false);
     setShowModeMenu(false);
     setShowModelMenu(false);
-    setShowProviderSubmenu(false);
     setShowToolMenu(false);
   }, []);
 
@@ -1555,7 +1553,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     setShowModelMenu(willOpen);
                     setShowModeMenu(false);
                     setShowPlusMenu(false);
-                    setShowProviderSubmenu(false);
                     setShowToolMenu(false);
                     // Refresh providers data when opening menu
                     if (willOpen && onRefreshProviders) {
@@ -1568,90 +1565,59 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <span>{currentModelName}</span>
                   <ChevronUp className="h-3 w-3" />
                 </button>
-                {showModelMenu && (
-                  <div className="absolute right-0 bottom-full mb-1 w-64 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
-                    {/* Provider selector in header */}
-                    <div className="relative px-3 py-2 border-b border-[var(--line)]">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-medium text-[var(--ink-muted)]">选择模型</span>
-                        {providers.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setShowProviderSubmenu(!showProviderSubmenu);
-                            }}
-                            className="flex items-center gap-1 rounded px-2 py-1.5 text-[10px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                          >
-                            <span>{provider?.name ?? '选择供应商'}</span>
-                            <ChevronDown className="h-2.5 w-2.5" />
-                          </button>
-                        )}
-                      </div>
-                      {/* Provider submenu - opens upward */}
-                      {showProviderSubmenu && providers.length > 0 && (
-                        <div className="absolute right-0 bottom-full mb-1 w-56 max-h-56 overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1 z-10">
-                          {providers.map((p) => {
-                            const available = isProviderAvailable(p);
-                            return (
-                              <button
-                                key={p.id}
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (!available) return; // Don't switch if unavailable
-                                  onProviderChange?.(p.id);
-                                  setShowProviderSubmenu(false);
-                                  // Auto-select first model of new provider
-                                  if (p.primaryModel) {
-                                    onModelChange?.(p.primaryModel);
-                                  }
-                                }}
-                                disabled={!available}
-                                className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm ${!available
-                                  ? 'opacity-50 cursor-not-allowed text-[var(--ink-muted)]'
-                                  : provider?.id === p.id
-                                    ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
-                                    : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                {showModelMenu && (() => {
+                  const availableProviders = (providers ?? []).filter(p => isProviderAvailable(p));
+                  return (
+                    <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
+                      {availableProviders.length === 0 ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowModelMenu(false);
+                            window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+                              detail: { section: 'providers' }
+                            }));
+                          }}
+                          className="w-full px-3 py-2.5 text-left text-[13px] text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
+                        >
+                          请先设置模型服务 →
+                        </button>
+                      ) : (
+                        availableProviders.map((p, idx) => (
+                          <div key={p.id}>
+                            {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
+                            <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                              {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
+                            </div>
+                            {p.models.map(model => {
+                              const isSelected = provider?.id === p.id && currentModelId === model.model;
+                              return (
+                                <button
+                                  key={model.model}
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (provider?.id !== p.id) onProviderChange?.(p.id);
+                                    onModelChange?.(model.model);
+                                    setShowModelMenu(false);
+                                  }}
+                                  className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                                    isSelected
+                                      ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
+                                      : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
                                   }`}
-                                title={!available
-                                  ? (p.type === 'subscription' ? '请在设置页面验证订阅状态' : '请在设置面板配置您的 API-Key')
-                                  : p.name}
-                              >
-                                <span className="font-medium truncate">{p.name}</span>
-                                <span className="text-[9px] text-[var(--ink-muted)] bg-[var(--paper-inset)] px-1 py-0.5 rounded shrink-0">
-                                  {p.cloudProvider}
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
+                                >
+                                  {model.modelName}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ))
                       )}
                     </div>
-                    {/* Dynamic models from provider.models */}
-                    {(provider?.models ?? PRESET_PROVIDERS[0].models).map((model) => (
-                      <button
-                        key={model.model}
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onModelChange?.(model.model);
-                          setShowModelMenu(false);
-                          setShowProviderSubmenu(false);
-                        }}
-                        className={`flex w-full items-center px-3 py-2 text-left ${currentModelId === model.model
-                          ? 'bg-[var(--accent)]/10'
-                          : 'hover:bg-[var(--hover-bg)]'
-                          }`}
-                      >
-                        <span className={`text-sm font-medium ${currentModelId === model.model ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
-                          }`}>
-                          {model.modelName}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
+                  );
+                })()}
               </div>
 
               {/* Button states: system task (disabled send) → stopping (disabled spinner) → AI responding (stop) → normal (send) */}
