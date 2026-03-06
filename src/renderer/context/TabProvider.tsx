@@ -455,56 +455,71 @@ export default function TabProvider({
      * Replaces the old markIncompleteBlocksAsFinished — does everything in one atomic step.
      */
     const moveStreamingToHistory = useCallback((status: 'completed' | 'stopped' | 'failed') => {
-        const current = streamingMessageRef.current;
-        if (!current) return;
-
-        let finalMsg = current;
-        if (current.role === 'assistant' && Array.isArray(current.content)) {
-            const statusFlags = status === 'stopped' ? { isStopped: true }
-                : status === 'failed' ? { isFailed: true }
-                    : {};
-            const hasIncomplete = current.content.some(b =>
-                (b.type === 'thinking' && !b.isComplete) ||
-                (b.type === 'tool_use' && b.tool?.isLoading)
-            );
-            if (hasIncomplete) {
-                finalMsg = {
-                    ...current,
-                    content: current.content.map(block => {
-                        if (block.type === 'thinking' && !block.isComplete) {
-                            return {
-                                ...block,
-                                isComplete: true,
-                                ...statusFlags,
-                                thinkingDurationMs: block.thinkingStartedAt
-                                    ? Date.now() - block.thinkingStartedAt
-                                    : undefined
-                            };
-                        }
-                        if (block.type === 'tool_use' && block.tool?.isLoading) {
-                            return {
-                                ...block,
-                                tool: { ...block.tool, isLoading: false, ...statusFlags }
-                            };
-                        }
-                        return block;
-                    }),
-                };
+        // CRITICAL: Use rawSetStreamingMessage updater to read the LATEST streaming message.
+        // Reading streamingMessageRef.current directly would race with pending setStreamingMessage
+        // updates (React 18 batching delays updater execution), causing the last few text chunks
+        // to be lost when chat:message-chunk and chat:message-complete arrive in the same batch.
+        // The updater's `prev` parameter is guaranteed by React to include all pending updates.
+        rawSetStreamingMessage(prev => {
+            if (!prev) {
+                isStreamingRef.current = false;
+                streamingMessageRef.current = null;
+                return null;
             }
-        }
 
-        // Capture completed text for auto-title generation (skip if already attempted)
-        if (!autoTitleAttemptedRef.current && status === 'completed' && finalMsg.role === 'assistant' && Array.isArray(finalMsg.content)) {
-            const textParts = finalMsg.content
-                .filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
-                .map(b => b.text)
-                .join('');
-            lastCompletedTextRef.current = textParts;
-        }
+            let finalMsg = prev;
+            if (prev.role === 'assistant' && Array.isArray(prev.content)) {
+                const statusFlags = status === 'stopped' ? { isStopped: true }
+                    : status === 'failed' ? { isFailed: true }
+                        : {};
+                const hasIncomplete = prev.content.some(b =>
+                    (b.type === 'thinking' && !b.isComplete) ||
+                    (b.type === 'tool_use' && b.tool?.isLoading)
+                );
+                if (hasIncomplete) {
+                    finalMsg = {
+                        ...prev,
+                        content: prev.content.map(block => {
+                            if (block.type === 'thinking' && !block.isComplete) {
+                                return {
+                                    ...block,
+                                    isComplete: true,
+                                    ...statusFlags,
+                                    thinkingDurationMs: block.thinkingStartedAt
+                                        ? Date.now() - block.thinkingStartedAt
+                                        : undefined
+                                };
+                            }
+                            if (block.type === 'tool_use' && block.tool?.isLoading) {
+                                return {
+                                    ...block,
+                                    tool: { ...block.tool, isLoading: false, ...statusFlags }
+                                };
+                            }
+                            return block;
+                        }),
+                    };
+                }
+            }
 
-        setHistoryMessages(prev => [...prev, finalMsg]);
-        setStreamingMessage(null);
-    }, [setStreamingMessage]);
+            // Capture completed text for auto-title generation (skip if already attempted)
+            if (!autoTitleAttemptedRef.current && status === 'completed' && finalMsg.role === 'assistant' && Array.isArray(finalMsg.content)) {
+                const textParts = finalMsg.content
+                    .filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
+                    .map(b => b.text)
+                    .join('');
+                lastCompletedTextRef.current = textParts;
+            }
+
+            setHistoryMessages(prevHistory => [...prevHistory, finalMsg]);
+            // Set isStreamingRef inside the updater so pending message-chunk updaters
+            // (which check isStreamingRef.current) still see true and correctly append
+            // rather than creating a new message. Must NOT be set before this updater runs.
+            isStreamingRef.current = false;
+            streamingMessageRef.current = null;
+            return null;
+        });
+    }, []);
     // Handle SSE events
     const handleSseEvent = useCallback((eventName: string, data: unknown) => {
         switch (eventName) {
@@ -883,8 +898,10 @@ export default function TabProvider({
 
             case 'chat:message-complete': {
                 console.log(`[TabProvider ${tabId}] message-complete received`);
-                isStreamingRef.current = false;
-                // Move streaming message to history (marks incomplete blocks as finished)
+                // NOTE: isStreamingRef.current is set to false inside moveStreamingToHistory's
+                // updater, NOT here. Setting it here would cause pending message-chunk updaters
+                // (queued by React 18 batching) to see false and create a new message instead
+                // of appending, losing the accumulated content.
                 moveStreamingToHistory('completed');
                 // Use flushSync to immediately update UI, bypassing React batching
                 // This prevents UI from getting stuck in loading state during rapid event streams
@@ -943,8 +960,7 @@ export default function TabProvider({
 
             case 'chat:message-stopped': {
                 console.log(`[TabProvider ${tabId}] message-stopped received`);
-                isStreamingRef.current = false;
-                // Move streaming message to history (marks incomplete blocks as stopped)
+                // isStreamingRef.current set inside moveStreamingToHistory's updater
                 moveStreamingToHistory('stopped');
                 // Use flushSync to immediately update UI
                 flushSync(() => {
@@ -965,8 +981,7 @@ export default function TabProvider({
 
             case 'chat:message-error': {
                 console.log(`[TabProvider ${tabId}] message-error received`);
-                isStreamingRef.current = false;
-                // Move streaming message to history (marks incomplete blocks as failed)
+                // isStreamingRef.current set inside moveStreamingToHistory's updater
                 moveStreamingToHistory('failed');
                 // Use flushSync to immediately update UI
                 flushSync(() => {
