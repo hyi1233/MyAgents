@@ -958,6 +958,109 @@ fn normalize_external_path(path: PathBuf) -> PathBuf {
     path
 }
 
+/// Diagnose why bun executable was not found and return a user-friendly error message.
+fn diagnose_bun_not_found<R: Runtime>(app_handle: &AppHandle<R>) -> String {
+    let mut details = Vec::new();
+
+    // Check resource_dir
+    match app_handle.path().resource_dir() {
+        Ok(resource_dir) => {
+            details.push(format!("resource_dir: {:?}", resource_dir));
+            #[cfg(target_os = "windows")]
+            {
+                let expected = resource_dir.join("bun-x86_64-pc-windows-msvc.exe");
+                if !expected.exists() {
+                    if let Some(parent) = resource_dir.parent() {
+                        let parent_bun = parent.join("bun-x86_64-pc-windows-msvc.exe");
+                        if !parent_bun.exists() {
+                            details.push("bun binary not found in install directory — may have been quarantined by antivirus".to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            details.push(format!("resource_dir() failed: {}", e));
+        }
+    }
+
+    // Check exe location
+    #[cfg(target_os = "windows")]
+    if let Ok(exe_path) = std::env::current_exe() {
+        details.push(format!("current_exe: {:?}", exe_path));
+    }
+
+    let diag = details.join("; ");
+    let msg = format!(
+        "Bun runtime not found. {} | \
+         Possible causes: (1) Antivirus quarantined bun.exe — check Windows Security > Protection History. \
+         (2) Installation is corrupted — try reinstalling. \
+         Workaround: install Bun manually from https://bun.sh",
+        diag
+    );
+    log::error!("[sidecar] {}", msg);
+    msg
+}
+
+/// Diagnose why bun process exited immediately and return a user-friendly error message.
+fn diagnose_immediate_exit(status: &std::process::ExitStatus, bun_path: &std::path::Path) -> String {
+    let status_str = format!("{:?}", status);
+
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, ExitStatus wraps the process exit code.
+        // 0xc0000135 (STATUS_DLL_NOT_FOUND) = missing DLL (e.g., VCRUNTIME140.dll)
+        // 0xc0000142 (STATUS_DLL_INIT_FAILED) = DLL initialization failed
+        use std::os::windows::process::ExitStatusExt;
+        let code = status.code().unwrap_or(0) as u32;
+        let hint = match code {
+            0xc0000135 => {
+                "Missing system DLL (likely VCRUNTIME140.dll). \
+                 Please install Visual C++ Redistributable: \
+                 https://aka.ms/vs/17/release/vc_redist.x64.exe"
+            }
+            0xc0000142 => {
+                "DLL initialization failed. \
+                 Please install Visual C++ Redistributable: \
+                 https://aka.ms/vs/17/release/vc_redist.x64.exe"
+            }
+            0xc0000022 => {
+                "Access denied — antivirus may be blocking bun.exe. \
+                 Check Windows Security > Protection History, or add the install directory to exclusions."
+            }
+            1 => {
+                "Bun exited with code 1. Check if Git for Windows is installed \
+                 (required by Claude Agent SDK): https://git-scm.com/downloads/win"
+            }
+            _ => "",
+        };
+
+        let msg = if hint.is_empty() {
+            format!(
+                "Bun process exited immediately (status: {}, code: 0x{:08x}). bun_path: {:?}",
+                status_str, code, bun_path
+            )
+        } else {
+            format!(
+                "Bun process exited immediately (status: {}, code: 0x{:08x}). {} | bun_path: {:?}",
+                status_str, code, hint, bun_path
+            )
+        };
+        log::error!("[sidecar] {}", msg);
+        return msg;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let msg = format!(
+            "Bun process exited immediately with status: {}. bun_path: {:?}",
+            status_str, bun_path
+        );
+        log::error!("[sidecar] {}", msg);
+        msg
+    }
+}
+
 /// Helper: check if bun exists at the given directory with platform-specific names
 #[cfg(target_os = "windows")]
 fn check_bun_in_dir(dir: &std::path::Path, label: &str) -> Option<PathBuf> {
@@ -1298,7 +1401,7 @@ pub fn start_tab_sidecar<R: Runtime>(
 
     // Find executables
     let bun_path = find_bun_executable(app_handle)
-        .ok_or_else(|| "Bun executable not found".to_string())?;
+        .ok_or_else(|| diagnose_bun_not_found(app_handle))?;
     let script_path = find_server_script(app_handle)
         .ok_or_else(|| "Server script not found".to_string())?;
 
@@ -1471,7 +1574,8 @@ pub fn start_tab_sidecar<R: Runtime>(
         // Process exited immediately, wait a bit for stderr thread to capture output
         thread::sleep(Duration::from_millis(100));
         log::error!("[sidecar] Process exited immediately with status: {:?}", status);
-        return Err(format!("Bun process exited immediately with status: {:?}", status));
+        let diag = diagnose_immediate_exit(&status, &bun_path);
+        return Err(diag);
     }
 
     // Create instance (not yet healthy)
@@ -1512,7 +1616,8 @@ pub fn start_tab_sidecar<R: Runtime>(
                         diag.push_str(&detail);
                     }
                     Ok(None) => {
-                        let detail = " | process alive but not listening";
+                        let detail = " | process alive but not listening. \
+                            Possible causes: antivirus slow-scanning bun.exe, or port conflict";
                         ulog_error!("[sidecar]{}", detail);
                         diag.push_str(detail);
                     }
@@ -1783,7 +1888,7 @@ fn create_new_session_sidecar<R: Runtime>(
     // Need to start a new Sidecar
     // First, find executables
     let bun_path = find_bun_executable(app_handle)
-        .ok_or_else(|| "Bun executable not found".to_string())?;
+        .ok_or_else(|| diagnose_bun_not_found(app_handle))?;
     let script_path = find_server_script(app_handle)
         .ok_or_else(|| "Server script not found".to_string())?;
 
@@ -1906,7 +2011,8 @@ fn create_new_session_sidecar<R: Runtime>(
     if let Ok(Some(status)) = child.try_wait() {
         thread::sleep(Duration::from_millis(100));
         log::error!("[sidecar] SessionSidecar exited immediately with status: {:?}", status);
-        return Err(format!("Sidecar process exited immediately with status: {:?}", status));
+        let diag = diagnose_immediate_exit(&status, &bun_path);
+        return Err(diag);
     }
 
     // Create SessionSidecar with owner
