@@ -511,6 +511,8 @@ export default function TabProvider({
                 lastCompletedTextRef.current = textParts;
             }
 
+            // Side effect inside updater — technically impure, but safe because:
+            // (1) StrictMode is off (no double invocation), (2) same pattern as setMessages (line 243).
             setHistoryMessages(prevHistory => [...prevHistory, finalMsg]);
             // Set isStreamingRef inside the updater so pending message-chunk updaters
             // (which check isStreamingRef.current) still see true and correctly append

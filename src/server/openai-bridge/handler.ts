@@ -15,6 +15,7 @@ import { SSEParser } from './utils/sse-parser';
 import { formatSSE } from './utils/sse-writer';
 
 const DEFAULT_TIMEOUT = 300_000; // 5 minutes
+const THOUGHT_SIG_CACHE_MAX = 500; // Max cached thought_signatures to prevent unbounded growth
 
 /** Detect proxy URL from environment (respects no_proxy for the target URL) */
 export function getProxyForUrl(url: string): string | undefined {
@@ -50,6 +51,7 @@ export function createBridgeHandler(config: BridgeConfig): (request: Request) =>
   // Gemini thinking models require round-tripping thought_signature on every request
   // that includes tool calls in history. The Claude Agent SDK strips non-standard fields,
   // so we must cache them here and re-inject on outgoing requests.
+  // Capped at THOUGHT_SIG_CACHE_MAX to prevent unbounded growth in long-lived sessions.
   const thoughtSignatureCache = new Map<string, string>();
 
   return async (request: Request): Promise<Response> => {
@@ -270,6 +272,14 @@ function handleStreamResponse(
                     thoughtSignatureCache.set(tc.id, tc.thought_signature);
                   }
                 }
+                // Evict oldest if over cap (rare in streaming — tool calls per response are few)
+                if (thoughtSignatureCache.size > THOUGHT_SIG_CACHE_MAX) {
+                  const excess = thoughtSignatureCache.size - THOUGHT_SIG_CACHE_MAX;
+                  const iter = thoughtSignatureCache.keys();
+                  for (let i = 0; i < excess; i++) {
+                    thoughtSignatureCache.delete(iter.next().value!);
+                  }
+                }
               }
             }
 
@@ -408,11 +418,20 @@ function jsonError(status: number, type: string, message: string): Response {
 function cacheThoughtSignatures(
   toolCalls: { id: string; thought_signature?: string }[] | undefined,
   cache: Map<string, string>,
+  maxSize = THOUGHT_SIG_CACHE_MAX,
 ): void {
   if (!toolCalls) return;
   for (const tc of toolCalls) {
     if (tc.id && tc.thought_signature) {
       cache.set(tc.id, tc.thought_signature);
+    }
+  }
+  // Evict oldest entries if cache exceeds max size
+  if (cache.size > maxSize) {
+    const excess = cache.size - maxSize;
+    const iter = cache.keys();
+    for (let i = 0; i < excess; i++) {
+      cache.delete(iter.next().value!);
     }
   }
 }
