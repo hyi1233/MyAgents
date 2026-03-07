@@ -21,7 +21,7 @@ interface MergedPoint {
 
 interface SwipeState {
   phase: 'idle' | 'tracking' | 'animating';
-  direction: 'horizontal' | 'vertical' | null;
+  direction: 'horizontal' | 'vertical' | 'inner-scroll' | null;
   offsetX: number;              // cumulative px; positive = shifted right (previous tab)
   velocitySamples: VelocitySample[];
   generation: number;           // incremented per animation — stale listeners check this
@@ -80,6 +80,38 @@ const BOUNCE_COOLDOWN = 500;           // ms — absorb inertial events after bo
 
 function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
+}
+
+/**
+ * Check if the wheel event target is inside a horizontally scrollable element
+ * that can still scroll in the given direction. If so, the inner element should
+ * handle the scroll and tab swipe should NOT intercept.
+ *
+ * @param target  The event target element
+ * @param container  The tab content container (stop walking at this boundary)
+ * @param deltaX  The wheel deltaX (positive = scroll right, negative = scroll left)
+ * @returns true if an inner element should handle the horizontal scroll
+ */
+function hasInnerHorizontalScroll(target: EventTarget | null, container: HTMLElement, deltaX: number): boolean {
+  // Narrow to HTMLElement — target may be a Text node, SVGElement, etc.
+  let el: HTMLElement | null =
+    target instanceof HTMLElement ? target
+    : (target instanceof Node ? target.parentElement : null);
+  while (el && el !== container) {
+    // Check if element has horizontal overflow (auto or scroll)
+    if (el.scrollWidth > el.clientWidth) {
+      const style = getComputedStyle(el);
+      const overflowX = style.overflowX;
+      if (overflowX === 'auto' || overflowX === 'scroll') {
+        // deltaX > 0 means scrolling right (content moves left)
+        if (deltaX > 0 && el.scrollLeft + el.clientWidth < el.scrollWidth - 1) return true;
+        // deltaX < 0 means scrolling left (content moves right)
+        if (deltaX < 0 && el.scrollLeft > 1) return true;
+      }
+    }
+    el = el.parentElement;
+  }
+  return false;
 }
 
 export function useTabSwipeGesture({
@@ -438,11 +470,20 @@ export function useTabSwipeGesture({
         const ax = Math.abs(deltaX);
         const ay = Math.abs(deltaY);
         if (ax < DIR_LOCK_MIN && ay < DIR_LOCK_MIN) return;
-        state.direction = ax > ay * DIR_LOCK_RATIO ? 'horizontal' : 'vertical';
+        if (ax > ay * DIR_LOCK_RATIO) {
+          // Horizontal gesture — but check if an inner element should handle it
+          if (hasInnerHorizontalScroll(e.target, cont, deltaX)) {
+            state.direction = 'inner-scroll';
+          } else {
+            state.direction = 'horizontal';
+          }
+        } else {
+          state.direction = 'vertical';
+        }
         if (state.direction === 'vertical') return;
       }
 
-      if (state.direction === 'vertical') {
+      if (state.direction === 'vertical' || state.direction === 'inner-scroll') {
         if (state.dirResetTimer !== null) clearTimeout(state.dirResetTimer);
         state.dirResetTimer = setTimeout(() => {
           state.direction = null;
