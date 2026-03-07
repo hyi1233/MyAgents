@@ -58,7 +58,8 @@
       "../src/shared": "shared",
       "../bundled-skills": "bundled-skills",
       "../bundled-agents": "bundled-agents",
-      "../mino": "mino"
+      "../mino": "mino",
+      "infoplist/**": "./"
     },
     "externalBin": [
       "binaries/bun"
