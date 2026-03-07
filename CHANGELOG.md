@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.37] - 2026-03-07
+
+### Added
+- **埋点系统升级**：新增 15 个前端事件（session_rewind/title_edit、message_retry/copy、agent_add/remove、skill_use、im_bot_create/toggle/remove、workspace_create、tts_play、task_center_open、bug_report_submit）+ 服务端统一 `ai_turn_complete` 指标覆盖所有 AI 执行来源（交互对话/IM Bot/定时任务/Heartbeat）
+- **工作区模板库**：新增「从模板创建工作区」功能，内置 Mino 模板；Phosphor 图标系统支持 50+ 工作区图标选择
+- **Tavily 搜索预设**：新增 Tavily Web Search MCP 预设工具 + MCP 设置引导优化
+- **macOS 本地化**：Info.plist 声明 CFBundleLocalizations，原生 UI（WebView 右键菜单等）跟随系统语言
+- **Windows 平台增强**：VC++ Runtime app-local 部署、Sidecar 启动失败诊断增强、用户友好错误提示
+
+### Fixed
+- **AI 回复最后几个字丢失**：React 18 批处理竞态导致流式输出末尾内容未渲染
+- **Gemini thinking 模型 400 错误**：工具调用后 `thought_signature` 丢失，全链路透传修复
+- **Sub-Agent 重命名后列表仍显示旧名称**：Agent 列表未刷新缓存
+- **飞书 Bot 群聊管理空状态提示**：优化空群组引导文案
+- **触摸板横滑切换 Tab 冲突**：与内部可横滑元素（代码块等）手势冲突
+- **右键菜单改进**：AgentCapabilitiesPanel 菜单项补全 icon；生产环境屏蔽原生 Reload/Inspect Element 菜单，保留输入框/文本选中/媒体元素原生菜单
+- **MCP 列表 UX**：简化 DuckDuckGo 描述文案；截断文本 hover 展示完整内容；设置面板标题下方展示副标题描述
+- **服务端埋点健壮性**：config 缓存加 TTL 重试修复启动竞态；endpoint 校验与前端三重检查一致
+
+### Changed
+- **对话页侧栏重构**：工作区面板与 Launcher 风格统一、两行布局 + 能力面板排序优化
+- **埋点开源最佳实践**：移除硬编码 endpoint，`isAnalyticsEnabled()` 强化为三重检查，fork 构建零泄漏
+
+---
+
 ## [0.1.36] - 2026-03-06
 
 ### Added
