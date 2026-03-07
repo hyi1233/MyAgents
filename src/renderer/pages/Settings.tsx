@@ -2092,7 +2092,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             <div className="min-w-0 flex-1">
                                                 <div className="flex items-center gap-2">
                                                     <Globe className="h-4 w-4 shrink-0 text-[var(--accent-warm)]/70" />
-                                                    <h3 className="truncate font-semibold text-[var(--ink)]">{server.name}</h3>
+                                                    <h3 className="truncate font-semibold text-[var(--ink)]" title={server.name}>{server.name}</h3>
                                                     {server.isBuiltin && (
                                                         <span className="shrink-0 rounded-full border border-[var(--info)]/20 bg-[var(--info-bg)] px-2 py-0.5 text-[10px] font-medium text-[var(--info)]">
                                                             预设
@@ -2109,7 +2109,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     )}
                                                 </div>
                                                 {server.description && (
-                                                    <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
+                                                    <p className="mt-1 truncate text-xs text-[var(--ink-muted)]" title={server.description}>
                                                         {server.description}
                                                     </p>
                                                 )}
@@ -2119,7 +2119,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     </p>
                                                 )}
                                                 {server.command !== '__builtin__' && (
-                                                    <p className="mt-2 truncate font-mono text-[10px] text-[var(--ink-muted)]">
+                                                    <p className="mt-2 truncate font-mono text-[10px] text-[var(--ink-muted)]" title={`${server.command} ${server.args?.join(' ') ?? ''}`}>
                                                         {server.command} {server.args?.join(' ')}
                                                     </p>
                                                 )}
@@ -2766,8 +2766,13 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">{builtinMcpSettings.server.name} 设置</h2>
-                            <button onClick={() => setBuiltinMcpSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
+                            <div className="min-w-0 flex-1">
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">{builtinMcpSettings.server.name} 设置</h2>
+                                {builtinMcpSettings.server.description && (
+                                    <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{builtinMcpSettings.server.description}</p>
+                                )}
+                            </div>
+                            <button onClick={() => setBuiltinMcpSettings(null)} className="shrink-0 rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
                                 <X className="h-5 w-5" />
                             </button>
                         </div>
@@ -2944,8 +2949,11 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">Gemini 图片生成 设置</h2>
-                            <button onClick={() => setGeminiImageSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
+                            <div className="min-w-0 flex-1">
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">Gemini 图片生成 设置</h2>
+                                <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{getPresetMcpServer('gemini-image')?.description}</p>
+                            </div>
+                            <button onClick={() => setGeminiImageSettings(null)} className="shrink-0 rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
                                 <X className="h-5 w-5" />
                             </button>
                         </div>
@@ -3153,8 +3161,11 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">Playwright 浏览器设置</h2>
-                            <button onClick={() => setPlaywrightSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
+                            <div className="min-w-0 flex-1">
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">Playwright 浏览器设置</h2>
+                                <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{getPresetMcpServer('playwright')?.description}</p>
+                            </div>
+                            <button onClick={() => setPlaywrightSettings(null)} className="shrink-0 rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
                                 <X className="h-5 w-5" />
                             </button>
                         </div>
@@ -3344,8 +3355,11 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">Edge TTS 语音合成 设置</h2>
-                            <button onClick={() => setEdgeTtsSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
+                            <div className="min-w-0 flex-1">
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">Edge TTS 语音合成 设置</h2>
+                                <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{getPresetMcpServer('edge-tts')?.description}</p>
+                            </div>
+                            <button onClick={() => setEdgeTtsSettings(null)} className="shrink-0 rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
                                 <X className="h-5 w-5" />
                             </button>
                         </div>

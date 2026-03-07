@@ -677,7 +677,7 @@ export const PRESET_MCP_SERVERS: McpServerDefinition[] = [
   {
     id: 'ddg-search',
     name: 'DuckDuckGo 搜索引擎',
-    description: '免费全网搜索，无需 API Key。受 DuckDuckGo 频率限制（≤1次/秒，≤15000次/月），高频使用可能返回 400 错误',
+    description: '无需 API Key。受 DuckDuckGo 频率限制（≤1次/秒，≤15000次/月），高频使用可能返回 400 错误',
     type: 'stdio',
     command: 'uvx',
     args: ['duckduckgo-mcp-server'],
