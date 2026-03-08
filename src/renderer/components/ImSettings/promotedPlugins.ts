@@ -48,8 +48,8 @@ export interface PromotedPlugin {
 
 export const PROMOTED_PLUGINS: PromotedPlugin[] = [
     {
-        pluginId: 'openclaw-channel-qqbot',
-        npmSpec: 'openclaw-channel-qqbot',
+        pluginId: 'qqbot',
+        npmSpec: '@sliverp/qqbot',
         name: 'QQ Bot',
         description: '通过 QQ Bot 远程使用 AI Agent',
         icon: qqbotIcon,
