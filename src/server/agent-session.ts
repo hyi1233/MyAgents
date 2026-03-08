@@ -431,8 +431,6 @@ let rewindPromise: Promise<unknown> | null = null;
 // ===== 持久 Session 门控 =====
 // 消息交付：事件驱动替代轮询，generator 阻塞在 waitForMessage 直到新消息到达
 let messageResolver: ((item: MessageQueueItem | null) => void) | null = null;
-// 回合同步：等待 result 后才 yield 下一条消息
-let resolveTurnComplete: (() => void) | null = null;
 
 /** 唤醒 generator — 投递消息或 null（退出信号） */
 function wakeGenerator(item: MessageQueueItem | null): void {
@@ -452,24 +450,44 @@ function waitForMessage(): Promise<MessageQueueItem | null> {
   return new Promise(resolve => { messageResolver = resolve; });
 }
 
-/** result handler 调用：解锁 generator 进入下一轮 */
-function signalTurnComplete(): void {
-  if (resolveTurnComplete) {
-    const resolve = resolveTurnComplete;
-    resolveTurnComplete = null;
-    resolve();
-  }
+/** 当前回合是否仍在进行中 */
+function isTurnInFlight(): boolean {
+  return isStreamingMessage;
 }
 
-/** generator 等待当前回合 AI 回复完成 */
-function waitForTurnComplete(): Promise<void> {
-  if (shouldAbortSession) return Promise.resolve();
-  return new Promise(resolve => { resolveTurnComplete = resolve; });
+// Mid-turn injection: messages yielded to SDK but not yet consumed by the AI.
+// queue:started is deferred until a content block boundary (thinking/tool_use/text start)
+// signals the AI has processed the injected message. NOT flushed during text_delta/thinking_delta
+// (continuous streaming within a block) to avoid splitting old content mid-stream.
+const pendingMidTurnQueue: Array<{
+  queueId: string;
+  userMessage: Pick<MessageWire, 'id' | 'role' | 'content' | 'timestamp' | 'attachments'>;
+}> = [];
+
+/**
+ * Flush deferred mid-turn user messages: push to messages[] and broadcast queue:started.
+ * Called at content block boundaries (thinking/tool_use/text start) and turn end
+ * (handleMessageComplete/handleMessageStopped). NOT called from text_delta/thinking_delta
+ * to avoid splitting old text mid-stream.
+ */
+function flushPendingMidTurnQueue(): void {
+  if (pendingMidTurnQueue.length === 0) return;
+  for (const pending of pendingMidTurnQueue) {
+    messages.push(pending.userMessage as MessageWire);
+    broadcast('queue:started', {
+      queueId: pending.queueId,
+      userMessage: pending.userMessage,
+      midTurnBreak: true,
+    });
+  }
+  pendingMidTurnQueue.length = 0;
 }
 
 /** 中止持久 session：唤醒所有被阻塞的 Promise */
 function abortPersistentSession(): void {
   shouldAbortSession = true;
+  // Discard pending mid-turn messages (session is being torn down)
+  pendingMidTurnQueue.length = 0;
   // Notify IM stream callback before abort
   if (imStreamCallback) {
     imStreamCallback('error', '会话已中断，请重新发送');
@@ -481,10 +499,42 @@ function abortPersistentSession(): void {
     messageResolver = null;
     resolve(null);
   }
-  // 唤醒被阻塞的 generator（waitForTurnComplete）
-  signalTurnComplete();
   // 强制 subprocess 产出消息/错误，解除 for-await 阻塞
   querySession?.interrupt().catch(() => {});
+}
+
+/**
+ * Hard-abort the current session after an interrupt timeout and recover automatically.
+ */
+async function forceAbortCurrentTurnAndRecover(): Promise<void> {
+  console.warn('[agent] force-aborting session after interrupt timeout');
+  abortPersistentSession();
+
+  if (sessionTerminationPromise) {
+    try {
+      await sessionTerminationPromise;
+    } catch (error) {
+      console.warn('[agent] forced stop: session termination error:', error);
+    }
+  }
+
+  // Another control flow (reset/switch session) already took over.
+  if (!shouldAbortSession) {
+    return;
+  }
+
+  if (messageQueue.length > 0) {
+    console.log('[agent] forced stop: restarting session to drain queued messages');
+    setTimeout(() => {
+      startStreamingSession().catch((error) => {
+        console.error('[agent] forced stop: failed to restart session', error);
+      });
+    }, 0);
+    return;
+  }
+
+  console.log('[agent] forced stop: scheduling recovery pre-warm');
+  schedulePreWarm();
 }
 
 // ===== Interaction Scenario (unified system prompt) =====
@@ -655,7 +705,7 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
     const ids = servers.map(s => s.id).join(', ') || 'none';
     if (isProcessing && !isPreWarming) {
       // Active user turn in progress (e.g. IM responding) — defer restart to avoid killing mid-response.
-      // The restart will fire after the current turn completes (see signalTurnComplete handler).
+      // The restart will fire after the current turn completes (see result handler pendingConfigRestart).
       // Pre-warm sessions are safe to abort immediately (no user message to lose).
       console.log(`[agent] MCP config changed → [${ids}], deferring restart (active turn)`);
       pendingConfigRestart = true;
@@ -2065,6 +2115,9 @@ function ensureAssistantMessage(): MessageWire {
   if (lastMessage && lastMessage.role === 'assistant' && isStreamingMessage) {
     return lastMessage;
   }
+  // Safety net: flush any remaining pending mid-turn messages before creating
+  // a new assistant. Primary flush happens in start handlers and handleMessageComplete().
+  flushPendingMidTurnQueue();
   const assistant: MessageWire = {
     id: String(messageSequence++),
     role: 'assistant',
@@ -2157,6 +2210,7 @@ function appendTextChunk(chunk: string): void {
 }
 
 function handleThinkingStart(index: number): void {
+  flushPendingMidTurnQueue();
   const message = ensureAssistantMessage();
   const contentArray = ensureContentArray(message);
   contentArray.push({
@@ -2184,6 +2238,7 @@ function handleToolUseStart(tool: {
   input: Record<string, unknown>;
   streamIndex: number;
 }): void {
+  flushPendingMidTurnQueue();
   const message = ensureAssistantMessage();
   const contentArray = ensureContentArray(message);
   contentArray.push({
@@ -2208,6 +2263,7 @@ function handleServerToolUseStart(tool: {
   input: Record<string, unknown>;
   streamIndex: number;
 }): void {
+  flushPendingMidTurnQueue();
   const message = ensureAssistantMessage();
   const contentArray = ensureContentArray(message);
   contentArray.push({
@@ -2380,6 +2436,8 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
 }
 
 function handleMessageComplete(): void {
+  // Flush pending mid-turn messages BEFORE marking streaming as done.
+  flushPendingMidTurnQueue();
   isStreamingMessage = false;
   // Notify IM stream: turn complete — only if callback was NOT nulled/replaced during this turn.
   // A nulled callback means the SSE stream timed out and a new one may have been set for a
@@ -2401,7 +2459,10 @@ function handleMessageComplete(): void {
   // buildSdkMcpServers() if the session restarts (MCP change, error recovery, etc.).
   // It is still cleared on full session termination (see below).
 
-  // Only transition to idle if no queued messages waiting.
+  // Transition to idle only when no queued messages remain.
+  // With mid-turn injection, the generator is always at waitForMessage() after yield
+  // (no waitForTurnComplete gate). Queued messages are delivered via wakeGenerator()
+  // at enqueue time, so the generator drains them naturally. No need to dequeue here.
   if (messageQueue.length === 0) {
     setSessionState('idle');
   }
@@ -2421,6 +2482,8 @@ function handleMessageComplete(): void {
 }
 
 function handleMessageStopped(): void {
+  // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
+  flushPendingMidTurnQueue();
   isStreamingMessage = false;
   // Notify IM stream: turn complete (stopped) — cross-turn guard prevents misfire
   if (imStreamCallback && !imCallbackNulledDuringTurn) {
@@ -2432,6 +2495,7 @@ function handleMessageStopped(): void {
   toolResultIndexToId.clear();
   childToolToParent.clear();
   imTextBlockIndices.clear();
+  clearCronTaskContext();
 
 
   // Only transition to idle if no queued messages waiting (same logic as handleMessageComplete)
@@ -2460,6 +2524,8 @@ function handleMessageStopped(): void {
 }
 
 function handleMessageError(error: string): void {
+  // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
+  flushPendingMidTurnQueue();
   isStreamingMessage = false;
   // Notify IM stream: localized error
   if (imStreamCallback) {
@@ -2791,6 +2857,7 @@ export function getMessages(): MessageWire[] {
 function clearMessageState(): void {
   messages.length = 0;
   messageQueue.length = 0;
+  pendingMidTurnQueue.length = 0;
   streamIndexToToolId.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
@@ -2910,11 +2977,12 @@ export async function resetSession(): Promise<void> {
   sessionRegistered = false;
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to new session
   messageResolver = null;
-  resolveTurnComplete = null;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
-  // 4b. Clear sub-agent definitions (will be re-set by frontend if needed)
-  currentAgentDefinitions = null;
+  // 4b. Keep currentAgentDefinitions — agents are workspace-level config, not session state.
+  // Clearing them here causes a race: pre-warm fires before frontend re-syncs agents,
+  // so referenced global agents (only available via programmatic injection) are lost.
+  // See: https://github.com/hAcKlyc/MyAgents/issues/13
 
   // 5. Clear SDK ready signal state (same as switchToSession)
   _sdkReadyResolve = null;
@@ -3071,7 +3139,6 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   sessionRegistered = false; // Will re-set from sessionMeta below
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to different session
   messageResolver = null;
-  resolveTurnComplete = null;
   setSessionState('idle');
   systemInitInfo = null;
 
@@ -3203,7 +3270,7 @@ export async function enqueueUserMessage(
 
   // Session is "busy" if AI is streaming OR there are pending messages in the queue.
   // This prevents config changes and turn-usage resets during the brief gap between turns.
-  const isSessionBusy = isStreamingMessage || messageQueue.length > 0;
+  const isSessionBusy = isTurnInFlight() || shouldAbortSession || isInterruptingResponse || messageQueue.length > 0;
 
   // Reset turn usage tracking — only for direct (non-queued) messages.
   // For queued messages, this is done in messageGenerator when the item is yielded,
@@ -3395,26 +3462,30 @@ export async function enqueueUserMessage(
   const queueId = randomUUID();
 
   // Queue if session is busy: either AI is streaming or there are pending messages
-  // in the queue waiting to be processed. This prevents a race condition where
-  // isStreamingMessage is false briefly between turns (handleMessageComplete resets it)
-  // but the generator hasn't picked up the next queued item yet.
+  // in the queue waiting to be processed.
   // IMPORTANT: Do NOT push to messages[] or broadcast here — queued messages
   // are rendered in the frontend only when they start executing (see messageGenerator).
-  if (isStreamingMessage || messageQueue.length > 0) {
+  // Mid-turn injection: deliver via wakeGenerator so the generator can yield
+  // the message to SDK stdin immediately (subprocess reads at breakpoints).
+  if (isSessionBusy) {
     // Backend queue limit (defense-in-depth — frontend also enforces limit)
+    // Count both messageQueue (waiting) and pendingMidTurnQueue (yielded but not yet flushed)
     const MAX_QUEUE_SIZE = 10;
-    if (messageQueue.length >= MAX_QUEUE_SIZE) {
+    if (messageQueue.length + pendingMidTurnQueue.length >= MAX_QUEUE_SIZE) {
       return { queued: false, error: `Queue full (max ${MAX_QUEUE_SIZE})` };
     }
-    messageQueue.push({
+    const queueItem: MessageQueueItem = {
       id: queueId,
       message: { role: 'user', content: contentBlocks },
       messageText: trimmed,
       wasQueued: true,
       resolve: () => {},  // No-op: no one is awaiting
       attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
-    });
-    console.log(`[agent] Message queued (deferred render): queueId=${queueId} text="${trimmed.slice(0, 50)}"`);
+    };
+    // wakeGenerator delivers directly if generator is at waitForMessage (messageResolver set),
+    // or buffers in messageQueue if generator is suspended at yield (SDK hasn't called next() yet).
+    wakeGenerator(queueItem);
+    console.log(`[agent] Message queued (mid-turn injection): queueId=${queueId} text="${trimmed.slice(0, 50)}"`);
     broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100) });
     return { queued: true, queueId };
   }
@@ -3513,14 +3584,7 @@ export async function waitForSessionIdle(
 }
 
 export async function interruptCurrentResponse(): Promise<boolean> {
-  if (!querySession) {
-    // 即使没有 querySession，如果 isStreamingMessage 为 true，也需要重置状态
-    if (isStreamingMessage) {
-      console.log('[agent] No querySession but streaming flag set, resetting state');
-      broadcast('chat:message-stopped', null);
-      handleMessageStopped();
-      return true;
-    }
+  if (!isTurnInFlight()) {
     return false;
   }
 
@@ -3528,8 +3592,16 @@ export async function interruptCurrentResponse(): Promise<boolean> {
     return true;
   }
 
+  if (!querySession) {
+    console.log('[agent] No querySession but turn is still marked active, resetting state');
+    broadcast('chat:message-stopped', null);
+    handleMessageStopped();
+    return true;
+  }
+
   isInterruptingResponse = true;
   try {
+    let shouldForceAbort = false;
     // 使用 Promise.race 添加 5 秒超时
     const interruptPromise = querySession.interrupt();
     const timeoutPromise = new Promise<void>((_, reject) => {
@@ -3540,11 +3612,14 @@ export async function interruptCurrentResponse(): Promise<boolean> {
       await Promise.race([interruptPromise, timeoutPromise]);
     } catch (error) {
       console.error('[agent] Interrupt error or timeout:', error);
-      // 超时或出错时也要清理状态，避免 UI 卡住
+      shouldForceAbort = true;
     }
 
     broadcast('chat:message-stopped', null);
     handleMessageStopped();
+    if (shouldForceAbort) {
+      void forceAbortCurrentTurnAndRecover();
+    }
     return true;
   } finally {
     isInterruptingResponse = false;
@@ -3778,7 +3853,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Build common query options (shared between normal start and "already in use" fallback)
     const commonQueryOptions = {
       enableFileCheckpointing: true,
-      maxThinkingTokens: 32_000,
+      thinking: { type: 'adaptive' as const },
+      effort: 'high' as const,
       // Load settings from project scope only (.claude/)
       // User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectUserConfig()
       // CLAUDE_CONFIG_DIR is NOT set — preserves Anthropic subscription Keychain lookup
@@ -3993,7 +4069,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               });
               broadcast('chat:message-error', 'Agent 启动超时');
               // abortPersistentSession 统一处理：设置 shouldAbortSession、唤醒 generator
-              // 的 waitForMessage/waitForTurnComplete、调用 interrupt() 解除 for-await 阻塞
+              // 的 waitForMessage、调用 interrupt() 解除 for-await 阻塞
               abortPersistentSession();
           }
       }, STARTUP_TIMEOUT_MS);
@@ -4071,6 +4147,31 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         }
       }
 
+      // Handle background task lifecycle (SDK Task tool with run_in_background)
+      // Gated behind type === 'system' to avoid unnecessary property access on high-frequency stream_events
+      if (sdkMessage.type === 'system') {
+        const taskMsg = sdkMessage as { subtype?: string; task_id?: string;
+          tool_use_id?: string; description?: string; task_type?: string;
+          status?: string; summary?: string; output_file?: string };
+        if (taskMsg.subtype === 'task_started' && taskMsg.task_id) {
+          console.log(`[agent] Background task started: ${taskMsg.task_id} — ${taskMsg.description}`);
+          broadcast('chat:task-started', {
+            taskId: taskMsg.task_id,
+            toolUseId: taskMsg.tool_use_id,
+            description: taskMsg.description,
+            taskType: taskMsg.task_type,
+          });
+        } else if (taskMsg.subtype === 'task_notification' && taskMsg.task_id) {
+          console.log(`[agent] Background task ${taskMsg.status}: ${taskMsg.task_id} — ${taskMsg.summary}`);
+          broadcast('chat:task-notification', {
+            taskId: taskMsg.task_id,
+            status: taskMsg.status,
+            summary: taskMsg.summary,
+            outputFile: taskMsg.output_file,
+          });
+        }
+      }
+
       const agentError = extractAgentError(sdkMessage);
       if (agentError) {
         broadcast('chat:agent-error', { message: agentError });
@@ -4109,8 +4210,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 // Filter out decorative text from third-party APIs before broadcasting
                 const decorativeCheck = checkDecorativeToolText(streamEvent.delta.text);
                 if (!decorativeCheck.filtered) {
-                  broadcast('chat:message-chunk', streamEvent.delta.text);
+                  // Handler first: appendTextChunk → ensureAssistantMessage() may flush
+                  // pendingMidTurnQueue. Broadcast after so frontend splits before new content.
                   appendTextChunk(streamEvent.delta.text);
+                  broadcast('chat:message-chunk', streamEvent.delta.text);
                   currentTurnHasOutput = true;
                   // IM stream: forward non-subagent text delta (cross-turn guard)
                   if (!imCallbackNulledDuringTurn) imStreamCallback?.('delta', streamEvent.delta.text);
@@ -4149,6 +4252,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         } else if (streamEvent.type === 'content_block_start') {
           // IM stream: track text block indices (non-subagent only, cross-turn guard)
+          // Flush pending mid-turn queue at non-subagent text content_block_start.
+          // thinking/tool_use/server_tool_use are covered by their start handlers.
+          // Subagent text blocks are skipped (they operate within a parent tool context).
+          if (streamEvent.content_block.type === 'text' && !sdkMessage.parent_tool_use_id) {
+            flushPendingMidTurnQueue();
+          }
           if (imStreamCallback && !sdkMessage.parent_tool_use_id && !imCallbackNulledDuringTurn) {
             if (streamEvent.content_block.type === 'text') {
               imTextBlockIndices.add(streamEvent.index);
@@ -4158,8 +4267,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             }
           }
           if (streamEvent.content_block.type === 'thinking') {
-            broadcast('chat:thinking-start', { index: streamEvent.index });
+            // Handler first: ensureAssistantMessage() may flush pendingMidTurnQueue
+            // (broadcasting queue:started). The thinking-start broadcast must come AFTER
+            // so the frontend splits streaming before adding new content.
             handleThinkingStart(streamEvent.index);
+            broadcast('chat:thinking-start', { index: streamEvent.index });
           } else if (streamEvent.content_block.type === 'tool_use') {
             streamIndexToToolId.set(streamEvent.index, streamEvent.content_block.id);
             const toolPayload = {
@@ -4169,14 +4281,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               streamIndex: streamEvent.index
             };
             if (sdkMessage.parent_tool_use_id) {
+              handleSubagentToolUseStart(sdkMessage.parent_tool_use_id, toolPayload);
               broadcast('chat:subagent-tool-use', {
                 parentToolUseId: sdkMessage.parent_tool_use_id,
                 tool: toolPayload
               });
-              handleSubagentToolUseStart(sdkMessage.parent_tool_use_id, toolPayload);
             } else {
-              broadcast('chat:tool-use-start', toolPayload);
+              // Handler first: ensureAssistantMessage() may flush pendingMidTurnQueue
+              // (broadcasting queue:started). The tool-use-start broadcast must come AFTER
+              // so the frontend splits streaming before adding new content.
               handleToolUseStart(toolPayload);
+              broadcast('chat:tool-use-start', toolPayload);
             }
           } else if (streamEvent.content_block.type === 'server_tool_use') {
             // Server-side tool use (e.g., 智谱 GLM-4.7's webReader, analyze_image)
@@ -4208,9 +4323,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               input: parsedInput,
               streamIndex: streamEvent.index
             };
-            // Server tools are always top-level (no subagent concept)
-            broadcast('chat:server-tool-use-start', toolPayload);
+            // Handler first: ensureAssistantMessage() may flush pendingMidTurnQueue.
             handleServerToolUseStart(toolPayload);
+            broadcast('chat:server-tool-use-start', toolPayload);
           } else if (
             (streamEvent.content_block.type === 'web_search_tool_result' ||
               streamEvent.content_block.type === 'web_fetch_tool_result' ||
@@ -4543,8 +4658,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           const nonStreamedText = nonStreamedParts.join('');
           if (nonStreamedText) {
             console.log(`[agent] Non-streamed assistant text detected (${nonStreamedText.length} chars), broadcasting as message-chunk`);
-            broadcast('chat:message-chunk', nonStreamedText);
+            // Handler first: appendTextChunk → ensureAssistantMessage() may flush
+            // pendingMidTurnQueue. Broadcast after so frontend splits before new content.
             appendTextChunk(nonStreamedText);
+            broadcast('chat:message-chunk', nonStreamedText);
             currentTurnHasOutput = true;
             if (!imCallbackNulledDuringTurn) imStreamCallback?.('delta', nonStreamedText);
           }
@@ -4612,8 +4729,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             // Non-error result text that wasn't captured by streaming or assistant handler
             // (safety net — should rarely trigger after the assistant handler fix above)
             console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
-            broadcast('chat:message-chunk', resultText);
+            // Handler first (same pattern as streamed text path)
             appendTextChunk(resultText);
+            broadcast('chat:message-chunk', resultText);
           }
           // Forward to IM callback (prevents "(No Response)" for SDK failures)
           // Cross-turn guard: only forward if callback was not nulled/replaced
@@ -4709,7 +4827,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         });
 
         handleMessageComplete();
-        signalTurnComplete();  // 解锁 generator 进入下一轮
 
         // Auto-reset session after unrecoverable errors (image content in history,
         // stale "No conversation found", etc.) — generates new session ID so next
@@ -4802,7 +4919,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       messageResolver = null;
       resolve(null);
     }
-    signalTurnComplete();
 
     // 防御：确保 isStreamingMessage 在 session 退出时被重置。
     // 正常路径由 handleMessageComplete/Stopped/Error 处理，但 subprocess
@@ -4865,10 +4981,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 }
 
 async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
-  // 持久 yield 模式：generator 不 return → subprocess 全程存活 → 消除每轮重启开销。
-  // while(true) 循环等待消息 → yield 到 SDK stdin → 等待 AI 回复完成 → 下一轮。
+  // Yield-and-ready 模式：generator yield 后立即回到 waitForMessage，有新消息即再次 yield。
+  // SDK 的 for-await 立即写入 stdin pipe，subprocess 在 tool call / thinking 间隙读取。
+  // 不再等待 turn 完成（waitForTurnComplete），实现 mid-turn 消息注入。
   // 唯一退出信号：waitForMessage() 返回 null（由 abortPersistentSession 触发）。
-  console.log('[messageGenerator] Started (persistent mode)');
+  console.log('[messageGenerator] Started (persistent mode, mid-turn injection enabled)');
 
   while (true) {
     // 等待队列中的消息（事件驱动，无轮询）
@@ -4878,7 +4995,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       return; // generator return → SDK endInput() → stdin EOF → subprocess 退出
     }
 
-    // 排队消息的延迟渲染（原逻辑不变）
+    // 排队消息的延迟渲染
     if (item.wasQueued) {
       const userMessage: MessageWire = {
         id: String(messageSequence++),
@@ -4887,29 +5004,55 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
         timestamp: new Date().toISOString(),
         attachments: item.attachments,
       };
-      messages.push(userMessage);
-      persistMessagesToStorage();
-      resetTurnUsage();
-      currentTurnStartTime = Date.now();
-      broadcast('queue:started', {
-        queueId: item.id,
-        userMessage: {
-          id: userMessage.id,
-          role: userMessage.role,
-          content: userMessage.content,
-          timestamp: userMessage.timestamp,
-          attachments: userMessage.attachments,
-        },
-      });
+
+      const isMidTurn = isStreamingMessage;
+      if (!isMidTurn) {
+        // Normal turn start: push to messages, persist, broadcast immediately
+        messages.push(userMessage);
+        persistMessagesToStorage();
+        resetTurnUsage();
+        currentTurnStartTime = Date.now();
+        broadcast('queue:started', {
+          queueId: item.id,
+          userMessage: {
+            id: userMessage.id,
+            role: userMessage.role,
+            content: userMessage.content,
+            timestamp: userMessage.timestamp,
+            attachments: userMessage.attachments,
+          },
+        });
+      } else {
+        // Mid-turn injection: defer BOTH the messages[] push AND queue:started broadcast.
+        // The user message must NOT be in messages[] while old content is still streaming,
+        // because ensureAssistantMessage() checks the last message's role — a premature
+        // user message at the end would cause it to create a new assistant and flush,
+        // splitting the OLD text stream at the wrong point (text_delta from the current
+        // response would trigger the flush, not a genuine new response from the AI).
+        // The message is pushed to messages[] when the turn ends (handleMessageComplete/
+        // handleMessageStopped flush).
+        pendingMidTurnQueue.push({
+          queueId: item.id,
+          userMessage: {
+            id: userMessage.id,
+            role: userMessage.role,
+            content: userMessage.content,
+            timestamp: userMessage.timestamp,
+            attachments: userMessage.attachments,
+          },
+        });
+      }
     }
 
     // Yield 消息到 SDK stdin
-    // Reset cross-turn guard: this turn starts fresh, no timeout/replacement yet.
-    // Unlike a generation snapshot (which races with setImStreamCallback on the event loop),
-    // this flag is SET by setImStreamCallback itself, so ordering is guaranteed.
-    imCallbackNulledDuringTurn = false;
-    isStreamingMessage = true;
-    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}`);
+    // Only reset cross-turn guards for NEW turns (not mid-turn injections).
+    const isMidTurnInjection = isStreamingMessage;
+    if (!isMidTurnInjection) {
+      // Reset cross-turn guard: this turn starts fresh, no timeout/replacement yet.
+      imCallbackNulledDuringTurn = false;
+      isStreamingMessage = true;
+    }
+    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}, midTurn=${isMidTurnInjection}`);
     yield {
       type: 'user' as const,
       message: item.message,
@@ -4917,12 +5060,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       session_id: getSessionId()
     };
     item.resolve();
-
-    // 等待本轮 AI 回复完成（result 消息到达后解锁）
-    await waitForTurnComplete();
-    if (shouldAbortSession) {
-      console.log('[messageGenerator] Abort flag set after turn complete, exiting');
-      return;
-    }
+    // Mid-turn injection: 不等 turn 完成，立即准备 yield 下一条。
+    // SDK 的 for-await 会立即写入 stdin pipe，subprocess 在断点处读取。
   }
 }

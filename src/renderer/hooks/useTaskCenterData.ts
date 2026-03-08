@@ -11,6 +11,7 @@ import { loadAppConfig } from '@/config/configService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import type { CronTask } from '@/types/cronTask';
 import type { ImBotStatus, ImBotConfig } from '../../shared/types/im';
+import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 
 // ===== Types =====
@@ -240,14 +241,23 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
     const sessionTagsMap = useMemo(() => {
         const map = new Map<string, SessionTag[]>();
 
-        // Build IM session map: sessionId → platform
+        // Build IM session map: sessionId → platform display name
         const imSessionPlatformMap = new Map<string, string>();
         for (const status of Object.values(imBotStatuses)) {
             if (status.status !== 'online' && status.status !== 'connecting') continue;
             for (const activeSession of status.activeSessions) {
                 const parts = activeSession.sessionKey.split(':');
                 const platform = parts[1] ?? 'unknown';
-                const displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
+                let displayName: string;
+                if (platform === 'openclaw' && parts[2]) {
+                    // OpenClaw session key: im:openclaw:<channelId>:private:...
+                    // Use promoted plugin name if available, otherwise capitalize channel ID
+                    const channelId = parts[2];
+                    const promoted = findPromotedPlugin(channelId);
+                    displayName = promoted?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
+                } else {
+                    displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
+                }
                 imSessionPlatformMap.set(activeSession.sessionId, displayName);
             }
         }

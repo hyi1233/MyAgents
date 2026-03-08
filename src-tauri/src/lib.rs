@@ -184,6 +184,10 @@ pub fn run() {
             im::cmd_approve_group,
             im::cmd_reject_group,
             im::cmd_remove_group,
+            // OpenClaw Channel Plugin commands
+            im::cmd_install_openclaw_plugin,
+            im::cmd_list_openclaw_plugins,
+            im::cmd_uninstall_openclaw_plugin,
         ])
         .setup(|app| {
             // Initialize logging for all builds

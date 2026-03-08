@@ -1,0 +1,7 @@
+{
+  "name": "openclaw",
+  "version": "0.0.1-shim",
+  "exports": {
+    "./plugin-sdk": "./plugin-sdk/index.js"
+  }
+}

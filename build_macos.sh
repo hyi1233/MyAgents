@@ -203,6 +203,10 @@ echo -e "  ${CYAN}打包服务端代码...${NC}"
 mkdir -p src-tauri/resources
 bun build ./src/server/index.ts --outfile=./src-tauri/resources/server-dist.js --target=bun
 
+# 打包 Plugin Bridge 代码 (OpenClaw channel plugin 支持)
+echo -e "  ${CYAN}打包 Plugin Bridge...${NC}"
+bun build ./src/server/plugin-bridge/index.ts --outfile=./src-tauri/resources/plugin-bridge-dist.js --target=bun
+
 # 验证打包结果不包含开发机硬编码路径
 # bun build 会将 __dirname 硬编码为编译时路径，必须使用 import.meta.url 替代
 # 检查任何 "var __dirname = \"/Users/..." 模式 (覆盖所有用户名)

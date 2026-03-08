@@ -10,6 +10,7 @@ import type { CronTask } from '@/types/cronTask';
 import { formatTokens } from '@/utils/formatTokens';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import type { ImBotStatus } from '../../shared/types/im';
+import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
 
 import SessionStatsModal from './SessionStatsModal';
 import SessionTagBadge from './SessionTagBadge';
@@ -68,8 +69,15 @@ export default function SessionHistoryDropdown({
             if (status.status !== 'online' && status.status !== 'connecting') continue;
             for (const activeSession of status.activeSessions) {
                 const parts = activeSession.sessionKey.split(':');
-                const platform = parts[1];
-                const displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
+                const platform = parts[1] ?? 'unknown';
+                let displayName: string;
+                if (platform === 'openclaw' && parts[2]) {
+                    const channelId = parts[2];
+                    const promoted = findPromotedPlugin(channelId);
+                    displayName = promoted?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
+                } else {
+                    displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
+                }
                 map.set(activeSession.sessionId, displayName);
             }
         }

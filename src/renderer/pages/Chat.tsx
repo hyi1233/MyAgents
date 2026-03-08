@@ -808,7 +808,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption on mount
   }, [joinedExistingSidecar]);
 
-  const { containerRef: messagesContainerRef, scrollToBottom } = useAutoScroll(isLoading, messages.length, sessionId);
+  const { containerRef: messagesContainerRef, spacerRef, scrollToBottom } = useAutoScroll(isLoading, messages.length, sessionId);
 
   // Auto-focus input when Tab becomes active
   useEffect(() => {
@@ -1434,6 +1434,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               streamingMessage={streamingMessage}
               isLoading={isLoading}
               containerRef={messagesContainerRef}
+              spacerRef={spacerRef}
               bottomPadding={140}
               pendingPermission={pendingPermission}
               onPermissionDecision={handlePermissionDecision}

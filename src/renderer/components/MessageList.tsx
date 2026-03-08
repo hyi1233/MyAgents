@@ -7,6 +7,7 @@ import { AskUserQuestionPrompt, type AskUserQuestionRequest } from '@/components
 import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { Message as MessageType } from '@/types/chat';
+import { IDLE_SPACER_HEIGHT } from '@/hooks/useAutoScroll';
 
 /**
  * Format elapsed seconds to human-readable string
@@ -33,6 +34,8 @@ interface MessageListProps {
   streamingMessage: MessageType | null;
   isLoading: boolean;
   containerRef: RefObject<HTMLDivElement | null>;
+  /** Ref for the bottom spacer — used by useAutoScroll for content-aware targeting */
+  spacerRef?: RefObject<HTMLDivElement | null>;
   bottomPadding?: number;
   pendingPermission?: PermissionRequest | null;
   onPermissionDecision?: (decision: 'deny' | 'allow_once' | 'always_allow') => void;
@@ -136,6 +139,7 @@ const MessageList = memo(function MessageList({
   streamingMessage,
   isLoading,
   containerRef,
+  spacerRef,
   bottomPadding,
   pendingPermission,
   onPermissionDecision,
@@ -246,6 +250,23 @@ const MessageList = memo(function MessageList({
             re-running messages.map() on every 1-second timer tick */}
         {showStatus && <StatusTimer message={statusMessage} />}
       </div>
+      {/* Dynamic bottom spacer — provides scroll room for content-aware targeting.
+          React always sets minHeight to IDLE_SPACER_HEIGHT (80px) as a stable base.
+          During loading, useAutoScroll's animation loop INCREASES it via direct DOM
+          manipulation to provide just enough scroll room (no excessive empty space).
+          When loading ends, the animation stops and the CSS transition smoothly
+          collapses the spacer from the JS-set value back to 80px. */}
+      {(historyMessages.length > 0 || streamingMessage) && (
+        <div
+          ref={spacerRef}
+          className={isLoading ? '' : 'transition-[min-height] duration-500 ease-out'}
+          style={{
+            minHeight: IDLE_SPACER_HEIGHT,
+            overflowAnchor: 'none',
+          }}
+          aria-hidden="true"
+        />
+      )}
       {/* Scroll anchor - helps browser maintain scroll position during content changes */}
       <div className="scroll-anchor h-px" aria-hidden="true" />
     </div>

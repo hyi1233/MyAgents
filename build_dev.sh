@@ -65,6 +65,7 @@ rm -rf "${PROJECT_DIR}/dist"
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/claude-agent-sdk"
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
 echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/server-dist.js"
+echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/plugin-bridge-dist.js"
 
 # 清理 debug 构建产物（确保 resources 被重新复制）
 rm -rf "${PROJECT_DIR}/src-tauri/target/debug/bundle"

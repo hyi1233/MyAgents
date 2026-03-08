@@ -16,6 +16,7 @@
 
 - `src/renderer/` — React 前端（api/、context/、hooks/、components/、pages/）
 - `src/server/` — Bun 后端 Sidecar
+- `src/server/plugin-bridge/` — OpenClaw Plugin Bridge（独立 Bun 进程，加载社区 Channel 插件）
 - `src/shared/` — 前后端共享类型
 - `src-tauri/` — Tauri Rust 层
 - `specs/` — 设计文档（tech_docs/、guides/、prd/、research/）
@@ -90,6 +91,7 @@ IM Bot 配置通过 Rust 命令 `cmd_update_im_bot_config` 写盘，写盘后 MU
 | Sidecar 用 `__dirname` / `readFileSync` | bun build 硬编码路径，生产环境出错 | 内联常量或 `getScriptDir()` |
 | 日志日期用 UTC `toISOString` | 与本地日期文件名不匹配 | 统一用 `localDate()`（`src/shared/logTime.ts`） |
 | UI 硬编码颜色（`#fff`、`bg-blue-500`） | 破坏设计系统一致性 | 使用 CSS Token `var(--xxx)`，参考 design_guide.md |
+| Plugin Bridge 用裸 `reqwest::Client` | 系统代理 → 502 | `local_http::json_client()` — Bridge 进程也在 localhost |
 
 ---
 
@@ -97,7 +99,7 @@ IM Bot 配置通过 Rust 命令 `cmd_update_im_bot_config` 写盘，写盘后 MU
 
 日志来自三层（React/Bun Sidecar/Rust），汇入统一日志 `~/.myagents/logs/unified-{YYYY-MM-DD}.log`。用户报告问题时 MUST 主动读取日志，不等用户粘贴。
 
-- **IM Bot 问题**：搜 `[feishu]` `[im]` `[telegram]` `[dingtalk]`
+- **IM Bot 问题**：搜 `[feishu]` `[im]` `[telegram]` `[dingtalk]` `[bridge]` `[openclaw]`
 - **AI/Agent 异常**：搜 `[agent]` `pre-warm` `timeout`
 - **Rust 层问题**：额外查系统日志 `/Users/{user}/Library/Logs/com.myagents.app/MyAgents.log`
 

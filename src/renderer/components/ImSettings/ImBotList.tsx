@@ -5,10 +5,11 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { getAllMcpServers, getEnabledMcpServerIds } from '@/config/configService';
-import type { ImBotConfig, ImBotStatus } from '../../../shared/types/im';
+import type { ImBotConfig, ImBotStatus, InstalledPlugin } from '../../../shared/types/im';
 import telegramIcon from './assets/telegram.png';
 import feishuIcon from './assets/feishu.jpeg';
 import dingtalkIcon from './assets/dingtalk.svg';
+import { findPromotedByPlatform } from './promotedPlugins';
 
 export default function ImBotList({
     configs,
@@ -32,8 +33,31 @@ export default function ImBotList({
     const statusesRef = useRef(statuses);
     statusesRef.current = statuses;
 
+    // Track which OpenClaw plugins are installed (for orphan detection)
+    const [installedPluginIds, setInstalledPluginIds] = useState<Set<string>>(new Set());
+    const installedPluginIdsRef = useRef(installedPluginIds);
+    installedPluginIdsRef.current = installedPluginIds;
+
     useEffect(() => {
         return () => { isMountedRef.current = false; };
+    }, []);
+
+    // Fetch installed OpenClaw plugin IDs
+    useEffect(() => {
+        if (!isTauriEnvironment()) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const { invoke } = await import('@tauri-apps/api/core');
+                const plugins = await invoke<InstalledPlugin[]>('cmd_list_openclaw_plugins');
+                if (!cancelled) {
+                    setInstalledPluginIds(new Set(plugins.map(p => p.pluginId)));
+                }
+            } catch {
+                // Ignore — no plugins installed or command not available
+            }
+        })();
+        return () => { cancelled = true; };
     }, []);
 
     // Poll all bot statuses
@@ -116,6 +140,9 @@ export default function ImBotList({
             telegramUseDraft: cfg.telegramUseDraft ?? false,
             heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
             botName: cfg.name || null,
+            openclawPluginId: cfg.openclawPluginId || null,
+            openclawNpmSpec: cfg.openclawNpmSpec || null,
+            openclawPluginConfig: cfg.openclawPluginConfig || null,
         };
     }, []);
 
@@ -152,7 +179,9 @@ export default function ImBotList({
                     ? (cfg.feishuAppId && cfg.feishuAppSecret)
                     : cfg.platform === 'dingtalk'
                         ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret)
-                        : cfg.botToken;
+                        : cfg.platform.startsWith('openclaw:')
+                            ? !!cfg.openclawPluginId
+                            : cfg.botToken;
                 if (!hasCredentials) {
                     toastRef.current.error(cfg.platform === 'telegram' ? '请先配置 Bot Token' : '请先配置应用凭证');
                     return;
@@ -186,7 +215,19 @@ export default function ImBotList({
         if (platform === 'telegram') return <img src={telegramIcon} alt="Telegram" className="h-5 w-5" />;
         if (platform === 'feishu') return <img src={feishuIcon} alt="飞书" className="h-5 w-5 rounded" />;
         if (platform === 'dingtalk') return <img src={dingtalkIcon} alt="钉钉" className="h-5 w-5 rounded" />;
+        const promoted = findPromotedByPlatform(platform);
+        if (promoted) return <img src={promoted.icon} alt={promoted.name} className="h-5 w-5 rounded" />;
         return <span className="text-base">💬</span>;
+    };
+
+    // Platform label
+    const platformLabel = (platform: string) => {
+        if (platform === 'feishu') return '飞书';
+        if (platform === 'dingtalk') return '钉钉';
+        if (platform === 'telegram') return 'Telegram';
+        const promoted = findPromotedByPlatform(platform);
+        if (promoted) return promoted.name;
+        return '社区插件';
     };
 
     return (
@@ -237,6 +278,10 @@ export default function ImBotList({
                             ? (status.status === 'online' || status.status === 'connecting')
                             : cfg.enabled;
                         const isToggling = togglingIds.has(cfg.id);
+                        // Detect orphaned OpenClaw bots (plugin uninstalled)
+                        const isPluginMissing = cfg.platform.startsWith('openclaw:')
+                            && !!cfg.openclawPluginId
+                            && !installedPluginIds.has(cfg.openclawPluginId);
 
                         const displayName = status?.botUsername
                             ? (cfg.platform === 'telegram' ? `@${status.botUsername}` : status.botUsername)
@@ -258,12 +303,14 @@ export default function ImBotList({
                                     </div>
                                     <div className="flex items-center gap-1.5 flex-shrink-0">
                                         <div className={`h-1.5 w-1.5 rounded-full ${
-                                            isRunning ? 'bg-[var(--success)]' : 'bg-[var(--ink-subtle)]'
+                                            isPluginMissing ? 'bg-[var(--warning)]'
+                                            : isRunning ? 'bg-[var(--success)]' : 'bg-[var(--ink-subtle)]'
                                         }`} />
                                         <span className={`text-xs ${
-                                            isRunning ? 'text-[var(--success)]' : 'text-[var(--ink-muted)]'
+                                            isPluginMissing ? 'text-[var(--warning)]'
+                                            : isRunning ? 'text-[var(--success)]' : 'text-[var(--ink-muted)]'
                                         }`}>
-                                            {isRunning ? '运行中' : '已停止'}
+                                            {isPluginMissing ? '插件已卸载' : isRunning ? '运行中' : '已停止'}
                                         </span>
                                     </div>
                                 </div>
@@ -277,7 +324,7 @@ export default function ImBotList({
                                             </span>
                                         )}
                                         {cfg.defaultWorkspacePath && <span>·</span>}
-                                        <span className="flex-shrink-0">{cfg.platform === 'feishu' ? '飞书' : cfg.platform === 'dingtalk' ? '钉钉' : 'Telegram'}</span>
+                                        <span className="flex-shrink-0">{platformLabel(cfg.platform)}</span>
                                     </div>
                                     {/* Capsule toggle button */}
                                     <button
@@ -285,7 +332,7 @@ export default function ImBotList({
                                             e.stopPropagation();
                                             toggleBot(cfg);
                                         }}
-                                        disabled={isToggling || (!(cfg.platform === 'feishu' ? (cfg.feishuAppId && cfg.feishuAppSecret) : cfg.platform === 'dingtalk' ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret) : cfg.botToken) && !isRunning)}
+                                        disabled={isToggling || isPluginMissing || (!(cfg.platform === 'feishu' ? (cfg.feishuAppId && cfg.feishuAppSecret) : cfg.platform === 'dingtalk' ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret) : cfg.platform.startsWith('openclaw:') ? cfg.openclawPluginId : cfg.botToken) && !isRunning)}
                                         className={`flex-shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
                                             isRunning
                                                 ? 'border border-[var(--error)]/40 text-[var(--error)] hover:bg-[var(--error)]/10'

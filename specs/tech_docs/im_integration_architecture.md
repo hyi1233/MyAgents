@@ -2,7 +2,7 @@
 
 > **文档状态**：实现完成，基于代码实际情况更新
 >
-> **更新日期**：2026-02-18
+> **更新日期**：2026-03-08
 >
 > **前置调研**：
 > - [OpenClaw IM 通道集成架构研究](../prd/research_openclaw_im_integration.md)
@@ -16,7 +16,8 @@
 
 | 层 | 职责 | 实现语言 | 理由 |
 |----|------|---------|------|
-| **IM 适配层** | Telegram/飞书 连接管理、消息收发、重连、白名单 | Rust | I/O 密集型，零 GC、稳定性高，崩溃不影响 IM 连接 |
+| **IM 适配层** | Telegram/飞书/钉钉 连接管理、消息收发、重连、白名单 | Rust | I/O 密集型，零 GC、稳定性高，崩溃不影响 IM 连接 |
+| **Plugin Bridge 层** | 加载 OpenClaw 社区 Channel Plugin，代理消息收发 | Bun 独立进程 | 兼容 TS 生态插件，故障隔离于独立进程 |
 | **Session 路由层** | peer→Sidecar 映射、按需启停、消息缓冲 | Rust | 复用 SidecarManager，统一进程生命周期管理 |
 | **AI 对话层** | Claude SDK、MCP、工具系统、Session 管理 | Bun Sidecar | 已有完整生态，不值得用 Rust 重写 |
 
@@ -53,7 +54,11 @@
 │                                  └─────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
                           │
-                    Telegram Bot API
+              ┌───────────┼───────────┐
+        Telegram API   Feishu WS   Plugin Bridge (Bun)
+                                      ↕ HTTP
+                                   OpenClaw 社区插件
+                                   (QQ Bot, Matrix, …)
 ```
 
 ---
@@ -435,6 +440,74 @@ ws_write.send(WsMessage::Binary(ack_data.into())).await;
 
 配合 24 小时 dedup 缓存 TTL 作为防御兜底，防止长时间运行后重连导致消息重复处理。
 
+### 2.13 Plugin Bridge（OpenClaw 社区插件桥接）
+
+**设计动机**：OpenClaw 生态有大量 Channel Plugin（QQ Bot、WeChat、Matrix 等），均为 TypeScript 实现。为避免为每个平台写 Rust 适配器，引入 Plugin Bridge 机制——独立 Bun 进程加载社区插件，仅做 Channel I/O，AI 推理走现有 Rust → Bun Sidecar 管道。
+
+#### 架构
+
+```
+Rust BridgeAdapter ←─ HTTP ──→ Plugin Bridge (Bun 进程)
+   │                               │
+   │ POST /send-text               │ import(plugin)
+   │ POST /send-media              │ compat-api → register()
+   │ POST /edit-message            │ compat-runtime → dispatchReply 拦截
+   │ GET  /status                  │
+   │                               │ POST /api/im-bridge/message → Rust
+   │                               │
+   ▼                               ▼
+SessionRouter → Sidecar(AI)    社区 IM 平台 (QQ/Matrix/…)
+```
+
+#### 核心组件
+
+| 组件 | 位置 | 职责 |
+|------|------|------|
+| `BridgeAdapter` | `src-tauri/src/im/bridge.rs` | 实现 ImAdapter + ImStreamAdapter，通过 HTTP 与 Bridge 进程通信 |
+| Plugin Bridge 入口 | `src/server/plugin-bridge/index.ts` | 启动 HTTP server，加载插件，转发消息 |
+| compat-api | `src/server/plugin-bridge/compat-api.ts` | OpenClaw API shim，捕获 `registerChannel()` |
+| compat-runtime | `src/server/plugin-bridge/compat-runtime.ts` | channelRuntime mock，拦截 `dispatchReply` 提取用户消息 |
+| plugin-sdk-shim | `src/server/plugin-bridge/plugin-sdk-shim/` | 为 `openclaw/plugin-sdk` imports 提供运行时 shim |
+| Bridge sender registry | `bridge.rs` 静态 `BRIDGE_SENDERS` | bot_id → (sender_channel, plugin_id) 路由映射 |
+
+#### 消息流
+
+**入站**（社区平台 → AI）：
+1. 社区插件收到消息 → 调 `dispatchReply`
+2. compat-runtime 拦截 → 提取 ctx（SenderId, Body, ChatType 等）
+3. POST `/api/im-bridge/message` → Rust management API
+4. Rust 查 `BRIDGE_SENDERS` registry → `mpsc::Sender<ImMessage>` → 标准消息处理循环
+5. SessionRouter → ensure_sidecar → AI Sidecar → SSE 流式回复
+
+**出站**（AI → 社区平台）：
+1. Rust `BridgeAdapter::send_message()` → POST `/send-text` 到 Bridge 进程
+2. Bridge 调用插件的 deliver 回调 → 社区平台 API
+
+#### 插件生命周期
+
+```
+安装：cmd_install_openclaw_plugin(npm_spec)
+  → bun init + bun add <spec>
+  → 读取 openclaw.plugin.json manifest
+  → 复制 plugin-sdk-shim → node_modules/openclaw/
+  → 返回 manifest + capabilities
+
+启动：start_im_bot(platform="openclaw:qqbot")
+  → spawn_plugin_bridge() (Bun 进程)
+  → 健康检查 GET /status
+  → register_bridge_sender(bot_id, plugin_id, tx)
+  → listen_loop + poll_handle watcher
+
+停止：stop_im_bot()
+  → POST /stop → Bridge 优雅退出
+  → unregister_bridge_sender(bot_id)
+  → kill bridge process
+
+卸载：cmd_uninstall_openclaw_plugin(plugin_id)
+  → is_plugin_in_use() 安全检查
+  → rm -rf plugin 目录
+```
+
 ---
 
 ## 三、前端实现
@@ -443,10 +516,12 @@ ws_write.send(WsMessage::Binary(ack_data.into())).await;
 
 ```
 src/renderer/components/ImSettings/
-├── ImSettings.tsx              # 路由容器（list/detail/wizard 三视图）
+├── ImSettings.tsx              # 路由容器（list/detail/wizard/platform 多视图）
 ├── ImBotList.tsx               # Bot 列表页
 ├── ImBotDetail.tsx             # Bot 详情/配置页
-├── ImBotWizard.tsx             # 2 步创建向导
+├── ImBotWizard.tsx             # 2 步创建向导（内置平台）
+├── PlatformSelect.tsx          # 平台选择页（内置 + 社区插件）
+├── OpenClawWizard.tsx          # OpenClaw 社区插件安装/配置向导
 ├── assets/
 │   ├── telegram.png            # Telegram 平台图标
 │   └── telegram_bot_add.png    # BotFather 教程截图
@@ -570,7 +645,7 @@ type View =
 interface ImBotConfig {
     id: string;                    // UUID
     name: string;                  // 展示名（自动同步为 @username）
-    platform: 'telegram';         // 未来扩展 'feishu' | 'slack'
+    platform: ImPlatform;          // 'telegram' | 'feishu' | 'dingtalk' | `openclaw:${string}`
     botToken: string;
     allowedUsers: string[];        // Telegram user_id 或 username
     providerId?: string;           // AI 供应商（独立于客户端）
@@ -580,6 +655,11 @@ interface ImBotConfig {
     defaultWorkspacePath?: string;
     enabled: boolean;
     setupCompleted?: boolean;      // 向导完成标记
+    // OpenClaw 社区插件专属
+    openclawPluginId?: string;     // 插件 ID
+    openclawNpmSpec?: string;      // npm 包名
+    openclawPluginConfig?: Record<string, unknown>;  // 插件运行时配置
+    openclawManifest?: object;     // 插件 manifest 缓存
 }
 ```
 
@@ -738,10 +818,13 @@ src-tauri/src/
 │   ├── adapter.rs      # ImAdapter + ImStreamAdapter trait 定义 + AnyAdapter enum
 │   ├── telegram.rs     # TelegramAdapter + MessageCoalescer + Inline Keyboard 审批
 │   ├── feishu.rs       # FeishuAdapter + WebSocket + 交互卡片审批 + ACK 机制
+│   ├── dingtalk.rs     # DingtalkAdapter + Stream 连接
+│   ├── bridge.rs       # BridgeAdapter + Plugin Bridge 进程管理 + 插件安装/卸载 + sender registry
 │   ├── health.rs       # HealthManager + 状态持久化
 │   ├── router.rs       # SessionRouter: peer→Sidecar 映射
 │   ├── buffer.rs       # MessageBuffer: 离线消息缓冲 + 磁盘持久化
 │   └── types.rs        # ImConfig, ImMessage, ImPlatform 等共享类型
+├── management_api.rs   # /api/im-bridge/message 端点（Bridge 入站消息路由）
 └── lib.rs              # Command 注册
 ```
 
@@ -756,10 +839,22 @@ src/renderer/
 └── pages/Settings.tsx         # "聊天机器人" 导航入口
 ```
 
+### Plugin Bridge（Bun 进程）
+
+```
+src/server/plugin-bridge/
+├── index.ts                   # Bridge 入口：CLI args 解析、插件加载、HTTP server
+├── compat-api.ts              # OpenClaw API shim（registerChannel 捕获）
+├── compat-runtime.ts          # channelRuntime mock（dispatchReply 拦截 → Rust）
+└── plugin-sdk-shim/           # openclaw/plugin-sdk import shim
+    ├── package.json
+    └── index.js               # emptyPluginConfigSchema + config helpers
+```
+
 ### 共享类型
 
 ```
-src/shared/types/im.ts         # ImBotConfig, ImBotStatus, DEFAULT_IM_BOT_CONFIG
+src/shared/types/im.ts         # ImBotConfig, ImBotStatus, ImPlatform, InstalledPlugin, DEFAULT_IM_BOT_CONFIG
 ```
 
 ### 数据文件
@@ -803,7 +898,9 @@ src/shared/types/im.ts         # ImBotConfig, ImBotStatus, DEFAULT_IM_BOT_CONFIG
 
 ### 9.3 更多 IM 平台
 
-`ImAdapter` trait 已定义（Telegram 和飞书已实现），可扩展 Slack、Discord 等平台，复用 Session Router 和消息处理循环。
+`ImAdapter` trait 已定义（Telegram、飞书、钉钉已实现），可扩展 Slack、Discord 等平台，复用 Session Router 和消息处理循环。
+
+社区平台可通过 OpenClaw Plugin Bridge 机制接入（v0.1.38+），无需编写 Rust 适配器。
 
 ---
 
