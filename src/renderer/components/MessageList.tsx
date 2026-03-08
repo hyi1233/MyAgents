@@ -7,6 +7,7 @@ import { AskUserQuestionPrompt, type AskUserQuestionRequest } from '@/components
 import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { Message as MessageType } from '@/types/chat';
+import { IDLE_SPACER_HEIGHT } from '@/hooks/useAutoScroll';
 
 /**
  * Format elapsed seconds to human-readable string
@@ -256,9 +257,9 @@ const MessageList = memo(function MessageList({
       {(historyMessages.length > 0 || streamingMessage) && (
         <div
           ref={spacerRef}
-          className="transition-[min-height] duration-500 ease-out"
+          className={isLoading ? '' : 'transition-[min-height] duration-500 ease-out'}
           style={{
-            minHeight: isLoading ? 'calc(100vh - 200px)' : 80,
+            minHeight: isLoading ? 'calc(100vh - 200px)' : IDLE_SPACER_HEIGHT,
             overflowAnchor: 'none',
           }}
           aria-hidden="true"

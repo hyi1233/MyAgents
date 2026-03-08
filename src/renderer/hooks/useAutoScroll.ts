@@ -13,6 +13,14 @@ const SNAP_THRESHOLD_PX = 3;              // Snap to bottom when this close
 const MSG_TOP_GAP = 80;          // px between user message top and viewport top
 const CONTENT_BOTTOM_GAP = 80;   // px between content end and viewport bottom during follow
 
+// Idle spacer height — MUST match MessageList's idle spacer minHeight
+export const IDLE_SPACER_HEIGHT = 80;
+
+// Collapse guard duration — slightly longer than spacer CSS transition (500ms)
+const COLLAPSE_GUARD_MS = 600;
+
+const LOG = '[autoScroll]';
+
 export interface AutoScrollControls {
   containerRef: RefObject<HTMLDivElement | null>;
   /** Ref for the bottom spacer element — attach to the spacer in MessageList */
@@ -83,6 +91,16 @@ export function useAutoScroll(
   // the animation in normal mode, chasing the collapsing spacer → visible jump.
   const isCollapsingRef = useRef(false);
   const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Track previous isLoading to only fire collapse guard on true→false transition
+  const prevIsLoadingRef = useRef(false);
+
+  const clearCollapseGuard = useCallback(() => {
+    isCollapsingRef.current = false;
+    if (collapseTimerRef.current) {
+      clearTimeout(collapseTimerRef.current);
+      collapseTimerRef.current = null;
+    }
+  }, []);
 
   const cancelAnimation = useCallback(() => {
     if (animationFrameRef.current !== null && typeof window !== 'undefined') {
@@ -92,30 +110,35 @@ export function useAutoScroll(
     isAnimatingRef.current = false;
   }, []);
 
-  // When loading finishes: stop animation and enter collapse guard.
-  // The spacer collapses from ~100vh to 80px over 500ms CSS transition.
-  // During this period, block ALL animation restarts to prevent the loop from
-  // chasing the shrinking spacer (which causes a visible page jump).
+  // When loading finishes (true→false): stop animation and enter collapse guard.
+  // The spacer collapses via CSS transition — browser naturally clamps scrollTop each frame,
+  // producing a smooth settling animation. No pre-clamp needed.
+  // Only fires on true→false transition — not on initial mount when isLoading starts as false.
   useEffect(() => {
-    if (!isLoading) {
+    const wasLoading = prevIsLoadingRef.current;
+    prevIsLoadingRef.current = isLoading;
+
+    if (!isLoading && wasLoading) {
       isContentAwareRef.current = false;
       cancelAnimation();
-      // Enter collapse guard — block animation restart during spacer transition
+
+      // No pre-clamp needed: the spacer collapses via CSS transition (500ms ease-out).
+      // As scrollHeight decreases each frame, the browser naturally clamps scrollTop,
+      // producing a smooth "settling" animation instead of an instant jump.
+
+      // Enter collapse guard — prevents ResizeObserver from restarting animation
+      // during the spacer's CSS collapse transition.
       isCollapsingRef.current = true;
       if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current);
       collapseTimerRef.current = setTimeout(() => {
         isCollapsingRef.current = false;
         collapseTimerRef.current = null;
-      }, 600); // slightly longer than the 500ms CSS transition
-    } else {
+      }, COLLAPSE_GUARD_MS);
+    } else if (isLoading && !wasLoading) {
       // Loading started — clear any leftover collapse guard
-      isCollapsingRef.current = false;
-      if (collapseTimerRef.current) {
-        clearTimeout(collapseTimerRef.current);
-        collapseTimerRef.current = null;
-      }
+      clearCollapseGuard();
     }
-  }, [isLoading, cancelAnimation]);
+  }, [isLoading, cancelAnimation, clearCollapseGuard]);
 
   /** Update cached position of the last user message in DOM */
   const updateLastUserMsgTop = useCallback(() => {
@@ -274,35 +297,27 @@ export function useAutoScroll(
     const element = containerRef.current;
     if (!element) {
       if (isDebugMode()) {
-        console.log('[useAutoScroll] scrollToBottomInstant: no container element');
+        console.log(LOG, 'scrollToBottomInstant: no container element');
       }
       return;
     }
 
     // Cancel any ongoing smooth scroll animation
     cancelAnimation();
+    clearCollapseGuard();
 
     // Re-enable auto-scroll, use absolute bottom (not content-aware)
     isAutoScrollEnabledRef.current = true;
     isPausedRef.current = false;
     isContentAwareRef.current = false;
 
-    const beforeScrollTop = element.scrollTop;
-    const scrollHeight = element.scrollHeight;
-    const clientHeight = element.clientHeight;
-
     // Instant scroll without animation
-    element.scrollTop = scrollHeight;
+    element.scrollTop = element.scrollHeight;
 
     if (isDebugMode()) {
-      console.log('[useAutoScroll] scrollToBottomInstant:', {
-        beforeScrollTop,
-        scrollHeight,
-        clientHeight,
-        afterScrollTop: element.scrollTop,
-      });
+      console.log(LOG, 'scrollToBottomInstant →', element.scrollTop);
     }
-  }, [cancelAnimation]);
+  }, [cancelAnimation, clearCollapseGuard]);
 
   /**
    * Smooth scroll to position user message near viewport top.
@@ -321,16 +336,23 @@ export function useAutoScroll(
     // Cancel any pending session-init scroll — user sending a message takes priority
     pendingScrollRef.current = false;
 
-    // Enable content-aware targeting
+    // Clear collapse guard — user action takes priority over spacer transition
+    clearCollapseGuard();
+
+    // Cancel any stuck animation
+    cancelAnimation();
+
+    // Enable content-aware targeting.
+    // The actual scroll happens in the messagesLength effect when the new user message
+    // appears in DOM (via SSE replay). This is intentional — at this point the new message
+    // isn't in DOM yet, so there's nothing to scroll to. The messagesLength effect starts
+    // the RAF animation which smoothly scrolls the user message toward viewport top.
     isContentAwareRef.current = true;
 
-    // Cache last user message position (may not be the new one yet —
-    // messagesLength effect will update when the new message appears in DOM)
-    updateLastUserMsgTop();
-
-    // Start smooth scroll animation (NO instant jump — this is the key UX fix)
-    startSmoothScroll();
-  }, [startSmoothScroll, updateLastUserMsgTop]);
+    if (isDebugMode()) {
+      console.log(LOG, 'scrollToBottom: set content-aware, waiting for new msg in DOM');
+    }
+  }, [cancelAnimation, clearCollapseGuard]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -351,7 +373,7 @@ export function useAutoScroll(
     lastSessionIdRef.current = sessionId;
 
     if (isDebugMode()) {
-      console.log('[useAutoScroll] sessionId changed:', {
+      console.log(LOG, 'sessionId changed:', {
         previousSessionId,
         currentSessionId: sessionId,
         isSessionSwitch,
@@ -364,7 +386,7 @@ export function useAutoScroll(
       // Mark that we need to scroll when messages load
       // Don't scroll immediately because messages may not be in DOM yet
       if (isDebugMode()) {
-        console.log('[useAutoScroll] Session switch detected, setting pending scroll flag');
+        console.log(LOG, 'Session switch detected, setting pending scroll flag');
       }
       pendingScrollRef.current = true;
     }
@@ -380,7 +402,7 @@ export function useAutoScroll(
     if (pendingScrollRef.current) {
       pendingScrollRef.current = false;
       if (isDebugMode()) {
-        console.log('[useAutoScroll] Messages loaded with pending scroll, executing scrollToBottomInstant');
+        console.log(LOG, 'Messages loaded with pending scroll, executing scrollToBottomInstant');
       }
       // Use RAF to ensure DOM has rendered the messages
       requestAnimationFrame(() => {
@@ -391,16 +413,25 @@ export function useAutoScroll(
       return;
     }
 
-    // Update cached user message position when new messages appear in DOM
-    if (isContentAwareRef.current) {
+    // Content-aware mode: update cached user message position and start smooth animation.
+    // The spacer expands instantly (no CSS transition), so scrollHeight is correct and the
+    // RAF animation can reliably calculate the target. The animation smoothly scrolls the
+    // user message toward viewport top, then transitions to content-following as AI streams.
+    if (isContentAwareRef.current && isAutoScrollEnabledRef.current) {
       updateLastUserMsgTop();
+      if (isDebugMode()) {
+        console.log(LOG, 'content-aware: start animation, msgTop=', lastUserMsgTopRef.current);
+      }
+      cancelAnimation();
+      startSmoothScroll();
+      return;
     }
 
     // Normal message change - use smooth scroll if enabled
     if (isAutoScrollEnabledRef.current) {
       startSmoothScroll();
     }
-  }, [messagesLength, startSmoothScroll, scrollToBottomInstant, updateLastUserMsgTop]);
+  }, [messagesLength, startSmoothScroll, scrollToBottomInstant, updateLastUserMsgTop, cancelAnimation]);
 
   // Start smooth scroll when loading starts
   // (Stop is handled by the isContentAwareRef cleanup effect above via cancelAnimation)
@@ -434,6 +465,9 @@ export function useAutoScroll(
         if (isAutoScrollEnabledRef.current) {
           isAutoScrollEnabledRef.current = false;
           cancelAnimation();
+          if (isDebugMode()) {
+            console.log(LOG, 'user scroll up detected, auto-scroll disabled, delta=', scrollDelta);
+          }
         }
       }
     };
