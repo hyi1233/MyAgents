@@ -495,6 +495,9 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
 
     let mut child = std::process::Command::new(&bun_path)
         .arg(bridge_script.to_string_lossy().as_ref())
+        // Same marker as regular sidecars — ensures cleanup_stale_sidecars()
+        // can find and kill orphaned bridge processes after a crash
+        .arg("--myagents-sidecar")
         .arg("--plugin-dir")
         .arg(plugin_dir)
         .arg("--port")
