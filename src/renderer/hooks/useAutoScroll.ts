@@ -398,8 +398,12 @@ export function useAutoScroll(
   useEffect(() => {
     if (messagesLength === 0) return;
 
-    // If we have a pending scroll from session switch, do instant scroll
-    if (pendingScrollRef.current) {
+    // If we have a pending scroll from session switch, do instant scroll.
+    // BUT: content-aware mode takes priority — it means the user just sent a message
+    // and the sessionId change is just the session being created for that message.
+    // Without this guard, the sequence scrollToBottom() → sessionId change → pendingScroll=true
+    // would override content-aware mode and instant-scroll to absolute bottom.
+    if (pendingScrollRef.current && !isContentAwareRef.current) {
       pendingScrollRef.current = false;
       if (isDebugMode()) {
         console.log(LOG, 'Messages loaded with pending scroll, executing scrollToBottomInstant');
@@ -412,6 +416,7 @@ export function useAutoScroll(
       });
       return;
     }
+    pendingScrollRef.current = false; // clear stale flag if content-aware took priority
 
     // Content-aware mode: update cached user message position and start smooth animation.
     // The spacer expands instantly (no CSS transition), so scrollHeight is correct and the
