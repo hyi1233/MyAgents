@@ -21,6 +21,7 @@ import { parseArgs } from 'util';
 // Parse CLI arguments
 const { values: args } = parseArgs({
   args: process.argv.slice(2),
+  strict: false,
   options: {
     'plugin-dir': { type: 'string' },
     'port': { type: 'string' },
@@ -29,10 +30,10 @@ const { values: args } = parseArgs({
   },
 });
 
-const pluginDir = args['plugin-dir'];
-const port = parseInt(args['port'] || '0', 10);
-const rustPort = parseInt(args['rust-port'] || '0', 10);
-const botId = args['bot-id'] || '';
+const pluginDir = args['plugin-dir'] as string | undefined;
+const port = parseInt((args['port'] as string) || '0', 10);
+const rustPort = parseInt((args['rust-port'] as string) || '0', 10);
+const botId = (args['bot-id'] as string) || '';
 // Read config from env var (not CLI arg) to avoid leaking secrets in process listing
 const pluginConfig = JSON.parse(process.env.BRIDGE_PLUGIN_CONFIG || '{}');
 
