@@ -1234,6 +1234,15 @@ export default function TabProvider({
                 break;
             }
 
+            // Background task lifecycle (SDK Task tool)
+            case 'chat:task-started':
+            case 'chat:task-notification': {
+                // Logged for debugging; frontend rendering handled by TaskTool component
+                // via existing subagent stream events and output_file polling.
+                console.log(`[TabProvider ${tabId}] ${eventName}:`, data);
+                break;
+            }
+
             // Queue events
             case 'queue:added': {
                 // A message was queued — add to frontend queue state for UI rendering.

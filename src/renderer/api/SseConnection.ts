@@ -49,6 +49,8 @@ const JSON_EVENTS = new Set([
     'exit-plan-mode:request',  // ExitPlanMode tool - AI submits plan for review
     'enter-plan-mode:request', // EnterPlanMode tool - AI requests plan mode
     'cron:task-exit-requested', // AI requested cron task exit via exit_cron_task tool
+    'chat:task-started',    // Background task (SDK Task tool) started
+    'chat:task-notification', // Background task completed/failed/stopped
     'queue:added',     // Message queued (confirmation)
     'queue:started',   // Queued message started executing
     'queue:cancelled', // Queued message cancelled

@@ -2441,8 +2441,22 @@ function handleMessageComplete(): void {
   // buildSdkMcpServers() if the session restarts (MCP change, error recovery, etc.).
   // It is still cleared on full session termination (see below).
 
-  // Only transition to idle if no queued messages waiting.
-  if (messageQueue.length === 0) {
+  // Drain queued messages or transition to idle.
+  // Two scenarios reach here:
+  // (A) Normal turn: generator is at waitForTurnComplete → signalTurnComplete() (called
+  //     right after this function) will unlock it → generator loops to waitForMessage()
+  //     and naturally drains the queue in FIFO order. We must NOT dequeue here or we'll
+  //     rotate [A,B] → [B,A] (wakeGenerator pushes back when messageResolver is null).
+  // (B) Auto-turn (e.g., background task completion triggers AI continue): generator is
+  //     at waitForMessage with messageResolver set → signalTurnComplete is a no-op →
+  //     we must proactively deliver via wakeGenerator so the message isn't stuck.
+  if (messageQueue.length > 0) {
+    if (messageResolver) {
+      // Scenario B: generator waiting at waitForMessage — deliver directly
+      wakeGenerator(messageQueue.shift()!);
+    }
+    // Scenario A: don't dequeue; signalTurnComplete will unlock generator to drain queue
+  } else {
     setSessionState('idle');
   }
 
@@ -4114,6 +4128,31 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           currentPermissionMode = prePlanPermissionMode;
           prePlanPermissionMode = null;
           console.log(`[agent] SDK exited plan mode, restored currentPermissionMode=${currentPermissionMode}`);
+        }
+      }
+
+      // Handle background task lifecycle (SDK Task tool with run_in_background)
+      // Gated behind type === 'system' to avoid unnecessary property access on high-frequency stream_events
+      if (sdkMessage.type === 'system') {
+        const taskMsg = sdkMessage as { subtype?: string; task_id?: string;
+          tool_use_id?: string; description?: string; task_type?: string;
+          status?: string; summary?: string; output_file?: string };
+        if (taskMsg.subtype === 'task_started' && taskMsg.task_id) {
+          console.log(`[agent] Background task started: ${taskMsg.task_id} — ${taskMsg.description}`);
+          broadcast('chat:task-started', {
+            taskId: taskMsg.task_id,
+            toolUseId: taskMsg.tool_use_id,
+            description: taskMsg.description,
+            taskType: taskMsg.task_type,
+          });
+        } else if (taskMsg.subtype === 'task_notification' && taskMsg.task_id) {
+          console.log(`[agent] Background task ${taskMsg.status}: ${taskMsg.task_id} — ${taskMsg.summary}`);
+          broadcast('chat:task-notification', {
+            taskId: taskMsg.task_id,
+            status: taskMsg.status,
+            summary: taskMsg.summary,
+            outputFile: taskMsg.output_file,
+          });
         }
       }
 
