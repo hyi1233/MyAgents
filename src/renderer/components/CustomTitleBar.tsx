@@ -202,6 +202,7 @@ export default function CustomTitleBar({
                         <FeedbackPopover
                             onClose={() => setShowFeedback(false)}
                             onOpenBugReport={handleOpenBugReport}
+                            triggerRef={feedbackBtnRef}
                         />
                     )}
                 </div>

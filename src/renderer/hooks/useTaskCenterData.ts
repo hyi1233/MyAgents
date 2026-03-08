@@ -11,6 +11,7 @@ import { loadAppConfig } from '@/config/configService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import type { CronTask } from '@/types/cronTask';
 import type { ImBotStatus, ImBotConfig } from '../../shared/types/im';
+import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 
 // ===== Types =====
@@ -249,10 +250,11 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
                 const platform = parts[1] ?? 'unknown';
                 let displayName: string;
                 if (platform === 'openclaw' && parts[2]) {
-                    // OpenClaw session key: im:openclaw:qqbot:private:...
-                    // Use channel ID (e.g., "qqbot") capitalized as "QQBot"
+                    // OpenClaw session key: im:openclaw:<channelId>:private:...
+                    // Use promoted plugin name if available, otherwise capitalize channel ID
                     const channelId = parts[2];
-                    displayName = channelId.charAt(0).toUpperCase() + channelId.slice(1);
+                    const promoted = findPromotedPlugin(channelId);
+                    displayName = promoted?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
                 } else {
                     displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
                 }

@@ -809,6 +809,16 @@ async fn read_plugin_manifest(
 /// Uninstall an OpenClaw plugin by removing its directory.
 /// Returns error if any running bot depends on the plugin.
 pub async fn uninstall_openclaw_plugin(plugin_id: &str) -> Result<(), String> {
+    // Validate plugin_id to prevent path traversal
+    if plugin_id.is_empty()
+        || plugin_id.contains('/')
+        || plugin_id.contains('\\')
+        || plugin_id.contains("..")
+        || plugin_id.starts_with('.')
+    {
+        return Err(format!("Invalid plugin ID: '{}'", plugin_id));
+    }
+
     let plugins_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".myagents")

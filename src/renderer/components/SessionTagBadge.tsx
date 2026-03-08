@@ -10,7 +10,7 @@ const IM_BORDER_COLORS: Record<string, string> = {
     feishu: '#8ca0b6',
     telegram: '#7d9eb5',
     dingtalk: '#8a9eb0',
-    qqbot: '#7b8fb5',
+    'qq bot': '#7b8fb5',
 };
 
 export default function SessionTagBadge({ tag }: { tag: SessionTag }) {

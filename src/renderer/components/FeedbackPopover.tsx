@@ -13,11 +13,13 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 interface FeedbackPopoverProps {
     onClose: () => void;
     onOpenBugReport: () => void;
+    /** Ref to the trigger button — excluded from outside-click detection */
+    triggerRef?: React.RefObject<HTMLElement | null>;
 }
 
 const QR_CDN_URL = 'https://download.myagents.io/assets/feedback_qr_code.png';
 
-export default function FeedbackPopover({ onClose, onOpenBugReport }: FeedbackPopoverProps) {
+export default function FeedbackPopover({ onClose, onOpenBugReport, triggerRef }: FeedbackPopoverProps) {
     const popoverRef = useRef<HTMLDivElement>(null);
     const isTauri = isTauriEnvironment();
     const [qrCodeUrl, setQrCodeUrl] = useState<string | null>(isTauri ? null : QR_CDN_URL);
@@ -44,7 +46,9 @@ export default function FeedbackPopover({ onClose, onOpenBugReport }: FeedbackPo
     // Click outside to close
     useEffect(() => {
         const handleClick = (e: MouseEvent) => {
-            if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+            const target = e.target as Node;
+            if (popoverRef.current && !popoverRef.current.contains(target)
+                && !(triggerRef?.current && triggerRef.current.contains(target))) {
                 onClose();
             }
         };
@@ -54,7 +58,7 @@ export default function FeedbackPopover({ onClose, onOpenBugReport }: FeedbackPo
             clearTimeout(timer);
             document.removeEventListener('mousedown', handleClick);
         };
-    }, [onClose]);
+    }, [onClose, triggerRef]);
 
     // Escape to close
     useEffect(() => {
