@@ -341,6 +341,14 @@ try {
     }
     Write-Host "    OK - 服务端代码验证通过" -ForegroundColor Green
 
+    # 打包 Plugin Bridge 代码 (OpenClaw channel plugin 支持)
+    Write-Host "  打包 Plugin Bridge..." -ForegroundColor Cyan
+    & bun build ./src/server/plugin-bridge/index.ts --outfile=./src-tauri/resources/plugin-bridge-dist.js --target=bun
+    if ($LASTEXITCODE -ne 0) {
+        throw "Plugin Bridge 打包失败"
+    }
+    Write-Host "    OK - Plugin Bridge 打包完成" -ForegroundColor Green
+
     # 复制 SDK 依赖
     Write-Host "  复制 SDK 依赖..." -ForegroundColor Cyan
     $sdkSrc = Join-Path $ProjectDir "node_modules\@anthropic-ai\claude-agent-sdk"
