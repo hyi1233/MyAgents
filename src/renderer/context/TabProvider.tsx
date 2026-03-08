@@ -230,11 +230,15 @@ export default function TabProvider({
         });
     }, []);
 
+    // Mid-turn injection: user messages yielded to SDK during active streaming.
     // Combined view for backward compat (used by Chat.tsx messagesRef, rewind, error handling)
-    const messages = useMemo<Message[]>(
-        () => streamingMessage ? [...historyMessages, streamingMessage] : historyMessages,
-        [historyMessages, streamingMessage]
-    );
+    // Mid-turn injected user messages are inserted into historyMessages via the mid-turn break
+    // mechanism (queue:started with midTurnBreak=true splits the streaming message).
+    const messages = useMemo<Message[]>(() => {
+        return streamingMessage
+            ? [...historyMessages, streamingMessage]
+            : historyMessages;
+    }, [historyMessages, streamingMessage]);
 
     // Compat wrapper: setMessages operates on combined array, drains streaming into history.
     // Note: The functional-update path has side effects (clearing streamingMessage) inside
@@ -274,6 +278,9 @@ export default function TabProvider({
     const [queuedMessages, setQueuedMessages] = useState<QueuedMessageInfo[]>([]);
     const queuedMessagesRef = useRef<QueuedMessageInfo[]>([]);
     queuedMessagesRef.current = queuedMessages;
+
+    // Track started queueIds to prevent sendMessage .then() from re-adding them
+    const startedQueueIdsRef = useRef(new Set<string>());
 
     // Sync currentSessionId when prop changes (e.g., from parent re-initializing)
     useEffect(() => {
@@ -337,6 +344,7 @@ export default function TabProvider({
         setPendingExitPlanMode(null);
         setPendingEnterPlanMode(null);
         setQueuedMessages([]);
+        startedQueueIdsRef.current.clear();
     }, []);
 
     const resetSession = useCallback(async (): Promise<boolean> => {
@@ -1246,14 +1254,16 @@ export default function TabProvider({
             // Queue events
             case 'queue:added': {
                 // A message was queued — add to frontend queue state for UI rendering.
-                // This is the single source of truth for queue additions (works for both
-                // user sendMessage and cron execute-sync paths).
-                // Deduplication: sendMessage's .then() may also add the same queueId.
+                // Deduplication: sendMessage's .then() may also add the same queueId,
+                // and optimistic entries (opt-*) may already exist from sendMessage.
                 const payload = data as { queueId: string; messageText: string } | null;
                 if (payload?.queueId) {
                     console.log(`[TabProvider] queue:added queueId=${payload.queueId}`);
                     setQueuedMessages(prev => {
+                        // Exact queueId match — already added by .then()
                         if (prev.some(q => q.queueId === payload.queueId)) return prev;
+                        // Optimistic entry exists — .then() will reconcile with real queueId
+                        if (prev.some(q => q.queueId.startsWith('opt-'))) return prev;
                         return [...prev, {
                             queueId: payload.queueId,
                             text: payload.messageText,
@@ -1266,10 +1276,13 @@ export default function TabProvider({
 
             case 'queue:started': {
                 // A queued message started executing:
-                // 1. Add user message to chat (backend does NOT broadcast chat:message-replay for queued messages)
+                // 1. Add user message to chat
                 // 2. Remove from frontend queue
+                // For mid-turn breaks (midTurnBreak=true): split the streaming message at the
+                // injection point so the user message appears at the correct chronological position.
                 const payload = data as {
                     queueId: string;
+                    midTurnBreak?: boolean;
                     userMessage?: {
                         id: string;
                         role: 'user';
@@ -1279,17 +1292,18 @@ export default function TabProvider({
                     };
                 } | null;
                 if (payload?.queueId) {
-                    console.log(`[TabProvider] queue:started queueId=${payload.queueId}`);
+                    // Track started IDs to prevent sendMessage .then() from re-adding
+                    startedQueueIdsRef.current.add(payload.queueId);
+                    console.log(`[TabProvider] queue:started queueId=${payload.queueId} midTurnBreak=${!!payload.midTurnBreak} streaming=${isStreamingRef.current}`);
 
-                    // Add the user message to the message list
+                    // Build the user message
                     if (payload.userMessage) {
                         const msgId = payload.userMessage.id;
                         if (!seenIdsRef.current.has(msgId)) {
                             seenIdsRef.current.add(msgId);
 
                             // Prefer backend-provided attachments (authoritative, includes savedPath).
-                            // Fall back to frontend queued message snapshot for preview URLs
-                            // (backend attachments have savedPath but may lack previewUrl).
+                            // Fall back to frontend queued message snapshot for preview URLs.
                             let attachments = payload.userMessage.attachments;
                             if (!attachments?.length) {
                                 const queuedMsg = queuedMessagesRef.current?.find(
@@ -1305,17 +1319,46 @@ export default function TabProvider({
                                 }));
                             }
 
-                            setHistoryMessages(prev => [...prev, {
+                            const userMsg: Message = {
                                 id: msgId,
                                 role: 'user' as const,
                                 content: payload.userMessage!.content,
                                 timestamp: new Date(payload.userMessage!.timestamp),
                                 attachments: attachments && attachments.length > 0 ? attachments : undefined,
-                            }]);
+                            };
+
+                            if (payload.midTurnBreak && isStreamingRef.current) {
+                                // Mid-turn break: AI consumed the injected message and started new content.
+                                // Split the streaming: snapshot current streaming → history, insert user message.
+                                // New streaming events will create a fresh streaming message automatically.
+                                rawSetStreamingMessage(prev => {
+                                    if (prev) {
+                                        setHistoryMessages(prevHistory => [...prevHistory, prev, userMsg]);
+                                    } else {
+                                        setHistoryMessages(prevHistory => [...prevHistory, userMsg]);
+                                    }
+                                    streamingMessageRef.current = null;
+                                    return null;
+                                });
+                            } else {
+                                // Normal turn start: render immediately
+                                setHistoryMessages(prev => [...prev, userMsg]);
+                            }
                         }
                     }
 
-                    setQueuedMessages(prev => prev.filter(q => q.queueId !== payload.queueId));
+                    setQueuedMessages(prev => {
+                        const filtered = prev.filter(q => q.queueId !== payload.queueId);
+                        // If exact match didn't remove anything, try first optimistic entry (FIFO).
+                        // This happens when queue:started fires before .then() replaces opt- with real queueId.
+                        if (filtered.length === prev.length) {
+                            const optIdx = filtered.findIndex(q => q.queueId.startsWith('opt-'));
+                            if (optIdx !== -1) {
+                                return [...filtered.slice(0, optIdx), ...filtered.slice(optIdx + 1)];
+                            }
+                        }
+                        return filtered;
+                    });
                 }
                 break;
             }
@@ -1442,6 +1485,19 @@ export default function TabProvider({
             data: img.preview.split(',')[1],
         }));
 
+        // Optimistic queue: immediately show badge when AI is streaming.
+        // We don't know the real queueId yet (backend assigns it), so use a local ID.
+        // .then() will reconcile: replace opt- with real queueId, or clean up if already started.
+        const localQueueId = isStreamingRef.current ? `opt-${crypto.randomUUID()}` : null;
+        if (localQueueId) {
+            setQueuedMessages(prev => [...prev, {
+                queueId: localQueueId,
+                text: trimmed,
+                images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })),
+                timestamp: Date.now(),
+            }]);
+        }
+
         // Fire-and-forget: send to backend without blocking the UI.
         // The HTTP response may be delayed by provider changes or session startup,
         // but the input should clear immediately for a responsive experience.
@@ -1462,32 +1518,50 @@ export default function TabProvider({
                     is_cron: isCron ?? false,
                 });
 
-                // If queued, add to frontend queue state with image data (richer than SSE event).
-                // Deduplication: queue:added SSE may have already added this queueId.
                 if (response.queued && response.queueId) {
-                    const queueId = response.queueId;
-                    setQueuedMessages(prev => {
-                        const existing = prev.find(q => q.queueId === queueId);
-                        if (existing) {
-                            // SSE already added it — enrich with image data if available
-                            if (!images?.length) return prev;
-                            return prev.map(q => q.queueId === queueId
-                                ? { ...q, images: images.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })) }
-                                : q
-                            );
+                    const realQueueId = response.queueId;
+                    if (startedQueueIdsRef.current.has(realQueueId)) {
+                        // Already started (mid-turn injection) — clean up optimistic entry
+                        startedQueueIdsRef.current.delete(realQueueId);
+                        if (localQueueId) {
+                            setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
                         }
-                        return [...prev, {
-                            queueId,
-                            text: trimmed,
-                            // Store lightweight image info only (no File blob) to avoid memory leaks
-                            images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })),
-                            timestamp: Date.now(),
-                        }];
-                    });
+                    } else if (localQueueId) {
+                        // Replace optimistic entry with real queueId + enrich with image data
+                        setQueuedMessages(prev => prev.map(q =>
+                            q.queueId === localQueueId
+                                ? { ...q, queueId: realQueueId, images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })) }
+                                : q
+                        ));
+                    } else {
+                        // Non-optimistic path (wasn't streaming when sent)
+                        setQueuedMessages(prev => {
+                            if (prev.some(q => q.queueId === realQueueId)) {
+                                // SSE already added it — enrich with image data if available
+                                if (!images?.length) return prev;
+                                return prev.map(q => q.queueId === realQueueId
+                                    ? { ...q, images: images.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })) }
+                                    : q
+                                );
+                            }
+                            return [...prev, {
+                                queueId: realQueueId,
+                                text: trimmed,
+                                images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })),
+                                timestamp: Date.now(),
+                            }];
+                        });
+                    }
+                } else if (localQueueId) {
+                    // Message wasn't queued (went through immediately) — remove optimistic entry
+                    setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
                 }
             } else {
                 // Backend rejected: queue full, validation error, etc.
                 console.error(`[TabProvider ${tabId}] Send rejected:`, response.error);
+                if (localQueueId) {
+                    setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
+                }
                 setMessages(prev => [...prev, {
                     id: `error-${crypto.randomUUID()}`,
                     role: 'assistant' as const,
@@ -1498,6 +1572,9 @@ export default function TabProvider({
             }
         }).catch((error) => {
             console.error(`[TabProvider ${tabId}] Send message failed:`, error);
+            if (localQueueId) {
+                setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
+            }
             setMessages(prev => [...prev, {
                 id: `error-${crypto.randomUUID()}`,
                 role: 'assistant' as const,
