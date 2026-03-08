@@ -1359,6 +1359,11 @@ export default function TabProvider({
                         }
                         return filtered;
                     });
+
+                    // Eagerly clean up: if .then() already ran, the ref entry is stale.
+                    // If .then() hasn't run yet, it will find & delete the entry itself.
+                    // Either way, schedule removal to prevent unbounded growth.
+                    setTimeout(() => startedQueueIdsRef.current.delete(payload.queueId), 5000);
                 }
                 break;
             }

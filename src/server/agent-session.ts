@@ -2524,6 +2524,8 @@ function handleMessageStopped(): void {
 }
 
 function handleMessageError(error: string): void {
+  // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
+  flushPendingMidTurnQueue();
   isStreamingMessage = false;
   // Notify IM stream: localized error
   if (imStreamCallback) {
@@ -2855,6 +2857,7 @@ export function getMessages(): MessageWire[] {
 function clearMessageState(): void {
   messages.length = 0;
   messageQueue.length = 0;
+  pendingMidTurnQueue.length = 0;
   streamIndexToToolId.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
@@ -3464,8 +3467,9 @@ export async function enqueueUserMessage(
   // the message to SDK stdin immediately (subprocess reads at breakpoints).
   if (isSessionBusy) {
     // Backend queue limit (defense-in-depth — frontend also enforces limit)
+    // Count both messageQueue (waiting) and pendingMidTurnQueue (yielded but not yet flushed)
     const MAX_QUEUE_SIZE = 10;
-    if (messageQueue.length >= MAX_QUEUE_SIZE) {
+    if (messageQueue.length + pendingMidTurnQueue.length >= MAX_QUEUE_SIZE) {
       return { queued: false, error: `Queue full (max ${MAX_QUEUE_SIZE})` };
     }
     const queueItem: MessageQueueItem = {
@@ -4245,10 +4249,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         } else if (streamEvent.type === 'content_block_start') {
           // IM stream: track text block indices (non-subagent only, cross-turn guard)
-          // Flush pending mid-turn queue at ANY content_block_start boundary.
-          // The subprocess reads stdin between content blocks, so the first content_block_start
-          // after an injection is the AI's response to it. This covers thinking, tool_use,
-          // server_tool_use (via their handlers), and text blocks (here, before the handler).
+          // Flush pending mid-turn queue at non-subagent text content_block_start.
+          // thinking/tool_use/server_tool_use are covered by their start handlers.
+          // Subagent text blocks are skipped (they operate within a parent tool context).
           if (streamEvent.content_block.type === 'text' && !sdkMessage.parent_tool_use_id) {
             flushPendingMidTurnQueue();
           }
@@ -4652,8 +4655,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           const nonStreamedText = nonStreamedParts.join('');
           if (nonStreamedText) {
             console.log(`[agent] Non-streamed assistant text detected (${nonStreamedText.length} chars), broadcasting as message-chunk`);
-            broadcast('chat:message-chunk', nonStreamedText);
+            // Handler first: appendTextChunk → ensureAssistantMessage() may flush
+            // pendingMidTurnQueue. Broadcast after so frontend splits before new content.
             appendTextChunk(nonStreamedText);
+            broadcast('chat:message-chunk', nonStreamedText);
             currentTurnHasOutput = true;
             if (!imCallbackNulledDuringTurn) imStreamCallback?.('delta', nonStreamedText);
           }
@@ -4721,8 +4726,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             // Non-error result text that wasn't captured by streaming or assistant handler
             // (safety net — should rarely trigger after the assistant handler fix above)
             console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
-            broadcast('chat:message-chunk', resultText);
+            // Handler first (same pattern as streamed text path)
             appendTextChunk(resultText);
+            broadcast('chat:message-chunk', resultText);
           }
           // Forward to IM callback (prevents "(No Response)" for SDK failures)
           // Cross-turn guard: only forward if callback was not nulled/replaced
