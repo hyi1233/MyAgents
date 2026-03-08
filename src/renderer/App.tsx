@@ -4,6 +4,7 @@ import { arrayMove } from '@dnd-kit/sortable';
 import { initAnalytics, track } from '@/analytics';
 import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
 import TabProvider from '@/context/TabProvider';
@@ -171,11 +172,22 @@ export default function App() {
 
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
-  const { config, isLoading: configLoading, updateConfig, providers: appProviders, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+  const { config, isLoading: configLoading, updateConfig, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
 
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
   const [settingsInitialMcpId, setSettingsInitialMcpId] = useState<string | undefined>(undefined);
+
+  // Bug report overlay state (triggered from titlebar feedback button)
+  const [showBugReport, setShowBugReport] = useState(false);
+  const [appVersion, setAppVersion] = useState('');
+  useEffect(() => {
+    if (isTauriEnvironment()) {
+      import('@tauri-apps/api/app').then(m => m.getVersion()).then(setAppVersion).catch(() => setAppVersion('unknown'));
+    } else {
+      setAppVersion('dev');
+    }
+  }, []);
 
   // Multi-tab state
   const [tabs, setTabs] = useState<Tab[]>(() => [createNewTab()]);
@@ -1431,6 +1443,7 @@ export default function App() {
       {/* Chrome-style titlebar with tabs */}
       <CustomTitleBar
         onSettingsClick={handleOpenSettings}
+        onOpenBugReport={() => setShowBugReport(true)}
         updateReady={updateReady}
         updateVersion={updateVersion}
         onRestartAndUpdate={() => void restartAndUpdate()}
@@ -1571,6 +1584,18 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Bug report overlay triggered from titlebar feedback button */}
+      {showBugReport && (
+        <BugReportOverlay
+          onClose={() => setShowBugReport(false)}
+          onNavigateToProviders={() => { setShowBugReport(false); handleOpenSettings('providers'); }}
+          appVersion={appVersion}
+          providers={appProviders}
+          apiKeys={appApiKeys}
+          providerVerifyStatus={appProviderVerifyStatus}
+        />
       )}
     </div>
   );

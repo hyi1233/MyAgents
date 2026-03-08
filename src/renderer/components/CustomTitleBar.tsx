@@ -9,13 +9,15 @@
  * we use decorations: false on Windows for custom title bar styling.
  */
 
-import { Minus, Square, X, RefreshCw, Settings, Copy } from 'lucide-react';
-import { type ReactNode, useEffect, useState } from 'react';
+import { Bug, Minus, Square, X, RefreshCw, Settings, Copy } from 'lucide-react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { isTauri } from '@/api/tauriClient';
+import FeedbackPopover from './FeedbackPopover';
 
 interface CustomTitleBarProps {
     children: ReactNode;  // TabBar component
     onSettingsClick?: () => void;
+    onOpenBugReport?: () => void;
     /** Whether an update is ready to install */
     updateReady?: boolean;
     /** Version of the update ready to install */
@@ -33,12 +35,20 @@ const isWindows = typeof navigator !== 'undefined' && navigator.platform?.includ
 export default function CustomTitleBar({
     children,
     onSettingsClick,
+    onOpenBugReport,
     updateReady,
     updateVersion,
     onRestartAndUpdate,
 }: CustomTitleBarProps) {
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [isMaximized, setIsMaximized] = useState(false);
+    const [showFeedback, setShowFeedback] = useState(false);
+    const feedbackBtnRef = useRef<HTMLDivElement>(null);
+
+    const handleOpenBugReport = useCallback(() => {
+        setShowFeedback(false);
+        onOpenBugReport?.();
+    }, [onOpenBugReport]);
 
     // Listen for fullscreen changes
     useEffect(() => {
@@ -174,6 +184,28 @@ export default function CustomTitleBar({
                         <span>重启更新</span>
                     </button>
                 )}
+                {/* Feedback button + popover */}
+                <div ref={feedbackBtnRef} className="relative">
+                    <button
+                        onClick={() => setShowFeedback(prev => !prev)}
+                        className={`flex h-7 items-center gap-1.5 rounded-md px-2.5 transition-all ${
+                            showFeedback
+                                ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
+                                : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]'
+                        }`}
+                        title="帮助与反馈"
+                    >
+                        <Bug className="h-4 w-4" />
+                        <span className="text-[13px] font-medium">反馈</span>
+                    </button>
+                    {showFeedback && (
+                        <FeedbackPopover
+                            onClose={() => setShowFeedback(false)}
+                            onOpenBugReport={handleOpenBugReport}
+                        />
+                    )}
+                </div>
+
                 <button
                     onClick={onSettingsClick || (() => console.log('Settings clicked - TODO'))}
                     className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"

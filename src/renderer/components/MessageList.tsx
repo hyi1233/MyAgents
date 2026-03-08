@@ -33,6 +33,8 @@ interface MessageListProps {
   streamingMessage: MessageType | null;
   isLoading: boolean;
   containerRef: RefObject<HTMLDivElement | null>;
+  /** Ref for the bottom spacer — used by useAutoScroll for content-aware targeting */
+  spacerRef?: RefObject<HTMLDivElement | null>;
   bottomPadding?: number;
   pendingPermission?: PermissionRequest | null;
   onPermissionDecision?: (decision: 'deny' | 'allow_once' | 'always_allow') => void;
@@ -136,6 +138,7 @@ const MessageList = memo(function MessageList({
   streamingMessage,
   isLoading,
   containerRef,
+  spacerRef,
   bottomPadding,
   pendingPermission,
   onPermissionDecision,
@@ -246,6 +249,21 @@ const MessageList = memo(function MessageList({
             re-running messages.map() on every 1-second timer tick */}
         {showStatus && <StatusTimer message={statusMessage} />}
       </div>
+      {/* Dynamic bottom spacer — provides scroll room for content-aware targeting.
+          Large during loading: allows scrollToBottom to position user message near viewport top.
+          Small when idle: just a comfortable gap below content (like ChatGPT/Claude).
+          CSS transition smoothly collapses the spacer when AI finishes responding. */}
+      {(historyMessages.length > 0 || streamingMessage) && (
+        <div
+          ref={spacerRef}
+          className="transition-[min-height] duration-500 ease-out"
+          style={{
+            minHeight: isLoading ? 'calc(100vh - 200px)' : 80,
+            overflowAnchor: 'none',
+          }}
+          aria-hidden="true"
+        />
+      )}
       {/* Scroll anchor - helps browser maintain scroll position during content changes */}
       <div className="scroll-anchor h-px" aria-hidden="true" />
     </div>
