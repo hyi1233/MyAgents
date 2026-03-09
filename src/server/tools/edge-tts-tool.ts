@@ -41,6 +41,7 @@ interface EdgeTtsConfig {
   defaultVolume: string;
   defaultPitch: string;
   defaultOutputFormat: string;
+  workspace?: string;
 }
 
 let edgeTtsConfig: EdgeTtsConfig | null = null;
@@ -62,7 +63,10 @@ export function clearEdgeTtsConfig(): void {
 // ============= Directories =============
 
 function getGeneratedAudioDir(): string {
-  const dir = join(homedir(), '.myagents', 'generated_audio');
+  const workspace = edgeTtsConfig?.workspace;
+  const dir = workspace
+    ? join(workspace, 'myagents-generated', 'audio')
+    : join(homedir(), '.myagents', 'generated_audio');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -830,13 +834,14 @@ import { registerBuiltinMcp } from './builtin-mcp-registry';
 registerBuiltinMcp('edge-tts', {
   server: edgeTtsServer,
 
-  configure: (env) => {
+  configure: (env, ctx) => {
     setEdgeTtsConfig({
       defaultVoice: env.EDGE_TTS_DEFAULT_VOICE || 'zh-CN-XiaoxiaoNeural',
       defaultRate: env.EDGE_TTS_DEFAULT_RATE || '0%',
       defaultVolume: env.EDGE_TTS_DEFAULT_VOLUME || '0%',
       defaultPitch: env.EDGE_TTS_DEFAULT_PITCH || '+0Hz',
       defaultOutputFormat: env.EDGE_TTS_DEFAULT_FORMAT || 'audio-24khz-48kbitrate-mono-mp3',
+      workspace: ctx.workspace,
     });
   },
 

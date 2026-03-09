@@ -552,7 +552,6 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         thinkingLevel: string;
         searchGrounding: boolean;
         maxContextTurns: number;
-        saveToProject: boolean;
     } | null>(null);
 
     // Edge TTS slider styling (custom range input with accent-colored thumb)
@@ -782,7 +781,6 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 thinkingLevel: savedEnv?.GEMINI_THINKING_LEVEL || 'auto',
                 searchGrounding: savedEnv?.GEMINI_SEARCH_GROUNDING === 'true',
                 maxContextTurns: parseInt(savedEnv?.MAX_CONTEXT_TURNS || '20', 10),
-                saveToProject: savedEnv?.SAVE_TO_PROJECT !== 'false',
             });
             return;
         }
@@ -878,7 +876,6 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 GEMINI_THINKING_LEVEL: geminiImageSettings.thinkingLevel,
                 GEMINI_SEARCH_GROUNDING: geminiImageSettings.searchGrounding ? 'true' : 'false',
                 MAX_CONTEXT_TURNS: String(geminiImageSettings.maxContextTurns),
-                SAVE_TO_PROJECT: geminiImageSettings.saveToProject ? 'true' : 'false',
             };
             await atomicModifyConfig(config => ({
                 ...config,
@@ -3118,23 +3115,6 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">超过后自动开始新会话（防止请求体过大）</p>
                             </div>
 
-                            {/* Save to Project */}
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <div className="text-sm font-medium text-[var(--ink)]">保存图片到项目目录</div>
-                                    <div className="text-xs text-[var(--ink-muted)]">保存副本到项目 .myagents-images/ 目录</div>
-                                </div>
-                                <button
-                                    onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, saveToProject: !prev.saveToProject } : null)}
-                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
-                                        geminiImageSettings.saveToProject ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
-                                    }`}
-                                >
-                                    <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                                        geminiImageSettings.saveToProject ? 'translate-x-5' : 'translate-x-0'
-                                    }`} />
-                                </button>
-                            </div>
                         </div>
 
                         {/* Footer */}
