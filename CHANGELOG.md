@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.39] - 2026-03-10
+
+### Added
+- **对话流内联 TTS 音频播放** (#14)：TTS 工具结果支持内联播放/暂停控件，音频文件存储到工作区 `myagents-generated/` 目录
+- **思考中实时显示已用时间**：思考过程中显示 "思考中… (3s)"，完成后显示 "思考了 5s"
+- **API 响应超时 watchdog**：检测 Sidecar 响应超时并提供中止选项
+
+### Fixed
+- **Spacer 收缩跳动**：CSS transition 改 JS RAF 动画，每帧检测 scrollTop 位置，消除自动滚动时的视觉抖动
+- **Markdown 预处理破坏 GFM 表格**：含 `#` 的单元格被误判为标题
+- **CSS 变量未定义**：`--accent-hover` → `--accent-warm-hover`
+- **watchdog 空闲后误触发**：abort handler 增加 `signal.aborted` 前置检查
+- **`myagents-generated/` 目录自动创建 `.gitignore`**：防止误提交生成文件
+- **思考完成后始终显示耗时秒数**：不足 1s 时显示 1s
+- **Windows asset 协议兼容**：convertFileSrc + CSP `https://asset.localhost`
+
+### Changed
+- **音频播放器重构**：toggleAudio 移入 singleton、AudioState 去重、watchdog 可读性改进
+- **TTS/图片生成文件存储重构**：统一存储到工作区 `myagents-generated/` 目录
+
+---
+
 ## [0.1.38] - 2026-03-09
 
 ### Added
