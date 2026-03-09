@@ -24,7 +24,7 @@ export function isAudioPath(filePath: string): boolean {
   return ext ? AUDIO_EXTENSIONS.has(ext) : false;
 }
 
-interface AudioState {
+export interface AudioState {
   playing: boolean;
   currentPath: string | null;
   progress: number;
@@ -102,5 +102,14 @@ export function stopAudio(): void {
   }
   currentPath = null;
   notify();
+}
+
+/** Toggle play/stop for a specific file. Reads internal state — no external dependency needed. */
+export function toggleAudio(filePath: string): void {
+  if (currentPath === filePath && audio && !audio.paused && !audio.ended) {
+    stopAudio();
+  } else {
+    playAudio(filePath);
+  }
 }
 

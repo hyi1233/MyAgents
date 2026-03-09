@@ -4128,8 +4128,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // Also require the current turn to have been running for > timeout duration.
       // This prevents false positives when a new turn just started but lastSdkEventAt
       // is stale from the previous turn (idle gap between turns).
-      const turnRunningLongEnough = currentTurnStartTime && Date.now() - currentTurnStartTime > API_WATCHDOG_TIMEOUT_MS;
-      if (!watchdogFired && turnRunningLongEnough && pendingTools === 0 && Date.now() - lastSdkEventAt > API_WATCHDOG_TIMEOUT_MS) {
+      const now = Date.now();
+      const turnRunningLongEnough = currentTurnStartTime && now - currentTurnStartTime > API_WATCHDOG_TIMEOUT_MS;
+      const noRecentSdkEvents = now - lastSdkEventAt > API_WATCHDOG_TIMEOUT_MS;
+      if (!watchdogFired && turnRunningLongEnough && pendingTools === 0 && noRecentSdkEvents) {
         watchdogFired = true;
         console.error(`[agent] API watchdog: no SDK event for ${API_WATCHDOG_TIMEOUT_MS / 1000}s with no pending tools — aborting`);
         broadcast('chat:agent-error', {

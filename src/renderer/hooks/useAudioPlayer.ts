@@ -1,12 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react';
-import { subscribeAudio, playAudio, stopAudio } from '@/utils/audioPlayer';
-
-interface AudioState {
-  playing: boolean;
-  currentPath: string | null;
-  progress: number;
-  duration: number;
-}
+import { subscribeAudio, toggleAudio } from '@/utils/audioPlayer';
+import type { AudioState } from '@/utils/audioPlayer';
 
 const defaultState: AudioState = { playing: false, currentPath: null, progress: 0, duration: 0 };
 let latestState: AudioState = defaultState;
@@ -45,13 +39,8 @@ export function useAudioPlayer(filePath: string) {
 
   const isActive = state.currentPath === filePath && state.playing;
 
-  const toggle = useCallback(() => {
-    if (isActive) {
-      stopAudio();
-    } else {
-      playAudio(filePath);
-    }
-  }, [filePath, isActive]);
+  // toggleAudio reads internal singleton state, so no dependency on isActive
+  const toggle = useCallback(() => toggleAudio(filePath), [filePath]);
 
   return { isActive, progress: isActive ? state.progress : 0, duration: isActive ? state.duration : 0, toggle };
 }
