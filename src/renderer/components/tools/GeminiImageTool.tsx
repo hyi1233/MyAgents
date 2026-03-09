@@ -4,6 +4,7 @@ import { CollapsibleTool } from './CollapsibleTool';
 import { ToolHeader } from './utils';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 interface GeminiImageToolProps {
   tool: ToolUseSimple;
@@ -63,13 +64,8 @@ function parseToolResult(result: string | undefined): {
 /** Convert a file path to a displayable image URL */
 function getImageUrl(filePath: string): string {
   if (isTauriEnvironment()) {
-    // Tauri v2: use asset protocol to load local files
-    // The CSP includes asset: for img-src
-    // Encode each path segment separately to preserve slashes
-    const encoded = filePath.split('/').map(segment => encodeURIComponent(segment)).join('/');
-    return `asset://localhost/${encoded}`;
+    return convertFileSrc(filePath);
   }
-  // Browser dev mode: use the sidecar API endpoint
   return `/api/image?path=${encodeURIComponent(filePath)}`;
 }
 

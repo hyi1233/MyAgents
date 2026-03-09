@@ -5,7 +5,7 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod/v4';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
-import { join, basename } from 'path';
+import { join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 
@@ -32,7 +32,6 @@ interface GeminiImageConfig {
   thinkingLevel: string;
   searchGrounding: boolean;
   maxContextTurns: number;
-  saveToProject: boolean;
   sessionId: string;
   workspace?: string;
 }
@@ -59,8 +58,21 @@ export function clearGeminiImageConfig(): void {
 // ============= Directories =============
 
 function getGeneratedDir(): string {
-  const dir = join(homedir(), '.myagents', 'generated');
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const workspace = geminiImageConfig?.workspace;
+  const dir = workspace
+    ? join(workspace, 'myagents-generated', 'images')
+    : join(homedir(), '.myagents', 'generated');
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+    // Ensure .gitignore in myagents-generated/ parent to prevent accidental commits
+    if (workspace) {
+      const parentDir = join(workspace, 'myagents-generated');
+      const gitignorePath = join(parentDir, '.gitignore');
+      if (!existsSync(gitignorePath)) {
+        writeFileSync(gitignorePath, '*\n');
+      }
+    }
+  }
   return dir;
 }
 
@@ -412,25 +424,6 @@ function processGeminiResponse(
   return result;
 }
 
-/**
- * Optionally copy image to project directory
- */
-function copyToProject(imagePath: string, workspace: string | undefined): string | undefined {
-  if (!workspace) return undefined;
-  try {
-    const projectDir = join(workspace, '.myagents-images');
-    if (!existsSync(projectDir)) mkdirSync(projectDir, { recursive: true });
-    const fileName = basename(imagePath) || 'image.png';
-    const destPath = join(projectDir, fileName);
-    const data = readFileSync(imagePath);
-    writeFileSync(destPath, data);
-    return destPath;
-  } catch (err) {
-    console.error(`[gemini-image] Failed to copy to project:`, err);
-    return undefined;
-  }
-}
-
 // ============= Tool Handlers =============
 
 async function generateImageHandler(args: {
@@ -497,12 +490,6 @@ async function generateImageHandler(args: {
     // Persist context
     persistContext(ctx);
 
-    // Optionally copy to project
-    let projectPath: string | undefined;
-    if (geminiImageConfig.saveToProject) {
-      projectPath = copyToProject(processed.imagePaths[0], geminiImageConfig.workspace);
-    }
-
     // Build result text
     const description = processed.textParts.join('\n').trim();
     const imagePath = processed.imagePaths[0];
@@ -512,9 +499,6 @@ async function generateImageHandler(args: {
     resultText += `filePath: ${imagePath}\n`;
     resultText += `resolution: ${resolution} | aspectRatio: ${aspectRatio}\n`;
     resultText += `model: ${geminiImageConfig.model}\n`;
-    if (projectPath) {
-      resultText += `projectCopy: ${projectPath}\n`;
-    }
     if (description) {
       resultText += `\n图片描述: ${description}\n`;
     }
@@ -614,18 +598,12 @@ async function editImageHandler(args: {
       newCtx.generatedImages.push(...processed.imagePaths);
       persistContext(newCtx);
 
-      let projectPath: string | undefined;
-      if (geminiImageConfig.saveToProject) {
-        projectPath = copyToProject(processed.imagePaths[0], geminiImageConfig.workspace);
-      }
-
       const description = processed.textParts.join('\n').trim();
       let resultText = `图片已编辑（自动创建新会话，原会话已达 ${maxTurns} 轮上限）。\n\n`;
       resultText += `contextId: ${newCtx.id}\n`;
       resultText += `previousContextId: ${ctx.id}\n`;
       resultText += `filePath: ${processed.imagePaths[0]}\n`;
       resultText += `resolution: ${newCtx.config.imageSize} | aspectRatio: ${newCtx.config.aspectRatio}\n`;
-      if (projectPath) resultText += `projectCopy: ${projectPath}\n`;
       if (description) resultText += `\n${description}\n`;
       resultText += `\n后续编辑请使用新的 contextId: ${newCtx.id}`;
 
@@ -665,11 +643,6 @@ async function editImageHandler(args: {
     ctx.generatedImages.push(...processed.imagePaths);
     persistContext(ctx);
 
-    let projectPath: string | undefined;
-    if (geminiImageConfig.saveToProject) {
-      projectPath = copyToProject(processed.imagePaths[0], geminiImageConfig.workspace);
-    }
-
     const newEditCount = editCount + 1;
     const description = processed.textParts.join('\n').trim();
 
@@ -690,7 +663,6 @@ async function editImageHandler(args: {
     resultText += `contextId: ${ctx.id}\n`;
     resultText += `filePath: ${processed.imagePaths[0]}\n`;
     resultText += `resolution: ${ctx.config.imageSize} | aspectRatio: ${ctx.config.aspectRatio}\n`;
-    if (projectPath) resultText += `projectCopy: ${projectPath}\n`;
     if (description) resultText += `\n${description}\n`;
     resultText += `\n编辑历史:\n${historyLines.join('\n')}\n`;
     resultText += `\n如需继续修改，请使用 edit_image 传入相同 contextId。`;
@@ -780,7 +752,6 @@ registerBuiltinMcp('gemini-image', {
       thinkingLevel: env.GEMINI_THINKING_LEVEL || 'auto',
       searchGrounding: env.GEMINI_SEARCH_GROUNDING === 'true',
       maxContextTurns: parseInt(env.MAX_CONTEXT_TURNS || '20', 10),
-      saveToProject: env.SAVE_TO_PROJECT !== 'false',
       sessionId: ctx.sessionId,
       workspace: ctx.workspace,
     });

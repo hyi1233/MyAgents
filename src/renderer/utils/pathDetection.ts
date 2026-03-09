@@ -4,6 +4,7 @@
  * Determines if a text string looks like a file or directory path,
  * so that only plausible candidates are sent to the backend for existence checks.
  */
+import { AUDIO_EXTENSIONS } from '@/utils/audioPlayer';
 
 /**
  * Common file extensions that strongly indicate a file path.
@@ -25,6 +26,8 @@ const PATH_EXTENSIONS = new Set([
   'lock', 'sum', 'mod',
   // Images (still paths even though they're binary)
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp',
+  // Audio (imported from audioPlayer to avoid duplication)
+  ...AUDIO_EXTENSIONS,
 ]);
 
 /** Well-known dotfiles that are valid paths but lack a "normal" extension */

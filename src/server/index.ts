@@ -3119,12 +3119,15 @@ async function main() {
             return jsonResponse({ success: false, error: 'Missing path parameter' }, 400);
           }
 
-          // Security: only allow reading from ~/.myagents/generated/
-          const generatedDir = join(homedir(), '.myagents', 'generated');
+          // Security: allow reading from workspace/myagents-generated/images/ or legacy ~/.myagents/generated/
           const resolvedPath = resolve(imagePath);
-          // Ensure path is strictly within generatedDir (prevent prefix confusion like "generated-evil/")
-          const generatedDirWithSep = generatedDir.endsWith('/') ? generatedDir : generatedDir + '/';
-          if (!resolvedPath.startsWith(generatedDirWithSep)) {
+          const legacyDir = join(homedir(), '.myagents', 'generated');
+          const workspaceDir = currentAgentDir ? join(currentAgentDir, 'myagents-generated', 'images') : '';
+          const legacyDirSep = legacyDir.endsWith(sep) ? legacyDir : legacyDir + sep;
+          const workspaceDirSep = workspaceDir ? (workspaceDir.endsWith(sep) ? workspaceDir : workspaceDir + sep) : '';
+          const allowed = resolvedPath.startsWith(legacyDirSep)
+            || (workspaceDirSep && resolvedPath.startsWith(workspaceDirSep));
+          if (!allowed) {
             return jsonResponse({ success: false, error: 'Access denied: path must be within generated directory' }, 403);
           }
 
@@ -3159,11 +3162,15 @@ async function main() {
             return jsonResponse({ success: false, error: 'Missing path parameter' }, 400);
           }
 
-          // Security: only allow reading from ~/.myagents/generated_audio/
-          const generatedAudioDir = join(homedir(), '.myagents', 'generated_audio');
+          // Security: allow reading from workspace/myagents-generated/audio/ or legacy ~/.myagents/generated_audio/
           const resolvedPath = resolve(audioPath);
-          const generatedAudioDirWithSep = generatedAudioDir.endsWith(sep) ? generatedAudioDir : generatedAudioDir + sep;
-          if (!resolvedPath.startsWith(generatedAudioDirWithSep)) {
+          const legacyAudioDir = join(homedir(), '.myagents', 'generated_audio');
+          const workspaceAudioDir = currentAgentDir ? join(currentAgentDir, 'myagents-generated', 'audio') : '';
+          const legacyAudioDirSep = legacyAudioDir.endsWith(sep) ? legacyAudioDir : legacyAudioDir + sep;
+          const workspaceAudioDirSep = workspaceAudioDir ? (workspaceAudioDir.endsWith(sep) ? workspaceAudioDir : workspaceAudioDir + sep) : '';
+          const audioAllowed = resolvedPath.startsWith(legacyAudioDirSep)
+            || (workspaceAudioDirSep && resolvedPath.startsWith(workspaceAudioDirSep));
+          if (!audioAllowed) {
             return jsonResponse({ success: false, error: 'Access denied: path must be within generated_audio directory' }, 403);
           }
 
@@ -3178,6 +3185,9 @@ async function main() {
             wav: 'audio/wav',
             ogg: 'audio/ogg',
             webm: 'audio/webm',
+            opus: 'audio/opus',
+            aac: 'audio/aac',
+            m4a: 'audio/mp4',
           };
           const mimeType = mimeTypes[ext || ''] || 'audio/mpeg';
 

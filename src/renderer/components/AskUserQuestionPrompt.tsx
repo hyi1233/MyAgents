@@ -355,7 +355,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                 onClick={handleSubmit}
                                 disabled={!allAnswered || isSubmitting}
                                 className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-lg
-                                    text-white bg-[var(--accent)] hover:bg-[var(--accent-hover)]
+                                    text-white bg-[var(--accent)] hover:bg-[var(--accent-warm-hover)]
                                     transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                                 <Check className="size-3.5" />
