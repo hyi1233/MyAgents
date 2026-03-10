@@ -1831,6 +1831,18 @@ pub async fn monitor_global_sidecar(
 
         log::warn!("[sidecar] Global sidecar on port {} is unhealthy, auto-restarting...", port);
 
+        // Mark the existing instance as unhealthy so start_global_sidecar() won't
+        // short-circuit with "already running". Without this, a hung process (alive
+        // but not responding to HTTP) would never be replaced — is_running() checks
+        // the healthy flag first, and start_tab_sidecar returns the old port.
+        {
+            if let Ok(mut guard) = manager.lock() {
+                if let Some(instance) = guard.get_instance_mut(GLOBAL_SIDECAR_ID) {
+                    instance.healthy = false;
+                }
+            }
+        }
+
         let app_clone = app_handle.clone();
         let mgr_clone = manager.clone();
         match tokio::task::spawn_blocking(move || {

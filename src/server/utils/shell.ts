@@ -72,7 +72,7 @@ export function getShellPath(): string {
 
     // On Windows, just use existing PATH with fallback paths prepended
     if (isWindows) {
-        const existing = process.env[PATH_KEY] || '';
+        const existing = process.env[PATH_KEY] || process.env.PATH || '';
         cachedPath = existing ? `${fallback}${PATH_SEPARATOR}${existing}` : fallback;
         console.log('[shell] Windows PATH configured');
         return cachedPath;

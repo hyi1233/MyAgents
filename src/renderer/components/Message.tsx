@@ -173,13 +173,12 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
   // the per-frame scroll position tracking to oscillate and produce a visible "jump".
   const [actionsReady, setActionsReady] = useState(!isStreaming);
   useEffect(() => {
-    if (isStreaming) {
-      setActionsReady(false);
-    } else if (!actionsReady) {
+    if (!isStreaming) {
       const timer = setTimeout(() => setActionsReady(true), 350);
       return () => clearTimeout(timer);
     }
-  }, [isStreaming, actionsReady]);
+    setActionsReady(false);
+  }, [isStreaming]);
 
   useEffect(() => {
     return () => {
