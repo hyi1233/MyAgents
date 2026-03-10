@@ -168,6 +168,19 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const [userHovered, setUserHovered] = useState(false);
 
+  // Delay AssistantActions rendering until after the spacer collapse animation (400ms).
+  // Prevents layout shift (~30px from action buttons) during collapse, which causes
+  // the per-frame scroll position tracking to oscillate and produce a visible "jump".
+  const [actionsReady, setActionsReady] = useState(!isStreaming);
+  useEffect(() => {
+    if (isStreaming) {
+      setActionsReady(false);
+    } else if (!actionsReady) {
+      const timer = setTimeout(() => setActionsReady(true), 350);
+      return () => clearTimeout(timer);
+    }
+  }, [isStreaming, actionsReady]);
+
   useEffect(() => {
     return () => {
       if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
@@ -283,7 +296,7 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
           <div className="text-[var(--ink)] select-text">
             <Markdown>{message.content}</Markdown>
           </div>
-          {!isStreaming && <AssistantActions message={message} onRetry={onRetry} />}
+          {actionsReady && <AssistantActions message={message} onRetry={onRetry} />}
         </div>
       </div>
     );
@@ -398,7 +411,7 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
             })}
           </div>
         </article>
-        {!isStreaming && <AssistantActions className="px-4" message={message} onRetry={onRetry} />}
+        {actionsReady && <AssistantActions className="px-4" message={message} onRetry={onRetry} />}
       </div>
     </div>
   );
