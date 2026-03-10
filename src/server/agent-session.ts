@@ -4158,11 +4158,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Only active when isStreamingMessage is true (an active turn is in progress).
     // pendingTools > 0 means a local tool or subagent is executing (no API
     // call in flight), so we skip. pendingTools === 0 means we're waiting
-    // for the API — if no SDK event arrives for 5 minutes, abort.
+    // for the API — if no SDK event arrives for 15 minutes, abort.
     let pendingTools = 0;
     let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
-    const API_WATCHDOG_TIMEOUT_MS = 5 * 60 * 1000;
+    const API_WATCHDOG_TIMEOUT_MS = 15 * 60 * 1000;
     let watchdogFired = false;
     apiWatchdogId = setInterval(() => {
       // Only check during active turns (not pre-warm, not idle between turns)
@@ -4177,7 +4177,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         watchdogFired = true;
         console.error(`[agent] API watchdog: no SDK event for ${API_WATCHDOG_TIMEOUT_MS / 1000}s with no pending tools — aborting`);
         broadcast('chat:agent-error', {
-          message: 'API 响应超时（5 分钟无活动），已自动终止。请重试。'
+          message: 'API 响应超时（15 分钟无活动），已自动终止。请重试。'
         });
         broadcast('chat:message-error', 'API 响应超时');
         abortPersistentSession();
