@@ -14,6 +14,8 @@ import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
 import GlobalAgentsPanel from '@/components/GlobalAgentsPanel';
 import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
 import { ImSettings } from '@/components/ImSettings';
+import { AgentCardList, AgentCreateMenu, WorkspaceSelectDialog } from '@/components/AgentSettings';
+import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
     getModelsDisplay,
@@ -66,7 +68,7 @@ function parsePositiveInt(value: string): number | undefined {
 }
 
 // Settings sub-sections
-type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'agents' | 'im' | 'usage-stats' | 'about';
+type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'sub-agents' | 'agent' | 'usage-stats' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
@@ -157,7 +159,7 @@ interface SettingsProps {
     onRestartAndUpdate?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'agents', 'im', 'usage-stats', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'sub-agents', 'agent', 'usage-stats', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 const ModelTagList = React.memo(function ModelTagList({
@@ -285,6 +287,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     // Track whether Skills/Agents panels are in detail view (to hide the other panel)
     const [skillsInDetail, setSkillsInDetail] = useState(false);
     const [agentsInDetail, setAgentsInDetail] = useState(false);
+    // Agent overlay state for viewing agent config from Settings card list
+    const [overlayAgent, setOverlayAgent] = useState<{ agentId?: string; workspacePath: string } | null>(null);
+
+    const [showWorkspaceSelect, setShowWorkspaceSelect] = useState(false);
+
+    const handleSelectAgent = useCallback((_agentId: string, _workspacePath: string) => {
+        setOverlayAgent({ agentId: _agentId, workspacePath: _workspacePath });
+    }, []);
+
+    // Open workspace's config panel with Agent tab (for upgrade or settings)
+    const handleUpgradeWorkspace = useCallback(() => {
+        setShowWorkspaceSelect(true);
+    }, []);
+
+    const handleWorkspaceSelected = useCallback((project: import('@/config/types').Project) => {
+        setShowWorkspaceSelect(false);
+        setOverlayAgent({ workspacePath: project.path });
+    }, []);
 
     // Stable callback ref for onSectionChange (avoids unnecessary effect triggers)
     const onSectionChangeRef = useRef(onSectionChange);
@@ -1822,7 +1842,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     </button>
                     <button
                         onClick={() => setActiveSection('skills')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'skills' || activeSection === 'agents'
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'skills' || activeSection === 'sub-agents'
                             ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
@@ -1839,13 +1859,13 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         工具 MCP
                     </button>
                     <button
-                        onClick={() => setActiveSection('im')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'im'
+                        onClick={() => setActiveSection('agent')}
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'agent'
                             ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
-                        聊天机器人 Bot
+                        Agent 🦞
                     </button>
                     <button
                         onClick={() => setActiveSection('usage-stats')}
@@ -1879,18 +1899,34 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Right content area */}
             <div className="flex-1 overflow-y-auto overscroll-contain">
-                {/* Skills + Agents section uses wider layout */}
-                {(activeSection === 'skills' || activeSection === 'agents') && (
+                {/* Skills + Sub-Agents section uses wider layout */}
+                {(activeSection === 'skills' || activeSection === 'sub-agents') && (
                     <div className="mx-auto max-w-4xl px-8 py-8 space-y-10">
                         {!agentsInDetail && <GlobalSkillsPanel onDetailChange={setSkillsInDetail} />}
                         {!skillsInDetail && <GlobalAgentsPanel onDetailChange={setAgentsInDetail} />}
                     </div>
                 )}
 
-                {/* IM integration section */}
-                {activeSection === 'im' && (
-                    <div className="mx-auto max-w-4xl px-8 py-8">
-                        <ImSettings />
+                {/* Agent section (formerly IM Bot) */}
+                {activeSection === 'agent' && (
+                    <div className="mx-auto max-w-4xl px-8 py-8 space-y-8">
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-lg font-semibold text-[var(--ink)]">Agent</h2>
+                            <AgentCreateMenu
+                                onUpgradeWorkspace={handleUpgradeWorkspace}
+                                onCreateFromTemplate={() => {
+                                    // Navigate to template creation (dispatches OPEN_SETTINGS event or opens template dialog)
+                                    window.dispatchEvent(new CustomEvent('myagents:create-from-template'));
+                                }}
+                            />
+                        </div>
+                        <AgentCardList onSelectAgent={handleSelectAgent} />
+                        <div className="border-t border-[var(--line)] pt-6">
+                            <h3 className="mb-4 text-sm font-semibold text-[var(--ink-muted)]">
+                                旧版 IM Bot 配置
+                            </h3>
+                            <ImSettings />
+                        </div>
                     </div>
                 )}
 
@@ -4604,6 +4640,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     providers={providers}
                     apiKeys={apiKeys}
                     providerVerifyStatus={providerVerifyStatus}
+                />
+            )}
+
+            {/* Agent detail overlay */}
+            {overlayAgent && (
+                <WorkspaceConfigPanel
+                    agentDir={overlayAgent.workspacePath}
+                    onClose={() => setOverlayAgent(null)}
+                    initialTab="agent"
+                />
+            )}
+
+            {/* Workspace select dialog for Agent upgrade */}
+            {showWorkspaceSelect && (
+                <WorkspaceSelectDialog
+                    projects={projects}
+                    onSelect={handleWorkspaceSelected}
+                    onClose={() => setShowWorkspaceSelect(false)}
                 />
             )}
         </div>

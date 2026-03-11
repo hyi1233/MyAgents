@@ -45,15 +45,21 @@ pub fn run() {
 
     // Create IM Bot managed state
     let im_bot_state = im::create_im_bot_state();
+    // Create Agent managed state (v0.1.41)
+    let agent_state = im::create_agent_state();
     let sidecar_state_for_window = sidecar_state.clone();
     let sidecar_state_for_exit = sidecar_state.clone();
     let sidecar_state_for_tray_exit = sidecar_state.clone();
     let sidecar_state_for_monitor = sidecar_state.clone();
 
     let im_state_for_management = im_bot_state.clone();
+    let agent_state_for_management = agent_state.clone();
     let im_state_for_window = im_bot_state.clone();
     let im_state_for_exit = im_bot_state.clone();
     let im_state_for_tray_exit = im_bot_state.clone();
+    let agent_state_for_window = agent_state.clone();
+    let agent_state_for_exit = agent_state.clone();
+    let agent_state_for_tray_exit = agent_state.clone();
 
     // Track if cleanup has been performed to avoid duplicate cleanup
     // All clones share the same underlying AtomicBool - whichever exit path
@@ -90,6 +96,7 @@ pub fn run() {
         .manage(sidecar_state)
         .manage(sse_proxy_state)
         .manage(im_bot_state)
+        .manage(agent_state)
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
             commands::cmd_start_sidecar,
@@ -190,6 +197,14 @@ pub fn run() {
             im::cmd_install_openclaw_plugin,
             im::cmd_list_openclaw_plugins,
             im::cmd_uninstall_openclaw_plugin,
+            // Agent commands (v0.1.41)
+            im::cmd_start_agent_channel,
+            im::cmd_stop_agent_channel,
+            im::cmd_agent_status,
+            im::cmd_all_agents_status,
+            im::cmd_update_agent_config,
+            im::cmd_create_agent,
+            im::cmd_delete_agent,
             // File utility commands
             commands::cmd_read_file_base64,
         ])
@@ -228,6 +243,7 @@ pub fn run() {
                 use std::sync::atomic::Ordering::Relaxed;
                 if !cleanup_done_for_tray_exit.swap(true, Relaxed) {
                     log::info!("[App] Cleaning up sidecars before exit...");
+                    im::signal_all_agents_shutdown(&agent_state_for_tray_exit);
                     im::signal_all_bots_shutdown(&im_state_for_tray_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_tray_exit);
                 }
@@ -253,8 +269,9 @@ pub fn run() {
                 }
             }
 
-            // Inject IM state into management API (for /api/im/wake endpoint)
+            // Inject IM/Agent state into management API (for /api/im/wake endpoint)
             management_api::set_im_bots_state(im_state_for_management);
+            management_api::set_agent_state(agent_state_for_management);
 
             // Start management API (internal HTTP server for Bun→Rust IPC)
             tauri::async_runtime::spawn(async move {
@@ -274,6 +291,10 @@ pub fn run() {
             // Auto-start IM Bot if previously enabled (3s delay)
             im::schedule_auto_start(app.handle().clone());
             log::info!("[App] IM Bot auto-start scheduled");
+
+            // Auto-start Agent channels (4s delay, after IM bots)
+            im::schedule_agent_auto_start(app.handle().clone());
+            log::info!("[App] Agent auto-start scheduled");
 
             // Start Global Sidecar health monitor
             // Periodically checks if the Global Sidecar is alive and auto-restarts it
@@ -317,6 +338,7 @@ pub fn run() {
                     use std::sync::atomic::Ordering::Relaxed;
                     if !cleanup_done_for_window.swap(true, Relaxed) {
                         log::info!("[App] Window destroyed, cleaning up sidecars...");
+                        im::signal_all_agents_shutdown(&agent_state_for_window);
                         im::signal_all_bots_shutdown(&im_state_for_window);
                         let _ = stop_all_sidecars(&sidecar_state_for_window);
                     }
@@ -336,6 +358,7 @@ pub fn run() {
                 use std::sync::atomic::Ordering::Relaxed;
                 if !cleanup_done_for_exit.swap(true, Relaxed) {
                     log::info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
+                    im::signal_all_agents_shutdown(&agent_state_for_exit);
                     im::signal_all_bots_shutdown(&im_state_for_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_exit);
                 }

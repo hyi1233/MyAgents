@@ -21,6 +21,7 @@ import {
     mockSaveConfig,
 } from '@/utils/browserMock';
 import { type ImBotConfig, DEFAULT_IM_BOT_CONFIG } from '../../../shared/types/im';
+// Agent migration is triggered from ConfigProvider after both config + projects are loaded
 import { isDebugMode } from '@/utils/debug';
 
 // ============= Validation =============

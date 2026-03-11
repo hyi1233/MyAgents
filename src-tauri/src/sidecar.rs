@@ -268,9 +268,9 @@ pub enum SidecarOwner {
     /// Background completion owner - keeps Sidecar alive while AI finishes responding
     /// String is the session ID for identification
     BackgroundCompletion(String),
-    /// IM Bot owner - keeps Sidecar alive for IM message processing
-    /// String is the session_key (e.g. "im:telegram:private:12345")
-    ImBot(String),
+    /// Agent owner - keeps Sidecar alive for IM/Agent message processing
+    /// String is the session_key (e.g. "agent:{agentId}:{channel}:{type}:{id}")
+    Agent(String),
 }
 
 /// Session-centric Sidecar instance
@@ -771,12 +771,12 @@ impl SidecarManager {
         upgraded
     }
 
-    /// Check if a session's Sidecar has persistent background owners (CronTask or ImBot)
+    /// Check if a session's Sidecar has persistent background owners (CronTask or Agent)
     /// that will keep it alive after a Tab releases its ownership.
     pub fn session_has_persistent_owners(&self, session_id: &str) -> bool {
         self.sidecars
             .get(session_id)
-            .map(|s| s.owners.iter().any(|o| matches!(o, SidecarOwner::CronTask(_) | SidecarOwner::ImBot(_))))
+            .map(|s| s.owners.iter().any(|o| matches!(o, SidecarOwner::CronTask(_) | SidecarOwner::Agent(_))))
             .unwrap_or(false)
     }
 
@@ -2248,7 +2248,7 @@ pub fn cmd_ensure_session_sidecar(
     let owner = match ownerType.as_str() {
         "tab" => SidecarOwner::Tab(ownerId),
         "cron_task" => SidecarOwner::CronTask(ownerId),
-        "im_bot" => SidecarOwner::ImBot(ownerId),
+        "im_bot" | "agent" => SidecarOwner::Agent(ownerId),
         _ => return Err(format!("Invalid owner type: {}", ownerType)),
     };
 
@@ -2269,7 +2269,7 @@ pub fn cmd_release_session_sidecar(
         "tab" => SidecarOwner::Tab(ownerId),
         "cron_task" => SidecarOwner::CronTask(ownerId),
         "background_completion" => SidecarOwner::BackgroundCompletion(ownerId),
-        "im_bot" => SidecarOwner::ImBot(ownerId),
+        "im_bot" | "agent" => SidecarOwner::Agent(ownerId),
         _ => return Err(format!("Invalid owner type: {}", ownerType)),
     };
 
@@ -2299,7 +2299,7 @@ pub fn cmd_upgrade_session_id(
     Ok(manager.upgrade_session_id(&oldSessionId, &newSessionId))
 }
 
-/// Check if a session's Sidecar has persistent background owners (CronTask or ImBot)
+/// Check if a session's Sidecar has persistent background owners (CronTask or Agent)
 /// Used by frontend to decide whether closing a tab needs confirmation.
 #[tauri::command]
 #[allow(non_snake_case)]

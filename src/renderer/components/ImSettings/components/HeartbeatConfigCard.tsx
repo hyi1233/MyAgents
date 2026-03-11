@@ -23,9 +23,12 @@ const COMMON_TIMEZONES = [
 export default function HeartbeatConfigCard({
     heartbeat,
     onChange,
+    flat,
 }: {
     heartbeat: HeartbeatConfig | undefined;
     onChange: (config: HeartbeatConfig | undefined) => void;
+    /** When true, renders without card border/bg — parent handles container styling */
+    flat?: boolean;
 }) {
     const config = useMemo(
         () => heartbeat ?? DEFAULT_HEARTBEAT_CONFIG,
@@ -73,10 +76,10 @@ export default function HeartbeatConfigCard({
     const isCustomInterval = !INTERVAL_PRESETS.some(p => p.value === config.intervalMinutes);
 
     return (
-        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+        <div className={flat ? '' : 'rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5'}>
             {/* Header with toggle */}
             <div className="mb-4 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-[var(--ink)]">心跳巡检</h3>
+                <h3 className="text-base font-medium text-[var(--ink)]">心跳巡检 Heartbeat</h3>
                 <button
                     type="button"
                     onClick={toggleEnabled}

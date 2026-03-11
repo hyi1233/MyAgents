@@ -144,6 +144,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Get config to find current project provider
   const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData } = useConfig();
   const currentProject = projects.find((p) => p.path === agentDir);
+  // Agent workspaces should NOT write config back to project via patchProject
+  // (Agent config is managed separately via cmd_update_agent_config)
+  const isAgentWorkspace = currentProject?.isAgent ?? false;
   // Local provider state: snapshot project's providerId at creation, independent thereafter.
   // Prevents cross-tab pollution when another tab patches the shared project.
   const [selectedProviderId, setSelectedProviderId] = useState<string | undefined>(
@@ -709,7 +712,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     // Persist to project config (patchProject updates disk AND projects React state,
     // keeping currentProject.mcpEnabledServers in sync for tab-activate sync at L672)
-    if (currentProject) {
+    if (currentProject && !isAgentWorkspace) {
       void patchProject(currentProject.id, { mcpEnabledServers: newEnabled });
     }
 
@@ -922,7 +925,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
 
     // Write back to project (last-writer-wins for new tabs)
-    if (currentProject) {
+    if (currentProject && !isAgentWorkspace) {
       void patchProject(currentProject.id, { providerId, model: newProvider?.primaryModel ?? null });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps
@@ -939,7 +942,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     track('model_switch', { model });
 
     setSelectedModel(model);
-    if (currentProject) {
+    if (currentProject && !isAgentWorkspace) {
       void patchProject(currentProject.id, { model });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
@@ -948,7 +951,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Handle permission mode change with project write-back
   const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
     setPermissionMode(mode);
-    if (currentProject) {
+    if (currentProject && !isAgentWorkspace) {
       void patchProject(currentProject.id, { permissionMode: mode });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
@@ -1299,6 +1302,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             {agentDir && (
               <span className="text-sm font-medium text-[var(--ink)]">
                 {agentDir.split(/[/\\]/).filter(Boolean).pop()}
+                {isAgentWorkspace && <span className="ml-1 text-xs" title="Agent">🦞</span>}
               </span>
             )}
             {/* Session title — click to rename */}

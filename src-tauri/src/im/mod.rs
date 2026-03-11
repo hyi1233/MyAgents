@@ -24,7 +24,7 @@ use reqwest::Client;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Runtime};
 use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
-use tokio::sync::{watch, Mutex, Semaphore};
+use tokio::sync::{watch, Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 
 use tokio::sync::mpsc;
@@ -304,6 +304,84 @@ pub struct ImBotInstance {
     pub(crate) group_activation: Arc<tokio::sync::RwLock<GroupActivation>>,
     pub(crate) group_tools_deny: Arc<tokio::sync::RwLock<Vec<String>>>,
     pub(crate) group_history: Arc<Mutex<GroupHistoryBuffer>>,
+    // ===== Agent link (v0.1.41) =====
+    /// Set after the bot is moved into an AgentInstance; the processing loop sees updates via Arc.
+    pub(crate) agent_link: SharedAgentLink,
+}
+
+// ===== Agent Architecture (v0.1.41) =====
+
+use types::{AgentConfigRust, AgentConfigPatch, AgentStatus, ChannelConfigRust, ChannelStatus, LastActiveChannel};
+
+/// Info linking an ImBotInstance back to its parent Agent (set after moving into AgentInstance).
+/// The processing loop holds a clone of this Arc; writing to it after spawn is visible to the task.
+#[derive(Clone)]
+pub(crate) struct AgentChannelLink {
+    pub channel_id: String,
+    pub agent_id: String,
+    /// Shared with `AgentInstance.last_active_channel` — the processing loop writes here.
+    pub last_active_channel: Arc<RwLock<Option<LastActiveChannel>>>,
+}
+
+/// Shared, write-after-spawn link — the processing loop reads this via Arc.
+pub(crate) type SharedAgentLink = Arc<RwLock<Option<AgentChannelLink>>>;
+
+/// Running Channel instance within an Agent
+pub struct ChannelInstance {
+    pub channel_id: String,
+    /// The underlying ImBotInstance that does the actual work
+    /// (reuses existing infrastructure — adapter, router, buffer, health, etc.)
+    pub bot_instance: ImBotInstance,
+}
+
+/// Running Agent instance (holds multiple ChannelInstances)
+pub struct AgentInstance {
+    pub agent_id: String,
+    pub config: AgentConfigRust,
+    pub channels: HashMap<String, ChannelInstance>,
+    pub last_active_channel: Arc<tokio::sync::RwLock<Option<LastActiveChannel>>>,
+    // Agent-level heartbeat (shared across channels)
+    pub heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+    pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
+    pub heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
+    // Agent-level hot-reloadable AI config (shared defaults)
+    pub current_model: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub current_provider_env: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
+    pub permission_mode: Arc<tokio::sync::RwLock<String>>,
+    pub mcp_servers_json: Arc<tokio::sync::RwLock<Option<String>>>,
+}
+
+/// Managed state for the Agent subsystem (agent_id → instance)
+pub type ManagedAgents = Arc<Mutex<HashMap<String, AgentInstance>>>;
+
+/// Create the managed Agent state (called during app setup)
+pub fn create_agent_state() -> ManagedAgents {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Signal all running agents to shut down (sync, for use in app exit handlers).
+pub fn signal_all_agents_shutdown(agent_state: &ManagedAgents) {
+    if let Ok(agents) = agent_state.try_lock() {
+        for (agent_id, instance) in agents.iter() {
+            log::info!("[agent] Signaling shutdown for agent {}", agent_id);
+            for (channel_id, ch) in &instance.channels {
+                log::info!("[agent] Shutting down channel {} of agent {}", channel_id, agent_id);
+                let _ = ch.bot_instance.shutdown_tx.send(true);
+                ch.bot_instance.poll_handle.abort();
+                ch.bot_instance.process_handle.abort();
+                ch.bot_instance.approval_handle.abort();
+                ch.bot_instance.health_handle.abort();
+                if let Some(ref h) = ch.bot_instance.heartbeat_handle {
+                    h.abort();
+                }
+            }
+            if let Some(ref h) = instance.heartbeat_handle {
+                h.abort();
+            }
+        }
+    } else {
+        log::warn!("[agent] Could not acquire lock for shutdown signal, agents may linger");
+    }
 }
 
 /// Create the managed IM Bot state (called during app setup)
@@ -710,6 +788,10 @@ pub async fn start_im_bot<R: Runtime>(
     let peer_locks_for_loop = Arc::clone(&peer_locks);
     let stream_client = create_sidecar_stream_client();
     let platform_for_loop = config.platform.clone();
+    // Agent link — starts as None; set after bot is moved into AgentInstance.
+    // The processing loop holds a clone of this Arc and checks it after each message.
+    let agent_link: SharedAgentLink = Arc::new(RwLock::new(None));
+    let agent_link_for_loop = Arc::clone(&agent_link);
 
     let process_handle = tokio::spawn(async move {
         let mut in_flight: JoinSet<()> = JoinSet::new();
@@ -840,7 +922,10 @@ pub async fn start_im_bot<R: Runtime>(
                             .push(msg);
                         continue;
                     }
-                    let session_key = SessionRouter::session_key(&msg);
+                    let session_key = {
+                        let r = router_clone.lock().await;
+                        r.session_key(&msg)
+                    };
                     let chat_id = msg.chat_id.clone();
                     let message_id = msg.message_id.clone();
                     let text = msg.text.trim().to_string();
@@ -1435,6 +1520,7 @@ pub async fn start_im_bot<R: Runtime>(
                     let task_group_activation = Arc::clone(&group_activation_for_loop);
                     let task_group_tools_deny = Arc::clone(&group_tools_deny_for_loop);
                     let task_group_permissions = Arc::clone(&group_permissions_for_loop);
+                    let task_agent_link = Arc::clone(&agent_link_for_loop);
 
                     in_flight.spawn(async move {
                         // 1. Acquire per-peer lock FIRST (serialize requests to same Sidecar).
@@ -1630,6 +1716,24 @@ pub async fn start_im_bot<R: Runtime>(
                             )
                             .await;
                         let _ = task_app.emit("im:status-changed", json!({ "event": "sessions_updated" }));
+
+                        // 7b. Update agent lastActiveChannel (if this bot belongs to an agent)
+                        {
+                            let link_guard = task_agent_link.read().await;
+                            if let Some(ref link) = *link_guard {
+                                let now_str = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                                let new_lac = LastActiveChannel {
+                                    channel_id: link.channel_id.clone(),
+                                    session_key: session_key.clone(),
+                                    last_active_at: now_str,
+                                };
+                                *link.last_active_channel.write().await = Some(new_lac);
+                                ulog_debug!(
+                                    "[agent] Updated lastActiveChannel: agent={}, channel={}, session={}",
+                                    link.agent_id, link.channel_id, session_key
+                                );
+                            }
+                        }
 
                         // 8. Buffer replay (same session only — per-peer lock is held)
                         let mut replayed = 0u32;
@@ -1966,6 +2070,8 @@ pub async fn start_im_bot<R: Runtime>(
         group_history,
         // OpenClaw Bridge process
         bridge_process: bridge_process_handle.map(tokio::sync::Mutex::new),
+        // Agent link (set after moving into AgentInstance)
+        agent_link,
     });
 
     Ok(status)
@@ -2607,6 +2713,9 @@ struct PartialAppConfig {
     im_bot_config: Option<PartialBotEntry>,
     /// Multi-bot configs (v0.1.19+)
     im_bot_configs: Option<Vec<PartialBotEntry>>,
+    /// Agent configs (v0.1.41)
+    #[serde(default)]
+    agents: Vec<AgentConfigRust>,
     /// API keys keyed by provider ID (for migrating providerEnvJson)
     #[serde(default)]
     provider_api_keys: std::collections::HashMap<String, String>,
@@ -2710,18 +2819,35 @@ fn read_im_configs_from_disk() -> Vec<(String, ImConfig)> {
 
 /// Extract (bot_id, config) pairs from parsed config.
 /// Migrates missing `provider_env_json` from `provider_api_keys` + preset baseUrl map.
+/// Skips bots whose IDs also appear as agent channel IDs (to prevent double auto-start).
 fn parse_bot_entries(app_config: PartialAppConfig) -> Vec<(String, ImConfig)> {
+    // Build set of channel IDs owned by agents — these will be started by schedule_agent_auto_start
+    let agent_channel_ids: std::collections::HashSet<String> = app_config
+        .agents
+        .iter()
+        .flat_map(|a| a.channels.iter().map(|ch| ch.id.clone()))
+        .collect();
+
     let api_keys = app_config.provider_api_keys;
     let mut entries: Vec<(String, ImConfig)> = if let Some(bots) = app_config.im_bot_configs {
         bots.into_iter()
-            .map(|entry| {
+            .filter_map(|entry| {
                 let id = entry.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                (id, entry.config)
+                if agent_channel_ids.contains(&id) {
+                    ulog_debug!("[im] Skipping legacy bot {} (owned by agent)", id);
+                    None
+                } else {
+                    Some((id, entry.config))
+                }
             })
             .collect()
     } else if let Some(entry) = app_config.im_bot_config {
         let id = entry.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        vec![(id, entry.config)]
+        if agent_channel_ids.contains(&id) {
+            Vec::new()
+        } else {
+            vec![(id, entry.config)]
+        }
     } else {
         Vec::new()
     };
@@ -2783,6 +2909,465 @@ fn migrate_provider_env(
         "[im] Migrated providerEnvJson for provider '{}' from providerApiKeys",
         provider_id
     );
+}
+
+// ===== Agent Config Disk Read/Write (v0.1.41) =====
+
+/// Read Agent configs from disk. Falls back to reading imBotConfigs and converting.
+fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+    let config_dir = home.join(".myagents");
+    let main_path = config_dir.join("config.json");
+
+    let candidates = [
+        main_path.clone(),
+        config_dir.join("config.json.bak"),
+        config_dir.join("config.json.tmp"),
+    ];
+
+    for (i, path) in candidates.iter().enumerate() {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let app_config: PartialAppConfig = match serde_json::from_str(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                let label = ["main", "bak", "tmp"][i];
+                ulog_warn!("[agent] Config {} file corrupted, trying next: {}", label, e);
+                continue;
+            }
+        };
+
+        if i > 0 {
+            ulog_warn!("[agent] Recovered config from {} file", ["main", "bak", "tmp"][i]);
+        }
+
+        if !app_config.agents.is_empty() {
+            return app_config.agents;
+        }
+
+        // Fallback: if no agents[], try converting from imBotConfigs (migration)
+        // This is handled by the TS frontend migration, but provide a Rust fallback too
+        return Vec::new();
+    }
+
+    Vec::new()
+}
+
+/// Persist a partial patch to a single agent's entry in `~/.myagents/config.json`.
+#[allow(dead_code)] // Kept for potential future use; disk persistence now done by TypeScript service
+fn persist_agent_config_patch(agent_id: &str, patch: &AgentConfigPatch) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
+    let config_path = home.join(".myagents").join("config.json");
+    let tmp_path = config_path.with_extension("json.tmp.rust");
+    let bak_path = config_path.with_extension("json.bak");
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("[agent] Cannot read config.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("[agent] Cannot parse config.json: {}", e))?;
+
+    let agents = config.get_mut("agents")
+        .and_then(|v| v.as_array_mut())
+        .ok_or_else(|| "[agent] No agents[] in config.json".to_string())?;
+    let agent = agents.iter_mut()
+        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(agent_id))
+        .ok_or_else(|| format!("[agent] Agent {} not found in config.json", agent_id))?;
+
+    // Apply patch fields
+    macro_rules! apply_field {
+        ($field:ident, $key:expr) => {
+            if let Some(ref val) = patch.$field {
+                agent[$key] = serde_json::json!(val);
+            }
+        };
+    }
+    apply_field!(name, "name");
+    apply_field!(icon, "icon");
+    apply_field!(enabled, "enabled");
+    apply_field!(provider_id, "providerId");
+    apply_field!(model, "model");
+    apply_field!(provider_env_json, "providerEnvJson");
+    apply_field!(permission_mode, "permissionMode");
+    apply_field!(mcp_enabled_servers, "mcpEnabledServers");
+    apply_field!(setup_completed, "setupCompleted");
+
+    if let Some(ref channels) = patch.channels {
+        agent["channels"] = serde_json::to_value(channels)
+            .map_err(|e| format!("[agent] Failed to serialize channels: {}", e))?;
+    }
+
+    if let Some(ref hb_json) = patch.heartbeat_config_json {
+        if !hb_json.is_empty() && hb_json != "null" {
+            if let Ok(hb) = serde_json::from_str::<serde_json::Value>(hb_json) {
+                agent["heartbeat"] = hb;
+            }
+        }
+    }
+
+    // Atomic write: tmp → bak → rename
+    let serialized = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("[agent] Failed to serialize config: {}", e))?;
+    std::fs::write(&tmp_path, &serialized)
+        .map_err(|e| format!("[agent] Failed to write tmp: {}", e))?;
+    if config_path.exists() {
+        let _ = std::fs::copy(&config_path, &bak_path);
+    }
+    std::fs::rename(&tmp_path, &config_path)
+        .map_err(|e| format!("[agent] Failed to rename tmp → config: {}", e))?;
+
+    ulog_info!("[agent] Persisted config patch for agent {}", agent_id);
+    Ok(())
+}
+
+/// Resolve which channel to use for proactive messages (heartbeat/cron).
+/// Fallback chain:
+/// 1. lastActiveChannel if that channel is enabled + connected (Online status)
+/// 2. Any other channel with active sessions and Online status
+/// 3. First enabled channel with Online status (no history needed)
+/// 4. None — no available channel
+fn resolve_target_channel(
+    agent: &AgentInstance,
+    agent_statuses: &HashMap<String, ChannelStatus>,
+) -> Option<String> {
+    // Helper: check if a channel is online
+    let is_online = |ch_id: &str| -> bool {
+        agent_statuses
+            .get(ch_id)
+            .map_or(false, |s| s.status == ImStatus::Online)
+    };
+
+    // 1. Try lastActiveChannel
+    if let Ok(guard) = agent.last_active_channel.try_read() {
+        if let Some(ref lac) = *guard {
+            if is_online(&lac.channel_id) {
+                return Some(lac.channel_id.clone());
+            }
+        }
+    }
+
+    // 2. Find any channel with active sessions and Online status
+    for (ch_id, status) in agent_statuses {
+        if status.status == ImStatus::Online && !status.active_sessions.is_empty() {
+            return Some(ch_id.clone());
+        }
+    }
+
+    // 3. First enabled channel with Online status (even without sessions)
+    for (ch_id, status) in agent_statuses {
+        if status.status == ImStatus::Online {
+            return Some(ch_id.clone());
+        }
+    }
+
+    // 4. No available channel
+    None
+}
+
+/// Build channel statuses from a running AgentInstance (async helper for heartbeat).
+/// Build channel statuses using clone-then-collect pattern (caller should NOT hold ManagedAgents lock).
+/// Auto-start all enabled Agent channels.
+/// Called from schedule_auto_start after the legacy IM bot startup.
+pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        // Give the app time to fully initialize
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+
+        let agents = read_agent_configs_from_disk();
+        if agents.is_empty() {
+            return;
+        }
+
+        use tauri::Manager;
+        let agent_state = app_handle.state::<ManagedAgents>();
+        let im_state = app_handle.state::<ManagedImBots>();
+        let sidecar_manager = app_handle.state::<ManagedSidecarManager>();
+
+        for agent_config in agents {
+            if !agent_config.enabled {
+                continue;
+            }
+
+            // Shared last_active_channel Arc for this agent (all channels share it)
+            let shared_lac: Arc<RwLock<Option<LastActiveChannel>>> =
+                Arc::new(RwLock::new(agent_config.last_active_channel.clone()));
+
+            let mut started_channel_ids: Vec<String> = Vec::new();
+
+            for channel in &agent_config.channels {
+                if !channel.enabled {
+                    continue;
+                }
+                let mut im_config = channel.to_im_config(&agent_config);
+                // Suppress per-channel heartbeat interval — agent-level heartbeat controls timing.
+                // The runner still exists (to receive delegated wake signals from agent heartbeat).
+                im_config.heartbeat_config = Some(types::HeartbeatConfig {
+                    enabled: false,
+                    ..types::HeartbeatConfig::default()
+                });
+
+                let has_credentials = match im_config.platform {
+                    ImPlatform::Telegram => !im_config.bot_token.is_empty(),
+                    ImPlatform::Feishu => {
+                        im_config.feishu_app_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                            && im_config.feishu_app_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                    }
+                    ImPlatform::Dingtalk => {
+                        im_config.dingtalk_client_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                            && im_config.dingtalk_client_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                    }
+                    ImPlatform::OpenClaw(_) => {
+                        im_config.openclaw_plugin_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                    }
+                };
+                if has_credentials {
+                    // Use channel.id as the bot_id for the underlying ImBotInstance
+                    let bot_id = channel.id.clone();
+                    // Dedup: skip if channel already running in agent state
+                    {
+                        let agents_guard = agent_state.lock().await;
+                        if let Some(agent) = agents_guard.get(&agent_config.id) {
+                            if agent.channels.contains_key(&bot_id) {
+                                ulog_info!("[agent] Channel {} already running in agent {}, skipping auto-start", bot_id, agent_config.id);
+                                continue;
+                            }
+                        }
+                    }
+                    ulog_info!("[agent] Auto-starting channel {} of agent {}", bot_id, agent_config.id);
+                    match start_im_bot(&app_handle, &im_state, &sidecar_manager, bot_id.clone(), im_config).await {
+                        Ok(_bot_status) => {
+                            ulog_info!("[agent] Auto-start succeeded for channel {}", bot_id);
+                            // Register channel in agent state
+                            let mut agents_guard = agent_state.lock().await;
+                            let agent_instance = agents_guard.entry(agent_config.id.clone()).or_insert_with(|| {
+                                AgentInstance {
+                                    agent_id: agent_config.id.clone(),
+                                    config: agent_config.clone(),
+                                    channels: HashMap::new(),
+                                    last_active_channel: Arc::clone(&shared_lac),
+                                    heartbeat_handle: None,
+                                    heartbeat_wake_tx: None,
+                                    heartbeat_config: None,
+                                    current_model: Arc::new(RwLock::new(agent_config.model.clone())),
+                                    current_provider_env: Arc::new(RwLock::new(None)),
+                                    permission_mode: Arc::new(RwLock::new(agent_config.permission_mode.clone())),
+                                    mcp_servers_json: Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
+                                }
+                            });
+                            // Move the bot instance from im_state to agent channel
+                            let mut im_guard = im_state.lock().await;
+                            if let Some(bot_instance) = im_guard.remove(&bot_id) {
+                                // Set agent_link so the processing loop can update lastActiveChannel
+                                let link = AgentChannelLink {
+                                    channel_id: channel.id.clone(),
+                                    agent_id: agent_config.id.clone(),
+                                    last_active_channel: Arc::clone(&shared_lac),
+                                };
+                                *bot_instance.agent_link.write().await = Some(link);
+
+                                agent_instance.channels.insert(channel.id.clone(), ChannelInstance {
+                                    channel_id: channel.id.clone(),
+                                    bot_instance,
+                                });
+                                started_channel_ids.push(channel.id.clone());
+                            }
+                            drop(im_guard);
+                            drop(agents_guard);
+                        }
+                        Err(e) => ulog_warn!("[agent] Auto-start failed for channel {}: {}", bot_id, e),
+                    }
+                }
+            }
+
+            // Start agent-level heartbeat if configured and at least one channel started
+            if !started_channel_ids.is_empty() {
+                let hb_config = agent_config.heartbeat.clone().unwrap_or_default();
+                let agent_id = agent_config.id.clone();
+                let agent_label = agent_config.name.clone();
+                let agent_state_for_hb = Arc::clone(&*agent_state);
+                let (wake_tx, mut wake_rx) = mpsc::channel::<types::WakeReason>(64);
+                let hb_config_arc = Arc::new(RwLock::new(hb_config));
+                let hb_config_for_loop = Arc::clone(&hb_config_arc);
+
+                let hb_handle = tokio::spawn(async move {
+                    use heartbeat::is_in_active_hours;
+
+                    let initial_interval = {
+                        let cfg = hb_config_for_loop.read().await;
+                        Duration::from_secs(cfg.interval_minutes.max(5) as u64 * 60)
+                    };
+                    let mut interval = tokio::time::interval(initial_interval);
+                    interval.tick().await; // skip first immediate tick
+
+                    ulog_info!(
+                        "[agent-heartbeat] Runner started for agent {} (interval={}min)",
+                        agent_label,
+                        initial_interval.as_secs() / 60
+                    );
+
+                    loop {
+                        // Check if interval needs updating
+                        {
+                            let cfg = hb_config_for_loop.read().await;
+                            let desired = Duration::from_secs(cfg.interval_minutes.max(5) as u64 * 60);
+                            if desired != interval.period() {
+                                ulog_info!(
+                                    "[agent-heartbeat] Interval changed to {}min",
+                                    desired.as_secs() / 60
+                                );
+                                interval = tokio::time::interval(desired);
+                                interval.tick().await;
+                            }
+                        }
+
+                        let reason = tokio::select! {
+                            _ = interval.tick() => types::WakeReason::Interval,
+                            Some(reason) = wake_rx.recv() => {
+                                // Coalesce: drain additional signals within 250ms
+                                let mut reasons = vec![reason];
+                                tokio::time::sleep(Duration::from_millis(250)).await;
+                                while let Ok(r) = wake_rx.try_recv() {
+                                    reasons.push(r);
+                                }
+                                reasons.into_iter()
+                                    .max_by_key(|r| if r.is_high_priority() { 1 } else { 0 })
+                                    .unwrap_or(types::WakeReason::Interval)
+                            }
+                        };
+
+                        let is_high_priority = reason.is_high_priority();
+
+                        // Gate: enabled check
+                        let config = hb_config_for_loop.read().await.clone();
+                        if !config.enabled {
+                            ulog_debug!("[agent-heartbeat] Skipped: disabled");
+                            continue;
+                        }
+
+                        // Gate: active hours (high-priority wakes skip)
+                        if !is_high_priority {
+                            if let Some(ref active_hours) = config.active_hours {
+                                if !is_in_active_hours(active_hours) {
+                                    ulog_debug!("[agent-heartbeat] Skipped: outside active hours");
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Clone refs from agent state, then drop the lock before async work
+                        let channel_snapshot = {
+                            let agents_guard = agent_state_for_hb.lock().await;
+                            let agent = match agents_guard.get(&agent_id) {
+                                Some(a) => a,
+                                None => {
+                                    ulog_debug!("[agent-heartbeat] Agent {} not found, stopping", agent_id);
+                                    break;
+                                }
+                            };
+                            // Clone channel refs for status collection + wake_tx for delegation
+                            let refs: Vec<_> = agent.channels.iter().map(|(ch_id, ch_inst)| {
+                                (
+                                    ch_id.clone(),
+                                    Arc::clone(&ch_inst.bot_instance.health),
+                                    Arc::clone(&ch_inst.bot_instance.router),
+                                    ch_inst.bot_instance.heartbeat_wake_tx.clone(),
+                                    ch_inst.bot_instance.started_at,
+                                    ch_inst.bot_instance.config.platform.clone(),
+                                    ch_inst.bot_instance.config.name.clone(),
+                                    ch_inst.bot_instance.bind_code.clone(),
+                                )
+                            }).collect();
+                            let lac = Arc::clone(&agent.last_active_channel);
+                            (refs, lac)
+                        }; // agents_guard dropped here
+
+                        // Build channel statuses without holding the Mutex
+                        let (ch_refs, _lac) = channel_snapshot;
+                        let mut statuses_map = HashMap::new();
+                        let mut wake_txs: HashMap<String, mpsc::Sender<types::WakeReason>> = HashMap::new();
+                        for (ch_id, health, router, wake_tx, started_at, platform, name, bind_code) in &ch_refs {
+                            let health_state = health.get_state().await;
+                            let active_sessions = router.lock().await.active_sessions();
+                            statuses_map.insert(ch_id.clone(), ChannelStatus {
+                                channel_id: ch_id.clone(),
+                                channel_type: platform.clone(),
+                                name: name.clone(),
+                                status: health_state.status,
+                                bot_username: health_state.bot_username,
+                                uptime_seconds: started_at.elapsed().as_secs(),
+                                last_message_at: health_state.last_message_at,
+                                active_sessions,
+                                error_message: health_state.error_message,
+                                restart_count: health_state.restart_count,
+                                buffered_messages: health_state.buffered_messages,
+                                bind_url: None,
+                                bind_code: Some(bind_code.clone()),
+                            });
+                            if let Some(tx) = wake_tx {
+                                wake_txs.insert(ch_id.clone(), tx.clone());
+                            }
+                        }
+
+                        // Re-acquire lock briefly to resolve target channel
+                        let target_ch_id = {
+                            let agents_guard = agent_state_for_hb.lock().await;
+                            match agents_guard.get(&agent_id) {
+                                Some(agent) => resolve_target_channel(agent, &statuses_map),
+                                None => None,
+                            }
+                        };
+                        let target_ch_id = match target_ch_id {
+                            Some(id) => id,
+                            None => {
+                                ulog_debug!("[agent-heartbeat] No available channel for agent {}", agent_id);
+                                continue;
+                            }
+                        };
+
+                        // Delegate to the target channel's per-bot heartbeat wake_tx (no lock held)
+                        let delegated_reason = if reason.is_high_priority() {
+                            reason
+                        } else {
+                            types::WakeReason::Manual
+                        };
+                        if let Some(wake_tx) = wake_txs.get(&target_ch_id) {
+                            let _ = wake_tx.send(delegated_reason).await;
+                            ulog_debug!(
+                                "[agent-heartbeat] Routed heartbeat to channel {} for agent {}",
+                                target_ch_id, agent_id
+                            );
+                        } else {
+                            ulog_debug!(
+                                "[agent-heartbeat] Channel {} has no heartbeat runner, skipping",
+                                target_ch_id
+                            );
+                        }
+
+                        // Reset interval after wake
+                        if is_high_priority {
+                            interval.reset();
+                        }
+                    }
+
+                    ulog_info!("[agent-heartbeat] Runner stopped for agent {}", agent_label);
+                });
+
+                // Store heartbeat handles on the agent instance
+                let mut agents_guard = agent_state.lock().await;
+                if let Some(agent_instance) = agents_guard.get_mut(&agent_config.id) {
+                    agent_instance.heartbeat_handle = Some(hb_handle);
+                    agent_instance.heartbeat_wake_tx = Some(wake_tx);
+                    agent_instance.heartbeat_config = Some(hb_config_arc);
+                    ulog_info!("[agent] Agent-level heartbeat started for {}", agent_config.id);
+                }
+                drop(agents_guard);
+            }
+        }
+    });
 }
 
 
@@ -2888,9 +3473,49 @@ pub async fn cmd_stop_im_bot(
 #[allow(non_snake_case)]
 pub async fn cmd_im_bot_status(
     imState: tauri::State<'_, ManagedImBots>,
+    agentState: tauri::State<'_, ManagedAgents>,
     botId: String,
 ) -> Result<ImBotStatus, String> {
-    Ok(get_im_bot_status(&imState, &botId).await)
+    // First check legacy ManagedImBots
+    let status = get_im_bot_status(&imState, &botId).await;
+    if status.status != types::ImStatus::Stopped {
+        return Ok(status);
+    }
+
+    // Fallback: check ManagedAgents (bot may have been moved there by cmd_start_agent_channel)
+    let agents_guard = agentState.lock().await;
+    for (_agent_id, agent) in agents_guard.iter() {
+        if let Some(ch) = agent.channels.get(&botId) {
+            let health_state = ch.bot_instance.health.get_state().await;
+
+            // Compute bind_url/bind_code like get_im_bot_status does
+            let (bind_url, bind_code) = match ch.bot_instance.platform {
+                types::ImPlatform::Telegram => {
+                    let url = health_state.bot_username.as_ref()
+                        .map(|u| format!("https://t.me/{}?start={}", u, ch.bot_instance.bind_code));
+                    (url, None)
+                }
+                types::ImPlatform::Feishu => (None, Some(ch.bot_instance.bind_code.clone())),
+                types::ImPlatform::Dingtalk => (None, Some(ch.bot_instance.bind_code.clone())),
+                _ => (None, None),
+            };
+
+            return Ok(types::ImBotStatus {
+                bot_username: health_state.bot_username,
+                status: health_state.status,
+                uptime_seconds: ch.bot_instance.started_at.elapsed().as_secs(),
+                last_message_at: health_state.last_message_at,
+                active_sessions: ch.bot_instance.router.lock().await.active_sessions(),
+                error_message: health_state.error_message,
+                restart_count: health_state.restart_count,
+                buffered_messages: ch.bot_instance.buffer.lock().await.len(),
+                bind_url,
+                bind_code,
+            });
+        }
+    }
+
+    Ok(status)
 }
 
 #[tauri::command]
@@ -3532,4 +4157,580 @@ pub async fn cmd_list_openclaw_plugins() -> Result<Vec<serde_json::Value>, Strin
 #[allow(non_snake_case)]
 pub async fn cmd_uninstall_openclaw_plugin(pluginId: String) -> Result<(), String> {
     bridge::uninstall_openclaw_plugin(&pluginId).await
+}
+
+// ===== Agent Tauri Commands (v0.1.41) =====
+
+/// Start a single channel within an agent.
+/// Under the hood, creates an ImBotInstance via start_im_bot and wraps it in ChannelInstance.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_start_agent_channel(
+    app_handle: AppHandle,
+    agentState: tauri::State<'_, ManagedAgents>,
+    imState: tauri::State<'_, ManagedImBots>,
+    sidecarManager: tauri::State<'_, ManagedSidecarManager>,
+    agentId: String,
+    channelId: String,
+    agentConfig: AgentConfigRust,
+    channelConfig: ChannelConfigRust,
+) -> Result<ChannelStatus, String> {
+    // Dedup: check if channel is already running in agent state
+    {
+        let agents_guard = agentState.lock().await;
+        if let Some(agent) = agents_guard.get(&agentId) {
+            if agent.channels.contains_key(&channelId) {
+                ulog_warn!("[agent] Channel {} already running in agent {}, skipping start", channelId, agentId);
+                // Return current status instead of double-starting
+                let ch = agent.channels.get(&channelId).unwrap();
+                let health_state = ch.bot_instance.health.get_state().await;
+                let active_sessions = ch.bot_instance.router.lock().await.active_sessions();
+                return Ok(ChannelStatus {
+                    channel_id: channelId,
+                    channel_type: ch.bot_instance.config.platform.clone(),
+                    name: ch.bot_instance.config.name.clone(),
+                    status: health_state.status,
+                    bot_username: health_state.bot_username,
+                    uptime_seconds: ch.bot_instance.started_at.elapsed().as_secs(),
+                    last_message_at: health_state.last_message_at,
+                    active_sessions,
+                    error_message: health_state.error_message,
+                    restart_count: health_state.restart_count,
+                    buffered_messages: health_state.buffered_messages,
+                    bind_url: None,
+                    bind_code: Some(ch.bot_instance.bind_code.clone()),
+                });
+            }
+        }
+    } // agents_guard dropped
+
+    let mut im_config = channelConfig.to_im_config(&agentConfig);
+    // Suppress per-channel heartbeat interval — agent-level heartbeat controls timing
+    im_config.heartbeat_config = Some(types::HeartbeatConfig {
+        enabled: false,
+        ..types::HeartbeatConfig::default()
+    });
+
+    // Start underlying bot via existing infrastructure
+    let bot_status = start_im_bot(
+        &app_handle,
+        &imState,
+        &sidecarManager,
+        channelId.clone(),
+        im_config,
+    )
+    .await?;
+
+    // Move bot instance from im_state into agent state
+    let mut agents_guard = agentState.lock().await;
+    let agent_instance = agents_guard.entry(agentId.clone()).or_insert_with(|| {
+        AgentInstance {
+            agent_id: agentId.clone(),
+            config: agentConfig.clone(),
+            channels: HashMap::new(),
+            last_active_channel: Arc::new(RwLock::new(agentConfig.last_active_channel.clone())),
+            heartbeat_handle: None,
+            heartbeat_wake_tx: None,
+            heartbeat_config: None,
+            current_model: Arc::new(RwLock::new(agentConfig.model.clone())),
+            current_provider_env: Arc::new(RwLock::new(None)),
+            permission_mode: Arc::new(RwLock::new(agentConfig.permission_mode.clone())),
+            mcp_servers_json: Arc::new(RwLock::new(agentConfig.mcp_servers_json.clone())),
+        }
+    });
+
+    let mut im_guard = imState.lock().await;
+    if let Some(bot_instance) = im_guard.remove(&channelId) {
+        // Set agent_link so the processing loop can update lastActiveChannel
+        let link = AgentChannelLink {
+            channel_id: channelId.clone(),
+            agent_id: agentId.clone(),
+            last_active_channel: Arc::clone(&agent_instance.last_active_channel),
+        };
+        *bot_instance.agent_link.write().await = Some(link);
+
+        agent_instance.channels.insert(channelId.clone(), ChannelInstance {
+            channel_id: channelId.clone(),
+            bot_instance,
+        });
+    }
+    drop(im_guard);
+
+    // Start agent-level heartbeat if not already running
+    let needs_heartbeat = agent_instance.heartbeat_handle.is_none() && !agent_instance.channels.is_empty();
+    if needs_heartbeat {
+        let hb_config = agentConfig.heartbeat.clone().unwrap_or_default();
+        let agent_id_hb = agentId.clone();
+        let agent_label = agentConfig.name.clone();
+        let agent_state_for_hb = Arc::clone(&*agentState);
+        let (wake_tx, mut wake_rx) = mpsc::channel::<types::WakeReason>(64);
+        let hb_config_arc = Arc::new(RwLock::new(hb_config));
+        let hb_config_for_loop = Arc::clone(&hb_config_arc);
+
+        let hb_handle = tokio::spawn(async move {
+            use heartbeat::is_in_active_hours;
+
+            let initial_interval = {
+                let cfg = hb_config_for_loop.read().await;
+                Duration::from_secs(cfg.interval_minutes.max(5) as u64 * 60)
+            };
+            let mut interval = tokio::time::interval(initial_interval);
+            interval.tick().await; // skip first immediate tick
+
+            ulog_info!(
+                "[agent-heartbeat] Runner started for agent {} (interval={}min)",
+                agent_label,
+                initial_interval.as_secs() / 60
+            );
+
+            loop {
+                {
+                    let cfg = hb_config_for_loop.read().await;
+                    let desired = Duration::from_secs(cfg.interval_minutes.max(5) as u64 * 60);
+                    if desired != interval.period() {
+                        interval = tokio::time::interval(desired);
+                        interval.tick().await;
+                    }
+                }
+
+                let reason = tokio::select! {
+                    _ = interval.tick() => types::WakeReason::Interval,
+                    Some(reason) = wake_rx.recv() => {
+                        let mut reasons = vec![reason];
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        while let Ok(r) = wake_rx.try_recv() {
+                            reasons.push(r);
+                        }
+                        reasons.into_iter()
+                            .max_by_key(|r| if r.is_high_priority() { 1 } else { 0 })
+                            .unwrap_or(types::WakeReason::Interval)
+                    }
+                };
+
+                let is_high_priority = reason.is_high_priority();
+
+                let config = hb_config_for_loop.read().await.clone();
+                if !config.enabled {
+                    continue;
+                }
+
+                if !is_high_priority {
+                    if let Some(ref active_hours) = config.active_hours {
+                        if !is_in_active_hours(active_hours) {
+                            continue;
+                        }
+                    }
+                }
+
+                // Clone refs from agent state, then drop the lock before async work
+                let channel_snapshot = {
+                    let agents_guard = agent_state_for_hb.lock().await;
+                    let agent = match agents_guard.get(&agent_id_hb) {
+                        Some(a) => a,
+                        None => break,
+                    };
+                    let refs: Vec<_> = agent.channels.iter().map(|(ch_id, ch_inst)| {
+                        (
+                            ch_id.clone(),
+                            Arc::clone(&ch_inst.bot_instance.health),
+                            Arc::clone(&ch_inst.bot_instance.router),
+                            ch_inst.bot_instance.heartbeat_wake_tx.clone(),
+                            ch_inst.bot_instance.started_at,
+                            ch_inst.bot_instance.config.platform.clone(),
+                            ch_inst.bot_instance.config.name.clone(),
+                            ch_inst.bot_instance.bind_code.clone(),
+                        )
+                    }).collect();
+                    refs
+                }; // agents_guard dropped here
+
+                // Build channel statuses without holding the Mutex
+                let mut statuses_map = HashMap::new();
+                let mut wake_txs: HashMap<String, mpsc::Sender<types::WakeReason>> = HashMap::new();
+                for (ch_id, health, router, wake_tx, started_at, platform, name, bind_code) in &channel_snapshot {
+                    let health_state = health.get_state().await;
+                    let active_sessions = router.lock().await.active_sessions();
+                    statuses_map.insert(ch_id.clone(), ChannelStatus {
+                        channel_id: ch_id.clone(),
+                        channel_type: platform.clone(),
+                        name: name.clone(),
+                        status: health_state.status,
+                        bot_username: health_state.bot_username,
+                        uptime_seconds: started_at.elapsed().as_secs(),
+                        last_message_at: health_state.last_message_at,
+                        active_sessions,
+                        error_message: health_state.error_message,
+                        restart_count: health_state.restart_count,
+                        buffered_messages: health_state.buffered_messages,
+                        bind_url: None,
+                        bind_code: Some(bind_code.clone()),
+                    });
+                    if let Some(tx) = wake_tx {
+                        wake_txs.insert(ch_id.clone(), tx.clone());
+                    }
+                }
+
+                // Re-acquire lock briefly to resolve target channel
+                let target_ch_id = {
+                    let agents_guard = agent_state_for_hb.lock().await;
+                    match agents_guard.get(&agent_id_hb) {
+                        Some(agent) => resolve_target_channel(agent, &statuses_map),
+                        None => None,
+                    }
+                };
+                let target_ch_id = match target_ch_id {
+                    Some(id) => id,
+                    None => continue,
+                };
+
+                // Delegate to the target channel's per-bot heartbeat wake_tx (no lock held)
+                let delegated_reason = if reason.is_high_priority() {
+                    reason
+                } else {
+                    types::WakeReason::Manual
+                };
+                if let Some(wake_tx) = wake_txs.get(&target_ch_id) {
+                    let _ = wake_tx.send(delegated_reason).await;
+                }
+
+                if is_high_priority {
+                    interval.reset();
+                }
+            }
+
+            ulog_info!("[agent-heartbeat] Runner stopped for agent {}", agent_label);
+        });
+
+        agent_instance.heartbeat_handle = Some(hb_handle);
+        agent_instance.heartbeat_wake_tx = Some(wake_tx);
+        agent_instance.heartbeat_config = Some(hb_config_arc);
+    }
+
+    drop(agents_guard);
+
+    // Convert ImBotStatus to ChannelStatus
+    let channel_status = ChannelStatus {
+        channel_id: channelId,
+        channel_type: channelConfig.channel_type,
+        name: channelConfig.name,
+        status: bot_status.status,
+        bot_username: bot_status.bot_username,
+        uptime_seconds: bot_status.uptime_seconds,
+        last_message_at: bot_status.last_message_at,
+        active_sessions: bot_status.active_sessions,
+        error_message: bot_status.error_message,
+        restart_count: bot_status.restart_count,
+        buffered_messages: bot_status.buffered_messages,
+        bind_url: bot_status.bind_url,
+        bind_code: bot_status.bind_code,
+    };
+
+    let _ = app_handle.emit("agent:status-changed", json!({ "agentId": agentId, "event": "channel_started" }));
+    // Backward compat event
+    let _ = app_handle.emit("im:status-changed", json!({ "event": "started" }));
+
+    Ok(channel_status)
+}
+
+/// Stop a single channel within an agent.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_stop_agent_channel(
+    app_handle: AppHandle,
+    agentState: tauri::State<'_, ManagedAgents>,
+    imState: tauri::State<'_, ManagedImBots>,
+    sidecarManager: tauri::State<'_, ManagedSidecarManager>,
+    agentId: String,
+    channelId: String,
+) -> Result<(), String> {
+    let mut agents_guard = agentState.lock().await;
+    if let Some(agent) = agents_guard.get_mut(&agentId) {
+        if let Some(channel_instance) = agent.channels.remove(&channelId) {
+            // Move back to im_state for stop_im_bot to find
+            let mut im_guard = imState.lock().await;
+            im_guard.insert(channelId.clone(), channel_instance.bot_instance);
+            drop(im_guard);
+        }
+    }
+    drop(agents_guard);
+
+    stop_im_bot(&imState, &sidecarManager, &channelId).await?;
+    let _ = app_handle.emit("agent:status-changed", json!({ "agentId": agentId, "event": "channel_stopped" }));
+    let _ = app_handle.emit("im:status-changed", json!({ "event": "stopped" }));
+    Ok(())
+}
+
+/// Snapshot of channel refs needed for status collection (clone-then-drop pattern).
+struct ChannelStatusRef {
+    channel_id: String,
+    channel_type: ImPlatform,
+    name: Option<String>,
+    health: Arc<HealthManager>,
+    router: Arc<Mutex<SessionRouter>>,
+    started_at: Instant,
+    bind_code: String,
+}
+
+/// Collect channel status from pre-cloned refs (no Mutex held).
+async fn collect_channel_statuses(refs: Vec<ChannelStatusRef>) -> Vec<ChannelStatus> {
+    let mut out = Vec::with_capacity(refs.len());
+    for r in refs {
+        let health_state = r.health.get_state().await;
+        let active_sessions = r.router.lock().await.active_sessions();
+        out.push(ChannelStatus {
+            channel_id: r.channel_id,
+            channel_type: r.channel_type,
+            name: r.name,
+            status: health_state.status,
+            bot_username: health_state.bot_username,
+            uptime_seconds: r.started_at.elapsed().as_secs(),
+            last_message_at: health_state.last_message_at,
+            active_sessions,
+            error_message: health_state.error_message,
+            restart_count: health_state.restart_count,
+            buffered_messages: health_state.buffered_messages,
+            bind_url: None,
+            bind_code: Some(r.bind_code),
+        });
+    }
+    out
+}
+
+/// Get status for a single agent (all channels).
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_agent_status(
+    agentState: tauri::State<'_, ManagedAgents>,
+    agentId: String,
+) -> Result<AgentStatus, String> {
+    // Clone refs inside lock, then drop lock before any .await work
+    let snapshot = {
+        let agents_guard = agentState.lock().await;
+        agents_guard.get(&agentId).map(|agent| {
+            let ch_refs: Vec<ChannelStatusRef> = agent.channels.iter().map(|(ch_id, ch_inst)| {
+                ChannelStatusRef {
+                    channel_id: ch_id.clone(),
+                    channel_type: ch_inst.bot_instance.config.platform.clone(),
+                    name: ch_inst.bot_instance.config.name.clone(),
+                    health: Arc::clone(&ch_inst.bot_instance.health),
+                    router: Arc::clone(&ch_inst.bot_instance.router),
+                    started_at: ch_inst.bot_instance.started_at,
+                    bind_code: ch_inst.bot_instance.bind_code.clone(),
+                }
+            }).collect();
+            (agent.agent_id.clone(), agent.config.name.clone(), agent.config.enabled, ch_refs)
+        })
+    }; // agents_guard dropped here
+
+    if let Some((aid, aname, enabled, ch_refs)) = snapshot {
+        let channels = collect_channel_statuses(ch_refs).await;
+        Ok(AgentStatus { agent_id: aid, agent_name: aname, enabled, channels })
+    } else {
+        Ok(AgentStatus {
+            agent_id: agentId,
+            agent_name: String::new(),
+            enabled: false,
+            channels: Vec::new(),
+        })
+    }
+}
+
+/// Get status for all agents.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_all_agents_status(
+    agentState: tauri::State<'_, ManagedAgents>,
+) -> Result<HashMap<String, AgentStatus>, String> {
+    // Clone refs inside lock, then drop lock before any .await work
+    let snapshots: Vec<_> = {
+        let agents_guard = agentState.lock().await;
+        agents_guard.iter().map(|(agent_id, agent)| {
+            let ch_refs: Vec<ChannelStatusRef> = agent.channels.iter().map(|(ch_id, ch_inst)| {
+                ChannelStatusRef {
+                    channel_id: ch_id.clone(),
+                    channel_type: ch_inst.bot_instance.config.platform.clone(),
+                    name: ch_inst.bot_instance.config.name.clone(),
+                    health: Arc::clone(&ch_inst.bot_instance.health),
+                    router: Arc::clone(&ch_inst.bot_instance.router),
+                    started_at: ch_inst.bot_instance.started_at,
+                    bind_code: ch_inst.bot_instance.bind_code.clone(),
+                }
+            }).collect();
+            (agent_id.clone(), agent.agent_id.clone(), agent.config.name.clone(), agent.config.enabled, ch_refs)
+        }).collect()
+    }; // agents_guard dropped here
+
+    let mut result = HashMap::new();
+    for (key, aid, aname, enabled, ch_refs) in snapshots {
+        let channels = collect_channel_statuses(ch_refs).await;
+        result.insert(key, AgentStatus { agent_id: aid, agent_name: aname, enabled, channels });
+    }
+    Ok(result)
+}
+
+/// Update an agent's config (hot-reload where possible, persist to disk).
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_agent_config(
+    app_handle: AppHandle,
+    agentState: tauri::State<'_, ManagedAgents>,
+    agentId: String,
+    patch: AgentConfigPatch,
+) -> Result<(), String> {
+    // Hot-reload running instance if present (runtime only — disk persistence
+    // is handled by the TypeScript patchAgentConfig service to maintain the imBotConfigs shim)
+    let agents_guard = agentState.lock().await;
+    if let Some(agent) = agents_guard.get(&agentId) {
+        if let Some(ref model) = patch.model {
+            *agent.current_model.write().await = Some(model.clone());
+            // Sync model to all channel sidecars
+            for (_ch_id, ch_inst) in &agent.channels {
+                *ch_inst.bot_instance.current_model.write().await = Some(model.clone());
+            }
+        }
+        if let Some(ref env_json) = patch.provider_env_json {
+            let parsed: Option<serde_json::Value> = if env_json.is_empty() {
+                None
+            } else {
+                serde_json::from_str(env_json).ok()
+            };
+            *agent.current_provider_env.write().await = parsed.clone();
+            for (_ch_id, ch_inst) in &agent.channels {
+                *ch_inst.bot_instance.current_provider_env.write().await = parsed.clone();
+            }
+        }
+        if let Some(ref pm) = patch.permission_mode {
+            *agent.permission_mode.write().await = pm.clone();
+            for (_ch_id, ch_inst) in &agent.channels {
+                *ch_inst.bot_instance.permission_mode.write().await = pm.clone();
+            }
+        }
+        if let Some(ref mcp) = patch.mcp_servers_json {
+            *agent.mcp_servers_json.write().await = Some(mcp.clone());
+            for (_ch_id, ch_inst) in &agent.channels {
+                *ch_inst.bot_instance.mcp_servers_json.write().await = Some(mcp.clone());
+            }
+        }
+        // Hot-reload heartbeat config
+        if let Some(ref hb_json) = patch.heartbeat_config_json {
+            if let Ok(hb_config) = serde_json::from_str::<types::HeartbeatConfig>(hb_json) {
+                if let Some(ref hb_arc) = agent.heartbeat_config {
+                    *hb_arc.write().await = hb_config;
+                }
+            }
+        }
+    }
+    drop(agents_guard);
+
+    let _ = app_handle.emit("agent:config-changed", json!({}));
+    Ok(())
+}
+
+/// Create a new agent config (persist to disk, no channels started).
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_create_agent(
+    app_handle: AppHandle,
+    config: AgentConfigRust,
+) -> Result<String, String> {
+    let agent_id = config.id.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
+        let config_path = home.join(".myagents").join("config.json");
+        let tmp_path = config_path.with_extension("json.tmp.rust");
+        let bak_path = config_path.with_extension("json.bak");
+
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("[agent] Cannot read config.json: {}", e))?;
+        let mut app_config: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("[agent] Cannot parse config.json: {}", e))?;
+
+        let agents = app_config.get_mut("agents")
+            .and_then(|v| v.as_array_mut());
+        let agent_value = serde_json::to_value(&config)
+            .map_err(|e| format!("[agent] Failed to serialize agent: {}", e))?;
+        if let Some(arr) = agents {
+            arr.push(agent_value);
+        } else {
+            app_config["agents"] = serde_json::json!([agent_value]);
+        }
+
+        let serialized = serde_json::to_string_pretty(&app_config)
+            .map_err(|e| format!("[agent] Failed to serialize config: {}", e))?;
+        std::fs::write(&tmp_path, &serialized)
+            .map_err(|e| format!("[agent] Failed to write tmp: {}", e))?;
+        if config_path.exists() {
+            let _ = std::fs::copy(&config_path, &bak_path);
+        }
+        std::fs::rename(&tmp_path, &config_path)
+            .map_err(|e| format!("[agent] Failed to rename: {}", e))?;
+
+        Ok::<(), String>(())
+    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+
+    let _ = app_handle.emit("agent:config-changed", json!({}));
+    Ok(agent_id)
+}
+
+/// Delete an agent config from disk and stop all its channels.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_delete_agent(
+    app_handle: AppHandle,
+    agentState: tauri::State<'_, ManagedAgents>,
+    imState: tauri::State<'_, ManagedImBots>,
+    sidecarManager: tauri::State<'_, ManagedSidecarManager>,
+    agentId: String,
+) -> Result<(), String> {
+    // Stop all running channels
+    let mut agents_guard = agentState.lock().await;
+    if let Some(agent) = agents_guard.remove(&agentId) {
+        let channel_ids: Vec<String> = agent.channels.keys().cloned().collect();
+        let mut im_guard = imState.lock().await;
+        for (ch_id, ch_inst) in agent.channels {
+            im_guard.insert(ch_id, ch_inst.bot_instance);
+        }
+        drop(im_guard);
+        drop(agents_guard);
+
+        for ch_id in channel_ids {
+            let _ = stop_im_bot(&imState, &sidecarManager, &ch_id).await;
+        }
+    } else {
+        drop(agents_guard);
+    }
+
+    // Remove from disk
+    let aid = agentId.clone();
+    tokio::task::spawn_blocking(move || {
+        let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
+        let config_path = home.join(".myagents").join("config.json");
+        let tmp_path = config_path.with_extension("json.tmp.rust");
+        let bak_path = config_path.with_extension("json.bak");
+
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("[agent] Cannot read config.json: {}", e))?;
+        let mut app_config: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("[agent] Cannot parse config.json: {}", e))?;
+
+        if let Some(agents) = app_config.get_mut("agents").and_then(|v| v.as_array_mut()) {
+            agents.retain(|a| a.get("id").and_then(|v| v.as_str()) != Some(&aid));
+        }
+
+        let serialized = serde_json::to_string_pretty(&app_config)
+            .map_err(|e| format!("[agent] Failed to serialize config: {}", e))?;
+        std::fs::write(&tmp_path, &serialized)
+            .map_err(|e| format!("[agent] Failed to write tmp: {}", e))?;
+        if config_path.exists() {
+            let _ = std::fs::copy(&config_path, &bak_path);
+        }
+        std::fs::rename(&tmp_path, &config_path)
+            .map_err(|e| format!("[agent] Failed to rename: {}", e))?;
+
+        Ok::<(), String>(())
+    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+
+    let _ = app_handle.emit("agent:config-changed", json!({}));
+    Ok(())
 }

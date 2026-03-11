@@ -30,12 +30,14 @@ import {
 } from './services/providerService';
 import {
     loadProjects,
+    saveProjects,
     addProject as addProjectService,
     updateProject as updateProjectService,
     patchProject as patchProjectService,
     removeProject as removeProjectService,
     touchProject as touchProjectService,
 } from './services/projectService';
+import { migrateImBotConfigsToAgents, persistAgents } from './services/agentConfigService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 
 // ============= Context Types =============
@@ -120,13 +122,36 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                 console.warn('[ConfigProvider] Admin agent sync failed:', e);
             }
 
-            const [loadedConfig, loadedProjects, loadedProviders, loadedApiKeys, loadedVerifyStatus] = await Promise.all([
+            const [rawConfig, loadedProjects, loadedProviders, loadedApiKeys, loadedVerifyStatus] = await Promise.all([
                 loadAppConfig(),
                 loadProjects(),
                 getAllProviders(),
                 loadApiKeysService(),
                 loadProviderVerifyStatusService(),
             ]);
+
+            // Migrate legacy imBotConfigs → agents (one-time, skipped if already migrated)
+            const preMigrationAgentsCount = rawConfig.agents?.length ?? 0;
+            const loadedConfig = migrateImBotConfigsToAgents(rawConfig, loadedProjects);
+            if ((loadedConfig.agents?.length ?? 0) > preMigrationAgentsCount) {
+                // Create timestamped backup before persisting migration
+                try {
+                    const { getConfigDir, CONFIG_FILE } = await import('./services/configStore');
+                    const { copyFile, exists } = await import('@tauri-apps/plugin-fs');
+                    const { join } = await import('@tauri-apps/api/path');
+                    const dir = await getConfigDir();
+                    const configPath = await join(dir, CONFIG_FILE);
+                    if (await exists(configPath)) {
+                        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+                        await copyFile(configPath, await join(dir, `config.json.bak.${ts}`));
+                    }
+                } catch (e) {
+                    console.warn('[ConfigProvider] Migration backup failed:', e);
+                }
+                // Persist agents + project isAgent/agentId changes
+                await persistAgents(loadedConfig.agents!);
+                await saveProjects(loadedProjects);
+            }
 
             await rebuildAndPersistAvailableProviders();
 
@@ -158,27 +183,34 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         if (!isTauriEnvironment()) return;
         let cancelled = false;
-        let unlisten: (() => void) | undefined;
+        let unlistenIm: (() => void) | undefined;
+        let unlistenAgent: (() => void) | undefined;
+
+        const refreshOnEvent = () => {
+            if (!isMountedRef.current) return;
+            loadAppConfig().then(latest => {
+                if (isMountedRef.current) setConfig(latest);
+            }).catch(err => {
+                console.error('[ConfigProvider] Failed to refresh config after config-changed:', err);
+            });
+        };
 
         import('@tauri-apps/api/event').then(({ listen }) => {
             if (cancelled) return;
-            listen<{ botId: string }>('im:bot-config-changed', () => {
-                if (!isMountedRef.current) return;
-                // Lightweight config-only refresh
-                loadAppConfig().then(latest => {
-                    if (isMountedRef.current) setConfig(latest);
-                }).catch(err => {
-                    console.error('[ConfigProvider] Failed to refresh config after bot-config-changed:', err);
-                });
-            }).then(fn => {
+            listen<{ botId: string }>('im:bot-config-changed', refreshOnEvent).then(fn => {
                 if (cancelled) fn();
-                else unlisten = fn;
+                else unlistenIm = fn;
+            });
+            listen('agent:config-changed', refreshOnEvent).then(fn => {
+                if (cancelled) fn();
+                else unlistenAgent = fn;
             });
         });
 
         return () => {
             cancelled = true;
-            unlisten?.();
+            unlistenIm?.();
+            unlistenAgent?.();
         };
     }, []);
 

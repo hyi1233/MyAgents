@@ -11,6 +11,7 @@ import { loadAppConfig } from '@/config/configService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import type { CronTask } from '@/types/cronTask';
 import type { ImBotStatus, ImBotConfig } from '../../shared/types/im';
+import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 
@@ -45,6 +46,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
     const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
     const [backgroundSessionIds, setBackgroundSessionIds] = useState<string[]>([]);
     const [imBotStatuses, setImBotStatuses] = useState<Record<string, ImBotStatus>>({});
+    const [agentStatuses, setAgentStatuses] = useState<AgentStatusMap>({});
     const [imBotConfigs, setImBotConfigs] = useState<ImBotConfig[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -64,11 +66,18 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
                     .catch(() => ({} as Record<string, ImBotStatus>))
                 : Promise.resolve({} as Record<string, ImBotStatus>);
 
-            const [sessionsData, tasksData, bgSessions, imStatuses, appConfig] = await Promise.all([
+            const agentStatusPromise = isTauriEnvironment()
+                ? import('@tauri-apps/api/core')
+                    .then(({ invoke }) => invoke<AgentStatusMap>('cmd_all_agents_status'))
+                    .catch(() => ({} as AgentStatusMap))
+                : Promise.resolve({} as AgentStatusMap);
+
+            const [sessionsData, tasksData, bgSessions, imStatuses, agentStatusResult, appConfig] = await Promise.all([
                 getSessions(),
                 getAllCronTasks().catch(() => [] as CronTask[]),
                 getBackgroundSessions().catch(() => [] as string[]),
                 imStatusPromise,
+                agentStatusPromise,
                 loadAppConfig().catch(() => null),
             ]);
 
@@ -82,6 +91,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             setCronTasks(tasksData);
             setBackgroundSessionIds(bgSessions);
             setImBotStatuses(imStatuses);
+            setAgentStatuses(agentStatusResult);
             setImBotConfigs(appConfig?.imBotConfigs ?? []);
         } catch (err) {
             if (!isMountedRef.current) return;
@@ -113,15 +123,21 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         }, delayMs);
     }, []);
 
-    // Debounced IM status refresh
+    // Debounced IM + Agent status refresh
     const refreshImStatusDebounced = useCallback((delayMs = 1000) => {
         if (imRefreshTimerRef.current) clearTimeout(imRefreshTimerRef.current);
         imRefreshTimerRef.current = setTimeout(() => {
             imRefreshTimerRef.current = null;
             if (!isTauriEnvironment()) return;
             import('@tauri-apps/api/core')
-                .then(({ invoke }) => invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status'))
-                .then(statuses => { if (isMountedRef.current) setImBotStatuses(statuses); })
+                .then(({ invoke }) => {
+                    invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status')
+                        .then(statuses => { if (isMountedRef.current) setImBotStatuses(statuses); })
+                        .catch(() => {});
+                    invoke<AgentStatusMap>('cmd_all_agents_status')
+                        .then(statuses => { if (isMountedRef.current) setAgentStatuses(statuses); })
+                        .catch(() => {});
+                })
                 .catch(() => {});
         }, delayMs);
     }, []);
@@ -227,6 +243,14 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
                 refreshSessionsDebounced(1000);
             });
             unlisteners.push(u6);
+
+            // Agent status changes (channel started/stopped)
+            const u7 = await listen('agent:status-changed', () => {
+                if (!mounted) return;
+                refreshImStatusDebounced();
+                refreshSessionsDebounced(1000);
+            });
+            unlisteners.push(u7);
         })();
 
         return () => {
@@ -241,24 +265,52 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
     const sessionTagsMap = useMemo(() => {
         const map = new Map<string, SessionTag[]>();
 
+        // Helper: extract platform display name from a session key
+        const extractPlatformDisplay = (sessionKey: string): string => {
+            const parts = sessionKey.split(':');
+            // New agent format: agent:{agentId}:{channelType}:{private|group}:{id}
+            if (parts[0] === 'agent' && parts.length >= 5) {
+                const channelType = parts[2] ?? 'unknown';
+                if (channelType.startsWith('openclaw:')) {
+                    const pluginId = channelType.slice('openclaw:'.length);
+                    const promoted = findPromotedPlugin(pluginId);
+                    return promoted?.name ?? (pluginId.charAt(0).toUpperCase() + pluginId.slice(1));
+                }
+                if (channelType === 'openclaw' && parts[3]) {
+                    // agent:{id}:openclaw:{pluginId}:...  — shouldn't happen but handle gracefully
+                    const promoted = findPromotedPlugin(parts[3]);
+                    return promoted?.name ?? (parts[3].charAt(0).toUpperCase() + parts[3].slice(1));
+                }
+                return channelType.charAt(0).toUpperCase() + channelType.slice(1);
+            }
+            // Legacy format: im:{platform}:{type}:{id}
+            const platform = parts[1] ?? 'unknown';
+            if (platform === 'openclaw' && parts[2]) {
+                const channelId = parts[2];
+                const promoted = findPromotedPlugin(channelId);
+                return promoted?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
+            }
+            return platform.charAt(0).toUpperCase() + platform.slice(1);
+        };
+
         // Build IM session map: sessionId → platform display name
         const imSessionPlatformMap = new Map<string, string>();
+
+        // From legacy IM bot statuses
         for (const status of Object.values(imBotStatuses)) {
             if (status.status !== 'online' && status.status !== 'connecting') continue;
             for (const activeSession of status.activeSessions) {
-                const parts = activeSession.sessionKey.split(':');
-                const platform = parts[1] ?? 'unknown';
-                let displayName: string;
-                if (platform === 'openclaw' && parts[2]) {
-                    // OpenClaw session key: im:openclaw:<channelId>:private:...
-                    // Use promoted plugin name if available, otherwise capitalize channel ID
-                    const channelId = parts[2];
-                    const promoted = findPromotedPlugin(channelId);
-                    displayName = promoted?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
-                } else {
-                    displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
+                imSessionPlatformMap.set(activeSession.sessionId, extractPlatformDisplay(activeSession.sessionKey));
+            }
+        }
+
+        // From agent channel statuses
+        for (const agentStatus of Object.values(agentStatuses)) {
+            for (const channel of agentStatus.channels) {
+                if (channel.status !== 'online' && channel.status !== 'connecting') continue;
+                for (const activeSession of (channel.activeSessions as { sessionKey: string; sessionId: string }[])) {
+                    imSessionPlatformMap.set(activeSession.sessionId, extractPlatformDisplay(activeSession.sessionKey));
                 }
-                imSessionPlatformMap.set(activeSession.sessionId, displayName);
             }
         }
 
@@ -282,7 +334,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         }
 
         return map;
-    }, [sessions, cronTasks, backgroundSessionIds, imBotStatuses]);
+    }, [sessions, cronTasks, backgroundSessionIds, imBotStatuses, agentStatuses]);
 
     // Compute cron bot info map (memoized)
     const cronBotInfoMap = useMemo(() => {

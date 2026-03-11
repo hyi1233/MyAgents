@@ -15,6 +15,7 @@
 export type InteractionScenario =
   | { type: 'desktop' }
   | { type: 'im'; platform: 'telegram' | 'feishu'; sourceType: 'private' | 'group'; botName?: string }
+  | { type: 'agent-channel'; platform: string; sourceType: 'private' | 'group'; botName?: string; agentName?: string }
   | { type: 'cron'; taskId: string; intervalMinutes: number; aiCanExit: boolean };
 
 // ===== Inline templates =====
@@ -69,8 +70,9 @@ export function buildSystemPromptAppend(scenario: InteractionScenario): string {
   parts.push(TMPL_BASE_IDENTITY);
 
   // L2: Interaction channel (mutually exclusive)
-  if (scenario.type === 'im') {
-    const platformLabel = scenario.platform === 'feishu' ? '飞书' : 'Telegram';
+  if (scenario.type === 'im' || scenario.type === 'agent-channel') {
+    const platformMap: Record<string, string> = { feishu: '飞书', telegram: 'Telegram', dingtalk: '钉钉' };
+    const platformLabel = platformMap[scenario.platform] ?? scenario.platform;
     const sourceTypeLabel = scenario.sourceType === 'private' ? '私聊模式' : '群聊模式';
     parts.push(renderTemplate(TMPL_CHANNEL_IM, {
       botName: scenario.botName ?? '',
@@ -94,7 +96,7 @@ export function buildSystemPromptAppend(scenario: InteractionScenario): string {
     }));
   }
 
-  if (scenario.type === 'im') {
+  if (scenario.type === 'im' || scenario.type === 'agent-channel') {
     parts.push(TMPL_HEARTBEAT);
   }
 

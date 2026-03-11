@@ -6293,8 +6293,11 @@ async function main() {
           const cronEvents = drainedEvents.filter(e => e.event === 'cron_complete');
           const otherEvents = drainedEvents.filter(e => e.event !== 'cron_complete');
 
-          // Skip AI call if HEARTBEAT.md is empty AND no system events AND not high-priority
-          if (!heartbeatMdContent && drainedEvents.length === 0 && !payload.isHighPriority) {
+          // Skip AI call if HEARTBEAT.md is empty AND no system events.
+          // Always skip regardless of priority — CronComplete events are in drainedEvents
+          // so they won't be affected. The isHighPriority flag is for bypassing per-channel
+          // enabled=false gate (agent-level heartbeat delegation), NOT for skipping this check.
+          if (!heartbeatMdContent && drainedEvents.length === 0) {
             console.log('[im/heartbeat] Skipped: HEARTBEAT.md is empty and no pending events');
             return jsonResponse({ status: 'silent', reason: 'empty_heartbeat_md' });
           }

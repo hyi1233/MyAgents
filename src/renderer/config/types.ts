@@ -164,6 +164,10 @@ export interface Project {
   icon?: string;
   /** Custom display name, defaults to folder name extracted from path */
   displayName?: string;
+  /** Whether this workspace has been upgraded to an Agent (v0.1.41) */
+  isAgent?: boolean;
+  /** Associated Agent ID when isAgent=true (v0.1.41) */
+  agentId?: string;
 }
 
 // ===== Workspace Template Types =====
@@ -308,10 +312,13 @@ export interface AppConfig {
     mcpEnabledServers?: string[];
   };
 
-  // ===== IM Bot Configuration =====
+  // ===== Agent Configuration (v0.1.41) =====
+  agents?: import('../../shared/types/agent').AgentConfig[];
+
+  // ===== IM Bot Configuration (legacy) =====
   /** @deprecated Migrated to imBotConfigs[]. Only used for migration. */
   imBotConfig?: import('../../shared/types/im').ImBotConfig;
-  // Multi-bot configuration (v0.1.19+)
+  /** @deprecated Migrated to agents[]. Retained for migration detection + Phase 2 Rust shim. */
   imBotConfigs?: import('../../shared/types/im').ImBotConfig[];
 
   // ===== Dismiss Flags =====

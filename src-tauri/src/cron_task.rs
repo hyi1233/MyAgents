@@ -1943,6 +1943,7 @@ async fn deliver_cron_result_to_bot(
     summary: &str,
 ) {
     // 1. Find the Bot's sidecar port and POST system event
+    // First check ManagedAgents (v0.1.41), then fall back to ManagedImBots (legacy)
     let im_state: tauri::State<'_, crate::im::ManagedImBots> = match handle.try_state() {
         Some(s) => s,
         None => {
@@ -1951,24 +1952,49 @@ async fn deliver_cron_result_to_bot(
         }
     };
 
-    // Extract Arc refs from instance, then drop im_guard early to avoid
-    // holding the IM lock during potentially slow ensure_sidecar (~2s).
+    // Extract Arc refs from instance, then drop guard early to avoid
+    // holding the lock during potentially slow ensure_sidecar (~2s).
     let (router, current_model, mcp_servers_json, wake_tx) = {
-        let im_guard = im_state.lock().await;
-        let instance = match im_guard.get(&delivery.bot_id) {
-            Some(i) => i,
-            None => {
-                ulog_warn!("[CronTask] Cannot deliver result: Bot {} not found", delivery.bot_id);
-                return;
+        // Try Agent state first (v0.1.41)
+        let agent_refs = if let Some(agent_state) = handle.try_state::<crate::im::ManagedAgents>() {
+            let agents_guard = agent_state.lock().await;
+            let mut found = None;
+            for (_agent_id, agent) in agents_guard.iter() {
+                if let Some(ch) = agent.channels.get(&delivery.bot_id) {
+                    found = Some((
+                        std::sync::Arc::clone(&ch.bot_instance.router),
+                        std::sync::Arc::clone(&ch.bot_instance.current_model),
+                        std::sync::Arc::clone(&ch.bot_instance.mcp_servers_json),
+                        ch.bot_instance.heartbeat_wake_tx.clone(),
+                    ));
+                    break;
+                }
             }
+            found
+        } else {
+            None
         };
-        (
-            std::sync::Arc::clone(&instance.router),
-            std::sync::Arc::clone(&instance.current_model),
-            std::sync::Arc::clone(&instance.mcp_servers_json),
-            instance.heartbeat_wake_tx.clone(),
-        )
-    }; // im_guard dropped here
+
+        if let Some(refs) = agent_refs {
+            refs
+        } else {
+            // Fall back to legacy ManagedImBots
+            let im_guard = im_state.lock().await;
+            let instance = match im_guard.get(&delivery.bot_id) {
+                Some(i) => i,
+                None => {
+                    ulog_warn!("[CronTask] Cannot deliver result: Bot {} not found", delivery.bot_id);
+                    return;
+                }
+            };
+            (
+                std::sync::Arc::clone(&instance.router),
+                std::sync::Arc::clone(&instance.current_model),
+                std::sync::Arc::clone(&instance.mcp_servers_json),
+                instance.heartbeat_wake_tx.clone(),
+            )
+        }
+    }; // guards dropped here
 
     let sidecar_manager = match handle.try_state::<ManagedSidecarManager>() {
         Some(s) => s,

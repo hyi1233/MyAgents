@@ -4,7 +4,7 @@
  */
 
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, Trash2, Pencil } from 'lucide-react';
+import { Loader2, Trash2, Pencil, Bot, Settings2 } from 'lucide-react';
 
 import type { Project } from '@/config/types';
 import { getFolderName } from '@/types/tab';
@@ -16,6 +16,8 @@ interface WorkspaceCardProps {
     onLaunch: (project: Project) => void;
     onRemove: (project: Project) => void;
     onEdit: (project: Project) => void;
+    onAgentSettings?: (project: Project) => void;
+    onUpgradeToAgent?: (project: Project) => void;
     isLoading?: boolean;
 }
 
@@ -24,6 +26,8 @@ export default memo(function WorkspaceCard({
     onLaunch,
     onRemove,
     onEdit,
+    onAgentSettings,
+    onUpgradeToAgent,
     isLoading,
 }: WorkspaceCardProps) {
     // Context menu state
@@ -73,11 +77,14 @@ export default memo(function WorkspaceCard({
                 }`}
             >
                 {/* Icon */}
-                <div className="flex h-7 w-7 shrink-0 items-center justify-center">
+                <div className="relative flex h-7 w-7 shrink-0 items-center justify-center">
                     {isLoading ? (
                         <Loader2 className="h-5 w-5 animate-spin text-[var(--ink-subtle)]" />
                     ) : (
                         <WorkspaceIcon icon={project.icon} size={28} />
+                    )}
+                    {project.isAgent && !isLoading && (
+                        <span className="absolute -bottom-1 -right-1 text-[10px] leading-none" title="Agent">🦞</span>
                     )}
                 </div>
 
@@ -101,6 +108,34 @@ export default memo(function WorkspaceCard({
                     role="menu"
                     aria-label="工作区操作菜单"
                 >
+                    {project.isAgent && onAgentSettings && (
+                        <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                                setContextMenu(null);
+                                onAgentSettings(project);
+                            }}
+                            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
+                        >
+                            <Settings2 className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
+                            Agent 设置
+                        </button>
+                    )}
+                    {!project.isAgent && onUpgradeToAgent && (
+                        <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                                setContextMenu(null);
+                                onUpgradeToAgent(project);
+                            }}
+                            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
+                        >
+                            <Bot className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
+                            转化为 Agent
+                        </button>
+                    )}
                     <button
                         type="button"
                         role="menuitem"

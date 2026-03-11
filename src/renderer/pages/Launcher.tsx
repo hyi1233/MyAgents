@@ -17,6 +17,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import TaskCenterOverlay from '@/components/TaskCenterOverlay';
 import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, WorkspaceCard, WorkspaceEditDialog } from '@/components/launcher';
+import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import { useConfig } from '@/hooks/useConfig';
 import { type Project, type Provider, type PermissionMode, type McpServerDefinition } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
@@ -68,6 +69,8 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [selectedCronTask, setSelectedCronTask] = useState<CronTask | null>(null);
     const [showTemplateDialog, setShowTemplateDialog] = useState(false);
     const [editingProject, setEditingProject] = useState<Project | null>(null);
+    // Agent overlay — opens WorkspaceConfigPanel for agent settings or upgrade
+    const [agentOverlay, setAgentOverlay] = useState<{ workspacePath: string; initialTab: 'agent' } | null>(null);
 
     // ===== Launcher-specific state for BrandSection =====
 
@@ -193,6 +196,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     }, [isLoading, selectedWorkspace?.id, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode]);
 
     // Write-back handlers: persist Launcher setting changes to the selected project
+
     const handleLauncherPermissionModeChange = useCallback((mode: PermissionMode) => {
         setLauncherPermissionMode(mode);
         if (selectedWorkspace) {
@@ -429,6 +433,15 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleCloseTemplateDialog = useCallback(() => setShowTemplateDialog(false), []);
     const handleCloseEditDialog = useCallback(() => setEditingProject(null), []);
 
+    // Agent overlay handlers
+    const handleAgentSettings = useCallback((project: Project) => {
+        setAgentOverlay({ workspacePath: project.path, initialTab: 'agent' });
+    }, []);
+    const handleUpgradeToAgent = useCallback((project: Project) => {
+        setAgentOverlay({ workspacePath: project.path, initialTab: 'agent' });
+    }, []);
+    const handleCloseAgentOverlay = useCallback(() => setAgentOverlay(null), []);
+
     return (
         <div className="flex h-full flex-col overflow-hidden bg-[var(--paper)] text-[var(--ink)]">
             {/* Path Input Dialog (browser dev mode) */}
@@ -569,6 +582,8 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                                         onLaunch={handleLaunch}
                                         onRemove={handleRemoveProject}
                                         onEdit={setEditingProject}
+                                        onAgentSettings={handleAgentSettings}
+                                        onUpgradeToAgent={handleUpgradeToAgent}
                                         isLoading={launchingProjectId === project.id && isStarting}
                                     />
                                 ))}
@@ -616,6 +631,15 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     project={editingProject}
                     onSave={handleEditProject}
                     onClose={handleCloseEditDialog}
+                />
+            )}
+
+            {/* Agent Config Overlay */}
+            {agentOverlay && (
+                <WorkspaceConfigPanel
+                    agentDir={agentOverlay.workspacePath}
+                    onClose={handleCloseAgentOverlay}
+                    initialTab={agentOverlay.initialTab}
                 />
             )}
         </div>

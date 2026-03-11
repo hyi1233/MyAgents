@@ -18,6 +18,7 @@ import type { CommandDetailPanelRef } from './CommandDetailPanel';
 import WorkspaceAgentsList from './WorkspaceAgentsList';
 import AgentDetailPanel from './AgentDetailPanel';
 import type { AgentDetailPanelRef } from './AgentDetailPanel';
+import { WorkspaceGeneralTab } from './AgentSettings';
 
 interface WorkspaceConfigPanelProps {
     agentDir: string;
@@ -28,7 +29,7 @@ interface WorkspaceConfigPanelProps {
     initialTab?: Tab;
 }
 
-export type Tab = 'system-prompts' | 'skills';
+export type Tab = 'general' | 'system-prompts' | 'skills' | 'agent';
 type DetailView =
     | { type: 'none' }
     | { type: 'skill'; name: string; scope: 'user' | 'project'; isNewSkill?: boolean }
@@ -36,6 +37,7 @@ type DetailView =
     | { type: 'agent'; name: string; scope: 'user' | 'project'; isNewAgent?: boolean };
 
 const TAB_ITEMS: { key: Tab; label: string }[] = [
+    { key: 'general', label: '通用' },
     { key: 'system-prompts', label: '系统提示词' },
     { key: 'skills', label: '技能 Skills' },
 ];
@@ -50,7 +52,9 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
         toastRef.current = toast;
     }, [toast]);
 
-    const [activeTab, setActiveTab] = useState<Tab>(initialTab ?? 'system-prompts');
+    // Map legacy 'agent' tab to 'general' for backward compat (Settings page passes 'agent')
+    const resolvedInitialTab: Tab = initialTab === 'agent' ? 'general' : (initialTab ?? 'general');
+    const [activeTab, setActiveTab] = useState<Tab>(resolvedInitialTab);
     const [detailView, setDetailView] = useState<DetailView>({ type: 'none' });
     const [internalRefreshKey, setInternalRefreshKey] = useState(0);
 
@@ -240,6 +244,9 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                 <div className="flex-1 overflow-hidden">
                     {detailView.type === 'none' ? (
                         <>
+                            {activeTab === 'general' && (
+                                <WorkspaceGeneralTab agentDir={agentDir} />
+                            )}
                             {activeTab === 'system-prompts' && (
                                 <SystemPromptsPanel ref={systemPromptsRef} agentDir={agentDir} />
                             )}
