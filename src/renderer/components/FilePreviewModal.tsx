@@ -13,7 +13,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } fro
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
-import { useTabApi } from '@/context/TabContext';
+import { useTabApiOptional } from '@/context/TabContext';
 import { getPrismLanguage, getMonacoLanguage, shouldShowLineNumbers, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 
@@ -68,7 +68,8 @@ export default function FilePreviewModal({
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
-    const { apiPost } = useTabApi();
+    const tabApi = useTabApiOptional();
+    const apiPost = tabApi?.apiPost;
 
     // State
     const [isEditing, setIsEditing] = useState(false);
@@ -186,6 +187,7 @@ export default function FilePreviewModal({
     }, [hasUnsavedChanges, onClose]);
 
     const handleSave = useCallback(async () => {
+        if (!apiPost) return;
         setIsSaving(true);
         try {
             const response = await apiPost<{ success: boolean; error?: string }>(
@@ -223,6 +225,7 @@ export default function FilePreviewModal({
     }, [handleClose]);
 
     const handleOpenInFinder = useCallback(async () => {
+        if (!apiPost) return;
         try {
             await apiPost('/agent/open-in-finder', { path });
         } catch {
@@ -333,21 +336,23 @@ export default function FilePreviewModal({
                                     <span className="max-w-[400px] truncate text-[11px] text-[var(--ink-muted)]" title={path}>
                                         {shortenPathForDisplay(path)}
                                     </span>
-                                    <button
-                                        type="button"
-                                        onClick={handleOpenInFinder}
-                                        className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                        title="打开所在文件夹"
-                                    >
-                                        <FolderOpen className="h-3.5 w-3.5" />
-                                    </button>
+                                    {apiPost && (
+                                        <button
+                                            type="button"
+                                            onClick={handleOpenInFinder}
+                                            className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                            title="打开所在文件夹"
+                                        >
+                                            <FolderOpen className="h-3.5 w-3.5" />
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                         </div>
 
                         {/* Action buttons - unified styling with smooth transitions */}
                         <div className="flex flex-shrink-0 items-center gap-1.5">
-                            {isEditing ? (
+                            {apiPost && (isEditing ? (
                                 <div key="editing" className="flex items-center gap-1.5">
                                     <button
                                         type="button"
@@ -382,7 +387,7 @@ export default function FilePreviewModal({
                                     <Edit2 className="h-3.5 w-3.5" />
                                     编辑
                                 </button>
-                            )}
+                            ))}
                             <button
                                 type="button"
                                 onClick={handleClose}

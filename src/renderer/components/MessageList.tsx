@@ -203,18 +203,25 @@ const MessageList = memo(function MessageList({
     : streamingStatusMessage;
 
   // Fade-in: track when session load completes so content appears with a smooth transition.
-  // wasSessionLoading transitions true→false when messages arrive, triggering the CSS animation.
+  // contentHidden keeps content at opacity:0 between "session loaded" and "animation start",
+  // preventing the flash-then-fade bug where content briefly renders visible before the animation.
   const wasSessionLoadingRef = useRef(false);
   const [fadeIn, setFadeIn] = useState(false);
+  const [contentHidden, setContentHidden] = useState(false);
 
   useEffect(() => {
     if (isSessionLoading) {
       wasSessionLoadingRef.current = true;
       setFadeIn(false);
+      setContentHidden(true);
     } else if (wasSessionLoadingRef.current) {
       wasSessionLoadingRef.current = false;
-      // Trigger fade-in on next frame (after DOM has messages)
-      requestAnimationFrame(() => setFadeIn(true));
+      // Content stays hidden (opacity:0) until this RAF fires,
+      // which atomically sets fadeIn=true + contentHidden=false in the same render batch.
+      requestAnimationFrame(() => {
+        setFadeIn(true);
+        setContentHidden(false);
+      });
     }
   }, [isSessionLoading]);
 
@@ -233,7 +240,7 @@ const MessageList = memo(function MessageList({
       )}
       <div
         className="mx-auto max-w-3xl space-y-2"
-        style={fadeIn ? {
+        style={contentHidden ? { opacity: 0 } : fadeIn ? {
           animation: 'message-list-fade-in 600ms ease-out both',
         } : undefined}
         onAnimationEnd={() => setFadeIn(false)}

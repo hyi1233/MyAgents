@@ -178,7 +178,7 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-2">
           {agent.channels.map(channel => {
             const chStatus = getChannelStatus(status, channel.id);
             const isRunning = chStatus?.status === 'online' || chStatus?.status === 'connecting';
@@ -191,17 +191,14 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
             return (
               <div
                 key={channel.id}
-                className="cursor-pointer rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:translate-y-[-1px]"
+                className="flex cursor-pointer items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3 transition-all hover:border-[var(--line-strong)] hover:shadow-sm"
                 onClick={() => setOverlay({ view: 'detail', channelId: channel.id })}
               >
-                {/* Top row: icon + name + status */}
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="flex-shrink-0">{getPlatformIcon(channel.type)}</span>
-                    <span className="text-sm font-medium text-[var(--ink)] truncate">
-                      {displayName}
-                    </span>
-                  </div>
+                <span className="flex-shrink-0">{getPlatformIcon(channel.type)}</span>
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="truncate text-sm font-medium text-[var(--ink)]">
+                    {displayName}
+                  </span>
                   <div className="flex items-center gap-1.5 flex-shrink-0">
                     <div className={`h-1.5 w-1.5 rounded-full ${
                       isRunning ? 'bg-[var(--success)]' : 'bg-[var(--ink-subtle)]'
@@ -213,27 +210,22 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
                     </span>
                   </div>
                 </div>
-
-                {/* Bottom row: platform label + toggle */}
-                <div className="mt-3 flex items-center justify-between text-xs text-[var(--ink-muted)]">
-                  <span className="flex-shrink-0">{getPlatformLabel(channel.type)}</span>
-                  <button
-                    className={`flex-shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
-                      isRunning
-                        ? 'border border-[var(--error)]/40 text-[var(--error)] hover:bg-[var(--error)]/10'
-                        : 'bg-[var(--button-primary-bg)] text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]'
-                    }`}
-                    onClick={e => {
-                      e.stopPropagation();
-                      if (isRunning) { handleStopChannel(channel.id); } else { handleStartChannel(channel); }
-                    }}
-                    disabled={isLoading || !channel.enabled}
-                  >
-                    {isLoading ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : isRunning ? '停止' : '启动'}
-                  </button>
-                </div>
+                <button
+                  className={`flex-shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+                    isRunning
+                      ? 'border border-[var(--error)]/40 text-[var(--error)] hover:bg-[var(--error)]/10'
+                      : 'bg-[var(--button-primary-bg)] text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]'
+                  }`}
+                  onClick={e => {
+                    e.stopPropagation();
+                    if (isRunning) { handleStopChannel(channel.id); } else { handleStartChannel(channel); }
+                  }}
+                  disabled={isLoading || !channel.enabled}
+                >
+                  {isLoading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : isRunning ? '停止' : '启动'}
+                </button>
               </div>
             );
           })}

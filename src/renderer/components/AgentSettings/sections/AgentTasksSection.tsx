@@ -1,9 +1,23 @@
-// Agent tasks section — read-only display of cron tasks associated with this agent
-import { useState, useEffect } from 'react';
+// Agent tasks section — display cron tasks associated with this agent, clickable to open detail
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { AgentConfig } from '../../../../shared/types/agent';
-import { getAllCronTasks } from '@/api/cronTaskClient';
+import { getAllCronTasks, deleteCronTask, startCronTask, stopCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import { getCronStatusText, formatScheduleDescription } from '@/types/cronTask';
+import { useToast } from '@/components/Toast';
+import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
+
+function formatRelativeTime(isoStr: string): string {
+  const diff = Date.now() - new Date(isoStr).getTime();
+  if (diff < 0) return '刚刚';
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return '刚刚';
+  if (mins < 60) return `${mins} 分钟前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  return `${days} 天前`;
+}
 
 function cronStatusDotColor(status: string): string {
   if (status === 'running') return 'var(--success)';
@@ -16,19 +30,84 @@ interface AgentTasksSectionProps {
 
 export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
   const [tasks, setTasks] = useState<CronTask[]>([]);
+  const [selectedTask, setSelectedTask] = useState<CronTask | null>(null);
+  const toast = useToast();
+  const toastRef = useRef(toast);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => { toastRef.current = toast; }, [toast]);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
+  const loadTasks = useCallback(async () => {
+    try {
+      const all = await getAllCronTasks();
+      if (!isMountedRef.current) return;
+      // Filter tasks by agent's channel IDs (sourceBotId matches channel ID)
+      const channelIds = new Set(agent.channels.map(ch => ch.id));
+      setTasks(all.filter(t => t.sourceBotId && channelIds.has(t.sourceBotId)));
+    } catch {
+      // Silent — tasks are optional
+    }
+  }, [agent.channels]);
 
   useEffect(() => {
-    void (async () => {
-      try {
-        const all = await getAllCronTasks();
-        // Filter tasks by agent's channel IDs (sourceBotId matches channel ID)
-        const channelIds = new Set(agent.channels.map(ch => ch.id));
-        setTasks(all.filter(t => t.sourceBotId && channelIds.has(t.sourceBotId)));
-      } catch {
-        // Silent — tasks are optional
+    void loadTasks();
+  }, [loadTasks]);
+
+  const handleDelete = useCallback(async (taskId: string) => {
+    try {
+      await deleteCronTask(taskId);
+      if (!isMountedRef.current) return;
+      setSelectedTask(null);
+      toastRef.current.success('定时任务已删除');
+      void loadTasks();
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      toastRef.current.error(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [loadTasks]);
+
+  const handleResume = useCallback(async (taskId: string) => {
+    try {
+      await startCronTask(taskId);
+      await startCronScheduler(taskId);
+      if (!isMountedRef.current) return;
+      setSelectedTask(null);
+      toastRef.current.success('任务已恢复运行');
+      void loadTasks();
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('not found')) {
+        setSelectedTask(null);
+        void loadTasks();
+        return;
       }
-    })();
-  }, [agent.channels]);
+      toastRef.current.error(`恢复失败: ${msg}`);
+    }
+  }, [loadTasks]);
+
+  const handleStop = useCallback(async (taskId: string) => {
+    try {
+      await stopCronTask(taskId, '手动停止');
+      if (!isMountedRef.current) return;
+      setSelectedTask(null);
+      toastRef.current.success('任务已停止');
+      void loadTasks();
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('not found')) {
+        setSelectedTask(null);
+        void loadTasks();
+        return;
+      }
+      toastRef.current.error(`停止失败: ${msg}`);
+    }
+  }, [loadTasks]);
 
   return (
     <div className="space-y-3">
@@ -43,9 +122,11 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
       ) : (
         <div className="space-y-2">
           {tasks.map(task => (
-            <div
+            <button
               key={task.id}
-              className="flex items-center gap-3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5"
+              type="button"
+              onClick={() => setSelectedTask(task)}
+              className="flex w-full items-center gap-3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-left transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--hover-bg)]"
             >
               <div
                 className="h-2 w-2 shrink-0 rounded-full"
@@ -59,9 +140,24 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
                   {formatScheduleDescription(task)} · {getCronStatusText(task.status)}
                 </div>
               </div>
-            </div>
+              {task.lastExecutedAt && (
+                <span className="shrink-0 text-xs text-[var(--ink-subtle)]">
+                  {formatRelativeTime(task.lastExecutedAt)}
+                </span>
+              )}
+            </button>
           ))}
         </div>
+      )}
+
+      {selectedTask && (
+        <CronTaskDetailPanel
+          task={selectedTask}
+          onClose={() => setSelectedTask(null)}
+          onDelete={handleDelete}
+          onResume={handleResume}
+          onStop={handleStop}
+        />
       )}
     </div>
   );

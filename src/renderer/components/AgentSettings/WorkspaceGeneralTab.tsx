@@ -12,9 +12,7 @@ import WorkspaceBasicsSection from './WorkspaceBasicsSection';
 import AgentChannelsSection from './sections/AgentChannelsSection';
 import AgentHeartbeatSection from './sections/AgentHeartbeatSection';
 import AgentTasksSection from './sections/AgentTasksSection';
-import WorkspaceIcon from '../launcher/WorkspaceIcon';
-import { DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
-import { shortenPathForDisplay } from '@/utils/pathDetection';
+import { Settings, BrainCircuit } from 'lucide-react';
 
 interface WorkspaceGeneralTabProps {
   agentDir: string;
@@ -125,7 +123,6 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
   }, [project, agent, agentDir, config.defaultPermissionMode, toggling, patchProject, refreshConfig, refreshStatuses]);
 
   const status = agent ? statuses[agent.id] : undefined;
-  const displayName = project?.displayName || project?.name || agentDir.split(/[/\\]/).filter(Boolean).pop() || 'Workspace';
 
   if (!project) {
     return (
@@ -138,30 +135,25 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
   return (
     <div className="h-full overflow-auto px-8 py-6">
       <div className="mx-auto max-w-2xl space-y-0 pb-8">
-        {/* Header: icon + name + path */}
-        <div className="flex items-center gap-3 pb-6">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--paper-inset)]">
-            <WorkspaceIcon icon={project.icon || DEFAULT_WORKSPACE_ICON} size={24} />
-          </div>
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold text-[var(--ink)]">{displayName}</h2>
-            <p className="truncate text-xs text-[var(--ink-muted)]">{shortenPathForDisplay(agentDir)}</p>
-          </div>
-        </div>
-
         {/* Section 1: Workspace Basics (L1) */}
         <div className="border-b border-[var(--line)] pb-6">
-          <h3 className="mb-4 text-lg font-semibold text-[var(--ink)]">基础设置</h3>
-          <WorkspaceBasicsSection project={project} agent={agent} />
+          <h3 className="mb-4 flex items-center gap-2 text-lg font-semibold text-[var(--ink)]">
+            <Settings className="h-5 w-5 text-[var(--ink-muted)]" />
+            基础设置
+          </h3>
+          <WorkspaceBasicsSection project={project} agent={agent} agentDir={agentDir} />
         </div>
 
         {/* Section 2: Proactive Agent Toggle (L1) */}
         <div className="pt-6">
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="text-lg font-semibold text-[var(--ink)]">主动 Agent 模式</h3>
+              <h3 className="flex items-center gap-2 text-lg font-semibold text-[var(--ink)]">
+                <BrainCircuit className="h-5 w-5 text-[var(--ink-muted)]" />
+                主动 Agent 模式
+              </h3>
               <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-                启用后可添加 IM 渠道（飞书、Telegram、钉钉等），让 AI 主动与用户交互
+                启用后让 AI 具备 24 小时感知与行动能力、可添加聊天机器人（如飞书、钉钉）主动与你互动
               </p>
             </div>
             <button

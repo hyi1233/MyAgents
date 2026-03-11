@@ -336,7 +336,7 @@ function TabHeader({
         <div className="mb-3 flex items-center gap-4">
             <button
                 onClick={() => onTabChange('sessions')}
-                className={`relative text-[11px] font-semibold uppercase tracking-[0.12em] transition-colors ${
+                className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
                     activeTab === 'sessions'
                         ? 'text-[var(--ink-muted)]'
                         : 'text-[var(--ink-muted)]/40 hover:text-[var(--ink-muted)]/60'
@@ -349,7 +349,7 @@ function TabHeader({
             </button>
             <button
                 onClick={() => onTabChange('cron')}
-                className={`relative text-[11px] font-semibold uppercase tracking-[0.12em] transition-colors ${
+                className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
                     activeTab === 'cron'
                         ? 'text-[var(--ink-muted)]'
                         : 'text-[var(--ink-muted)]/40 hover:text-[var(--ink-muted)]/60'

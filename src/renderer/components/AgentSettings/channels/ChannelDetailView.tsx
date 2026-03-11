@@ -20,7 +20,6 @@ import FeishuCredentialInput from '../../ImSettings/components/FeishuCredentialI
 import DingtalkCredentialInput from '../../ImSettings/components/DingtalkCredentialInput';
 import WhitelistManager from '../../ImSettings/components/WhitelistManager';
 import PermissionModeSelect from '../../ImSettings/components/PermissionModeSelect';
-import BotStatusPanel from '../../ImSettings/components/BotStatusPanel';
 import BindQrPanel from '../../ImSettings/components/BindQrPanel';
 import BindCodePanel from '../../ImSettings/components/BindCodePanel';
 import AiConfigCard from '../../ImSettings/components/AiConfigCard';
@@ -433,18 +432,48 @@ export default function ChannelDetailView({
         : channel.type === 'dingtalk' ? '钉钉'
         : findPromotedByPlatform(channel.type)?.name || channel.type;
 
+    // Status summary for header
+    const statusText = botStatus?.status === 'online' ? '运行中'
+        : botStatus?.status === 'connecting' ? '连接中'
+        : botStatus?.status === 'error' ? '异常'
+        : '已停止';
+    const statusColor = botStatus?.status === 'online' ? 'var(--success)'
+        : botStatus?.status === 'connecting' ? 'var(--warning)'
+        : botStatus?.status === 'error' ? 'var(--error)'
+        : 'var(--ink-subtle)';
+    const uptimeText = botStatus && botStatus.uptimeSeconds > 0
+        ? (botStatus.uptimeSeconds >= 3600
+            ? `${Math.floor(botStatus.uptimeSeconds / 3600)}h`
+            : botStatus.uptimeSeconds >= 60
+                ? `${Math.floor(botStatus.uptimeSeconds / 60)}m`
+                : '<1m')
+        : undefined;
+    const sessionCount = botStatus?.activeSessions?.length ?? 0;
+
     return (
         <div className="space-y-6">
-            {/* Header + Start/Stop action */}
+            {/* Header: icon + name + status + start/stop */}
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                     {detailPlatformIcon && (
                         <img src={detailPlatformIcon} alt={platformLabel} className="h-8 w-8 rounded-lg" />
                     )}
                     <div>
-                        <h2 className="text-lg font-semibold text-[var(--ink)]">
-                            {channel.name || platformLabel}
-                        </h2>
+                        <div className="flex items-center gap-2">
+                            <h2 className="text-lg font-semibold text-[var(--ink)]">
+                                {channel.name || platformLabel}
+                            </h2>
+                            <div className="flex items-center gap-1.5">
+                                <div className="h-1.5 w-1.5 rounded-full" style={{ background: statusColor }} />
+                                <span className="text-xs" style={{ color: statusColor }}>{statusText}</span>
+                            </div>
+                            {uptimeText && (
+                                <span className="text-xs text-[var(--ink-subtle)]">{uptimeText}</span>
+                            )}
+                            {sessionCount > 0 && (
+                                <span className="text-xs text-[var(--ink-subtle)]">{sessionCount} 个会话</span>
+                            )}
+                        </div>
                         <p className="text-xs text-[var(--ink-muted)]">{platformLabel} Channel</p>
                     </div>
                 </div>
@@ -467,9 +496,6 @@ export default function ChannelDetailView({
                     {isRunning ? '停止' : '启动'}
                 </button>
             </div>
-
-            {/* Status */}
-            <BotStatusPanel status={botStatus} />
 
             {/* Plugin missing warning */}
             {pluginMissing && (

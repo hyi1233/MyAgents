@@ -17,6 +17,6 @@ export default function AgentHeartbeatSection({ agent, onAgentChanged }: AgentHe
   }, [agent.id, onAgentChanged]);
 
   return (
-    <HeartbeatConfigCard heartbeat={agent.heartbeat} onChange={handleChange} flat />
+    <HeartbeatConfigCard heartbeat={agent.heartbeat} onChange={handleChange} flat workspacePath={agent.workspacePath} />
   );
 }

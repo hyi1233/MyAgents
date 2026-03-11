@@ -207,6 +207,7 @@ pub fn run() {
             im::cmd_delete_agent,
             // File utility commands
             commands::cmd_read_file_base64,
+            commands::cmd_open_file,
         ])
         .setup(|app| {
             // Initialize logging for all builds

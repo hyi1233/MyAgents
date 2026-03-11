@@ -437,9 +437,6 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleAgentSettings = useCallback((project: Project) => {
         setAgentOverlay({ workspacePath: project.path, initialTab: 'agent' });
     }, []);
-    const handleUpgradeToAgent = useCallback((project: Project) => {
-        setAgentOverlay({ workspacePath: project.path, initialTab: 'agent' });
-    }, []);
     const handleCloseAgentOverlay = useCallback(() => setAgentOverlay(null), []);
 
     return (
@@ -519,7 +516,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     {/* Workspaces Header */}
                     <div className="mx-6 border-t border-[var(--line)]" />
                     <div className="flex flex-shrink-0 items-center justify-between px-6 py-4">
-                        <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+                        <h2 className="text-[13px] font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
                             工作区
                         </h2>
                         <div className="flex items-center gap-3">
@@ -581,9 +578,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                                         project={project}
                                         onLaunch={handleLaunch}
                                         onRemove={handleRemoveProject}
-                                        onEdit={setEditingProject}
                                         onAgentSettings={handleAgentSettings}
-                                        onUpgradeToAgent={handleUpgradeToAgent}
                                         isLoading={launchingProjectId === project.id && isStarting}
                                     />
                                 ))}

@@ -789,3 +789,31 @@ pub async fn cmd_read_file_base64(path: String) -> Result<String, String> {
     let bytes = tokio::fs::read(&path).await.map_err(|e| format!("Failed to read {}: {}", path, e))?;
     Ok(BASE64.encode(&bytes))
 }
+
+/// Open a local file with the system default application.
+/// Bypasses shell plugin URL-only scope restriction.
+#[tauri::command]
+pub async fn cmd_open_file(path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+    }
+    Ok(())
+}

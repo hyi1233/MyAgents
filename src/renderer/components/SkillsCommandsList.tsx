@@ -68,14 +68,22 @@ export default function SkillsCommandsList({
     const [deleteTarget, setDeleteTarget] = useState<{ type: 'skill' | 'command'; name: string; scope: 'user' | 'project' } | null>(null);
     const [deleting, setDeleting] = useState(false);
 
+    // Build endpoint with optional agentDir (same pattern as SystemPromptsPanel)
+    const buildEndpoint = useCallback((path: string) => {
+        if (isInTabContext) return path;
+        if (!agentDir) return path;
+        const sep = path.includes('?') ? '&' : '?';
+        return `${path}${sep}agentDir=${encodeURIComponent(agentDir)}`;
+    }, [isInTabContext, agentDir]);
+
     // Load skills and commands
     // When scope is 'project', only load project-level data (user-level shown in Settings)
     const loadData = useCallback(async () => {
         setLoading(true);
         try {
             const [skillsRes, commandsRes] = await Promise.all([
-                api.get<{ success: boolean; skills: SkillItem[] }>(`/api/skills?scope=${scope}`),
-                api.get<{ success: boolean; commands: CommandItem[] }>(`/api/command-items?scope=${scope}`)
+                api.get<{ success: boolean; skills: SkillItem[] }>(buildEndpoint(`/api/skills?scope=${scope}`)),
+                api.get<{ success: boolean; commands: CommandItem[] }>(buildEndpoint(`/api/command-items?scope=${scope}`))
             ]);
 
             if (skillsRes.success) {
@@ -89,7 +97,7 @@ export default function SkillsCommandsList({
         } finally {
             setLoading(false);
         }
-    }, [scope, api]);
+    }, [scope, api, buildEndpoint]);
 
     useEffect(() => {
         loadData();
@@ -226,9 +234,11 @@ export default function SkillsCommandsList({
         if (!deleteTarget) return;
         setDeleting(true);
         try {
-            const endpoint = deleteTarget.type === 'skill'
-                ? `/api/skill/${encodeURIComponent(deleteTarget.name)}?scope=${deleteTarget.scope}`
-                : `/api/command-item/${encodeURIComponent(deleteTarget.name)}?scope=${deleteTarget.scope}`;
+            const endpoint = buildEndpoint(
+                deleteTarget.type === 'skill'
+                    ? `/api/skill/${encodeURIComponent(deleteTarget.name)}?scope=${deleteTarget.scope}`
+                    : `/api/command-item/${encodeURIComponent(deleteTarget.name)}?scope=${deleteTarget.scope}`
+            );
 
             const response = await api.delete<{ success: boolean; error?: string }>(endpoint);
             if (response.success) {
@@ -243,7 +253,7 @@ export default function SkillsCommandsList({
         } finally {
             setDeleting(false);
         }
-    }, [deleteTarget, loadData, api]);
+    }, [deleteTarget, loadData, api, buildEndpoint]);
 
     // Open Settings tab with Skills section (close modal first if in modal context)
     const handleOpenUserSkills = useCallback(() => {

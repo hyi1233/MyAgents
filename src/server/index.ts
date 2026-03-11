@@ -4502,9 +4502,12 @@ async function main() {
       const projectCommandsBaseDir = hasValidAgentDir ? join(currentAgentDir, '.claude', 'commands') : '';
 
       // GET /api/skills - List all skills (with scope filter)
+      // Supports ?agentDir= for listing skills from a specific workspace (e.g. from Launcher)
       if (pathname === '/api/skills' && request.method === 'GET') {
         try {
           const scope = url.searchParams.get('scope') || 'all';
+          const queryAgentDir = url.searchParams.get('agentDir');
+          const { skillsDir: effectiveSkillsDir } = getProjectBaseDirs(queryAgentDir);
           const skillsConfigForList = readSkillsConfig();
           const skills: Array<{
             name: string;
@@ -4543,8 +4546,9 @@ async function main() {
             }
           };
 
-          if ((scope === 'all' || scope === 'project') && projectSkillsBaseDir) {
-            scanSkills(projectSkillsBaseDir, 'project');
+          const resolvedProjectSkillsDir = effectiveSkillsDir || projectSkillsBaseDir;
+          if ((scope === 'all' || scope === 'project') && resolvedProjectSkillsDir) {
+            scanSkills(resolvedProjectSkillsDir, 'project');
           }
           if (scope === 'all' || scope === 'user') {
             scanSkills(userSkillsBaseDir, 'user');
@@ -5253,9 +5257,12 @@ async function main() {
 
       // ============= COMMANDS MANAGEMENT API =============
       // GET /api/command-items - List all commands
+      // Supports ?agentDir= for listing commands from a specific workspace (e.g. from Launcher)
       if (pathname === '/api/command-items' && request.method === 'GET') {
         try {
           const scope = url.searchParams.get('scope') || 'all';
+          const queryAgentDir = url.searchParams.get('agentDir');
+          const { commandsDir: effectiveCommandsDir } = getProjectBaseDirs(queryAgentDir);
           const commandItems: Array<{
             name: string;
             fileName: string;
@@ -5289,8 +5296,9 @@ async function main() {
             }
           };
 
-          if ((scope === 'all' || scope === 'project') && projectCommandsBaseDir) {
-            scanCommands(projectCommandsBaseDir, 'project');
+          const resolvedProjectCommandsDir = effectiveCommandsDir || projectCommandsBaseDir;
+          if ((scope === 'all' || scope === 'project') && resolvedProjectCommandsDir) {
+            scanCommands(resolvedProjectCommandsDir, 'project');
           }
           if (scope === 'all' || scope === 'user') {
             scanCommands(userCommandsBaseDir, 'user');

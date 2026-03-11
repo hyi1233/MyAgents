@@ -227,8 +227,8 @@ export default memo(function TemplateLibraryDialog({
                 throw new Error('Template has no source path');
             }
 
-            // displayName = template name, path may have suffix
-            await onCreateWorkspace(destPath, selectedTemplate.icon, selectedTemplate.name);
+            // displayName = user's project name input (not template name)
+            await onCreateWorkspace(destPath, selectedTemplate.icon, projectName);
             onClose();
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
