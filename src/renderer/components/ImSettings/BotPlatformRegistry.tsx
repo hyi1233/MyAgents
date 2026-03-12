@@ -40,7 +40,7 @@ const STATIC_PLATFORMS: PlatformEntry[] = [
 ];
 
 const GUIDE_STEPS_PATH1 = [
-  { image: guide1_1, caption: '在启动页找到目标工作区，hover 出现设置按钮，点击进入项目设置' },
+  { image: guide1_1, caption: '在启动页找到目标工作区，hover 出现设置按钮，点击进入 Agent 设置' },
   { image: guide1_2, caption: '在「通用」Tab 找到「主动 Agent 模式」，打开开关' },
   { image: guide1_3, caption: '开启后出现「聊天机器人 Channels」，点击「+ 添加」选择平台并配置凭证' },
 ];

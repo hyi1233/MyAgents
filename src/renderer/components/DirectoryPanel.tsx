@@ -11,7 +11,7 @@ import {
   Loader2,
   Pencil,
   RefreshCw,
-  Settings,
+  SlidersHorizontal,
   Trash2,
   Upload,
   PanelRightClose,
@@ -1026,10 +1026,10 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                 onOpenConfig();
               }}
               className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-              title="打开项目设置"
+              title="打开 Agent 设置"
             >
-              <Settings className="h-4 w-4" />
-              项目设置
+              <SlidersHorizontal className="h-4 w-4" />
+              Agent 设置
             </button>
           )}
           {/* Collapse toggle button - only in narrow mode, positioned at far right */}

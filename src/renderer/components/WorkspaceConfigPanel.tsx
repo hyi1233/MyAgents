@@ -2,7 +2,7 @@
  * WorkspaceConfigPanel - Full-screen configuration overlay for workspace
  * Two tabs: 「系统提示词」(CLAUDE.md + rules) and 「技能 Skills」(skills + commands + agents)
  */
-import { X, Settings, ChevronLeft } from 'lucide-react';
+import { X, SlidersHorizontal, ChevronLeft } from 'lucide-react';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -192,9 +192,9 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                             </button>
                         )}
                         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--ink)] shadow">
-                            <Settings className="h-4 w-4 text-white" />
+                            <SlidersHorizontal className="h-4 w-4 text-white" />
                         </div>
-                        <h2 className="text-base font-semibold text-[var(--ink)]">项目设置</h2>
+                        <h2 className="text-base font-semibold text-[var(--ink)]">Agent 设置</h2>
                     </div>
 
                     {/* Tab switcher — left-aligned after title (only in list view) */}
