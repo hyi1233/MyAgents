@@ -13,8 +13,8 @@ import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
 import GlobalAgentsPanel from '@/components/GlobalAgentsPanel';
 import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
-import { ImSettings } from '@/components/ImSettings';
-import { AgentCardList, AgentCreateMenu, WorkspaceSelectDialog } from '@/components/AgentSettings';
+import { BotPlatformRegistry } from '@/components/ImSettings';
+import { WorkspaceSelectDialog } from '@/components/AgentSettings';
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
@@ -1877,7 +1877,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
-                        Agent 🦞
+                        聊天机器人 Bot
                     </button>
                     <button
                         onClick={() => setActiveSection('usage-stats')}
@@ -1919,26 +1919,10 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     </div>
                 )}
 
-                {/* Agent section (formerly IM Bot) */}
+                {/* Bot Platform Registry (formerly Agent / IM Bot) */}
                 {activeSection === 'agent' && (
-                    <div className="mx-auto max-w-4xl px-8 py-8 space-y-8">
-                        <div className="flex items-center justify-between">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">Agent</h2>
-                            <AgentCreateMenu
-                                onUpgradeWorkspace={handleUpgradeWorkspace}
-                                onCreateFromTemplate={() => {
-                                    // Navigate to template creation (dispatches OPEN_SETTINGS event or opens template dialog)
-                                    window.dispatchEvent(new CustomEvent('myagents:create-from-template'));
-                                }}
-                            />
-                        </div>
-                        <AgentCardList onSelectAgent={handleSelectAgent} />
-                        <div className="border-t border-[var(--line)] pt-6">
-                            <h3 className="mb-4 text-sm font-semibold text-[var(--ink-muted)]">
-                                旧版 IM Bot 配置
-                            </h3>
-                            <ImSettings />
-                        </div>
+                    <div className="mx-auto max-w-4xl px-8 py-8">
+                        <BotPlatformRegistry />
                     </div>
                 )}
 

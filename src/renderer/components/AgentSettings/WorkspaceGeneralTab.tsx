@@ -8,6 +8,7 @@ import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { getAgentById, addAgentConfig, patchAgentConfig, invokeStartAgentChannel } from '@/config/services/agentConfigService';
 import type { AgentConfig } from '../../../shared/types/agent';
+import { DEFAULT_HEARTBEAT_CONFIG } from '../../../shared/types/im';
 import WorkspaceBasicsSection from './WorkspaceBasicsSection';
 import AgentChannelsSection from './sections/AgentChannelsSection';
 import AgentHeartbeatSection from './sections/AgentHeartbeatSection';
@@ -58,6 +59,11 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
           permissionMode: project.permissionMode || config.defaultPermissionMode || 'plan',
           mcpEnabledServers: project.mcpEnabledServers,
           channels: [],
+          heartbeat: {
+            ...DEFAULT_HEARTBEAT_CONFIG,
+            enabled: true,
+            activeHours: { start: '08:00', end: '22:00', timezone: 'Asia/Shanghai' },
+          },
         };
         await addAgentConfig(newAgent);
         await patchProject(project.id, { isAgent: true, agentId: newAgent.id });
