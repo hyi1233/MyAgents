@@ -1,9 +1,10 @@
 /**
  * Shared utilities for Task Center components
- * (RecentTasks, TaskCenterOverlay, CronTaskDetailPanel)
+ * (RecentTasks, TaskCenterOverlay, CronTaskDetailPanel, SessionHistoryDropdown)
  */
 
 import type { SessionMetadata } from '@/api/sessionClient';
+import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
 
 const PREVIEW_MAX_LENGTH = 35;
 
@@ -61,6 +62,37 @@ export function getSessionDisplayText(session: SessionMetadata): string {
     const raw = session.lastMessagePreview || session.title;
     if (raw.length <= PREVIEW_MAX_LENGTH) return raw;
     return raw.slice(0, PREVIEW_MAX_LENGTH) + '...';
+}
+
+/**
+ * Extract platform display name from a session key.
+ * Handles both legacy (`im:{platform}:{type}:{id}`) and
+ * new agent format (`agent:{agentId}:{channelType}:{sourceType}:{id}`).
+ */
+export function extractPlatformDisplay(sessionKey: string): string {
+    const parts = sessionKey.split(':');
+    // New agent format: agent:{agentId}:{channelType}:{private|group}:{id}
+    if (parts[0] === 'agent' && parts.length >= 5) {
+        const channelType = parts[2] ?? 'unknown';
+        if (channelType.startsWith('openclaw:')) {
+            const pluginId = channelType.slice('openclaw:'.length);
+            const promoted = findPromotedPlugin(pluginId);
+            return promoted?.name ?? (pluginId.charAt(0).toUpperCase() + pluginId.slice(1));
+        }
+        if (channelType === 'openclaw' && parts[3]) {
+            const promoted = findPromotedPlugin(parts[3]);
+            return promoted?.name ?? (parts[3].charAt(0).toUpperCase() + parts[3].slice(1));
+        }
+        return channelType.charAt(0).toUpperCase() + channelType.slice(1);
+    }
+    // Legacy format: im:{platform}:{type}:{id}
+    const platform = parts[1] ?? 'unknown';
+    if (platform === 'openclaw' && parts[2]) {
+        const channelId = parts[2];
+        const promoted = findPromotedPlugin(channelId);
+        return promoted?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
+    }
+    return platform.charAt(0).toUpperCase() + platform.slice(1);
 }
 
 /**

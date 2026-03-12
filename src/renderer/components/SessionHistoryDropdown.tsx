@@ -5,12 +5,14 @@ import { BarChart2, Clock, Trash2 } from 'lucide-react';
 import { deleteSession, getSessions, type SessionMetadata } from '@/api/sessionClient';
 import { deactivateSession } from '@/api/tauriClient';
 import { CUSTOM_EVENTS } from '../../shared/constants';
-import { getWorkspaceCronTasks } from '@/api/cronTaskClient';
+import { getWorkspaceCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import { formatTokens } from '@/utils/formatTokens';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import type { ImBotStatus } from '../../shared/types/im';
-import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
+import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
+import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
+import type { SessionTag } from '@/hooks/useTaskCenterData';
 
 import SessionStatsModal from './SessionStatsModal';
 import SessionTagBadge from './SessionTagBadge';
@@ -51,38 +53,62 @@ export default function SessionHistoryDropdown({
 
     // IM bot statuses for active session tagging
     const [imBotStatuses, setImBotStatuses] = useState<Record<string, ImBotStatus>>({});
+    const [agentStatuses, setAgentStatuses] = useState<AgentStatusMap>({});
+    const [backgroundSessionIds, setBackgroundSessionIds] = useState<string[]>([]);
 
-    // Map sessionId to active cron task (running only)
-    const sessionCronTaskMap = useMemo(() => {
-        if (!cronTasks) return new Map<string, CronTask>();
-        return new Map(
-            cronTasks
-                .filter(t => t.status === 'running')
-                .map(t => [t.sessionId, t])
-        );
-    }, [cronTasks]);
+    // Compute session tags map (same logic as useTaskCenterData)
+    const sessionTagsMap = useMemo(() => {
+        const map = new Map<string, SessionTag[]>();
+        if (!sessions) return map;
 
-    // Map sessionId to IM bot platform name (only for currently active sessions)
-    const sessionImBotMap = useMemo(() => {
-        const map = new Map<string, string>();
+        // Build IM session map from legacy + agent statuses
+        const imSessionPlatformMap = new Map<string, string>();
         for (const status of Object.values(imBotStatuses)) {
             if (status.status !== 'online' && status.status !== 'connecting') continue;
             for (const activeSession of status.activeSessions) {
-                const parts = activeSession.sessionKey.split(':');
-                const platform = parts[1] ?? 'unknown';
-                let displayName: string;
-                if (platform === 'openclaw' && parts[2]) {
-                    const channelId = parts[2];
-                    const promoted = findPromotedPlugin(channelId);
-                    displayName = promoted?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
-                } else {
-                    displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
-                }
-                map.set(activeSession.sessionId, displayName);
+                imSessionPlatformMap.set(activeSession.sessionId, extractPlatformDisplay(activeSession.sessionKey));
             }
         }
+        for (const agentStatus of Object.values(agentStatuses)) {
+            for (const channel of agentStatus.channels) {
+                if (channel.status !== 'online' && channel.status !== 'connecting') continue;
+                for (const activeSession of (channel.activeSessions as { sessionKey: string; sessionId: string }[])) {
+                    imSessionPlatformMap.set(activeSession.sessionId, extractPlatformDisplay(activeSession.sessionKey));
+                }
+            }
+        }
+
+        // Build running cron task session set (use internalSessionId when available)
+        const cronSessionIds = new Set(
+            (cronTasks ?? []).filter(t => t.status === 'running').map(t => t.internalSessionId || t.sessionId)
+        );
+
+        // Build background session set
+        const bgSessionIds = new Set(backgroundSessionIds);
+
+        // Assign tags to each session
+        for (const session of sessions) {
+            const tags: SessionTag[] = [];
+            const imPlatform = imSessionPlatformMap.get(session.id);
+            if (imPlatform) tags.push({ type: 'im', platform: imPlatform });
+            if (cronSessionIds.has(session.id)) tags.push({ type: 'cron' });
+            if (bgSessionIds.has(session.id)) tags.push({ type: 'background' });
+            if (tags.length > 0) map.set(session.id, tags);
+        }
+
         return map;
-    }, [imBotStatuses]);
+    }, [sessions, cronTasks, backgroundSessionIds, imBotStatuses, agentStatuses]);
+
+    // Sorted sessions: tagged first, then by lastActiveAt descending within each group
+    const sortedSessions = useMemo(() => {
+        if (!sessions) return [];
+        return [...sessions].sort((a, b) => {
+            const aHasTag = sessionTagsMap.has(a.id);
+            const bHasTag = sessionTagsMap.has(b.id);
+            if (aHasTag !== bHasTag) return aHasTag ? -1 : 1;
+            return new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime();
+        });
+    }, [sessions, sessionTagsMap]);
 
     // Keep refs updated via effect (not during render)
     useEffect(() => {
@@ -97,17 +123,25 @@ export default function SessionHistoryDropdown({
         let cancelled = false;
 
         (async () => {
-            // Load sessions, cron tasks, and IM bot statuses in parallel
+            // Load sessions, cron tasks, IM bot statuses, agent statuses, and background sessions in parallel
             const imStatusPromise = isTauriEnvironment()
                 ? import('@tauri-apps/api/core')
                     .then(({ invoke }) => invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status'))
                     .catch(() => ({} as Record<string, ImBotStatus>))
                 : Promise.resolve({} as Record<string, ImBotStatus>);
 
-            const [sessionsResult, cronTasksResult, imStatuses] = await Promise.allSettled([
+            const agentStatusPromise = isTauriEnvironment()
+                ? import('@tauri-apps/api/core')
+                    .then(({ invoke }) => invoke<AgentStatusMap>('cmd_all_agents_status'))
+                    .catch(() => ({} as AgentStatusMap))
+                : Promise.resolve({} as AgentStatusMap);
+
+            const [sessionsResult, cronTasksResult, imStatuses, agentStatusResult, bgSessionsResult] = await Promise.allSettled([
                 getSessions(agentDir),
                 getWorkspaceCronTasks(agentDir),
                 imStatusPromise,
+                agentStatusPromise,
+                getBackgroundSessions().catch(() => [] as string[]),
             ]);
 
             if (cancelled) return;
@@ -132,6 +166,16 @@ export default function SessionHistoryDropdown({
             if (imStatuses.status === 'fulfilled') {
                 setImBotStatuses(imStatuses.value);
             }
+
+            // Agent statuses (new Agent channel system)
+            if (agentStatusResult.status === 'fulfilled') {
+                setAgentStatuses(agentStatusResult.value);
+            }
+
+            // Background sessions
+            if (bgSessionsResult.status === 'fulfilled') {
+                setBackgroundSessionIds(bgSessionsResult.value);
+            }
         })();
 
         return () => {
@@ -139,6 +183,9 @@ export default function SessionHistoryDropdown({
             // Reset state when closing or agentDir changes
             setSessions(null);
             setCronTasks(null);
+            setImBotStatuses({});
+            setAgentStatuses({});
+            setBackgroundSessionIds([]);
             setStatsSession(null);
             setPendingDeleteId(null);
             setDeleteError(null);
@@ -153,6 +200,51 @@ export default function SessionHistoryDropdown({
         };
         window.addEventListener(CUSTOM_EVENTS.SESSION_TITLE_CHANGED, handler);
         return () => window.removeEventListener(CUSTOM_EVENTS.SESSION_TITLE_CHANGED, handler);
+    }, [isOpen, agentDir]);
+
+    // Real-time tag updates: listen for cron/IM/agent status changes while dropdown is open
+    useEffect(() => {
+        if (!isOpen || !isTauriEnvironment()) return;
+
+        let mounted = true;
+        const unlisteners: (() => void)[] = [];
+
+        (async () => {
+            const { listen } = await import('@tauri-apps/api/event');
+            if (!mounted) return;
+
+            // Cron task start/stop → refresh cron tasks (affects delete protection)
+            const refreshCron = () => {
+                getWorkspaceCronTasks(agentDir).then(tasks => { if (mounted) setCronTasks(tasks); }).catch(() => {});
+            };
+            const u1 = await listen('cron:task-started', refreshCron);
+            const u2 = await listen('cron:task-stopped', refreshCron);
+            unlisteners.push(u1, u2);
+
+            // IM/Agent status changes → refresh statuses
+            const refreshStatuses = () => {
+                import('@tauri-apps/api/core').then(({ invoke }) => {
+                    invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status')
+                        .then(s => { if (mounted) setImBotStatuses(s); }).catch(() => {});
+                    invoke<AgentStatusMap>('cmd_all_agents_status')
+                        .then(s => { if (mounted) setAgentStatuses(s); }).catch(() => {});
+                }).catch(() => {});
+            };
+            const u3 = await listen('im:status-changed', refreshStatuses);
+            const u4 = await listen('agent:status-changed', refreshStatuses);
+            unlisteners.push(u3, u4);
+
+            // Background completion → refresh background sessions
+            const u5 = await listen('session:background-complete', () => {
+                getBackgroundSessions().then(ids => { if (mounted) setBackgroundSessionIds(ids); }).catch(() => {});
+            });
+            unlisteners.push(u5);
+        })();
+
+        return () => {
+            mounted = false;
+            unlisteners.forEach(fn => fn());
+        };
     }, [isOpen, agentDir]);
 
     // Close on outside click (using stable ref to avoid re-attaching listener)
@@ -269,8 +361,9 @@ export default function SessionHistoryDropdown({
                             暂无历史记录
                         </div>
                     ) : (
-                        sessions.map((session) => {
+                        sortedSessions.map((session) => {
                             const isCurrent = session.id === currentSessionId;
+                            const tags = sessionTagsMap.get(session.id) ?? [];
                             const stats = session.stats;
                             const hasStats = stats && (stats.messageCount > 0 || stats.totalInputTokens > 0);
                             const totalTokens = (stats?.totalInputTokens ?? 0) + (stats?.totalOutputTokens ?? 0);
@@ -296,12 +389,9 @@ export default function SessionHistoryDropdown({
                                                     当前
                                                 </span>
                                             )}
-                                            {sessionImBotMap.has(session.id) && (
-                                                <SessionTagBadge tag={{ type: 'im', platform: sessionImBotMap.get(session.id)! }} />
-                                            )}
-                                            {sessionCronTaskMap.has(session.id) && (
-                                                <SessionTagBadge tag={{ type: 'cron' }} />
-                                            )}
+                                            {tags.map((tag, i) => (
+                                                <SessionTagBadge key={i} tag={tag} />
+                                            ))}
                                             <span className={`truncate text-sm ${isCurrent ? 'font-medium text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
                                                 {session.title}
                                             </span>
@@ -348,7 +438,7 @@ export default function SessionHistoryDropdown({
                                                     <BarChart2 className="h-3.5 w-3.5" />
                                                 </button>
                                                 {/* Disable delete for sessions with running cron tasks */}
-                                                {sessionCronTaskMap.has(session.id) ? (
+                                                {tags.some(t => t.type === 'cron') ? (
                                                     <button
                                                         className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 group-hover:opacity-40"
                                                         disabled

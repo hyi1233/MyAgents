@@ -12,7 +12,7 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import type { CronTask } from '@/types/cronTask';
 import type { ImBotStatus, ImBotConfig } from '../../shared/types/im';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
-import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
+import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 
 // ===== Types =====
@@ -264,34 +264,6 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
     // Compute session tags (memoized)
     const sessionTagsMap = useMemo(() => {
         const map = new Map<string, SessionTag[]>();
-
-        // Helper: extract platform display name from a session key
-        const extractPlatformDisplay = (sessionKey: string): string => {
-            const parts = sessionKey.split(':');
-            // New agent format: agent:{agentId}:{channelType}:{private|group}:{id}
-            if (parts[0] === 'agent' && parts.length >= 5) {
-                const channelType = parts[2] ?? 'unknown';
-                if (channelType.startsWith('openclaw:')) {
-                    const pluginId = channelType.slice('openclaw:'.length);
-                    const promoted = findPromotedPlugin(pluginId);
-                    return promoted?.name ?? (pluginId.charAt(0).toUpperCase() + pluginId.slice(1));
-                }
-                if (channelType === 'openclaw' && parts[3]) {
-                    // agent:{id}:openclaw:{pluginId}:...  — shouldn't happen but handle gracefully
-                    const promoted = findPromotedPlugin(parts[3]);
-                    return promoted?.name ?? (parts[3].charAt(0).toUpperCase() + parts[3].slice(1));
-                }
-                return channelType.charAt(0).toUpperCase() + channelType.slice(1);
-            }
-            // Legacy format: im:{platform}:{type}:{id}
-            const platform = parts[1] ?? 'unknown';
-            if (platform === 'openclaw' && parts[2]) {
-                const channelId = parts[2];
-                const promoted = findPromotedPlugin(channelId);
-                return promoted?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
-            }
-            return platform.charAt(0).toUpperCase() + platform.slice(1);
-        };
 
         // Build IM session map: sessionId → platform display name
         const imSessionPlatformMap = new Map<string, string>();
