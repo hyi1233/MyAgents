@@ -1,8 +1,9 @@
-import { AlertTriangle, ArrowLeft, HeartPulse, History, Loader2, Plus, PanelRightOpen } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useToast } from '@/components/Toast';
 import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/DirectoryPanel';
 import DropZoneOverlay from '@/components/DropZoneOverlay';
@@ -1321,9 +1322,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             )}
             {/* Project name */}
             {agentDir && (
-              <span className="text-sm font-medium text-[var(--ink)]">
+              <span className="flex items-center gap-1.5 text-sm font-medium text-[var(--ink)]">
+                <WorkspaceIcon icon={currentProject?.icon} size={16} />
                 {agentDir.split(/[/\\]/).filter(Boolean).pop()}
-                {isAgentWorkspace && <span title="Agent"><HeartPulse className="ml-1 inline h-3 w-3 text-[var(--heartbeat)]" /></span>}
               </span>
             )}
             {/* Session title — click to rename */}

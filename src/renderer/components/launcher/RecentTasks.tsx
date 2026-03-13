@@ -4,9 +4,10 @@
  */
 
 import { memo, useCallback, useMemo, useState } from 'react';
-import { AlertCircle, ArrowRight, BarChart2, Clock, FolderOpen, MessageSquare, RefreshCw, Timer, Trash2 } from 'lucide-react';
+import { AlertCircle, ArrowRight, BarChart2, Clock, MessageSquare, RefreshCw, Timer, Trash2 } from 'lucide-react';
 
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
+import WorkspaceIcon from './WorkspaceIcon';
 import { deleteSession } from '@/api/sessionClient';
 import { deactivateSession } from '@/api/tauriClient';
 import SessionTagBadge from '@/components/SessionTagBadge';
@@ -196,7 +197,7 @@ export default memo(function RecentTasks({
                                             )}
                                         </span>
                                         <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
-                                            <FolderOpen className="h-3 w-3" />
+                                            <WorkspaceIcon icon={project.icon} size={14} />
                                             <span className="max-w-[80px] truncate">
                                                 {getFolderName(project.path)}
                                             </span>

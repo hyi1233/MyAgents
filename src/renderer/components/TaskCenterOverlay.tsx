@@ -5,9 +5,10 @@
  */
 
 import { memo, useCallback, useMemo, useState } from 'react';
-import { BarChart2, Clock, FolderOpen, Trash2, X } from 'lucide-react';
+import { BarChart2, Clock, Trash2, X } from 'lucide-react';
 
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
+import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { deleteSession } from '@/api/sessionClient';
 import { deactivateSession } from '@/api/tauriClient';
 import SessionTagBadge from '@/components/SessionTagBadge';
@@ -60,23 +61,28 @@ export default memo(function TaskCenterOverlay({
     const [pendingDeleteSession, setPendingDeleteSession] = useState<{ id: string; title: string } | null>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
 
-    // Unique workspace names for dropdown
+    // Unique workspace entries for dropdown (name + icon)
     const workspaceOptions = useMemo(() => {
-        const names = new Set<string>();
+        const seen = new Map<string, string | undefined>(); // name → icon
         for (const s of sessions) {
             const proj = projects.find(p => p.path === s.agentDir);
-            if (proj) names.add(getFolderName(proj.path));
+            if (proj) {
+                const name = getFolderName(proj.path);
+                if (!seen.has(name)) seen.set(name, proj.icon);
+            }
         }
-        return Array.from(names).sort();
+        return Array.from(seen.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([name, icon]) => ({ name, icon }));
     }, [sessions, projects]);
 
     // Memoize CustomSelect options to avoid re-creating JSX icons each render
     const workspaceSelectOptions = useMemo(() => [
         { value: 'all', label: '全部工作区' },
-        ...workspaceOptions.map(name => ({
+        ...workspaceOptions.map(({ name, icon }) => ({
             value: name,
             label: name,
-            icon: <FolderOpen className="h-3 w-3" />,
+            icon: <WorkspaceIcon icon={icon} size={14} />,
         })),
     ], [workspaceOptions]);
 
@@ -265,7 +271,7 @@ export default memo(function TaskCenterOverlay({
                                                     )}
                                                 </span>
                                                 <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
-                                                    <FolderOpen className="h-3 w-3" />
+                                                    <WorkspaceIcon icon={project.icon} size={14} />
                                                     <span className="max-w-[80px] truncate">
                                                         {getFolderName(project.path)}
                                                     </span>
