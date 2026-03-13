@@ -3430,22 +3430,32 @@ export async function enqueueUserMessage(
   // Apply runtime config changes if session is active (model/permission changes don't require restart)
   // Skip for queued messages — config is locked to the current session while streaming
   if (!isSessionBusy) {
-    // applySessionConfig reads currentPermissionMode/currentModel to detect changes,
-    // so call it BEFORE updating the tracking variables.
     await applySessionConfig(model, permissionMode);
-  }
 
-  // Always update tracking variables so the next session start picks up correct values.
-  // Without this, permission/model from the user's message is lost when the session is busy
-  // (e.g., during abort/restart), and the next pre-warm starts with stale defaults.
-  // When !isSessionBusy, applySessionConfig already updated these — the checks below are no-ops.
-  if (permissionMode && permissionMode !== currentPermissionMode) {
-    currentPermissionMode = permissionMode;
-    if (isDebugMode) console.log(`[agent] permission mode set to: ${permissionMode}`);
-  }
-  if (model && model !== currentModel) {
-    currentModel = model;
-    if (isDebugMode) console.log(`[agent] model set to: ${model}`);
+    // Update local tracking even if SDK call is skipped (e.g., first message before pre-warm)
+    if (permissionMode && permissionMode !== currentPermissionMode) {
+      currentPermissionMode = permissionMode;
+      if (isDebugMode) console.log(`[agent] permission mode set to: ${permissionMode}`);
+    }
+    if (model && model !== currentModel) {
+      currentModel = model;
+      if (isDebugMode) console.log(`[agent] model set to: ${model}`);
+    }
+  } else if (shouldAbortSession) {
+    // Session is being restarted (abort for MCP/agents config change). Stage permission/model
+    // for the next session start. Without this, user's permission mode is lost during restart
+    // and the next pre-warm uses the stale default (e.g., 'auto' instead of 'fullAgency').
+    // Only update during abort — NOT during normal streaming or queued messages, to maintain
+    // the "config locked while streaming" contract. canUseTool() reads currentPermissionMode
+    // live (line ~4081), so updating it mid-turn would change permission behavior unexpectedly.
+    if (permissionMode && permissionMode !== currentPermissionMode) {
+      currentPermissionMode = permissionMode;
+      if (isDebugMode) console.log(`[agent] permission mode staged for restart: ${permissionMode}`);
+    }
+    if (model && model !== currentModel) {
+      currentModel = model;
+      if (isDebugMode) console.log(`[agent] model staged for restart: ${model}`);
+    }
   }
 
   // Persist session to SessionStore on first message
