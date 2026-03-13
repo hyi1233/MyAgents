@@ -255,6 +255,25 @@ export default function FilePreviewModal({
             );
         }
 
+        // Empty content: show placeholder with edit prompt
+        if (!previewContent.trim() && !isEditing) {
+            return (
+                <div className="flex h-full flex-col items-center justify-center gap-3 bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
+                    <FileText className="h-10 w-10 opacity-20" />
+                    <p className="text-sm">文档内容为空</p>
+                    {apiPost && (
+                        <button
+                            type="button"
+                            onClick={handleEdit}
+                            className="text-sm text-[var(--accent)] hover:underline"
+                        >
+                            点击开始编辑
+                        </button>
+                    )}
+                </div>
+            );
+        }
+
         // Editing mode: use Monaco Editor
         // - Suspense handles first-time chunk loading (lazy import)
         // - isEditorReady defers mounting to next frame on every edit (avoids blocking click microtask)
