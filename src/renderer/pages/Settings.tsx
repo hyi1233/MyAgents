@@ -2630,17 +2630,21 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 </div>
                             </div>
 
-                            {/* Product Description */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <div className="space-y-4 text-sm leading-relaxed text-[var(--ink-secondary)]">
+                            {/* Product Description — Developer Letter */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-7 py-6">
+                                <p className="text-xs font-medium uppercase tracking-widest text-[var(--ink-muted)]/50">From the Developer</p>
+                                <div className="mt-4 space-y-5 text-[13px] leading-[1.9] text-[var(--ink-secondary)]">
                                     <p>
-                                        <span className="font-medium text-[var(--ink)]">MyAgents</span> 是一款住在你电脑里的 AI Agent 桌面客户端，你的个人 AI 中心。基于 Claude Agent SDK 运行，同时支持接入各家大模型与快速切换。所有操作都在本地完成，数据始终留在你的电脑里。
+                                        <span className="font-semibold text-[var(--ink)]">MyAgents</span> 是一款住在你电脑里的 AI Agent 桌面客户端，你的个人 AI 中心。基于 Claude Agent SDK 运行，同时支持接入各家大模型与快速切换。所有操作都在本地完成，数据始终留在你的电脑里。
                                     </p>
                                     <p>
                                         Claude Code 让开发者率先体会到了 AI 加持下的无限生产力，OpenClaw 又让普通人看到了像伙伴一样的主动型 Agent 助手的雏形。而 MyAgents 要做的，是让本地 Agent 成为完全体——当你在电脑前，它能触达你的文件、项目与一切工具，与你精细化地协同工作，完成高质量的产出；当你不在电脑前，它也能像你的分身，7×24 小时感知世界，按照你的意图持续行动。
                                     </p>
-                                    <p className="text-[var(--ink-muted)]">
-                                        不同于每次对话都要重新自我介绍的 AI 工具，MyAgents 里的 Agent 与你的生活、工作深度同步，是一个越来越懂你的搭档。我们希望它成为每个人意图的超级放大器——你有一个想法，And it's done。
+                                    <p>
+                                        不同于每次对话都要重新自我介绍的 AI 工具，MyAgents 里的 Agent 与你的生活、工作深度同步，是一个越来越懂你的搭档。我们希望它成为每个人意图的超级放大器——
+                                    </p>
+                                    <p className="text-center text-[14px] font-medium italic tracking-wide text-[var(--ink)]">
+                                        你有一个想法，And it&apos;s done.
                                     </p>
                                 </div>
                             </div>

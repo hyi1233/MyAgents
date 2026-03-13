@@ -64,6 +64,7 @@ export default memo(function WorkspaceCard({
 
     const handleContextMenu = useCallback((e: React.MouseEvent) => {
         e.preventDefault();
+        window.getSelection()?.removeAllRanges();
         // Clamp position so the menu stays within the viewport
         const menuWidth = 140;
         const menuHeight = 76;

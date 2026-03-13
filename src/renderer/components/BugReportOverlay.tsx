@@ -192,7 +192,7 @@ export default function BugReportOverlay({
             className="fixed inset-0 z-[250] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm"
             onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
         >
-            <div className="glass-panel w-full max-w-md overflow-hidden">
+            <div className="glass-panel w-full max-w-md">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
                     <h2 className="text-[14px] font-semibold text-[var(--ink)]">AI 小助理</h2>
