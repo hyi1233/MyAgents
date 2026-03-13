@@ -1,19 +1,24 @@
 /**
  * FilePreviewModal - File preview and edit modal for workspace files
- * 
+ *
  * Features:
  * - Syntax highlighted preview for code files (with line numbers)
  * - Rendered HTML preview for Markdown files
  * - Plain text preview for txt/log files
  * - Monaco Editor for editing mode
  * - Unsaved changes confirmation
+ *
+ * Edit capability comes from two sources (either is sufficient):
+ * 1. Tab API (useTabApiOptional) — when rendered inside a Tab context
+ * 2. Explicit onSave/onRevealFile props — when caller provides save logic directly
  */
 import { Edit2, FileText, FolderOpen, Loader2, Save, X } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
-import { useTabApi } from '@/context/TabContext';
+import { useTabApiOptional } from '@/context/TabContext';
 import { getPrismLanguage, getMonacoLanguage, shouldShowLineNumbers, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 
@@ -42,6 +47,10 @@ interface FilePreviewModalProps {
     onClose: () => void;
     /** Callback after file is saved successfully */
     onSaved?: () => void;
+    /** External save handler — enables editing even without Tab context */
+    onSave?: (content: string) => Promise<void>;
+    /** External reveal-in-finder handler — enables "Open in Finder" without Tab context */
+    onRevealFile?: () => Promise<void>;
 }
 
 // Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
@@ -61,14 +70,21 @@ export default function FilePreviewModal({
     isLoading = false,
     error = null,
     onClose,
-    onSaved
+    onSaved,
+    onSave,
+    onRevealFile,
 }: FilePreviewModalProps) {
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
-    const { apiPost } = useTabApi();
+    const tabApi = useTabApiOptional();
+    const apiPost = tabApi?.apiPost;
+
+    // Edit: Tab API OR explicit onSave prop.  Reveal: Tab API OR explicit onRevealFile prop.
+    const canEdit = !!(apiPost || onSave);
+    const canReveal = !!(apiPost || onRevealFile);
 
     // State
     const [isEditing, setIsEditing] = useState(false);
@@ -186,27 +202,33 @@ export default function FilePreviewModal({
     }, [hasUnsavedChanges, onClose]);
 
     const handleSave = useCallback(async () => {
+        if (!canEdit) return;
         setIsSaving(true);
         try {
-            const response = await apiPost<{ success: boolean; error?: string }>(
-                '/agent/save-file',
-                { path, content: editContent }
-            );
-
-            if (response.success) {
-                toastRef.current.success('文件保存成功');
-                setPreviewContent(editContent); // Update preview content after successful save
-                setIsEditing(false);
-                onSaved?.();
-            } else {
-                toastRef.current.error(response.error ?? '保存失败');
+            if (onSave) {
+                // Caller-provided save (e.g., direct Tauri fs for non-Tab contexts)
+                await onSave(editContent);
+            } else if (apiPost) {
+                // Tab context — save via Sidecar API
+                const response = await apiPost<{ success: boolean; error?: string }>(
+                    '/agent/save-file',
+                    { path, content: editContent }
+                );
+                if (!response.success) {
+                    toastRef.current.error(response.error ?? '保存失败');
+                    return;
+                }
             }
+            toastRef.current.success('文件保存成功');
+            setPreviewContent(editContent); // Update preview content after successful save
+            setIsEditing(false);
+            onSaved?.();
         } catch (err) {
             toastRef.current.error(err instanceof Error ? err.message : '保存失败');
         } finally {
             setIsSaving(false);
         }
-    }, [apiPost, path, editContent, onSaved]);
+    }, [canEdit, onSave, apiPost, path, editContent, onSaved]);
 
     // Handle backdrop click — only close on genuine clicks (mousedown + mouseup both on backdrop).
     // Prevents closing when user drags a text selection out of the modal and releases on the backdrop.
@@ -223,12 +245,17 @@ export default function FilePreviewModal({
     }, [handleClose]);
 
     const handleOpenInFinder = useCallback(async () => {
+        if (!canReveal) return;
         try {
-            await apiPost('/agent/open-in-finder', { path });
+            if (onRevealFile) {
+                await onRevealFile();
+            } else if (apiPost) {
+                await apiPost('/agent/open-in-finder', { path });
+            }
         } catch {
             toastRef.current.error('无法打开目录');
         }
-    }, [apiPost, path]);
+    }, [canReveal, onRevealFile, apiPost, path]);
 
     // Render preview content based on file type
     const renderPreviewContent = () => {
@@ -247,6 +274,25 @@ export default function FilePreviewModal({
                 <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--error)]">
                     <X className="h-8 w-8" />
                     <span className="text-sm">{error}</span>
+                </div>
+            );
+        }
+
+        // Empty content: show placeholder with edit prompt
+        if (!previewContent.trim() && !isEditing) {
+            return (
+                <div className="flex h-full flex-col items-center justify-center gap-3 bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
+                    <FileText className="h-10 w-10 opacity-20" />
+                    <p className="text-sm">文档内容为空</p>
+                    {canEdit && (
+                        <button
+                            type="button"
+                            onClick={handleEdit}
+                            className="text-sm text-[var(--accent)] hover:underline"
+                        >
+                            点击开始编辑
+                        </button>
+                    )}
                 </div>
             );
         }
@@ -280,7 +326,7 @@ export default function FilePreviewModal({
         // Use raw mode to skip streaming preprocessing (which can break valid markdown)
         if (isMarkdown) {
             return (
-                <div className="h-full overflow-auto p-6 bg-[var(--paper-elevated)]">
+                <div className="h-full overflow-auto overscroll-contain p-6 bg-[var(--paper-elevated)]">
                     <div className="prose prose-stone max-w-none dark:prose-invert">
                         <Markdown raw basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined}>{previewContent}</Markdown>
                     </div>
@@ -290,17 +336,19 @@ export default function FilePreviewModal({
 
         // Preview mode: Code files with syntax highlighting (memoized)
         return (
-            <div className="h-full overflow-auto bg-[var(--paper-elevated)]">
+            <div className="h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)]">
                 {syntaxHighlightedContent}
             </div>
         );
     };
 
-    return (
+    // Render via portal to document.body to escape parent stacking context
+    // (prevents chat scrollbar from rendering on top of modal)
+    return createPortal(
         <>
             {/* Modal backdrop */}
             <div
-                className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+                className="fixed inset-0 z-[210] flex items-center justify-center bg-black/30 backdrop-blur-sm"
                 style={{ padding: '2vh 2vw' }}
                 onMouseDown={handleBackdropMouseDown}
                 onClick={handleBackdropClick}
@@ -333,21 +381,23 @@ export default function FilePreviewModal({
                                     <span className="max-w-[400px] truncate text-[11px] text-[var(--ink-muted)]" title={path}>
                                         {shortenPathForDisplay(path)}
                                     </span>
-                                    <button
-                                        type="button"
-                                        onClick={handleOpenInFinder}
-                                        className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                        title="打开所在文件夹"
-                                    >
-                                        <FolderOpen className="h-3.5 w-3.5" />
-                                    </button>
+                                    {canReveal && (
+                                        <button
+                                            type="button"
+                                            onClick={handleOpenInFinder}
+                                            className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                            title="打开所在文件夹"
+                                        >
+                                            <FolderOpen className="h-3.5 w-3.5" />
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                         </div>
 
                         {/* Action buttons - unified styling with smooth transitions */}
                         <div className="flex flex-shrink-0 items-center gap-1.5">
-                            {isEditing ? (
+                            {canEdit && (isEditing ? (
                                 <div key="editing" className="flex items-center gap-1.5">
                                     <button
                                         type="button"
@@ -382,7 +432,7 @@ export default function FilePreviewModal({
                                     <Edit2 className="h-3.5 w-3.5" />
                                     编辑
                                 </button>
-                            )}
+                            ))}
                             <button
                                 type="button"
                                 onClick={handleClose}
@@ -412,6 +462,7 @@ export default function FilePreviewModal({
                     onCancel={() => setShowUnsavedConfirm(false)}
                 />
             )}
-        </>
+        </>,
+        document.body
     );
 }

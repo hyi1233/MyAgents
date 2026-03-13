@@ -7,6 +7,7 @@ import {
     DEFAULT_CONFIG,
     type ModelEntity,
     type Project,
+    type ModelAliases,
     type Provider,
     type ProviderVerifyStatus,
     PRESET_PROVIDERS,
@@ -30,12 +31,14 @@ import {
 } from './services/providerService';
 import {
     loadProjects,
+    saveProjects,
     addProject as addProjectService,
     updateProject as updateProjectService,
     patchProject as patchProjectService,
     removeProject as removeProjectService,
     touchProject as touchProjectService,
 } from './services/projectService';
+import { migrateImBotConfigsToAgents, persistAgents } from './services/agentConfigService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 
 // ============= Context Types =============
@@ -69,6 +72,8 @@ export interface ConfigActionsValue {
     // Preset custom models
     savePresetCustomModels: (providerId: string, models: ModelEntity[]) => Promise<void>;
     removePresetCustomModel: (providerId: string, modelId: string) => Promise<void>;
+    // Provider model aliases (SDK sub-agent model mapping)
+    saveProviderModelAliases: (providerId: string, aliases: ModelAliases) => Promise<void>;
     // API Keys
     saveApiKey: (providerId: string, apiKey: string) => Promise<void>;
     deleteApiKey: (providerId: string) => Promise<void>;
@@ -120,13 +125,36 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                 console.warn('[ConfigProvider] Admin agent sync failed:', e);
             }
 
-            const [loadedConfig, loadedProjects, loadedProviders, loadedApiKeys, loadedVerifyStatus] = await Promise.all([
+            const [rawConfig, loadedProjects, loadedProviders, loadedApiKeys, loadedVerifyStatus] = await Promise.all([
                 loadAppConfig(),
                 loadProjects(),
                 getAllProviders(),
                 loadApiKeysService(),
                 loadProviderVerifyStatusService(),
             ]);
+
+            // Migrate legacy imBotConfigs → agents (one-time, skipped if already migrated)
+            const preMigrationAgentsCount = rawConfig.agents?.length ?? 0;
+            const loadedConfig = migrateImBotConfigsToAgents(rawConfig, loadedProjects);
+            if ((loadedConfig.agents?.length ?? 0) > preMigrationAgentsCount) {
+                // Create timestamped backup before persisting migration
+                try {
+                    const { getConfigDir, CONFIG_FILE } = await import('./services/configStore');
+                    const { copyFile, exists } = await import('@tauri-apps/plugin-fs');
+                    const { join } = await import('@tauri-apps/api/path');
+                    const dir = await getConfigDir();
+                    const configPath = await join(dir, CONFIG_FILE);
+                    if (await exists(configPath)) {
+                        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+                        await copyFile(configPath, await join(dir, `config.json.bak.${ts}`));
+                    }
+                } catch (e) {
+                    console.warn('[ConfigProvider] Migration backup failed:', e);
+                }
+                // Persist agents + project isAgent/agentId changes
+                await persistAgents(loadedConfig.agents!);
+                await saveProjects(loadedProjects);
+            }
 
             await rebuildAndPersistAvailableProviders();
 
@@ -158,27 +186,34 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         if (!isTauriEnvironment()) return;
         let cancelled = false;
-        let unlisten: (() => void) | undefined;
+        let unlistenIm: (() => void) | undefined;
+        let unlistenAgent: (() => void) | undefined;
+
+        const refreshOnEvent = () => {
+            if (!isMountedRef.current) return;
+            loadAppConfig().then(latest => {
+                if (isMountedRef.current) setConfig(latest);
+            }).catch(err => {
+                console.error('[ConfigProvider] Failed to refresh config after config-changed:', err);
+            });
+        };
 
         import('@tauri-apps/api/event').then(({ listen }) => {
             if (cancelled) return;
-            listen<{ botId: string }>('im:bot-config-changed', () => {
-                if (!isMountedRef.current) return;
-                // Lightweight config-only refresh
-                loadAppConfig().then(latest => {
-                    if (isMountedRef.current) setConfig(latest);
-                }).catch(err => {
-                    console.error('[ConfigProvider] Failed to refresh config after bot-config-changed:', err);
-                });
-            }).then(fn => {
+            listen<{ botId: string }>('im:bot-config-changed', refreshOnEvent).then(fn => {
                 if (cancelled) fn();
-                else unlisten = fn;
+                else unlistenIm = fn;
+            });
+            listen('agent:config-changed', refreshOnEvent).then(fn => {
+                if (cancelled) fn();
+                else unlistenAgent = fn;
             });
         });
 
         return () => {
             cancelled = true;
-            unlisten?.();
+            unlistenIm?.();
+            unlistenAgent?.();
         };
     }, []);
 
@@ -362,6 +397,20 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         setConfig(newConfig);
     }, []);
 
+    const saveProviderModelAliases = useCallback(async (providerId: string, aliases: ModelAliases) => {
+        // Strip empty strings — prevent sending model: "" upstream
+        const cleaned: ModelAliases = {};
+        if (aliases.sonnet) cleaned.sonnet = aliases.sonnet;
+        if (aliases.opus) cleaned.opus = aliases.opus;
+        if (aliases.haiku) cleaned.haiku = aliases.haiku;
+        const newConfig = await atomicModifyConfig(c => {
+            const newAliases = { ...c.providerModelAliases, [providerId]: cleaned };
+            return { ...c, providerModelAliases: newAliases };
+        });
+        setConfig(newConfig);
+        await rebuildAndPersistAvailableProviders();
+    }, []);
+
     // ============= Memoized Context Values =============
 
     const data = useMemo<ConfigDataValue>(() => ({
@@ -372,14 +421,14 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         updateConfig, refreshConfig, reload: load, refreshProviderData,
         addProject, updateProject, patchProject, removeProject, touchProject,
         addCustomProvider, updateCustomProvider, deleteCustomProvider, refreshProviders,
-        savePresetCustomModels, removePresetCustomModel,
+        savePresetCustomModels, removePresetCustomModel, saveProviderModelAliases,
         saveApiKey, deleteApiKey,
         saveProviderVerifyStatus,
     }), [
         updateConfig, refreshConfig, load, refreshProviderData,
         addProject, updateProject, patchProject, removeProject, touchProject,
         addCustomProvider, updateCustomProvider, deleteCustomProvider, refreshProviders,
-        savePresetCustomModels, removePresetCustomModel,
+        savePresetCustomModels, removePresetCustomModel, saveProviderModelAliases,
         saveApiKey, deleteApiKey,
         saveProviderVerifyStatus,
     ]);

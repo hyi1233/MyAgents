@@ -72,10 +72,7 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::er
                 }
                 MENU_EXIT => {
                     log::info!("[Tray] Exit menu clicked");
-                    // Emit event to let frontend handle exit confirmation if needed
-                    if let Err(e) = app.emit("tray:exit-requested", ()) {
-                        log::error!("[Tray] Failed to emit exit event: {}", e);
-                    }
+                    app.exit(0);
                 }
                 _ => {}
             }

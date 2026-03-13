@@ -2,7 +2,7 @@
  * WorkspaceConfigPanel - Full-screen configuration overlay for workspace
  * Two tabs: 「系统提示词」(CLAUDE.md + rules) and 「技能 Skills」(skills + commands + agents)
  */
-import { X, Settings, ChevronLeft } from 'lucide-react';
+import { X, SlidersHorizontal, ChevronLeft } from 'lucide-react';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -18,6 +18,7 @@ import type { CommandDetailPanelRef } from './CommandDetailPanel';
 import WorkspaceAgentsList from './WorkspaceAgentsList';
 import AgentDetailPanel from './AgentDetailPanel';
 import type { AgentDetailPanelRef } from './AgentDetailPanel';
+import { WorkspaceGeneralTab } from './AgentSettings';
 
 interface WorkspaceConfigPanelProps {
     agentDir: string;
@@ -28,7 +29,7 @@ interface WorkspaceConfigPanelProps {
     initialTab?: Tab;
 }
 
-export type Tab = 'system-prompts' | 'skills';
+export type Tab = 'general' | 'system-prompts' | 'skills' | 'agent';
 type DetailView =
     | { type: 'none' }
     | { type: 'skill'; name: string; scope: 'user' | 'project'; isNewSkill?: boolean }
@@ -36,6 +37,7 @@ type DetailView =
     | { type: 'agent'; name: string; scope: 'user' | 'project'; isNewAgent?: boolean };
 
 const TAB_ITEMS: { key: Tab; label: string }[] = [
+    { key: 'general', label: '通用' },
     { key: 'system-prompts', label: '系统提示词' },
     { key: 'skills', label: '技能 Skills' },
 ];
@@ -50,7 +52,9 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
         toastRef.current = toast;
     }, [toast]);
 
-    const [activeTab, setActiveTab] = useState<Tab>(initialTab ?? 'system-prompts');
+    // Map legacy 'agent' tab to 'general' for backward compat (Settings page passes 'agent')
+    const resolvedInitialTab: Tab = initialTab === 'agent' ? 'general' : (initialTab ?? 'general');
+    const [activeTab, setActiveTab] = useState<Tab>(resolvedInitialTab);
     const [detailView, setDetailView] = useState<DetailView>({ type: 'none' });
     const [internalRefreshKey, setInternalRefreshKey] = useState(0);
 
@@ -163,9 +167,6 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
         setActiveTab(tab);
     }, [isAnyEditing]);
 
-    // Get workspace name from path (support both / and \ separators for cross-platform)
-    const workspaceName = agentDir.split(/[/\\]/).filter(Boolean).pop() || 'Workspace';
-
     return createPortal(
         <div
             className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
@@ -177,26 +178,23 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Header — three zones: left (icon+title), center (tabs), right (close) */}
-                <div className="flex flex-shrink-0 items-center border-b border-[var(--line)] bg-gradient-to-r from-[var(--paper-inset)] to-[var(--paper)] px-6 py-4">
+                <div className="flex flex-shrink-0 items-center border-b border-[var(--line)] bg-gradient-to-r from-[var(--paper-inset)] to-[var(--paper)] px-6 py-3">
                     {/* Left zone */}
-                    <div className="flex min-w-0 items-center gap-3">
+                    <div className="flex min-w-0 items-center gap-2.5">
                         {detailView.type !== 'none' && (
                             <button
                                 type="button"
                                 onClick={handleBackFromDetail}
-                                className="mr-2 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                className="mr-1 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                 title="返回列表"
                             >
                                 <ChevronLeft className="h-5 w-5" />
                             </button>
                         )}
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--ink)] shadow-lg">
-                            <Settings className="h-5 w-5 text-white" />
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--ink)] shadow">
+                            <SlidersHorizontal className="h-4 w-4 text-white" />
                         </div>
-                        <div className="min-w-0">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">项目设置</h2>
-                            <p className="truncate text-xs text-[var(--ink-muted)]">{workspaceName}</p>
-                        </div>
+                        <h2 className="text-base font-semibold text-[var(--ink)]">Agent 设置</h2>
                     </div>
 
                     {/* Tab switcher — left-aligned after title (only in list view) */}
@@ -236,10 +234,13 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                     </button>
                 </div>
 
-                {/* Content Area */}
-                <div className="flex-1 overflow-hidden">
+                {/* Content Area — paper base so elevated cards stand out */}
+                <div className="flex-1 overflow-hidden bg-[var(--paper)]">
                     {detailView.type === 'none' ? (
                         <>
+                            {activeTab === 'general' && (
+                                <WorkspaceGeneralTab agentDir={agentDir} />
+                            )}
                             {activeTab === 'system-prompts' && (
                                 <SystemPromptsPanel ref={systemPromptsRef} agentDir={agentDir} />
                             )}

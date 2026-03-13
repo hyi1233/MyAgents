@@ -48,7 +48,7 @@ export default memo(function AddWorkspaceMenu({
             <button
                 ref={buttonRef}
                 onClick={toggle}
-                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-2.5 py-1.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
             >
                 <Plus className="h-3.5 w-3.5" />
                 添加
@@ -76,7 +76,7 @@ export default memo(function AddWorkspaceMenu({
                         className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
                     >
                         <LayoutTemplate className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
-                        从模板创建
+                        从模板创建 Agent
                     </button>
                 </div>
             )}

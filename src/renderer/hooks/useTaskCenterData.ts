@@ -10,8 +10,9 @@ import { getAllCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
 import { loadAppConfig } from '@/config/configService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import type { CronTask } from '@/types/cronTask';
-import type { ImBotStatus, ImBotConfig } from '../../shared/types/im';
-import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
+import type { ImBotConfig } from '../../shared/types/im';
+import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
+import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 
 // ===== Types =====
@@ -44,31 +45,31 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
     const [sessions, setSessions] = useState<SessionMetadata[]>([]);
     const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
     const [backgroundSessionIds, setBackgroundSessionIds] = useState<string[]>([]);
-    const [imBotStatuses, setImBotStatuses] = useState<Record<string, ImBotStatus>>({});
+    const [agentStatuses, setAgentStatuses] = useState<AgentStatusMap>({});
     const [imBotConfigs, setImBotConfigs] = useState<ImBotConfig[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const isMountedRef = useRef(true);
     const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const sessionRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const imRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const agentRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     const fetchData = useCallback(async (retryCount = 0) => {
         if (retryCount === 0) setIsLoading(true);
         setError(null);
 
         try {
-            const imStatusPromise = isTauriEnvironment()
+            const agentStatusPromise = isTauriEnvironment()
                 ? import('@tauri-apps/api/core')
-                    .then(({ invoke }) => invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status'))
-                    .catch(() => ({} as Record<string, ImBotStatus>))
-                : Promise.resolve({} as Record<string, ImBotStatus>);
+                    .then(({ invoke }) => invoke<AgentStatusMap>('cmd_all_agents_status'))
+                    .catch(() => ({} as AgentStatusMap))
+                : Promise.resolve({} as AgentStatusMap);
 
-            const [sessionsData, tasksData, bgSessions, imStatuses, appConfig] = await Promise.all([
+            const [sessionsData, tasksData, bgSessions, agentStatusResult, appConfig] = await Promise.all([
                 getSessions(),
                 getAllCronTasks().catch(() => [] as CronTask[]),
                 getBackgroundSessions().catch(() => [] as string[]),
-                imStatusPromise,
+                agentStatusPromise,
                 loadAppConfig().catch(() => null),
             ]);
 
@@ -81,7 +82,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             setSessions(sorted);
             setCronTasks(tasksData);
             setBackgroundSessionIds(bgSessions);
-            setImBotStatuses(imStatuses);
+            setAgentStatuses(agentStatusResult);
             setImBotConfigs(appConfig?.imBotConfigs ?? []);
         } catch (err) {
             if (!isMountedRef.current) return;
@@ -113,15 +114,18 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         }, delayMs);
     }, []);
 
-    // Debounced IM status refresh
-    const refreshImStatusDebounced = useCallback((delayMs = 1000) => {
-        if (imRefreshTimerRef.current) clearTimeout(imRefreshTimerRef.current);
-        imRefreshTimerRef.current = setTimeout(() => {
-            imRefreshTimerRef.current = null;
+    // Debounced Agent status refresh
+    const refreshAgentStatusDebounced = useCallback((delayMs = 1000) => {
+        if (agentRefreshTimerRef.current) clearTimeout(agentRefreshTimerRef.current);
+        agentRefreshTimerRef.current = setTimeout(() => {
+            agentRefreshTimerRef.current = null;
             if (!isTauriEnvironment()) return;
             import('@tauri-apps/api/core')
-                .then(({ invoke }) => invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status'))
-                .then(statuses => { if (isMountedRef.current) setImBotStatuses(statuses); })
+                .then(({ invoke }) => {
+                    invoke<AgentStatusMap>('cmd_all_agents_status')
+                        .then(statuses => { if (isMountedRef.current) setAgentStatuses(statuses); })
+                        .catch(() => {});
+                })
                 .catch(() => {});
         }, delayMs);
     }, []);
@@ -134,7 +138,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             isMountedRef.current = false;
             if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
             if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
-            if (imRefreshTimerRef.current) clearTimeout(imRefreshTimerRef.current);
+            if (agentRefreshTimerRef.current) clearTimeout(agentRefreshTimerRef.current);
         };
     }, [fetchData]);
 
@@ -220,22 +224,22 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             });
             unlisteners.push(u5);
 
-            // IM status changes (bot online/offline, session created)
-            const u6 = await listen('im:status-changed', () => {
+            // Agent status changes (channel started/stopped, session created)
+            const u7 = await listen('agent:status-changed', () => {
                 if (!mounted) return;
-                refreshImStatusDebounced();
+                refreshAgentStatusDebounced();
                 refreshSessionsDebounced(1000);
             });
-            unlisteners.push(u6);
+            unlisteners.push(u7);
         })();
 
         return () => {
             mounted = false;
             unlisteners.forEach(fn => fn());
             if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
-            if (imRefreshTimerRef.current) clearTimeout(imRefreshTimerRef.current);
+            if (agentRefreshTimerRef.current) clearTimeout(agentRefreshTimerRef.current);
         };
-    }, [refreshSessionsDebounced, refreshImStatusDebounced]);
+    }, [refreshSessionsDebounced, refreshAgentStatusDebounced]);
 
     // Compute session tags (memoized)
     const sessionTagsMap = useMemo(() => {
@@ -243,22 +247,14 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
 
         // Build IM session map: sessionId → platform display name
         const imSessionPlatformMap = new Map<string, string>();
-        for (const status of Object.values(imBotStatuses)) {
-            if (status.status !== 'online' && status.status !== 'connecting') continue;
-            for (const activeSession of status.activeSessions) {
-                const parts = activeSession.sessionKey.split(':');
-                const platform = parts[1] ?? 'unknown';
-                let displayName: string;
-                if (platform === 'openclaw' && parts[2]) {
-                    // OpenClaw session key: im:openclaw:<channelId>:private:...
-                    // Use promoted plugin name if available, otherwise capitalize channel ID
-                    const channelId = parts[2];
-                    const promoted = findPromotedPlugin(channelId);
-                    displayName = promoted?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
-                } else {
-                    displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
+
+        // From agent channel statuses
+        for (const agentStatus of Object.values(agentStatuses)) {
+            for (const channel of agentStatus.channels) {
+                if (channel.status !== 'online' && channel.status !== 'connecting') continue;
+                for (const activeSession of (channel.activeSessions as { sessionKey: string; sessionId: string }[])) {
+                    imSessionPlatformMap.set(activeSession.sessionId, extractPlatformDisplay(activeSession.sessionKey));
                 }
-                imSessionPlatformMap.set(activeSession.sessionId, displayName);
             }
         }
 
@@ -282,7 +278,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         }
 
         return map;
-    }, [sessions, cronTasks, backgroundSessionIds, imBotStatuses]);
+    }, [sessions, cronTasks, backgroundSessionIds, agentStatuses]);
 
     // Compute cron bot info map (memoized)
     const cronBotInfoMap = useMemo(() => {

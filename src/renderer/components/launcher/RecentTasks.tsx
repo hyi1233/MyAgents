@@ -4,9 +4,10 @@
  */
 
 import { memo, useCallback, useMemo, useState } from 'react';
-import { AlertCircle, ArrowRight, BarChart2, Clock, FolderOpen, MessageSquare, RefreshCw, Timer, Trash2 } from 'lucide-react';
+import { AlertCircle, ArrowRight, BarChart2, Clock, MessageSquare, RefreshCw, Timer, Trash2 } from 'lucide-react';
 
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
+import WorkspaceIcon from './WorkspaceIcon';
 import { deleteSession } from '@/api/sessionClient';
 import { deactivateSession } from '@/api/tauriClient';
 import SessionTagBadge from '@/components/SessionTagBadge';
@@ -196,7 +197,7 @@ export default memo(function RecentTasks({
                                             )}
                                         </span>
                                         <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
-                                            <FolderOpen className="h-3 w-3" />
+                                            <WorkspaceIcon icon={project.icon} size={14} />
                                             <span className="max-w-[80px] truncate">
                                                 {getFolderName(project.path)}
                                             </span>
@@ -336,7 +337,7 @@ function TabHeader({
         <div className="mb-3 flex items-center gap-4">
             <button
                 onClick={() => onTabChange('sessions')}
-                className={`relative text-[11px] font-semibold uppercase tracking-[0.12em] transition-colors ${
+                className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
                     activeTab === 'sessions'
                         ? 'text-[var(--ink-muted)]'
                         : 'text-[var(--ink-muted)]/40 hover:text-[var(--ink-muted)]/60'
@@ -349,7 +350,7 @@ function TabHeader({
             </button>
             <button
                 onClick={() => onTabChange('cron')}
-                className={`relative text-[11px] font-semibold uppercase tracking-[0.12em] transition-colors ${
+                className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
                     activeTab === 'cron'
                         ? 'text-[var(--ink-muted)]'
                         : 'text-[var(--ink-muted)]/40 hover:text-[var(--ink-muted)]/60'

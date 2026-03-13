@@ -1,4 +1,4 @@
-import { Check, Download, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Square, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, ChevronDown, Download, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Square, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
@@ -13,11 +13,15 @@ import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
 import GlobalAgentsPanel from '@/components/GlobalAgentsPanel';
 import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
-import { ImSettings } from '@/components/ImSettings';
+import { BotPlatformRegistry } from '@/components/ImSettings';
+import { WorkspaceSelectDialog } from '@/components/AgentSettings';
+import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
     getModelsDisplay,
+    getEffectiveModelAliases,
     PRESET_PROVIDERS,
+    type ModelAliases,
     type Provider,
     type ProviderAuthType,
     type ApiProtocol,
@@ -66,7 +70,7 @@ function parsePositiveInt(value: string): number | undefined {
 }
 
 // Settings sub-sections
-type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'agents' | 'im' | 'usage-stats' | 'about';
+type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'sub-agents' | 'agent' | 'usage-stats' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
@@ -132,6 +136,9 @@ interface ProviderEditForm {
     editAuthType?: Extract<ProviderAuthType, 'auth_token' | 'api_key'>;
     editMaxOutputTokens?: string;
     editUpstreamFormat?: 'chat_completions' | 'responses';
+    // Model alias mapping (sub-agent model redirection)
+    editModelAliases?: ModelAliases;
+    showAdvanced?: boolean;
 }
 
 interface SettingsProps {
@@ -157,7 +164,7 @@ interface SettingsProps {
     onRestartAndUpdate?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'agents', 'im', 'usage-stats', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'sub-agents', 'agent', 'usage-stats', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 const ModelTagList = React.memo(function ModelTagList({
@@ -264,6 +271,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         deleteCustomProvider: deleteCustomProviderService,
         savePresetCustomModels,
         removePresetCustomModel: _removePresetCustomModel,
+        saveProviderModelAliases,
     } = useConfig();
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -285,6 +293,16 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     // Track whether Skills/Agents panels are in detail view (to hide the other panel)
     const [skillsInDetail, setSkillsInDetail] = useState(false);
     const [agentsInDetail, setAgentsInDetail] = useState(false);
+    // Agent overlay state for viewing agent config from Settings card list
+    const [overlayAgent, setOverlayAgent] = useState<{ agentId?: string; workspacePath: string } | null>(null);
+
+    const [showWorkspaceSelect, setShowWorkspaceSelect] = useState(false);
+
+
+    const handleWorkspaceSelected = useCallback((project: import('@/config/types').Project) => {
+        setShowWorkspaceSelect(false);
+        setOverlayAgent({ workspacePath: project.path });
+    }, []);
 
     // Stable callback ref for onSectionChange (avoids unnecessary effect triggers)
     const onSectionChangeRef = useRef(onSectionChange);
@@ -1507,6 +1525,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             }
             // Persist provider to disk and refresh providers list
             await addCustomProvider(newProvider);
+            // Set as default only when no valid default exists (avoid overriding user's existing choice)
+            const currentDefault = config.defaultProviderId;
+            const defaultStillExists = currentDefault && providers.some(p => p.id === currentDefault);
+            if (!defaultStillExists) {
+                await updateConfig({ defaultProviderId: newProvider.id });
+            }
             // Trigger verification directly (no debounce — unlike handleSaveApiKey which
             // debounces for keystroke input, creation is a one-shot operation)
             if (customForm.apiKey) {
@@ -1561,11 +1585,14 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     const openProviderManage = (provider: Provider) => {
         // For preset providers, we allow adding custom models
         // For custom providers, we can edit all fields
+        const effectiveAliases = getEffectiveModelAliases(provider, config.providerModelAliases);
         setEditingProvider({
             provider,
             customModels: [],  // TODO: Load from persisted custom models if any
             removedModels: [], // 标记要删除的已保存模型
             newModelInput: '',
+            editModelAliases: effectiveAliases ? { ...effectiveAliases } : { sonnet: '', opus: '', haiku: '' },
+            showAdvanced: false,
             // 为自定义供应商初始化编辑字段
             ...(provider.isBuiltin ? {} : {
                 editName: provider.name,
@@ -1619,7 +1646,16 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     // Save provider edits
     const saveProviderEdits = async () => {
         if (!editingProvider) return;
-        const { provider, customModels, removedModels, editName, editCloudProvider, editApiProtocol, editBaseUrl, editAuthType } = editingProvider;
+        const { provider, customModels, removedModels, editName, editCloudProvider, editApiProtocol, editBaseUrl, editAuthType, editModelAliases } = editingProvider;
+
+        // Save model aliases for preset providers (custom providers store aliases on the Provider object itself)
+        if (provider.isBuiltin && editModelAliases && provider.id !== 'anthropic-sub' && provider.id !== 'anthropic-api') {
+            try {
+                await saveProviderModelAliases(provider.id, editModelAliases);
+            } catch (error) {
+                console.error('[Settings] Failed to save model aliases:', error);
+            }
+        }
 
         if (provider.isBuiltin) {
             // For preset providers: save user-added custom models
@@ -1664,27 +1700,36 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 toast.error('供应商至少需要保留一个模型');
                 return;
             }
+            const finalModels = [
+                ...remainingModels,
+                ...customModels.map((m) => ({
+                    model: m,
+                    modelName: m,
+                    modelSeries: 'custom' as const,
+                })),
+            ];
+            // 若 primaryModel 已被删除，改用第一个可用模型
+            const validPrimary = finalModels.some(m => m.model === provider.primaryModel)
+                ? provider.primaryModel
+                : finalModels[0].model;
             // For custom providers, update the provider and persist to disk
             const updatedProvider: Provider = {
                 ...provider,
                 name: editName.trim(),
                 cloudProvider: editCloudProvider?.trim() || '自定义',
+                primaryModel: validPrimary,
                 authType: editAuthType ?? provider.authType ?? 'auth_token',
                 apiProtocol: editApiProtocol === 'openai' ? 'openai' : undefined,
                 maxOutputTokens: editApiProtocol === 'openai' && editingProvider?.editMaxOutputTokens ? parsePositiveInt(editingProvider.editMaxOutputTokens) : undefined,
                 upstreamFormat: editApiProtocol === 'openai' && editingProvider?.editUpstreamFormat !== 'chat_completions' ? editingProvider?.editUpstreamFormat : undefined,
+                modelAliases: editModelAliases
+                    ? Object.fromEntries(Object.entries(editModelAliases).filter(([, v]) => v)) as ModelAliases
+                    : undefined,
                 config: {
                     ...provider.config,
                     baseUrl: editBaseUrl.trim(),
                 },
-                models: [
-                    ...remainingModels,
-                    ...customModels.map((m) => ({
-                        model: m,
-                        modelName: m,
-                        modelSeries: 'custom',
-                    })),
-                ],
+                models: finalModels,
             };
             try {
                 await updateCustomProvider(updatedProvider);
@@ -1822,7 +1867,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     </button>
                     <button
                         onClick={() => setActiveSection('skills')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'skills' || activeSection === 'agents'
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'skills' || activeSection === 'sub-agents'
                             ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
@@ -1839,8 +1884,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         工具 MCP
                     </button>
                     <button
-                        onClick={() => setActiveSection('im')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'im'
+                        onClick={() => setActiveSection('agent')}
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'agent'
                             ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
@@ -1879,18 +1924,18 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Right content area */}
             <div className="flex-1 overflow-y-auto overscroll-contain">
-                {/* Skills + Agents section uses wider layout */}
-                {(activeSection === 'skills' || activeSection === 'agents') && (
+                {/* Skills + Sub-Agents section uses wider layout */}
+                {(activeSection === 'skills' || activeSection === 'sub-agents') && (
                     <div className="mx-auto max-w-4xl px-8 py-8 space-y-10">
                         {!agentsInDetail && <GlobalSkillsPanel onDetailChange={setSkillsInDetail} />}
                         {!skillsInDetail && <GlobalAgentsPanel onDetailChange={setAgentsInDetail} />}
                     </div>
                 )}
 
-                {/* IM integration section */}
-                {activeSection === 'im' && (
+                {/* Bot Platform Registry (formerly Agent / IM Bot) */}
+                {activeSection === 'agent' && (
                     <div className="mx-auto max-w-4xl px-8 py-8">
-                        <ImSettings />
+                        <BotPlatformRegistry />
                     </div>
                 )}
 
@@ -2562,7 +2607,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         )}
                                     </div>
                                     <p className="mt-3 text-base text-[var(--ink-secondary)]">
-                                        Your Universal AI Assistant
+                                        Your Intent, Amplified
                                     </p>
                                     {updateDownloading && propUpdateVersion && (
                                         <div className="mt-3 flex items-center gap-2 text-sm text-[var(--ink-secondary)]">
@@ -2585,17 +2630,21 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 </div>
                             </div>
 
-                            {/* Product Description */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <div className="space-y-4 text-sm leading-relaxed text-[var(--ink-secondary)]">
+                            {/* Product Description — Developer Letter */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-7 py-6">
+                                <p className="text-xs font-medium uppercase tracking-widest text-[var(--ink-muted)]/50">From the Developer</p>
+                                <div className="mt-4 space-y-5 text-[13px] leading-[1.9] text-[var(--ink-secondary)]">
                                     <p>
-                                        <span className="font-medium text-[var(--ink)]">MyAgents</span> 是一款本地运行的 AI Agent 桌面客户端，基于 Claude Agent SDK 运行，同时支持接入各家大模型与快速切换服务。
+                                        <span className="font-semibold text-[var(--ink)]">MyAgents</span> 是一款住在你电脑里的 AI Agent 桌面客户端，你的个人 AI 中心。基于 Claude Agent SDK 运行，同时支持接入各家大模型与快速切换。所有操作都在本地完成，数据始终留在你的电脑里。
                                     </p>
                                     <p>
-                                        MyAgents 已支持多标签页、多项目管理，让大家可以同时在电脑上跑若干个 Agent。Agent 可以读取文件、创建文档、执行命令——所有操作都在本地完成，让数据始终留在你的电脑里。
+                                        Claude Code 让开发者率先体会到了 AI 加持下的无限生产力，OpenClaw 又让普通人看到了像伙伴一样的主动型 Agent 助手的雏形。而 MyAgents 要做的，是让本地 Agent 成为完全体——当你在电脑前，它能触达你的文件、项目与一切工具，与你精细化地协同工作，完成高质量的产出；当你不在电脑前，它也能像你的分身，7×24 小时感知世界，按照你的意图持续行动。
                                     </p>
-                                    <p className="text-[var(--ink-muted)] italic">
-                                        Claude Code 这类 Agent 让开发者首先见识到了 AGI 的雏形，那么我们希望 MyAgents 成为让更多的非开发者也能体会到创作的乐趣，体会到来自 AI 智能的推背感，成就更好的自己。
+                                    <p>
+                                        不同于每次对话都要重新自我介绍的 AI 工具，MyAgents 里的 Agent 与你的生活、工作深度同步，是一个越来越懂你的搭档。我们希望它成为每个人意图的超级放大器——
+                                    </p>
+                                    <p className="text-center text-[14px] font-medium italic tracking-wide text-[var(--ink)]">
+                                        你有一个想法，And it&apos;s done.
                                     </p>
                                 </div>
                             </div>
@@ -2729,9 +2778,9 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">心跳循环</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">循环任务</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        查看和管理运行中的心跳循环任务（开发调试用）
+                                                        查看和管理运行中的循环任务（开发调试用）
                                                     </p>
                                                 </div>
                                                 <button
@@ -3988,22 +4037,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Custom Provider Modal */}
             {showCustomForm && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-                    <div className="mx-4 w-full max-w-md rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
-                        <div className="mb-5 flex items-center justify-between">
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">添加自定义供应商</h3>
-                            <button
-                                onClick={() => {
-                                    setShowCustomForm(false);
-                                    setCustomForm(EMPTY_CUSTOM_FORM);
-                                }}
-                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
-                            >
-                                <X className="h-5 w-5" />
-                            </button>
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm overflow-y-auto py-8">
+                    <div className="mx-4 w-full max-w-md flex max-h-[90vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                        <div className="flex-shrink-0 px-6 pt-6 pb-4">
+                            <div className="flex items-center justify-between">
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">添加自定义供应商</h3>
+                                <button
+                                    onClick={() => {
+                                        setShowCustomForm(false);
+                                        setCustomForm(EMPTY_CUSTOM_FORM);
+                                    }}
+                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
+                                >
+                                    <X className="h-5 w-5" />
+                                </button>
+                            </div>
                         </div>
 
-                        <div className="space-y-4">
+                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6">
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
                                     供应商名称 <span className="text-[var(--error)]">*</span>
@@ -4219,35 +4270,28 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 )}
                             </div>
 
-                            <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">API Key</label>
-                                <input
-                                    type="password"
-                                    value={customForm.apiKey}
-                                    onChange={(e) => setCustomForm((p) => ({ ...p, apiKey: e.target.value }))}
-                                    placeholder="可选，稍后设置"
-                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                />
-                            </div>
+                            {/* API Key moved to provider list page for consistency with edit flow */}
                         </div>
 
-                        <div className="mt-6 flex gap-3">
-                            <button
-                                onClick={() => {
-                                    setShowCustomForm(false);
-                                    setCustomForm(EMPTY_CUSTOM_FORM);
-                                }}
-                                className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
-                            >
-                                取消
-                            </button>
-                            <button
-                                onClick={handleAddCustomProvider}
-                                disabled={!customForm.name || !customForm.baseUrl || customForm.models.length === 0}
-                                className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
-                            >
-                                添加
-                            </button>
+                        <div className="flex-shrink-0 border-t border-[var(--line)] px-6 py-4">
+                            <div className="flex gap-3">
+                                <button
+                                    onClick={() => {
+                                        setShowCustomForm(false);
+                                        setCustomForm(EMPTY_CUSTOM_FORM);
+                                    }}
+                                    className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
+                                >
+                                    取消
+                                </button>
+                                <button
+                                    onClick={handleAddCustomProvider}
+                                    disabled={!customForm.name || !customForm.baseUrl || customForm.models.length === 0}
+                                    className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+                                >
+                                    添加
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -4255,21 +4299,23 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Provider Management Modal */}
             {editingProvider && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-                    <div className="mx-4 w-full max-w-md rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
-                        <div className="mb-5 flex items-center justify-between">
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">
-                                {editingProvider.provider.isBuiltin ? '管理供应商' : '编辑供应商'}
-                            </h3>
-                            <button
-                                onClick={() => setEditingProvider(null)}
-                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
-                            >
-                                <X className="h-5 w-5" />
-                            </button>
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm overflow-y-auto py-8">
+                    <div className="mx-4 w-full max-w-md flex max-h-[90vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                        <div className="flex-shrink-0 px-6 pt-6 pb-4">
+                            <div className="flex items-center justify-between">
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">
+                                    {editingProvider.provider.isBuiltin ? '管理供应商' : '编辑供应商'}
+                                </h3>
+                                <button
+                                    onClick={() => setEditingProvider(null)}
+                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
+                                >
+                                    <X className="h-5 w-5" />
+                                </button>
+                            </div>
                         </div>
 
-                        <div className="space-y-4">
+                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-6">
                             {/* Provider info - editable for custom, read-only for preset */}
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">供应商名称</label>
@@ -4480,35 +4526,90 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                     </button>
                                 </div>
                             </div>
+
+                            {/* Advanced Options - Model Alias Mapping (not shown for Anthropic providers) */}
+                            {editingProvider.provider.id !== 'anthropic-sub' && editingProvider.provider.id !== 'anthropic-api' && (
+                                <div className="border-t border-[var(--line)] pt-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => setEditingProvider((p) => p ? { ...p, showAdvanced: !p.showAdvanced } : null)}
+                                        className="flex w-full items-center gap-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                                    >
+                                        <ChevronDown className={`h-4 w-4 transition-transform ${editingProvider.showAdvanced ? '' : '-rotate-90'}`} />
+                                        高级选项
+                                    </button>
+                                    {editingProvider.showAdvanced && (() => {
+                                        const aliasModels = [
+                                            { value: '', label: '未设置' },
+                                            ...editingProvider.provider.models
+                                                .filter(m => !editingProvider.removedModels.includes(m.model))
+                                                .map(m => ({ value: m.model, label: m.modelName })),
+                                            ...editingProvider.customModels.map(m => ({ value: m, label: m })),
+                                        ];
+                                        const ALIAS_LABELS: Record<string, string> = {
+                                            opus: 'Opus（大杯）',
+                                            sonnet: 'Sonnet（中杯）',
+                                            haiku: 'Haiku（小杯）',
+                                        };
+                                        return (
+                                            <div className="mt-3">
+                                                <label className="mb-1 block text-sm font-medium text-[var(--ink)]">子 Agent 模型映射</label>
+                                                <p className="mb-3 text-xs leading-relaxed text-[var(--ink-muted)]">
+                                                    Opus 大杯、Sonnet 中杯、Haiku 小杯 — 映射到此供应商的实际模型
+                                                </p>
+                                                <div className="space-y-2.5">
+                                                    {(['opus', 'sonnet', 'haiku'] as const).map((alias) => (
+                                                        <div key={alias} className="flex items-center gap-2.5">
+                                                            <span className="w-[90px] shrink-0 text-xs text-[var(--ink-muted)]">{ALIAS_LABELS[alias]}</span>
+                                                            <CustomSelect
+                                                                value={editingProvider.editModelAliases?.[alias] || ''}
+                                                                options={aliasModels}
+                                                                onChange={(v) => setEditingProvider((p) => p ? {
+                                                                    ...p,
+                                                                    editModelAliases: { ...p.editModelAliases, [alias]: v },
+                                                                } : null)}
+                                                                placeholder="未设置"
+                                                                compact
+                                                                className="flex-1"
+                                                            />
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+                                </div>
+                            )}
                         </div>
 
-                        <div className="mt-6 flex items-center justify-between">
-                            {/* Delete button (only for custom providers) */}
-                            {!editingProvider.provider.isBuiltin ? (
-                                <button
-                                    onClick={() => setDeleteConfirmProvider(editingProvider.provider)}
-                                    className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
-                                >
-                                    <Trash2 className="h-4 w-4" />
-                                    删除
-                                </button>
-                            ) : (
-                                <div />
-                            )}
+                        <div className="flex-shrink-0 border-t border-[var(--line)] px-6 pt-6 pb-4">
+                            <div className="flex items-center justify-between">
+                                {!editingProvider.provider.isBuiltin ? (
+                                    <button
+                                        onClick={() => setDeleteConfirmProvider(editingProvider.provider)}
+                                        className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                    >
+                                        <Trash2 className="h-4 w-4" />
+                                        删除
+                                    </button>
+                                ) : (
+                                    <div />
+                                )}
 
-                            <div className="flex gap-3">
-                                <button
-                                    onClick={() => setEditingProvider(null)}
-                                    className="rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
-                                >
-                                    取消
-                                </button>
-                                <button
-                                    onClick={saveProviderEdits}
-                                    className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
-                                >
-                                    保存
-                                </button>
+                                <div className="flex gap-3">
+                                    <button
+                                        onClick={() => setEditingProvider(null)}
+                                        className="rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
+                                    >
+                                        取消
+                                    </button>
+                                    <button
+                                        onClick={saveProviderEdits}
+                                        className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
+                                    >
+                                        保存
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -4604,6 +4705,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     providers={providers}
                     apiKeys={apiKeys}
                     providerVerifyStatus={providerVerifyStatus}
+                />
+            )}
+
+            {/* Agent detail overlay */}
+            {overlayAgent && (
+                <WorkspaceConfigPanel
+                    agentDir={overlayAgent.workspacePath}
+                    onClose={() => setOverlayAgent(null)}
+                    initialTab="agent"
+                />
+            )}
+
+            {/* Workspace select dialog for Agent upgrade */}
+            {showWorkspaceSelect && (
+                <WorkspaceSelectDialog
+                    projects={projects}
+                    onSelect={handleWorkspaceSelected}
+                    onClose={() => setShowWorkspaceSelect(false)}
                 />
             )}
         </div>

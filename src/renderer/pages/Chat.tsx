@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useToast } from '@/components/Toast';
 import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/DirectoryPanel';
 import DropZoneOverlay from '@/components/DropZoneOverlay';
@@ -106,6 +107,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     historyMessages,
     streamingMessage,
     isLoading,
+    isSessionLoading,
     sessionState,
     unifiedLogs,
     systemInitInfo: _systemInitInfo,
@@ -144,10 +146,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Get config to find current project provider
   const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData } = useConfig();
   const currentProject = projects.find((p) => p.path === agentDir);
+  // Agent workspaces should NOT write config back to project via patchProject
+  // (Agent config is managed separately via cmd_update_agent_config)
+  const isAgentWorkspace = currentProject?.isAgent ?? false;
   // Local provider state: snapshot project's providerId at creation, independent thereafter.
   // Prevents cross-tab pollution when another tab patches the shared project.
   const [selectedProviderId, setSelectedProviderId] = useState<string | undefined>(
-    currentProject?.providerId ?? undefined
+    currentProject?.providerId ?? config.defaultProviderId ?? undefined
   );
   const currentProvider = selectedProviderId
     ? providers.find((p) => p.id === selectedProviderId)
@@ -709,7 +714,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     // Persist to project config (patchProject updates disk AND projects React state,
     // keeping currentProject.mcpEnabledServers in sync for tab-activate sync at L672)
-    if (currentProject) {
+    if (currentProject && !isAgentWorkspace) {
       void patchProject(currentProject.id, { mcpEnabledServers: newEnabled });
     }
 
@@ -763,6 +768,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time sync when project first loads
   }, [currentProject?.id]);
 
+  // 若 selectedModel 不在当前 provider 的 models 中（如模型已被删除），回退到 primaryModel 并更新项目
+  useEffect(() => {
+    if (!currentProject || !currentProvider || joinedExistingSidecarRef.current) return;
+    if (currentProvider.type === 'subscription' || !Array.isArray(currentProvider.models) || currentProvider.models.length === 0) return;
+    if (!selectedModel) return;
+    const modelIds = currentProvider.models.map((m) => m.model);
+    if (modelIds.includes(selectedModel)) return;
+    const fallback = currentProvider.primaryModel;
+    if (fallback) {
+      setSelectedModel(fallback);
+      void patchProject(currentProject.id, { model: fallback });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to specific sub-properties, not full object refs
+  }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject]);
+
   // Sync selectedModel to backend so pre-warm uses the correct model.
   // Without this, backend currentModel stays undefined until the first message,
   // causing a blocking setModel() call during pre-warm → active transition.
@@ -808,7 +828,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption on mount
   }, [joinedExistingSidecar]);
 
-  const { containerRef: messagesContainerRef, spacerRef, scrollToBottom } = useAutoScroll(isLoading, messages.length, sessionId);
+  const { containerRef: messagesContainerRef, spacerRef, scrollToBottom, pauseAutoScroll } = useAutoScroll(isLoading, messages.length, sessionId);
 
   // Auto-focus input when Tab becomes active
   useEffect(() => {
@@ -922,7 +942,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
 
     // Write back to project (last-writer-wins for new tabs)
-    if (currentProject) {
+    if (currentProject && !isAgentWorkspace) {
       void patchProject(currentProject.id, { providerId, model: newProvider?.primaryModel ?? null });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps
@@ -939,7 +959,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     track('model_switch', { model });
 
     setSelectedModel(model);
-    if (currentProject) {
+    if (currentProject && !isAgentWorkspace) {
       void patchProject(currentProject.id, { model });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
@@ -948,7 +968,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Handle permission mode change with project write-back
   const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
     setPermissionMode(mode);
-    if (currentProject) {
+    if (currentProject && !isAgentWorkspace) {
       void patchProject(currentProject.id, { permissionMode: mode });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
@@ -1141,6 +1161,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const { messageId, content, attachments } = rewindTarget;
 
     // 1. 立即关闭对话框 + 乐观更新 UI
+    // Pause auto-scroll to prevent animated scrolling during rewind's DOM changes.
+    // Without this, the smooth scroll animation fights with the browser's natural
+    // scroll clamping (messages removed → scrollHeight shrinks → scrollTop adjusts).
+    pauseAutoScroll(500);
     setRewindTarget(null);
     setMessages(prev => {
       const idx = prev.findIndex(m => m.id === messageId);
@@ -1180,7 +1204,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         setRewindStatus(null);
         setIsLoading(false);
       });
-  }, [rewindTarget, apiPost, setMessages, setIsLoading]);
+  }, [rewindTarget, apiPost, setMessages, setIsLoading, pauseAutoScroll]);
 
   // Retry = rewind to before user message + auto-resend
   // Uses refs for messagesRef/toastRef/handleSendMessageRef — deps are all stable → reference stable
@@ -1201,6 +1225,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const userMessageId = userMsg.id;
 
     // 1. Optimistic UI: truncate to before user message
+    pauseAutoScroll(500);
     setMessages(prev => {
       const idx = prev.findIndex(m => m.id === userMessageId);
       return idx >= 0 ? prev.slice(0, idx) : prev;
@@ -1240,7 +1265,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           setIsLoading(false);
         }
       });
-  }, [apiPost, setMessages, setIsLoading]); // all stable — refs handle the rest
+  }, [apiPost, setMessages, setIsLoading, pauseAutoScroll]); // all stable — refs handle the rest
 
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string) => {
@@ -1297,7 +1322,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             )}
             {/* Project name */}
             {agentDir && (
-              <span className="text-sm font-medium text-[var(--ink)]">
+              <span className="flex items-center gap-1.5 text-sm font-medium text-[var(--ink)]">
+                <WorkspaceIcon icon={currentProject?.icon} size={16} />
                 {agentDir.split(/[/\\]/).filter(Boolean).pop()}
               </span>
             )}
@@ -1433,6 +1459,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               historyMessages={historyMessages}
               streamingMessage={streamingMessage}
               isLoading={isLoading}
+              isSessionLoading={isSessionLoading}
               containerRef={messagesContainerRef}
               spacerRef={spacerRef}
               bottomPadding={140}

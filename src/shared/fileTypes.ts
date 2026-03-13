@@ -49,20 +49,47 @@ export function isImageMimeType(mimeType: string): boolean {
   return ALLOWED_IMAGE_MIME_TYPES.includes(mimeType) || mimeType.startsWith('image/');
 }
 
-/** Text-based file extensions that can be previewed in FilePreviewModal */
-export const PREVIEWABLE_EXTENSIONS = new Set([
-  'txt', 'md', 'json', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'scss',
-  'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'log', 'sh', 'bash',
-  'py', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp', 'swift', 'kt',
-  // Dotfiles (e.g., .gitignore -> extension is 'gitignore')
-  'gitignore', 'dockerignore', 'editorconfig', 'prettierrc', 'eslintrc',
-  'npmrc', 'nvmrc', 'env', 'local', 'example', 'development', 'production',
+/**
+ * Known binary file extensions that cannot be previewed as text.
+ * Strategy: blocklist binary → everything else is assumed text-previewable.
+ * This covers far more file types than a text allowlist ever could
+ * (.dev.vars, .env.dev, Makefile, LICENSE, .tool-versions, etc.).
+ */
+export const BINARY_EXTENSIONS = new Set([
+  // Images (superset of IMAGE_EXTENSIONS — includes raw/vector formats)
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif',
+  'psd', 'ai', 'eps', 'raw', 'cr2', 'nef', 'heic', 'heif', 'avif', 'jxl',
+  // Video
+  'mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm', 'm4v', 'mpg', 'mpeg', '3gp',
+  // Audio
+  'mp3', 'wav', 'aac', 'ogg', 'flac', 'wma', 'm4a', 'opus', 'aiff',
+  // Archives / Compressed
+  'zip', 'tar', 'gz', 'bz2', 'xz', 'rar', '7z', 'zst', 'lz4', 'lzma', 'cab', 'dmg', 'iso',
+  // Executables / Libraries
+  'exe', 'dll', 'so', 'dylib', 'bin', 'app', 'msi', 'deb', 'rpm', 'apk', 'ipa',
+  // Compiled / Object
+  'o', 'obj', 'class', 'pyc', 'pyo', 'wasm', 'elc',
+  // Fonts
+  'ttf', 'otf', 'woff', 'woff2', 'eot',
+  // Documents (binary formats)
+  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'rtf',
+  // Databases
+  'db', 'sqlite', 'sqlite3', 'mdb',
+  // Other binary
+  'dat', 'ds_store', 'swp', 'swo',
 ]);
 
 /**
- * Check if a filename can be previewed as text (code / markdown / plain text)
+ * Check if a filename can be previewed as text (code / markdown / plain text).
+ *
+ * Uses a binary-blocklist strategy: any file that is NOT a known binary format
+ * and NOT an image is considered previewable. This naturally covers dotfiles
+ * (.env, .gitignore), multi-dot names (.dev.vars, .env.dev), and extensionless
+ * files (Makefile, LICENSE, Dockerfile).
  */
 export function isPreviewable(filename: string): boolean {
+  // Extensionless files (Makefile, Dockerfile, LICENSE, etc.) are text
   const ext = getFileExtension(filename);
-  return PREVIEWABLE_EXTENSIONS.has(ext);
+  if (!ext || ext === filename.toLowerCase()) return true;
+  return !BINARY_EXTENSIONS.has(ext);
 }

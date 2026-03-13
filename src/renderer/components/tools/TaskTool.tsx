@@ -5,6 +5,7 @@ import Markdown from '@/components/Markdown';
 import { formatDuration } from '@/components/tools/toolBadgeConfig';
 import { useTabApiOptional } from '@/context/TabContext';
 import { useBackgroundTaskPolling } from '@/hooks/useBackgroundTaskPolling';
+import { getBackgroundTaskStatus, isTerminalStatus, BACKGROUND_TASK_STATUS_EVENT, type BackgroundTaskTerminalStatus } from '@/utils/backgroundTaskStatus';
 import { CheckCircle, ChevronDown, ChevronRight, Clock, Coins, Loader2, Terminal, Wrench, XCircle } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -288,18 +289,21 @@ function TaskCompletedStats({
 // 后台任务统计组件
 function TaskBackgroundStats({
   stats,
-  isComplete,
+  terminalStatus,
   startTime
 }: {
   stats: BackgroundTaskStats | null;
-  isComplete: boolean;
+  terminalStatus: BackgroundTaskTerminalStatus | null;
   startTime: number;
 }) {
   const [frontendElapsed, setFrontendElapsed] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
+  const isDone = terminalStatus !== null;
+  const isSuccess = terminalStatus === 'completed';
+
   useEffect(() => {
-    if (isComplete) {
+    if (isDone) {
       if (intervalRef.current) clearInterval(intervalRef.current);
       return;
     }
@@ -316,7 +320,7 @@ function TaskBackgroundStats({
       cancelAnimationFrame(rafId);
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [startTime, isComplete]);
+  }, [startTime, isDone]);
 
   // Use backend elapsed if available and larger, otherwise frontend timer
   const elapsed = stats?.elapsed && stats.elapsed > frontendElapsed ? stats.elapsed : frontendElapsed;
@@ -330,11 +334,18 @@ function TaskBackgroundStats({
         </span>
 
         {/* 状态 */}
-        {isComplete ? (
-          <div className="flex items-center gap-1.5 text-[var(--success)]">
-            <CheckCircle className="size-3.5" />
-            <span className="font-medium">后台完成</span>
-          </div>
+        {isDone ? (
+          isSuccess ? (
+            <div className="flex items-center gap-1.5 text-[var(--success)]">
+              <CheckCircle className="size-3.5" />
+              <span className="font-medium">后台完成</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 text-[var(--error)]">
+              <XCircle className="size-3.5" />
+              <span className="font-medium">后台失败</span>
+            </div>
+          )
         ) : (
           <div className="flex items-center gap-1.5 text-[var(--accent)]">
             <Loader2 className="size-3.5 animate-spin" />
@@ -476,19 +487,52 @@ export default function TaskTool({ tool }: TaskToolProps) {
     }
   }, [tool.result]);
 
-  // Background task polling
+  // Background task: extract agentId from text result for status matching.
+  // SDK returns "agentId: xxx (...)" in the async_launched tool_result text.
+  const bgAgentId = useMemo(() => {
+    if (!isBackgroundTask || !tool.result) return null;
+    const match = tool.result.match(/agentId:\s*(\S+)/);
+    if (!match?.[1] && tool.result.length > 0) {
+      console.warn('[TaskTool] Background task result has no agentId — SDK text format may have changed');
+    }
+    return match?.[1] ?? null;
+  }, [isBackgroundTask, tool.result]);
+
+  // Terminal status: solely from SDK's task_notification (persisted in module-level Map).
+  // Map survives timing races — if notification arrived before mount, we read it on mount.
+  const [bgTerminalStatus, setBgTerminalStatus] = useState<BackgroundTaskTerminalStatus | null>(null);
+  useEffect(() => {
+    if (!isBackgroundTask || !bgAgentId || bgTerminalStatus) return;
+    const existing = getBackgroundTaskStatus(bgAgentId);
+    if (isTerminalStatus(existing)) {
+      const rafId = requestAnimationFrame(() => setBgTerminalStatus(existing));
+      return () => cancelAnimationFrame(rafId);
+    }
+    const handler = (e: Event) => {
+      const { taskId, status } = (e as CustomEvent).detail;
+      if (taskId === bgAgentId && isTerminalStatus(status)) {
+        setBgTerminalStatus(status);
+      }
+    };
+    window.addEventListener(BACKGROUND_TASK_STATUS_EVENT, handler);
+    return () => window.removeEventListener(BACKGROUND_TASK_STATUS_EVENT, handler);
+  }, [isBackgroundTask, bgAgentId, bgTerminalStatus]);
+
+  const bgComplete = bgTerminalStatus !== null;
+
+  // Live stats polling (for tool count display during execution, NOT for completion)
   const outputFile = isBackgroundTask ? parsedResult?.output_file ?? null : null;
   const tabState = useTabApiOptional();
   const noopApiPost = useCallback(async <T,>(_path: string, _body?: unknown): Promise<T> => { throw new Error('no apiPost'); }, []);
-  const { stats: bgStats, isComplete: bgComplete } = useBackgroundTaskPolling({
+  const { stats: bgStats } = useBackgroundTaskPolling({
     outputFile,
-    isActive: isBackgroundTask && !!outputFile && !isRunning,
+    isActive: isBackgroundTask && !!outputFile && !isRunning && !bgComplete,
     apiPost: tabState?.apiPost ?? noopApiPost
   });
 
   // Show background stats when task is background, not running in foreground,
   // and main Agent hasn't provided a final status yet.
-  // Keep showing even when bgComplete=true so TaskBackgroundStats renders "后台完成".
+  // Keep showing even when bgComplete=true so TaskBackgroundStats renders "后台完成/失败".
   // Only dismiss when parsedResult gets a real completion/error status (e.g. from Phase 4 SSE).
   const showBackgroundStats = isBackgroundTask && !isRunning
     && parsedResult?.status !== 'completed' && parsedResult?.status !== 'error';
@@ -523,7 +567,7 @@ export default function TaskTool({ tool }: TaskToolProps) {
         ) : showBackgroundStats ? (
           <TaskBackgroundStats
             stats={bgStats}
-            isComplete={bgComplete}
+            terminalStatus={bgTerminalStatus}
             startTime={tool.taskStartTime || bgFallbackStartTime}
           />
         ) : parsedResult ? (

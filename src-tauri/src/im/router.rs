@@ -69,6 +69,8 @@ pub struct SessionRouter {
     peer_sessions: HashMap<String, PeerSession>,
     default_workspace: PathBuf,
     http_client: Client,
+    /// Agent ID (if this router belongs to an Agent channel). None for legacy IM bots.
+    agent_id: Option<String>,
 }
 
 /// Create an HTTP client configured for local Sidecar communication.
@@ -90,12 +92,33 @@ impl SessionRouter {
             peer_sessions: HashMap::new(),
             default_workspace,
             http_client: create_sidecar_http_client(),
+            agent_id: None,
         }
     }
 
-    /// Generate session key from IM message (delegates to ImMessage::session_key)
-    pub fn session_key(msg: &ImMessage) -> String {
-        msg.session_key()
+    /// Create a router for an Agent channel (uses `agent:` session key format).
+    pub fn new_for_agent(default_workspace: PathBuf, agent_id: String) -> Self {
+        Self {
+            peer_sessions: HashMap::new(),
+            default_workspace,
+            http_client: create_sidecar_http_client(),
+            agent_id: Some(agent_id),
+        }
+    }
+
+    /// Generate session key from IM message.
+    /// If agent_id is set, uses new format: agent:{agentId}:{channelType}:{type}:{id}
+    /// Otherwise falls back to legacy: im:{platform}:{type}:{id}
+    pub fn session_key(&self, msg: &ImMessage) -> String {
+        if let Some(ref agent_id) = self.agent_id {
+            let source = match msg.source_type {
+                ImSourceType::Private => "private",
+                ImSourceType::Group => "group",
+            };
+            format!("agent:{}:{}:{}:{}", agent_id, msg.platform, source, msg.chat_id)
+        } else {
+            msg.session_key()
+        }
     }
 
     /// Ensure a Sidecar is running for the given session key.
@@ -146,7 +169,7 @@ impl SessionRouter {
             .map(|ps| ps.session_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let owner = SidecarOwner::ImBot(session_key.to_string());
+        let owner = SidecarOwner::Agent(session_key.to_string());
 
         // Use spawn_blocking because ensure_session_sidecar uses reqwest::blocking
         let app_clone = app_handle.clone();
@@ -328,7 +351,7 @@ impl SessionRouter {
     ) -> Result<String, String> {
         // Release current Sidecar
         if let Some(ps) = self.peer_sessions.remove(session_key) {
-            let owner = SidecarOwner::ImBot(session_key.to_string());
+            let owner = SidecarOwner::Agent(session_key.to_string());
             let _ = release_session_sidecar(manager, &ps.session_id, &owner);
         }
 
@@ -361,7 +384,8 @@ impl SessionRouter {
     /// Collect idle sessions that haven't been active for IDLE_TIMEOUT_SECS.
     /// Releases the Sidecar process but preserves the PeerSession (with port=0)
     /// so that the stable session_id can be reused for resume on next message.
-    pub fn collect_idle_sessions(&mut self, manager: &ManagedSidecarManager) {
+    /// Returns the number of sessions collected (for UI notification).
+    pub fn collect_idle_sessions(&mut self, manager: &ManagedSidecarManager) -> usize {
         let now = Instant::now();
         let idle_keys: Vec<String> = self
             .peer_sessions
@@ -373,6 +397,7 @@ impl SessionRouter {
             .map(|(k, _)| k.clone())
             .collect();
 
+        let count = idle_keys.len();
         for key in idle_keys {
             if let Some(ps) = self.peer_sessions.get_mut(&key) {
                 ulog_info!(
@@ -381,11 +406,12 @@ impl SessionRouter {
                     now.duration_since(ps.last_active).as_secs(),
                     &ps.session_id,
                 );
-                let owner = SidecarOwner::ImBot(key.clone());
+                let owner = SidecarOwner::Agent(key.clone());
                 let _ = release_session_sidecar(manager, &ps.session_id, &owner);
                 ps.sidecar_port = 0; // Sidecar released, but session preserved for resume
             }
         }
+        count
     }
 
     /// Get workspace path for a peer session (for attachment file saving).
@@ -460,11 +486,29 @@ impl SessionRouter {
     /// NOT the persisted value. This ensures workspace changes take effect on restart.
     pub fn restore_sessions(&mut self, sessions: &[super::types::ImActiveSession]) {
         for s in sessions {
-            let (source_type, source_id) = parse_session_key(&s.session_key);
+            // TD-2: Migrate session key format if router has agent_id but key uses legacy "im:" prefix.
+            // Old keys: im:{platform}:{type}:{id} → new: agent:{agentId}:{platform}:{type}:{id}
+            let session_key = if let Some(ref agent_id) = self.agent_id {
+                if s.session_key.starts_with("im:") {
+                    // Translate: im:{platform}:{type}:{id} → agent:{agentId}:{platform}:{type}:{id}
+                    let rest = s.session_key.strip_prefix("im:").unwrap_or(&s.session_key);
+                    let migrated = format!("agent:{}:{}", agent_id, rest);
+                    ulog_info!(
+                        "[im-router] Migrated session key: {} → {}",
+                        s.session_key, migrated
+                    );
+                    migrated
+                } else {
+                    s.session_key.clone()
+                }
+            } else {
+                s.session_key.clone()
+            };
+            let (source_type, source_id) = parse_session_key(&session_key);
             self.peer_sessions.insert(
-                s.session_key.clone(),
+                session_key.clone(),
                 PeerSession {
-                    session_key: s.session_key.clone(),
+                    session_key: session_key.clone(),
                     session_id: s.session_id.clone(), // Restore original session_id for resume
                     sidecar_port: 0, // Sidecar not running yet; ensure_sidecar will start it
                     workspace_path: self.default_workspace.clone(),
@@ -548,7 +592,7 @@ impl SessionRouter {
         let keys: Vec<String> = self.peer_sessions.keys().cloned().collect();
         for key in keys {
             if let Some(ps) = self.peer_sessions.remove(&key) {
-                let owner = SidecarOwner::ImBot(key);
+                let owner = SidecarOwner::Agent(key);
                 let _ = release_session_sidecar(manager, &ps.session_id, &owner);
             }
         }
@@ -571,10 +615,21 @@ fn session_key_to_source_str(session_key: &str) -> String {
 }
 
 /// Parse session key into (source_type, source_id)
+/// Supports both legacy and new format:
+///   Legacy: im:{platform}:{private|group}:{id}
+///   New:    agent:{agentId}:{channelType}:{private|group}:{id}
 pub fn parse_session_key(session_key: &str) -> (ImSourceType, String) {
-    // Format: im:{platform}:{private|group}:{id}
     let parts: Vec<&str> = session_key.split(':').collect();
-    if parts.len() >= 4 {
+    if parts.len() >= 5 && parts[0] == "agent" {
+        // New format: agent:{agentId}:{channelType}:{private|group}:{id}
+        let source_type = match parts[3] {
+            "group" => ImSourceType::Group,
+            _ => ImSourceType::Private,
+        };
+        let source_id = parts[4..].join(":");
+        (source_type, source_id)
+    } else if parts.len() >= 4 {
+        // Legacy format: im:{platform}:{private|group}:{id}
         let source_type = match parts[2] {
             "group" => ImSourceType::Group,
             _ => ImSourceType::Private,

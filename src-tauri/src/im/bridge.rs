@@ -55,6 +55,17 @@ pub async fn is_plugin_in_use(plugin_id: &str) -> bool {
     get_registry().lock().await.values().any(|e| e.plugin_id == plugin_id)
 }
 
+/// Return all bot_ids currently using the given plugin_id.
+pub async fn get_bot_ids_using_plugin(plugin_id: &str) -> Vec<String> {
+    get_registry()
+        .lock()
+        .await
+        .iter()
+        .filter(|(_, e)| e.plugin_id == plugin_id)
+        .map(|(bot_id, _)| bot_id.clone())
+        .collect()
+}
+
 // ===== BridgeAdapter =====
 
 pub struct BridgeAdapter {
@@ -689,6 +700,16 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     let npm_pkg_dir = base_dir.join("node_modules").join(&npm_pkg_name);
     let required_fields = extract_required_fields(&npm_pkg_dir).await;
 
+    // Read installed package version from node_modules/{npmSpec}/package.json
+    let dep_pkg_path = npm_pkg_dir.join("package.json");
+    let package_version = if let Ok(content) = tokio::fs::read_to_string(&dep_pkg_path).await {
+        serde_json::from_str::<serde_json::Value>(&content)
+            .ok()
+            .and_then(|v| v.get("version").cloned())
+    } else {
+        None
+    };
+
     ulog_info!("[bridge] Plugin {} installed successfully", plugin_id);
 
     Ok(json!({
@@ -696,6 +717,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         "installDir": base_dir.to_string_lossy(),
         "npmSpec": trimmed,
         "manifest": manifest,
+        "packageVersion": package_version,
         "requiredFields": required_fields,
     }))
 }

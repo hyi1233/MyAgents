@@ -115,7 +115,7 @@ export default memo(function TemplateLibraryDialog({
             const selected = await open({
                 directory: true,
                 multiple: false,
-                title: '选择目标目录',
+                title: '选择工作区地址',
             });
             if (selected && typeof selected === 'string') {
                 setTargetDir(selected);
@@ -227,8 +227,8 @@ export default memo(function TemplateLibraryDialog({
                 throw new Error('Template has no source path');
             }
 
-            // displayName = template name, path may have suffix
-            await onCreateWorkspace(destPath, selectedTemplate.icon, selectedTemplate.name);
+            // displayName = user's project name input (not template name)
+            await onCreateWorkspace(destPath, selectedTemplate.icon, projectName);
             onClose();
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -285,7 +285,7 @@ export default memo(function TemplateLibraryDialog({
             <div className="flex w-[640px] max-h-[80vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
-                    <h2 className="text-lg font-semibold text-[var(--ink)]">从模板创建工作区</h2>
+                    <h2 className="text-lg font-semibold text-[var(--ink)]">从模板创建 Agent</h2>
                     <button
                         onClick={onClose}
                         className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
@@ -491,19 +491,19 @@ export default memo(function TemplateLibraryDialog({
 
                                 {/* Project name */}
                                 <div className="mb-4">
-                                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">项目名称</label>
+                                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">Agent 名称</label>
                                     <input
                                         type="text"
                                         value={projectName}
                                         onChange={(e) => setProjectName(e.target.value.replace(/[/\\]/g, ''))}
                                         className="w-full rounded-[6px] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--ink)] focus:outline-none transition-colors"
-                                        placeholder="输入项目名称"
+                                        placeholder="输入 Agent 名称"
                                     />
                                 </div>
 
                                 {/* Target directory */}
                                 <div className="mb-6">
-                                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">目标目录</label>
+                                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">工作区地址</label>
                                     <div className="flex items-center gap-2">
                                         <div className="flex min-w-0 flex-1 items-center rounded-[6px] border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5">
                                             <span className="truncate text-sm text-[var(--ink-muted)]">
@@ -554,7 +554,7 @@ export default memo(function TemplateLibraryDialog({
                                         ) : (
                                             <Plus className="h-3.5 w-3.5" />
                                         )}
-                                        创建工作区
+                                        创建 Agent
                                     </button>
                                 </div>
                             </>

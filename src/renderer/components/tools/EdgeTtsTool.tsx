@@ -150,6 +150,7 @@ function AudioPlayerBar({ filePath }: { filePath: string }) {
           {/* Filled portion */}
           <div
             className="absolute inset-y-0 left-0 rounded-full bg-[var(--accent)]"
+            // eslint-disable-next-line react-hooks/refs -- draggingRef read during render is intentional: transition must be instant while dragging to avoid lag
             style={{ width: `${displayProgress * 100}%`, transition: draggingRef.current ? 'none' : 'width 200ms' }}
           />
           {/* Thumb knob — only when active */}

@@ -88,7 +88,7 @@ pub trait ImStreamAdapter: ImAdapter {
         message_id: &str,
     ) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
 
-    /// Max message length for this platform (Telegram: 4096, Feishu: 30000).
+    /// Max message length in bytes for this platform (Telegram: 4096, Feishu: 15000).
     fn max_message_length(&self) -> usize;
 
     /// Send an interactive approval card/keyboard and return its message ID.
@@ -144,4 +144,44 @@ pub trait ImStreamAdapter: ImAdapter {
 
     /// Preferred throttle interval in ms for draft edits. Default 1000ms.
     fn preferred_throttle_ms(&self) -> u64 { 1000 }
+}
+
+/// Split a message into chunks at natural break points (paragraph, line, sentence, word).
+/// Used by platform adapters to split oversized messages into multiple sends.
+pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        // Find a char-boundary-safe upper bound (max_len may fall mid-character for CJK/emoji)
+        let mut safe_end = max_len.min(remaining.len());
+        while !remaining.is_char_boundary(safe_end) {
+            safe_end -= 1;
+        }
+
+        // Try to find a good break point within the safe range
+        let search_range = &remaining[..safe_end];
+        let break_point = search_range
+            .rfind("\n\n") // Paragraph break
+            .or_else(|| search_range.rfind('\n')) // Line break
+            .or_else(|| search_range.rfind(". ")) // Sentence
+            .or_else(|| search_range.rfind(' ')) // Word
+            .unwrap_or(safe_end); // Hard cut at char boundary
+
+        let break_at = if break_point == 0 { safe_end } else { break_point };
+
+        chunks.push(remaining[..break_at].to_string());
+        remaining = remaining[break_at..].trim_start();
+    }
+
+    chunks
 }

@@ -14,7 +14,7 @@ pub struct BotConfigPatch {
     pub provider_id: Option<String>,
     pub provider_env_json: Option<String>,
     pub permission_mode: Option<String>,
-    /// Complete MCP server definitions JSON (pushed to Sidecar at runtime, NOT persisted)
+    /// Complete MCP server definitions JSON (pushed to Sidecar at runtime, also persisted for auto-start)
     pub mcp_servers_json: Option<String>,
     /// Enabled MCP server ID list (persisted to imBotConfigs)
     pub mcp_enabled_servers: Option<Vec<String>>,
@@ -633,3 +633,208 @@ impl std::fmt::Display for TelegramError {
 }
 
 impl std::error::Error for TelegramError {}
+
+// ===== Agent Architecture types (v0.1.41) =====
+
+/// Channel-level config overrides (None = inherit from Agent)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelOverrides {
+    pub provider_id: Option<String>,
+    pub provider_env_json: Option<String>,
+    pub model: Option<String>,
+    pub permission_mode: Option<String>,
+    pub tools_deny: Option<Vec<String>>,
+}
+
+/// Channel configuration within an Agent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelConfigRust {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub channel_type: ImPlatform,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub enabled: bool,
+
+    // Platform credentials
+    #[serde(default)]
+    pub bot_token: Option<String>,
+    #[serde(default)]
+    pub telegram_use_draft: Option<bool>,
+    #[serde(default)]
+    pub feishu_app_id: Option<String>,
+    #[serde(default)]
+    pub feishu_app_secret: Option<String>,
+    #[serde(default)]
+    pub dingtalk_client_id: Option<String>,
+    #[serde(default)]
+    pub dingtalk_client_secret: Option<String>,
+    #[serde(default)]
+    pub dingtalk_use_ai_card: Option<bool>,
+    #[serde(default)]
+    pub dingtalk_card_template_id: Option<String>,
+    #[serde(default)]
+    pub openclaw_plugin_id: Option<String>,
+    #[serde(default)]
+    pub openclaw_npm_spec: Option<String>,
+    #[serde(default)]
+    pub openclaw_plugin_config: Option<serde_json::Value>,
+    #[serde(default)]
+    pub openclaw_manifest: Option<serde_json::Value>,
+
+    // User management
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+
+    // Group chat
+    #[serde(default)]
+    pub group_permissions: Vec<GroupPermission>,
+    #[serde(default)]
+    pub group_activation: Option<String>,
+
+    // Overrides
+    #[serde(default)]
+    pub overrides: Option<ChannelOverrides>,
+
+    #[serde(default)]
+    pub setup_completed: Option<bool>,
+}
+
+/// Last active channel tracking for heartbeat/cron routing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastActiveChannel {
+    pub channel_id: String,
+    pub session_key: String,
+    pub last_active_at: String,
+}
+
+/// Agent configuration (read from config.json agents[])
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfigRust {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    pub enabled: bool,
+
+    pub workspace_path: String,
+
+    // AI config (Agent-level defaults)
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider_env_json: Option<String>,
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
+    #[serde(default)]
+    pub mcp_enabled_servers: Option<Vec<String>>,
+    /// Complete MCP server definitions JSON (persisted for auto-start, rebuilt on manual start)
+    #[serde(default)]
+    pub mcp_servers_json: Option<String>,
+
+    // Heartbeat (Agent-level)
+    #[serde(default)]
+    pub heartbeat: Option<HeartbeatConfig>,
+
+    // Channels
+    #[serde(default)]
+    pub channels: Vec<ChannelConfigRust>,
+
+    // Active message routing
+    #[serde(default)]
+    pub last_active_channel: Option<LastActiveChannel>,
+
+    #[serde(default)]
+    pub setup_completed: Option<bool>,
+}
+
+fn default_permission_mode() -> String {
+    "plan".to_string()
+}
+
+/// Agent-level status (aggregates all channel statuses)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatus {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub enabled: bool,
+    pub channels: Vec<ChannelStatus>,
+}
+
+/// Per-channel runtime status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelStatus {
+    pub channel_id: String,
+    pub channel_type: ImPlatform,
+    pub name: Option<String>,
+    pub status: ImStatus,
+    pub bot_username: Option<String>,
+    pub uptime_seconds: u64,
+    pub last_message_at: Option<String>,
+    pub active_sessions: Vec<ImActiveSession>,
+    pub error_message: Option<String>,
+    pub restart_count: u32,
+    pub buffered_messages: usize,
+    pub bind_url: Option<String>,
+    pub bind_code: Option<String>,
+}
+
+impl ChannelConfigRust {
+    /// Convert to ImConfig for backward compatibility with existing start_im_bot logic.
+    pub fn to_im_config(&self, agent: &AgentConfigRust) -> ImConfig {
+        let overrides = self.overrides.as_ref();
+        ImConfig {
+            platform: self.channel_type.clone(),
+            name: self.name.clone().or_else(|| Some(agent.name.clone())),
+            bot_token: self.bot_token.clone().unwrap_or_default(),
+            allowed_users: self.allowed_users.clone(),
+            permission_mode: overrides.and_then(|o| o.permission_mode.clone()).unwrap_or_else(|| agent.permission_mode.clone()),
+            default_workspace_path: Some(agent.workspace_path.clone()),
+            enabled: self.enabled && agent.enabled,
+            feishu_app_id: self.feishu_app_id.clone(),
+            feishu_app_secret: self.feishu_app_secret.clone(),
+            dingtalk_client_id: self.dingtalk_client_id.clone(),
+            dingtalk_client_secret: self.dingtalk_client_secret.clone(),
+            dingtalk_use_ai_card: self.dingtalk_use_ai_card,
+            dingtalk_card_template_id: self.dingtalk_card_template_id.clone(),
+            telegram_use_draft: self.telegram_use_draft,
+            provider_id: overrides.and_then(|o| o.provider_id.clone()).or_else(|| agent.provider_id.clone()),
+            model: overrides.and_then(|o| o.model.clone()).or_else(|| agent.model.clone()),
+            provider_env_json: overrides.and_then(|o| o.provider_env_json.clone()).or_else(|| agent.provider_env_json.clone()),
+            mcp_servers_json: agent.mcp_servers_json.clone(),
+            heartbeat_config: agent.heartbeat.clone(),
+            group_permissions: self.group_permissions.clone(),
+            group_activation: self.group_activation.clone(),
+            group_tools_deny: overrides.and_then(|o| o.tools_deny.clone()).unwrap_or_default(),
+            openclaw_plugin_id: self.openclaw_plugin_id.clone(),
+            openclaw_npm_spec: self.openclaw_npm_spec.clone(),
+            openclaw_plugin_config: self.openclaw_plugin_config.clone(),
+        }
+    }
+}
+
+/// Partial update patch for Agent config (used by cmd_update_agent_config)
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfigPatch {
+    pub name: Option<String>,
+    pub icon: Option<String>,
+    pub enabled: Option<bool>,
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
+    pub provider_env_json: Option<String>,
+    pub permission_mode: Option<String>,
+    pub mcp_enabled_servers: Option<Vec<String>>,
+    pub mcp_servers_json: Option<String>,
+    pub heartbeat_config_json: Option<String>,
+    pub channels: Option<Vec<ChannelConfigRust>>,
+    pub setup_completed: Option<bool>,
+}

@@ -789,3 +789,41 @@ pub async fn cmd_read_file_base64(path: String) -> Result<String, String> {
     let bytes = tokio::fs::read(&path).await.map_err(|e| format!("Failed to read {}: {}", path, e))?;
     Ok(BASE64.encode(&bytes))
 }
+
+/// Open a local file with the system default application.
+/// Bypasses shell plugin URL-only scope restriction.
+#[tauri::command]
+pub async fn cmd_open_file(path: String) -> Result<(), String> {
+    // Validate: path must resolve to an existing file (prevents opening arbitrary commands)
+    let canonical = std::path::Path::new(&path)
+        .canonicalize()
+        .map_err(|e| format!("Invalid path '{}': {}", path, e))?;
+    if !canonical.is_file() {
+        return Err(format!("Not a file: {}", canonical.display()));
+    }
+    let safe_path = canonical.to_string_lossy().to_string();
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&safe_path)
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", safe_path, e))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Use explorer.exe instead of cmd /C start to avoid shell metacharacter injection
+        std::process::Command::new("explorer")
+            .arg(&safe_path)
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", safe_path, e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&safe_path)
+            .spawn()
+            .map_err(|e| format!("Failed to open {}: {}", safe_path, e))?;
+    }
+    Ok(())
+}

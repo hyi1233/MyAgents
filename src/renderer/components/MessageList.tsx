@@ -33,6 +33,7 @@ interface MessageListProps {
   historyMessages: MessageType[];
   streamingMessage: MessageType | null;
   isLoading: boolean;
+  isSessionLoading?: boolean;  // true while loadSession REST API is in-flight
   containerRef: RefObject<HTMLDivElement | null>;
   /** Ref for the bottom spacer — used by useAutoScroll for content-aware targeting */
   spacerRef?: RefObject<HTMLDivElement | null>;
@@ -46,7 +47,7 @@ interface MessageListProps {
   onExitPlanModeApprove?: () => void;
   onExitPlanModeReject?: () => void;
   systemStatus?: string | null;  // SDK system status (e.g., 'compacting')
-  isStreaming?: boolean;          // AI 回复中（传递给 Message 隐藏回溯按钮）
+  isStreaming?: boolean;          // AI 回复中（CSS 控制隐藏回溯按钮，不传给 Message）
   onRewind?: (messageId: string) => void;
   onRetry?: (assistantMessageId: string) => void;
 }
@@ -138,6 +139,7 @@ const MessageList = memo(function MessageList({
   historyMessages,
   streamingMessage,
   isLoading,
+  isSessionLoading,
   containerRef,
   spacerRef,
   bottomPadding,
@@ -200,16 +202,56 @@ const MessageList = memo(function MessageList({
     ? (SYSTEM_STATUS_MESSAGES[systemStatus] || systemStatus)
     : streamingStatusMessage;
 
+  // Fade-in: track when session load completes so content appears with a smooth transition.
+  // contentHidden keeps content at opacity:0 between "session loaded" and "animation start",
+  // preventing the flash-then-fade bug where content briefly renders visible before the animation.
+  const wasSessionLoadingRef = useRef(false);
+  const [fadeIn, setFadeIn] = useState(false);
+  const [contentHidden, setContentHidden] = useState(false);
+
+  useEffect(() => {
+    if (isSessionLoading) {
+      wasSessionLoadingRef.current = true;
+      setFadeIn(false);
+      setContentHidden(true);
+    } else if (wasSessionLoadingRef.current) {
+      wasSessionLoadingRef.current = false;
+      // Content stays hidden (opacity:0) until this RAF fires,
+      // which atomically sets fadeIn=true + contentHidden=false in the same render batch.
+      const rafId = requestAnimationFrame(() => {
+        setFadeIn(true);
+        setContentHidden(false);
+      });
+      return () => cancelAnimationFrame(rafId);
+    }
+  }, [isSessionLoading]);
+
+  const hasMessages = historyMessages.length > 0 || !!streamingMessage;
+
   return (
-    <div ref={containerRef} className={`relative ${containerClasses}`} style={containerStyle}>
-      <div className="mx-auto max-w-3xl space-y-2">
+    <div ref={containerRef} className={`relative ${containerClasses}`} style={containerStyle} data-streaming={isStreaming || undefined}>
+      {/* Centered loading spinner while session is loading */}
+      {isSessionLoading && !hasMessages && (
+        <div className="absolute inset-0 flex items-center justify-center" style={{ paddingBottom: 140 }}>
+          <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>加载对话记录…</span>
+          </div>
+        </div>
+      )}
+      <div
+        className="mx-auto max-w-3xl space-y-2"
+        style={contentHidden ? { opacity: 0 } : fadeIn ? {
+          animation: 'message-list-fade-in 600ms ease-out both',
+        } : undefined}
+        onAnimationEnd={() => setFadeIn(false)}
+      >
         {/* History messages — reference-stable during streaming, zero re-iteration */}
         {historyMessages.map((message) => (
           <Message
             key={message.id}
             message={message}
             isLoading={false}
-            isStreaming={isStreaming}
             onRewind={onRewind}
             onRetry={onRetry}
             exitPlanModeSlot={message.id === exitPlanModeAnchorId ? exitPlanModeSlot : undefined}
@@ -221,7 +263,6 @@ const MessageList = memo(function MessageList({
             key={streamingMessage.id}
             message={streamingMessage}
             isLoading={isLoading}
-            isStreaming={isStreaming}
             onRewind={onRewind}
             onRetry={onRetry}
             exitPlanModeSlot={streamingMessage.id === exitPlanModeAnchorId ? exitPlanModeSlot : undefined}

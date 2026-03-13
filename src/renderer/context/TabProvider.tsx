@@ -37,6 +37,7 @@ import {
     notifyAskUserQuestion,
     notifyPlanModeRequest,
 } from '@/services/notificationService';
+import { setBackgroundTaskStatus, clearAllBackgroundTaskStatuses } from '@/utils/backgroundTaskStatus';
 
 // File-modifying tools that should trigger workspace refresh
 // These tools can create, modify, or delete files in the workspace
@@ -263,6 +264,7 @@ export default function TabProvider({
     }, []);
 
     const [isLoading, setIsLoading] = useState(false);
+    const [isSessionLoading, setIsSessionLoading] = useState(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
     const [logs, setLogs] = useState<string[]>([]);
     const [unifiedLogs, setUnifiedLogs] = useState<LogEntry[]>([]);
@@ -315,6 +317,10 @@ export default function TabProvider({
     const seenIdsRef = useRef<Set<string>>(new Set());
     // Flag to skip message-replay after user clicks "new session"
     const isNewSessionRef = useRef(false);
+    // Flag to skip SSE replays while loadSession REST API is in-flight.
+    // Without this, SSE replays race with loadSession and create intermediate
+    // render states (3→46→249) causing visible scroll jumps on session entry.
+    const isLoadingSessionRef = useRef(false);
     // Ref for cron task exit handler (set by useCronTask hook via context)
     const onCronTaskExitRequestedRef = useRef<((taskId: string, reason: string) => void) | null>(null);
     // Pending attachments to merge with next user message from SSE replay
@@ -345,6 +351,7 @@ export default function TabProvider({
         setPendingEnterPlanMode(null);
         setQueuedMessages([]);
         startedQueueIdsRef.current.clear();
+        clearAllBackgroundTaskStatuses();
     }, []);
 
     const resetSession = useCallback(async (): Promise<boolean> => {
@@ -552,11 +559,17 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping chat:init (new session in progress)');
                     break;
                 }
-                seenIdsRef.current.clear();
-                setHistoryMessages([]);
-                setStreamingMessage(null);
-                setAgentError(null);
-                clearInteractiveState();
+
+                // When loadSession REST API is in-flight, skip the message clear —
+                // loadSession will overwrite historyMessages with the full batch.
+                // Still sync sessionState below so isLoading stays correct.
+                if (!isLoadingSessionRef.current) {
+                    seenIdsRef.current.clear();
+                    setHistoryMessages([]);
+                    setStreamingMessage(null);
+                    setAgentError(null);
+                    clearInteractiveState();
+                }
 
                 // Sync isLoading with backend state on SSE connect/reconnect
                 // This catches cases where message-complete was lost during connection issues
@@ -574,9 +587,10 @@ export default function TabProvider({
             }
 
             case 'chat:message-replay': {
-                // Skip replay if user started a new session
-                if (isNewSessionRef.current) {
-                    console.log('[TabProvider] Skipping message-replay (new session)');
+                // Skip replay if user started a new session or loadSession is in-flight.
+                // During loadSession, SSE replays race with REST and create intermediate
+                // render batches (3→46→249) causing visible scroll jumps.
+                if (isNewSessionRef.current || isLoadingSessionRef.current) {
                     break;
                 }
                 const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } } } | null;
@@ -965,7 +979,7 @@ export default function TabProvider({
                     const model = completePayload?.model || lastModelRef.current || '';
                     const pEnv = lastProviderEnvRef.current;
                     // Fire-and-forget — guard against session switch during async call
-                    generateSessionTitle(sid, userText, assistantText, model, pEnv)
+                    generateSessionTitle(postJson, sid, userText, assistantText, model, pEnv)
                         .then(r => {
                             if (r?.success && r.title && currentSessionIdRef.current === sid) {
                                 onTitleChangeRef.current?.(r.title);
@@ -1245,9 +1259,15 @@ export default function TabProvider({
             // Background task lifecycle (SDK Task tool)
             case 'chat:task-started':
             case 'chat:task-notification': {
-                // Logged for debugging; frontend rendering handled by TaskTool component
-                // via existing subagent stream events and output_file polling.
                 console.log(`[TabProvider ${tabId}] ${eventName}:`, data);
+                // Persist status to module-level Map + dispatch DOM event so TaskTool
+                // components can read it regardless of mount timing.
+                if (eventName === 'chat:task-notification') {
+                    const payload = data as { taskId?: string; status?: string };
+                    if (payload.taskId && payload.status) {
+                        setBackgroundTaskStatus(payload.taskId, payload.status);
+                    }
+                }
                 break;
             }
 
@@ -1302,14 +1322,27 @@ export default function TabProvider({
                         if (!seenIdsRef.current.has(msgId)) {
                             seenIdsRef.current.add(msgId);
 
-                            // Prefer backend-provided attachments (authoritative, includes savedPath).
-                            // Fall back to frontend queued message snapshot for preview URLs.
+                            // Merge backend attachments (authoritative path/size) with frontend preview URLs.
+                            // Backend savedAttachments have relativePath but no previewUrl;
+                            // frontend queuedMessages have the original data URL previews.
                             let attachments = payload.userMessage.attachments;
-                            if (!attachments?.length) {
-                                const queuedMsg = queuedMessagesRef.current?.find(
-                                    q => q.queueId === payload.queueId
-                                );
-                                attachments = queuedMsg?.images?.map(img => ({
+                            // Look up queued message by real queueId first;
+                            // fall back to first opt-* entry when queue:started arrives
+                            // before .then() replaces the optimistic ID (known race).
+                            const queuedMsg = queuedMessagesRef.current?.find(
+                                q => q.queueId === payload.queueId
+                            ) ?? queuedMessagesRef.current?.find(
+                                q => q.queueId.startsWith('opt-') && q.images?.length
+                            );
+                            if (attachments?.length && queuedMsg?.images?.length) {
+                                // Merge: enrich server attachments with frontend previewUrl
+                                attachments = attachments.map(att => {
+                                    const match = queuedMsg.images!.find(img => img.name === att.name);
+                                    return match?.preview ? { ...att, previewUrl: match.preview } : att;
+                                });
+                            } else if (!attachments?.length && queuedMsg?.images?.length) {
+                                // Fallback: server sent no attachments, use frontend snapshot
+                                attachments = queuedMsg.images.map(img => ({
                                     id: img.id,
                                     name: img.name,
                                     size: 0,
@@ -1394,6 +1427,12 @@ export default function TabProvider({
 
         const sse = createSseConnection(tabId, currentSessionIdRef);
         sse.setEventHandler(handleSseEvent);
+        sse.setStatusHandler((status) => {
+            if (status === 'disconnected' || status === 'failed') {
+                setIsConnected(false);
+                setIsLoading(false);
+            }
+        });
         sseRef.current = sse;
 
         try {
@@ -1567,12 +1606,7 @@ export default function TabProvider({
                 if (localQueueId) {
                     setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
                 }
-                setMessages(prev => [...prev, {
-                    id: `error-${crypto.randomUUID()}`,
-                    role: 'assistant' as const,
-                    content: `发送失败: ${response.error ?? '未知错误'}`,
-                    timestamp: new Date(),
-                }]);
+                setAgentError(response.error ?? '发送失败');
                 pendingAttachmentsRef.current = null;
             }
         }).catch((error) => {
@@ -1580,12 +1614,8 @@ export default function TabProvider({
             if (localQueueId) {
                 setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
             }
-            setMessages(prev => [...prev, {
-                id: `error-${crypto.randomUUID()}`,
-                role: 'assistant' as const,
-                content: `发送失败: ${error instanceof Error ? error.message : '网络错误'}`,
-                timestamp: new Date(),
-            }]);
+            const msg = error instanceof Error ? error.message : '网络错误';
+            setAgentError(msg === 'Failed to fetch' ? '网络连接中断，请重试' : msg);
             pendingAttachmentsRef.current = null;
         });
 
@@ -1653,6 +1683,8 @@ export default function TabProvider({
     ): Promise<boolean> => {
         try {
             console.log(`[TabProvider ${tabId}] Loading session: ${targetSessionId}`);
+            isLoadingSessionRef.current = true;
+            setIsSessionLoading(true);
 
             // Check if session is already activated by another Tab or CronTask (Session singleton constraint)
             const activation = await getSessionActivation(targetSessionId);
@@ -1663,6 +1695,8 @@ export default function TabProvider({
                     window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.JUMP_TO_TAB, {
                         detail: { targetTabId: activation.tab_id, sessionId: targetSessionId }
                     }));
+                    isLoadingSessionRef.current = false;
+                    setIsSessionLoading(false);
                     return false;
                 }
 
@@ -1681,6 +1715,8 @@ export default function TabProvider({
                 // Session not found is not necessarily an error - it may have been deleted
                 // or be a newly created empty session. Log as info, not error.
                 console.log(`[TabProvider ${tabId}] Session ${targetSessionId} not found in storage (may be deleted or empty)`);
+                isLoadingSessionRef.current = false;
+                setIsSessionLoading(false);
                 return false;
             }
 
@@ -1733,6 +1769,8 @@ export default function TabProvider({
             seenIdsRef.current.clear();
             isNewSessionRef.current = false; // Allow SSE replays again
             isStreamingRef.current = false;  // Stop any streaming state
+            isLoadingSessionRef.current = false;
+            setIsSessionLoading(false);
             setHistoryMessages(loadedMessages);
             setStreamingMessage(null);
             // Only reset loading state if not explicitly skipped
@@ -1752,12 +1790,14 @@ export default function TabProvider({
                 onTitleChangeRef.current?.(response.session.title);
             }
 
-            // Also update backend to switch session (for continuity)
-            await postJson('/sessions/switch', { sessionId: targetSessionId });
+            // Notify backend about session switch (fire-and-forget — UI is already updated)
+            void postJson('/sessions/switch', { sessionId: targetSessionId });
 
             console.log(`[TabProvider ${tabId}] Loaded ${loadedMessages.length} messages from session`);
             return true;
         } catch (error) {
+            isLoadingSessionRef.current = false;
+            setIsSessionLoading(false);
             const errorMessage = error instanceof Error ? error.message : String(error);
             const errorStack = error instanceof Error ? error.stack : undefined;
             console.error(`[TabProvider ${tabId}] Load session failed:`, errorMessage);
@@ -1987,6 +2027,7 @@ export default function TabProvider({
         historyMessages,
         streamingMessage,
         isLoading,
+        isSessionLoading,
         sessionState,
         logs,
         unifiedLogs,
@@ -2027,7 +2068,7 @@ export default function TabProvider({
         // Cron task exit handler ref (mutable, no need in deps)
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
-        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, isLoading, sessionState,
+        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, isLoading, isSessionLoading, sessionState,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage

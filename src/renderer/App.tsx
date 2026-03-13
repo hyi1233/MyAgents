@@ -615,13 +615,41 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
 
-  // Keyboard shortcuts: Cmd+T (new tab), Cmd+W (close tab), Cmd+Shift+[/] (switch tab)
+  // Keyboard shortcuts: Cmd+T, Cmd+W, Cmd+Shift+[/], Cmd+1~9, Ctrl+Tab/Ctrl+Shift+Tab
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isMac = navigator.platform.toLowerCase().includes('mac');
       const modKey = isMac ? e.metaKey : e.ctrlKey;
 
+      // --- Ctrl+Tab / Ctrl+Shift+Tab: cycle through tabs (both platforms use Ctrl) ---
+      if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Tab') {
+        e.preventDefault();
+        const tabs = tabsRef.current;
+        const activeId = activeTabIdRef.current;
+        if (tabs.length <= 1 || !activeId) return;
+        const idx = tabs.findIndex((t) => t.id === activeId);
+        if (idx === -1) return;
+        const newIdx = e.shiftKey
+          ? (idx - 1 + tabs.length) % tabs.length   // wrap backward
+          : (idx + 1) % tabs.length;                 // wrap forward
+        setActiveTabId(tabs[newIdx].id);
+        return;
+      }
+
       if (!modKey) return;
+
+      // --- Cmd/Ctrl + 1~9: jump to Nth tab (9 = last tab) ---
+      const digit = parseInt(e.key, 10);
+      if (digit >= 1 && digit <= 9 && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        const tabs = tabsRef.current;
+        if (tabs.length === 0) return;
+        const targetIdx = digit === 9 ? tabs.length - 1 : digit - 1;
+        if (targetIdx < tabs.length) {
+          setActiveTabId(tabs[targetIdx].id);
+        }
+        return;
+      }
 
       if (e.key === 't' || e.key === 'T') {
         e.preventDefault();
@@ -1508,7 +1536,7 @@ export default function App() {
       {exitConfirmState && (
         <ConfirmDialog
           title="退出应用"
-          message={`有 ${exitConfirmState.runningTaskCount} 个心跳循环正在运行中。退出后任务将被停止。确定要退出吗？`}
+          message={`有 ${exitConfirmState.runningTaskCount} 个循环任务正在运行中。退出后任务将被停止。确定要退出吗？`}
           confirmText="退出"
           cancelText="取消"
           confirmVariant="danger"

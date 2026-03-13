@@ -180,8 +180,9 @@ impl HeartbeatRunner {
         let config = self.config.read().await.clone();
         let is_high_priority = reason.is_high_priority();
 
-        // Gate 1: Enabled check
-        if !config.enabled {
+        // Gate 1: Enabled check (high-priority wakes bypass — agent-level heartbeat
+        // sends delegated wakes to per-channel runners that have enabled=false)
+        if !config.enabled && !is_high_priority {
             ulog_debug!("[heartbeat] Skipped: disabled");
             return;
         }
@@ -382,7 +383,7 @@ impl HeartbeatRunner {
 }
 
 /// Check if current time is within the active hours window.
-fn is_in_active_hours(hours: &ActiveHours) -> bool {
+pub fn is_in_active_hours(hours: &ActiveHours) -> bool {
     // Parse timezone
     let tz: chrono_tz::Tz = match hours.timezone.parse() {
         Ok(tz) => tz,

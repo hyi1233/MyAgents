@@ -17,6 +17,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import TaskCenterOverlay from '@/components/TaskCenterOverlay';
 import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, WorkspaceCard, WorkspaceEditDialog } from '@/components/launcher';
+import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import { useConfig } from '@/hooks/useConfig';
 import { type Project, type Provider, type PermissionMode, type McpServerDefinition } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
@@ -26,6 +27,7 @@ import {
 } from '@/config/configService';
 import { deleteCronTask, stopCronTask, startCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
+import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { CronTask } from '@/types/cronTask';
 import type { InitialMessage } from '@/types/tab';
@@ -60,6 +62,22 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // Filter out internal projects (e.g. ~/.myagents diagnostic workspace)
     const visibleProjects = useMemo(() => projects.filter(p => !p.internal), [projects]);
 
+    // Poll agent statuses only when any project has proactive mode
+    const hasAnyAgent = useMemo(() => visibleProjects.some(p => p.isAgent), [visibleProjects]);
+    const { statuses: agentStatuses } = useAgentStatuses(hasAnyAgent);
+
+    // Build agent lookup: project path → { agent config, runtime status }
+    const agentLookup = useMemo(() => {
+        const map = new Map<string, { agent: NonNullable<typeof config.agents>[number]; status?: (typeof agentStatuses)[string] }>();
+        if (!config.agents) return map;
+        for (const agent of config.agents) {
+            const key = agent.workspacePath.replace(/\\/g, '/');
+            map.set(key, { agent, status: agentStatuses[agent.id] });
+        }
+        return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- config.agents is the actual dependency; full config would cause unnecessary recomputes
+    }, [config.agents, agentStatuses]);
+
     const [_addError, setAddError] = useState<string | null>(null);
     const [launchingProjectId, setLaunchingProjectId] = useState<string | null>(null);
     const [showLogs, setShowLogs] = useState(false);
@@ -68,6 +86,8 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [selectedCronTask, setSelectedCronTask] = useState<CronTask | null>(null);
     const [showTemplateDialog, setShowTemplateDialog] = useState(false);
     const [editingProject, setEditingProject] = useState<Project | null>(null);
+    // Agent overlay — opens WorkspaceConfigPanel for agent settings or upgrade
+    const [agentOverlay, setAgentOverlay] = useState<{ workspacePath: string; initialTab: 'agent' } | null>(null);
 
     // ===== Launcher-specific state for BrandSection =====
 
@@ -193,6 +213,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     }, [isLoading, selectedWorkspace?.id, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode]);
 
     // Write-back handlers: persist Launcher setting changes to the selected project
+
     const handleLauncherPermissionModeChange = useCallback((mode: PermissionMode) => {
         setLauncherPermissionMode(mode);
         if (selectedWorkspace) {
@@ -429,6 +450,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleCloseTemplateDialog = useCallback(() => setShowTemplateDialog(false), []);
     const handleCloseEditDialog = useCallback(() => setEditingProject(null), []);
 
+    // Agent overlay handlers
+    const handleAgentSettings = useCallback((project: Project) => {
+        setAgentOverlay({ workspacePath: project.path, initialTab: 'agent' });
+    }, []);
+    const handleCloseAgentOverlay = useCallback(() => setAgentOverlay(null), []);
+
     return (
         <div className="flex h-full flex-col overflow-hidden bg-[var(--paper)] text-[var(--ink)]">
             {/* Path Input Dialog (browser dev mode) */}
@@ -506,8 +533,8 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     {/* Workspaces Header */}
                     <div className="mx-6 border-t border-[var(--line)]" />
                     <div className="flex flex-shrink-0 items-center justify-between px-6 py-4">
-                        <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-                            工作区
+                        <h2 className="text-[13px] font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
+                            Agent 工作区
                         </h2>
                         <div className="flex items-center gap-3">
                             {config.showDevTools && (
@@ -562,16 +589,21 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                             </div>
                         ) : (
                             <div className="grid grid-cols-2 gap-3">
-                                {visibleProjects.map((project) => (
-                                    <WorkspaceCard
-                                        key={project.id}
-                                        project={project}
-                                        onLaunch={handleLaunch}
-                                        onRemove={handleRemoveProject}
-                                        onEdit={setEditingProject}
-                                        isLoading={launchingProjectId === project.id && isStarting}
-                                    />
-                                ))}
+                                {visibleProjects.map((project) => {
+                                    const agentData = agentLookup.get(project.path.replace(/\\/g, '/'));
+                                    return (
+                                        <WorkspaceCard
+                                            key={project.id}
+                                            project={project}
+                                            agent={agentData?.agent}
+                                            agentStatus={agentData?.status}
+                                            onLaunch={handleLaunch}
+                                            onRemove={handleRemoveProject}
+                                            onAgentSettings={handleAgentSettings}
+                                            isLoading={launchingProjectId === project.id && isStarting}
+                                        />
+                                    );
+                                })}
                             </div>
                         )}
                     </div>
@@ -616,6 +648,15 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     project={editingProject}
                     onSave={handleEditProject}
                     onClose={handleCloseEditDialog}
+                />
+            )}
+
+            {/* Agent Config Overlay */}
+            {agentOverlay && (
+                <WorkspaceConfigPanel
+                    agentDir={agentOverlay.workspacePath}
+                    onClose={handleCloseAgentOverlay}
+                    initialTab={agentOverlay.initialTab}
                 />
             )}
         </div>

@@ -488,7 +488,7 @@ impl TelegramAdapter {
 
     /// Send message with Markdown, auto-split if needed
     pub async fn send_message(&self, chat_id: &str, text: &str) -> Result<Option<i64>, TelegramError> {
-        let chunks = split_message(text, 4096);
+        let chunks = super::adapter::split_message(text, 4096);
         let total = chunks.len();
         let mut last_message_id = None;
 

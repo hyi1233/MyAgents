@@ -156,9 +156,11 @@ export async function getSessionStats(sessionId: string): Promise<SessionDetaile
 
 /**
  * Generate a short AI-powered session title from the first QA exchange.
- * Uses Global Sidecar (apiPostJson) since title generation is tab-independent.
+ * MUST use tab-scoped API (postJson) since session metadata lives on the Tab Sidecar.
+ * Using global apiPostJson would send the request to the Global Sidecar which returns 404.
  */
 export async function generateSessionTitle(
+    postJson: <T>(path: string, body?: unknown) => Promise<T>,
     sessionId: string,
     userMessage: string,
     assistantReply: string,
@@ -166,7 +168,7 @@ export async function generateSessionTitle(
     providerEnv?: { baseUrl?: string; apiKey?: string; authType?: string; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' },
 ): Promise<{ success: boolean; title?: string }> {
     try {
-        return await apiPostJson<{ success: boolean; title?: string }>(
+        return await postJson<{ success: boolean; title?: string }>(
             '/api/generate-session-title',
             { sessionId, userMessage, assistantReply, model, providerEnv },
         );

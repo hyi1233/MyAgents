@@ -137,6 +137,7 @@ import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
 import { broadcast, createSseClient, getClients } from './sse';
 import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifySubscription } from './provider-verify';
 import { createBridgeHandler } from './openai-bridge';
+import { registerBridgeSeedFn } from './bridge-cache';
 import { generateTitle } from './title-generator';
 
 type ImagePayload = {
@@ -1116,6 +1117,7 @@ async function main() {
     },
     logger: (msg) => console.log(msg),
   });
+  registerBridgeSeedFn((entries) => bridgeHandler.seedThoughtSignatures(entries));
 
   console.log(`[startup] Bun.serve() binding to 127.0.0.1:${port}...`);
 
@@ -2595,6 +2597,77 @@ async function main() {
         } catch (error) {
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Rename failed' },
+            500
+          );
+        }
+      }
+
+      // Move files/folders to a target directory
+      if (pathname === '/agent/move' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { sourcePaths?: string[]; targetDir?: string };
+          const sourcePaths = payload?.sourcePaths;
+          const targetDir = payload?.targetDir?.trim() ?? '';
+
+          if (!sourcePaths || !Array.isArray(sourcePaths) || sourcePaths.length === 0) {
+            return jsonResponse({ success: false, error: 'sourcePaths is required.' }, 400);
+          }
+
+          // Resolve target directory (empty string = workspace root)
+          const resolvedTargetDir = targetDir
+            ? resolveAgentPath(currentAgentDir, targetDir)
+            : currentAgentDir;
+          if (!resolvedTargetDir) {
+            return jsonResponse({ success: false, error: 'Invalid target directory.' }, 400);
+          }
+          if (!existsSync(resolvedTargetDir) || !statSync(resolvedTargetDir).isDirectory()) {
+            return jsonResponse({ success: false, error: 'Target must be an existing directory.' }, 400);
+          }
+
+          const movedFiles: Array<{ oldPath: string; newPath: string }> = [];
+          const errors: string[] = [];
+
+          for (const src of sourcePaths) {
+            const resolvedSrc = resolveAgentPath(currentAgentDir, src.trim());
+            if (!resolvedSrc || !existsSync(resolvedSrc)) {
+              errors.push(`Not found: ${src}`);
+              continue;
+            }
+
+            // Prevent moving a directory into itself or its descendant
+            if (resolvedTargetDir === resolvedSrc || resolvedTargetDir.startsWith(resolvedSrc + sep)) {
+              errors.push(`Cannot move folder into itself: ${src}`);
+              continue;
+            }
+
+            // Skip if already in the target directory
+            if (dirname(resolvedSrc) === resolvedTargetDir) continue;
+
+            const itemName = basename(resolvedSrc);
+            let destination = join(resolvedTargetDir, itemName);
+
+            // Auto-rename on conflict
+            if (existsSync(destination)) {
+              const ext = extname(itemName);
+              const base = ext ? itemName.slice(0, -ext.length) : itemName;
+              let counter = 1;
+              do {
+                destination = join(resolvedTargetDir, `${base} (${counter})${ext}`);
+                counter++;
+              } while (existsSync(destination));
+            }
+
+            await rename(resolvedSrc, destination);
+            movedFiles.push({
+              oldPath: relative(currentAgentDir, resolvedSrc),
+              newPath: relative(currentAgentDir, destination),
+            });
+          }
+
+          return jsonResponse({ success: true, movedFiles, errors: errors.length > 0 ? errors : undefined });
+        } catch (error) {
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Move failed' },
             500
           );
         }
@@ -4502,9 +4575,12 @@ async function main() {
       const projectCommandsBaseDir = hasValidAgentDir ? join(currentAgentDir, '.claude', 'commands') : '';
 
       // GET /api/skills - List all skills (with scope filter)
+      // Supports ?agentDir= for listing skills from a specific workspace (e.g. from Launcher)
       if (pathname === '/api/skills' && request.method === 'GET') {
         try {
           const scope = url.searchParams.get('scope') || 'all';
+          const queryAgentDir = url.searchParams.get('agentDir');
+          const { skillsDir: effectiveSkillsDir } = getProjectBaseDirs(queryAgentDir);
           const skillsConfigForList = readSkillsConfig();
           const skills: Array<{
             name: string;
@@ -4543,8 +4619,9 @@ async function main() {
             }
           };
 
-          if ((scope === 'all' || scope === 'project') && projectSkillsBaseDir) {
-            scanSkills(projectSkillsBaseDir, 'project');
+          const resolvedProjectSkillsDir = effectiveSkillsDir || projectSkillsBaseDir;
+          if ((scope === 'all' || scope === 'project') && resolvedProjectSkillsDir) {
+            scanSkills(resolvedProjectSkillsDir, 'project');
           }
           if (scope === 'all' || scope === 'user') {
             scanSkills(userSkillsBaseDir, 'user');
@@ -4690,6 +4767,34 @@ async function main() {
 
             try {
               copyDirRecursiveSync(srcDir, destDir, '[api/skill/sync-from-claude]');
+
+              // Ensure SKILL.md exists — Claude Code may use different file names
+              const skillMdPath = join(destDir, 'SKILL.md');
+              if (!existsSync(skillMdPath)) {
+                // Sanitize folder name for YAML frontmatter (escape quotes and backslashes)
+                const safeName = folder.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                // Look for any .md file to use as the skill definition
+                const mdFiles = readdirSync(destDir).filter(f => f.endsWith('.md') && f !== 'SKILL.md');
+                if (mdFiles.length > 0) {
+                  // Use the first .md file as SKILL.md source
+                  const srcMd = join(destDir, mdFiles[0]);
+                  const mdContent = readFileSync(srcMd, 'utf-8');
+                  // Check if it already has frontmatter; if not, add minimal frontmatter
+                  if (mdContent.startsWith('---')) {
+                    writeFileSync(skillMdPath, mdContent, 'utf-8');
+                  } else {
+                    const skillContent = `---\nname: "${safeName}"\ndescription: "Imported from Claude Code"\n---\n\n${mdContent}`;
+                    writeFileSync(skillMdPath, skillContent, 'utf-8');
+                  }
+                  console.log(`[api/skill/sync-from-claude] Created SKILL.md from ${mdFiles[0]} for "${folder}"`);
+                } else {
+                  // No .md files — create minimal SKILL.md
+                  const minimalContent = `---\nname: "${safeName}"\ndescription: "Imported from Claude Code"\n---\n\nSkill imported from Claude Code.\n`;
+                  writeFileSync(skillMdPath, minimalContent, 'utf-8');
+                  console.log(`[api/skill/sync-from-claude] Created minimal SKILL.md for "${folder}"`);
+                }
+              }
+
               synced++;
               if (process.env.DEBUG === '1') {
                 console.log(`[api/skill/sync-from-claude] Synced skill "${folder}"`);
@@ -5253,9 +5358,12 @@ async function main() {
 
       // ============= COMMANDS MANAGEMENT API =============
       // GET /api/command-items - List all commands
+      // Supports ?agentDir= for listing commands from a specific workspace (e.g. from Launcher)
       if (pathname === '/api/command-items' && request.method === 'GET') {
         try {
           const scope = url.searchParams.get('scope') || 'all';
+          const queryAgentDir = url.searchParams.get('agentDir');
+          const { commandsDir: effectiveCommandsDir } = getProjectBaseDirs(queryAgentDir);
           const commandItems: Array<{
             name: string;
             fileName: string;
@@ -5289,8 +5397,9 @@ async function main() {
             }
           };
 
-          if ((scope === 'all' || scope === 'project') && projectCommandsBaseDir) {
-            scanCommands(projectCommandsBaseDir, 'project');
+          const resolvedProjectCommandsDir = effectiveCommandsDir || projectCommandsBaseDir;
+          if ((scope === 'all' || scope === 'project') && resolvedProjectCommandsDir) {
+            scanCommands(resolvedProjectCommandsDir, 'project');
           }
           if (scope === 'all' || scope === 'user') {
             scanCommands(userCommandsBaseDir, 'user');
@@ -6293,8 +6402,11 @@ async function main() {
           const cronEvents = drainedEvents.filter(e => e.event === 'cron_complete');
           const otherEvents = drainedEvents.filter(e => e.event !== 'cron_complete');
 
-          // Skip AI call if HEARTBEAT.md is empty AND no system events AND not high-priority
-          if (!heartbeatMdContent && drainedEvents.length === 0 && !payload.isHighPriority) {
+          // Skip AI call if HEARTBEAT.md is empty AND no system events.
+          // Always skip regardless of priority — CronComplete events are in drainedEvents
+          // so they won't be affected. The isHighPriority flag is for bypassing per-channel
+          // enabled=false gate (agent-level heartbeat delegation), NOT for skipping this check.
+          if (!heartbeatMdContent && drainedEvents.length === 0) {
             console.log('[im/heartbeat] Skipped: HEARTBEAT.md is empty and no pending events');
             return jsonResponse({ status: 'silent', reason: 'empty_heartbeat_md' });
           }
@@ -6496,6 +6608,12 @@ async function main() {
       if (pathname === '/v1/messages' && request.method === 'POST') {
         const bridgeConfig = getOpenAiBridgeConfig();
         if (bridgeConfig) {
+          // Diagnostic: log incoming model name to verify sub-agent requests reach the bridge
+          try {
+            const clonedReq = request.clone();
+            const body = await clonedReq.json() as { model?: string };
+            console.log(`[bridge] Incoming request: model=${body.model ?? '(none)'}, bridge_model_override=${bridgeConfig.model ?? '(none)'}`);
+          } catch { /* ignore parse errors for diagnostic */ }
           try {
             return await bridgeHandler(request);
           } catch (error) {

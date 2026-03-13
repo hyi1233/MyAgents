@@ -17,6 +17,11 @@ import { formatSSE } from './utils/sse-writer';
 const DEFAULT_TIMEOUT = 300_000; // 5 minutes
 const THOUGHT_SIG_CACHE_MAX = 500; // Max cached thought_signatures to prevent unbounded growth
 
+// Gemini-documented dummy value to skip thought_signature validation
+// when the real signature is unavailable (e.g., cross-model history, injected tool calls).
+// See: https://ai.google.dev/gemini-api/docs/thought-signatures
+const THOUGHT_SIG_SKIP_VALIDATOR = 'skip_thought_signature_validator';
+
 /** Detect proxy URL from environment (respects no_proxy for the target URL) */
 export function getProxyForUrl(url: string): string | undefined {
   const proxy = process.env.https_proxy || process.env.HTTPS_PROXY
@@ -41,8 +46,15 @@ export function getProxyForUrl(url: string): string | undefined {
   return proxy;
 }
 
+export interface BridgeHandler {
+  /** Handle an incoming Anthropic-format request */
+  (request: Request): Promise<Response>;
+  /** Seed the thought_signature cache (e.g., from persisted session history) */
+  seedThoughtSignatures(entries: Array<{ id: string; thought_signature: string }>): void;
+}
+
 /** Create a bridge handler that translates Anthropic → OpenAI → Anthropic */
-export function createBridgeHandler(config: BridgeConfig): (request: Request) => Promise<Response> {
+export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
   const log = config.logger === null ? () => {} : (config.logger ?? console.log);
   const timeout = config.upstreamTimeout ?? DEFAULT_TIMEOUT;
   const translateReasoning = config.translateReasoning ?? true;
@@ -54,7 +66,7 @@ export function createBridgeHandler(config: BridgeConfig): (request: Request) =>
   // Capped at THOUGHT_SIG_CACHE_MAX to prevent unbounded growth in long-lived sessions.
   const thoughtSignatureCache = new Map<string, string>();
 
-  return async (request: Request): Promise<Response> => {
+  const handler = async (request: Request): Promise<Response> => {
     // 1. Extract API key from request headers
     const apiKey = request.headers.get('x-api-key') || request.headers.get('authorization')?.replace('Bearer ', '') || '';
 
@@ -84,24 +96,44 @@ export function createBridgeHandler(config: BridgeConfig): (request: Request) =>
       ? translateRequestToResponses(anthropicReq, { modelOverride: upstream.model, modelMapping: config.modelMapping })
       : translateRequest(anthropicReq, { modelMapping: config.modelMapping, modelOverride: upstream.model });
 
-    // 4a. Re-inject cached thought_signatures into tool_calls (Gemini thinking models)
-    // The Claude Agent SDK strips non-standard fields from tool_use blocks, so
-    // thought_signature is lost between turns. Re-inject from our per-session cache.
-    if (!isResponses && thoughtSignatureCache.size > 0) {
+    // 4a. Normalize thought_signatures on tool_calls (Gemini thinking models).
+    // Gemini requires thought_signature on tool_calls in conversation history.
+    // In OpenAI-compat format, Gemini expects it at extra_content.google.thought_signature.
+    // The Claude Agent SDK strips non-standard fields, so we re-inject from cache.
+    // We normalize ALL tool_calls to have BOTH locations (direct + extra_content):
+    //   - Sig exists at one location → copy to the other (normalization)
+    //   - No sig at either → inject from cache or Google-documented dummy fallback
+    if (!isResponses) {
       const chatReq = translatedReq as OpenAIRequest;
-      let injected = 0;
+      let injectedCached = 0;
+      let injectedDummy = 0;
+      let normalized = 0;
       for (const msg of chatReq.messages) {
         if (msg.role === 'assistant' && 'tool_calls' in msg && msg.tool_calls) {
           for (const tc of msg.tool_calls) {
-            if (!tc.thought_signature && thoughtSignatureCache.has(tc.id)) {
-              tc.thought_signature = thoughtSignatureCache.get(tc.id)!;
-              injected++;
+            const existingSig = tc.thought_signature
+              || tc.extra_content?.google?.thought_signature;
+            if (existingSig) {
+              // Normalize: ensure both locations have the sig
+              if (!tc.thought_signature || !tc.extra_content?.google?.thought_signature) {
+                tc.thought_signature = existingSig;
+                tc.extra_content = { ...tc.extra_content, google: { ...tc.extra_content?.google, thought_signature: existingSig } };
+                normalized++;
+              }
+            } else {
+              // No sig anywhere — inject from cache or dummy
+              const cached = thoughtSignatureCache.get(tc.id);
+              const sig = cached || THOUGHT_SIG_SKIP_VALIDATOR;
+              tc.thought_signature = sig;
+              tc.extra_content = { ...tc.extra_content, google: { ...tc.extra_content?.google, thought_signature: sig } };
+              if (cached) injectedCached++;
+              else injectedDummy++;
             }
           }
         }
       }
-      if (injected > 0) {
-        log(`[bridge] Injected ${injected} cached thought_signature(s) into tool_calls`);
+      if (injectedCached > 0 || injectedDummy > 0 || normalized > 0) {
+        log(`[bridge] thought_signatures: ${injectedCached} cached, ${injectedDummy} dummy, ${normalized} normalized`);
       }
     }
 
@@ -194,6 +226,18 @@ export function createBridgeHandler(config: BridgeConfig): (request: Request) =>
         : handleNonStreamResponse(upstreamResp, anthropicReq.model, translateReasoning, log, thoughtSignatureCache);
     }
   };
+
+  // Expose cache seeding for session resume (thought_signatures from persisted history)
+  // Uses cacheThoughtSignatures() to enforce THOUGHT_SIG_CACHE_MAX consistently.
+  handler.seedThoughtSignatures = (entries: Array<{ id: string; thought_signature: string }>) => {
+    cacheThoughtSignatures(entries, thoughtSignatureCache, THOUGHT_SIG_CACHE_MAX);
+    if (entries.length > 0) {
+      log(`[bridge] Seeded ${entries.length} thought_signature(s) from session history`);
+    }
+  };
+
+  // Safe: function object with an attached method property matches BridgeHandler's callable + method shape
+  return handler as BridgeHandler;
 }
 
 async function handleNonStreamResponse(
@@ -263,16 +307,23 @@ function handleStreamResponse(
               continue; // Skip malformed chunks
             }
 
-            // Cache thought_signatures from streaming tool call chunks (Gemini thinking models)
+            // Cache thought_signatures from streaming tool call chunks (Gemini thinking models).
+            // Gemini OpenAI-compat format puts it at: extra_content.google.thought_signature
+            // Also check direct thought_signature field for forward compatibility.
             if (thoughtSignatureCache) {
               const delta = chunk.choices?.[0]?.delta;
               if (delta?.tool_calls) {
                 for (const tc of delta.tool_calls) {
-                  if (tc.id && tc.thought_signature) {
-                    thoughtSignatureCache.set(tc.id, tc.thought_signature);
+                  if (tc.id) {
+                    const sig = tc.thought_signature
+                      || tc.extra_content?.google?.thought_signature;
+                    if (sig) {
+                      thoughtSignatureCache.set(tc.id, sig);
+                      log(`[bridge] Cached thought_signature for ${tc.id} (len=${sig.length})`);
+                    }
                   }
                 }
-                // Evict oldest if over cap (rare in streaming — tool calls per response are few)
+                // Evict oldest if over cap
                 if (thoughtSignatureCache.size > THOUGHT_SIG_CACHE_MAX) {
                   const excess = thoughtSignatureCache.size - THOUGHT_SIG_CACHE_MAX;
                   const iter = thoughtSignatureCache.keys();
@@ -414,16 +465,18 @@ function jsonError(status: number, type: string, message: string): Response {
   );
 }
 
-/** Extract and cache thought_signatures from tool calls (non-stream response) */
+/** Extract and cache thought_signatures from tool calls (non-stream response).
+ * Checks both direct thought_signature and extra_content.google.thought_signature (Gemini OpenAI-compat). */
 function cacheThoughtSignatures(
-  toolCalls: { id: string; thought_signature?: string }[] | undefined,
+  toolCalls: { id: string; thought_signature?: string; extra_content?: { google?: { thought_signature?: string } } }[] | undefined,
   cache: Map<string, string>,
   maxSize = THOUGHT_SIG_CACHE_MAX,
 ): void {
   if (!toolCalls) return;
   for (const tc of toolCalls) {
-    if (tc.id && tc.thought_signature) {
-      cache.set(tc.id, tc.thought_signature);
+    const sig = tc.thought_signature || tc.extra_content?.google?.thought_signature;
+    if (tc.id && sig) {
+      cache.set(tc.id, sig);
     }
   }
   // Evict oldest entries if cache exceeds max size

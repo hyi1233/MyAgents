@@ -131,8 +131,12 @@ export class StreamTranslator {
         index: this.contentIndex,
         content_block: {
           type: 'tool_use', id, name, input: {},
-          // Gemini thinking models: pass through thought_signature (always in first chunk)
-          ...(tc.thought_signature ? { thought_signature: tc.thought_signature } : {}),
+          // Gemini thinking models: pass through thought_signature.
+          // Check both direct field and extra_content.google.thought_signature (OpenAI-compat format).
+          ...((() => {
+            const sig = tc.thought_signature || tc.extra_content?.google?.thought_signature;
+            return sig ? { thought_signature: sig } : {};
+          })()),
         },
       });
     }

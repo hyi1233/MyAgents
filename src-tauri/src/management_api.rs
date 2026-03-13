@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use crate::cron_task::{
     self, CronDelivery, CronSchedule, CronTask, CronTaskConfig, TaskProviderEnv,
 };
-use crate::im::{self, ManagedImBots};
+use crate::im::{self, ManagedImBots, ManagedAgents};
 use crate::im::adapter::ImStreamAdapter;
 use crate::im::types::MediaType;
 
@@ -23,6 +23,9 @@ static MANAGEMENT_PORT: OnceLock<u16> = OnceLock::new();
 
 /// Global IM bots state (set once at startup for wake endpoint)
 static IM_BOTS_STATE: OnceLock<ManagedImBots> = OnceLock::new();
+
+/// Global Agent state (set once at startup)
+static AGENT_STATE: OnceLock<ManagedAgents> = OnceLock::new();
 
 /// Get the management API port (returns 0 if not started)
 pub fn get_management_port() -> u16 {
@@ -34,8 +37,17 @@ pub fn set_im_bots_state(bots: ManagedImBots) {
     let _ = IM_BOTS_STATE.set(bots);
 }
 
+/// Set the Agent state for the management API (called once at startup)
+pub fn set_agent_state(agents: ManagedAgents) {
+    let _ = AGENT_STATE.set(agents);
+}
+
 fn get_im_bots() -> Option<&'static ManagedImBots> {
     IM_BOTS_STATE.get()
+}
+
+fn get_agents() -> Option<&'static ManagedAgents> {
+    AGENT_STATE.get()
 }
 
 /// Start the internal management API server on a random port
@@ -364,28 +376,66 @@ struct WakeRequest {
     text: Option<String>,
 }
 
+/// Look up a bot instance by ID — checks ManagedAgents first (primary path), then
+/// falls back to ManagedImBots (legacy compatibility, usually empty after migration).
+/// Returns (router Arc, heartbeat wake_tx) with locks already dropped.
+async fn find_bot_refs(bot_id: &str) -> Option<(
+    std::sync::Arc<tokio::sync::Mutex<im::router::SessionRouter>>,
+    Option<tokio::sync::mpsc::Sender<im::types::WakeReason>>,
+)> {
+    // Check agent channels first (primary path after v0.1.41 migration)
+    if let Some(agents) = get_agents() {
+        let agents_guard = agents.lock().await;
+        for agent in agents_guard.values() {
+            if let Some(ch_inst) = agent.channels.get(bot_id) {
+                return Some((
+                    std::sync::Arc::clone(&ch_inst.bot_instance.router),
+                    ch_inst.bot_instance.heartbeat_wake_tx.clone(),
+                ));
+            }
+        }
+    }
+    // Legacy fallback: ManagedImBots (for backward compatibility — usually empty)
+    if let Some(bots) = get_im_bots() {
+        let bots_guard = bots.lock().await;
+        if let Some(instance) = bots_guard.get(bot_id) {
+            return Some((
+                std::sync::Arc::clone(&instance.router),
+                instance.heartbeat_wake_tx.clone(),
+            ));
+        }
+    }
+    None
+}
+
+/// Look up a bot's adapter by ID — checks ManagedAgents first, then legacy ManagedImBots.
+async fn find_bot_adapter(bot_id: &str) -> Option<std::sync::Arc<im::AnyAdapter>> {
+    // Check agent channels first (primary path)
+    if let Some(agents) = get_agents() {
+        let agents_guard = agents.lock().await;
+        for agent in agents_guard.values() {
+            if let Some(ch_inst) = agent.channels.get(bot_id) {
+                return Some(std::sync::Arc::clone(&ch_inst.bot_instance.adapter));
+            }
+        }
+    }
+    // Legacy fallback
+    if let Some(bots) = get_im_bots() {
+        let bots_guard = bots.lock().await;
+        if let Some(instance) = bots_guard.get(bot_id) {
+            return Some(std::sync::Arc::clone(&instance.adapter));
+        }
+    }
+    None
+}
+
 async fn wake_bot_handler(
     Json(payload): Json<WakeRequest>,
 ) -> Json<serde_json::Value> {
-    let bots = match get_im_bots() {
-        Some(b) => b,
-        None => return Json(serde_json::json!({ "ok": false, "error": "IM state not available" })),
+    let (router, wake_tx) = match find_bot_refs(&payload.bot_id).await {
+        Some(refs) => refs,
+        None => return Json(serde_json::json!({ "ok": false, "error": "Bot not found" })),
     };
-
-    // Extract Arc refs from instance, then drop bots_guard early to avoid
-    // holding the IM lock during potentially slow HTTP requests.
-    // (Same pattern as deliver_cron_result_to_bot in cron_task.rs)
-    let (router, wake_tx) = {
-        let bots_guard = bots.lock().await;
-        let instance = match bots_guard.get(&payload.bot_id) {
-            Some(i) => i,
-            None => return Json(serde_json::json!({ "ok": false, "error": "Bot not found" })),
-        };
-        (
-            std::sync::Arc::clone(&instance.router),
-            instance.heartbeat_wake_tx.clone(),
-        )
-    }; // bots_guard dropped here
 
     // Step 1: If text provided, try to POST system event to Bot Sidecar
     if let Some(ref text) = payload.text {
@@ -435,23 +485,13 @@ struct SendMediaRequest {
 async fn send_media_handler(
     Json(req): Json<SendMediaRequest>,
 ) -> Json<serde_json::Value> {
-    let bots = match get_im_bots() {
-        Some(b) => b,
+    // Get adapter from the bot instance (checks legacy IM bots, then agent channels)
+    let adapter: std::sync::Arc<im::AnyAdapter> = match find_bot_adapter(&req.bot_id).await {
+        Some(a) => a,
         None => return Json(serde_json::json!({
-            "ok": false, "error": "IM state not available"
+            "ok": false, "error": format!("Bot not found: {}", req.bot_id)
         })),
     };
-
-    // Get adapter from the bot instance (clone Arc, drop lock early)
-    let adapter: std::sync::Arc<im::AnyAdapter> = {
-        let bots_guard = bots.lock().await;
-        match bots_guard.get(&req.bot_id) {
-            Some(instance) => std::sync::Arc::clone(&instance.adapter),
-            None => return Json(serde_json::json!({
-                "ok": false, "error": format!("Bot not found: {}", req.bot_id)
-            })),
-        }
-    }; // bots_guard dropped here
 
     // Read the file
     let path = std::path::Path::new(&req.file_path);

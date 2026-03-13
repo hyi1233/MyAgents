@@ -20,6 +20,7 @@ import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage } from './types/session';
 import { broadcast } from './sse';
+import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
@@ -254,6 +255,8 @@ type ToolUseState = {
   isLoading?: boolean;
   isError?: boolean;
   subagentCalls?: SubagentToolCall[];
+  /** Gemini thinking models: opaque signature that must be round-tripped on tool calls */
+  thought_signature?: string;
 };
 
 type SubagentToolCall = {
@@ -266,6 +269,8 @@ type SubagentToolCall = {
   result?: string;
   isLoading?: boolean;
   isError?: boolean;
+  /** Gemini thinking models: opaque signature that must be round-tripped on tool calls */
+  thought_signature?: string;
 };
 
 type ContentBlock = {
@@ -2299,6 +2304,7 @@ function handleToolUseStart(tool: {
   name: string;
   input: Record<string, unknown>;
   streamIndex: number;
+  thought_signature?: string;
 }): void {
   flushPendingMidTurnQueue();
   const message = ensureAssistantMessage();
@@ -2347,6 +2353,7 @@ function handleSubagentToolUseStart(
     name: string;
     input: Record<string, unknown>;
     streamIndex?: number;
+    thought_signature?: string;
   }
 ): void {
   const parentTool = findToolBlockById(parentToolUseId);
@@ -2984,6 +2991,22 @@ function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
       messageSequence = parsedId + 1;
     }
   }
+
+  // Seed Bridge thought_signature cache from persisted tool_use blocks
+  // (Gemini thinking models require round-tripping this field; the cache is lost on sidecar restart)
+  const thoughtSigEntries: Array<{ id: string; thought_signature: string }> = [];
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'tool_use' && block.tool?.thought_signature) {
+          thoughtSigEntries.push({ id: block.tool.id, thought_signature: block.tool.thought_signature });
+        }
+      }
+    }
+  }
+  if (thoughtSigEntries.length > 0) {
+    seedBridgeThoughtSignatures(thoughtSigEntries);
+  }
 }
 
 /**
@@ -3409,7 +3432,7 @@ export async function enqueueUserMessage(
   if (!isSessionBusy) {
     await applySessionConfig(model, permissionMode);
 
-    // Update local tracking even if SDK call is skipped (first message)
+    // Update local tracking even if SDK call is skipped (e.g., first message before pre-warm)
     if (permissionMode && permissionMode !== currentPermissionMode) {
       currentPermissionMode = permissionMode;
       if (isDebugMode) console.log(`[agent] permission mode set to: ${permissionMode}`);
@@ -3417,6 +3440,21 @@ export async function enqueueUserMessage(
     if (model && model !== currentModel) {
       currentModel = model;
       if (isDebugMode) console.log(`[agent] model set to: ${model}`);
+    }
+  } else if (shouldAbortSession) {
+    // Session is being restarted (abort for MCP/agents config change). Stage permission/model
+    // for the next session start. Without this, user's permission mode is lost during restart
+    // and the next pre-warm uses the stale default (e.g., 'auto' instead of 'fullAgency').
+    // Only update during abort — NOT during normal streaming or queued messages, to maintain
+    // the "config locked while streaming" contract. canUseTool() reads currentPermissionMode
+    // live (line ~4081), so updating it mid-turn would change permission behavior unexpectedly.
+    if (permissionMode && permissionMode !== currentPermissionMode) {
+      currentPermissionMode = permissionMode;
+      if (isDebugMode) console.log(`[agent] permission mode staged for restart: ${permissionMode}`);
+    }
+    if (model && model !== currentModel) {
+      currentModel = model;
+      if (isDebugMode) console.log(`[agent] model staged for restart: ${model}`);
     }
   }
 
@@ -4390,11 +4428,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             broadcast('chat:thinking-start', { index: streamEvent.index });
           } else if (streamEvent.content_block.type === 'tool_use') {
             streamIndexToToolId.set(streamEvent.index, streamEvent.content_block.id);
+            // Extract thought_signature from content block (Gemini thinking models)
+            const contentBlock = streamEvent.content_block as { id: string; name: string; input?: Record<string, unknown>; thought_signature?: string };
             const toolPayload = {
-              id: streamEvent.content_block.id,
-              name: streamEvent.content_block.name,
-              input: streamEvent.content_block.input || {},
-              streamIndex: streamEvent.index
+              id: contentBlock.id,
+              name: contentBlock.name,
+              input: contentBlock.input || {},
+              streamIndex: streamEvent.index,
+              ...(contentBlock.thought_signature ? { thought_signature: contentBlock.thought_signature } : {}),
             };
             if (sdkMessage.parent_tool_use_id) {
               handleSubagentToolUseStart(sdkMessage.parent_tool_use_id, toolPayload);
@@ -5127,6 +5168,28 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     if (!item) {
       console.log('[messageGenerator] Received null — exiting (abort or session end)');
       return; // generator return → SDK endInput() → stdin EOF → subprocess 退出
+    }
+
+    // Transition from pre-warm to active when processing a queued message.
+    // This handles a race: if enqueueUserMessage was called during session abort
+    // (shouldAbortSession=true), the pre-warm→active transition was skipped there.
+    // A new session then starts in pre-warm mode, and the messageGenerator picks up
+    // the queued message — but nobody transitions isPreWarming to false. Setting it
+    // false HERE ensures that when system_init arrives from the SDK (after this yield),
+    // it goes through the direct-broadcast path (line ~4256) instead of being buffered.
+    // Without this, the frontend never receives system_init, so currentSessionIdRef
+    // stays as the pending placeholder and title generation sends the wrong sessionId → 404.
+    if (isPreWarming) {
+      isPreWarming = false;
+      if (systemInitInfo) {
+        sessionRegistered = true;
+        broadcast('chat:system-init', { info: systemInitInfo, sessionId });
+      }
+      if (preWarmTimer) {
+        clearTimeout(preWarmTimer);
+        preWarmTimer = null;
+      }
+      console.log(`[agent] pre-warm → active (from queued message), sessionRegistered=${sessionRegistered}`);
     }
 
     // 排队消息的延迟渲染

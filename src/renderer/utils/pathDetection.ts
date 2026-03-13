@@ -9,9 +9,9 @@ import { AUDIO_EXTENSIONS } from '@/utils/audioPlayer';
 /**
  * Common file extensions that strongly indicate a file path.
  *
- * NOTE: This set is intentionally broader than PREVIEWABLE_EXTENSIONS in shared/fileTypes.ts.
+ * NOTE: This set is for path detection only, not for preview eligibility.
  * - PATH_EXTENSIONS: used for "does this look like a path?" heuristic (includes images, locks, etc.)
- * - PREVIEWABLE_EXTENSIONS: used for "can we open this in FilePreviewModal?" (text-based only)
+ * - isPreviewable() in shared/fileTypes.ts: uses a binary-blocklist strategy for preview eligibility
  */
 const PATH_EXTENSIONS = new Set([
   // Web / JS / TS

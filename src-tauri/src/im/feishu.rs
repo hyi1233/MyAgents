@@ -124,6 +124,11 @@ enum ListKind {
     Ordered(u64), // current item number
 }
 
+/// Safe single-message size limit (bytes). Feishu API has a ~150KB request body limit.
+/// After markdown→Post JSON conversion + double JSON encoding, 15000 bytes of raw markdown
+/// is a conservative safe ceiling for a single message.
+const FEISHU_SPLIT_THRESHOLD: usize = 15000;
+
 // ── Card Kit v2.0 helpers ──────────────────────────────────────
 
 /// Check if text contains markdown tables or fenced code blocks that benefit
@@ -955,12 +960,38 @@ impl FeishuAdapter {
     }
 
     /// Auto-detecting send: Card Kit v2.0 for table/code content, Post for plain text.
+    /// Automatically splits messages that exceed the safe size limit into multiple sends.
     pub async fn send_text_message(&self, chat_id: &str, text: &str) -> Result<Option<String>, String> {
-        if should_use_card(text) {
-            self.send_card_message(chat_id, text).await
-        } else {
-            self.send_post_message(chat_id, text).await
+        if text.len() <= FEISHU_SPLIT_THRESHOLD {
+            // Single message — use auto-detect (Card or Post)
+            return if should_use_card(text) {
+                self.send_card_message(chat_id, text).await
+            } else {
+                self.send_post_message(chat_id, text).await
+            };
         }
+
+        // Split and send as multiple messages
+        let chunks = super::adapter::split_message(text, FEISHU_SPLIT_THRESHOLD);
+        let total = chunks.len();
+        let mut last_msg_id = None;
+        for (i, chunk) in chunks.iter().enumerate() {
+            let decorated = if total == 1 {
+                chunk.clone()
+            } else if i < total - 1 {
+                format!("{}\n\n_(续…)_", chunk)
+            } else {
+                format!("_(接上条)_\n\n{}", chunk)
+            };
+            // Each chunk uses auto-detect independently
+            let msg_id = if should_use_card(&decorated) {
+                self.send_card_message(chat_id, &decorated).await?
+            } else {
+                self.send_post_message(chat_id, &decorated).await?
+            };
+            last_msg_id = msg_id;
+        }
+        Ok(last_msg_id)
     }
 
     /// Send a Card Kit v2.0 interactive message with markdown content.
@@ -2186,7 +2217,7 @@ impl super::adapter::ImStreamAdapter for FeishuAdapter {
     }
 
     fn max_message_length(&self) -> usize {
-        30000
+        FEISHU_SPLIT_THRESHOLD
     }
 
     async fn finalize_message(
