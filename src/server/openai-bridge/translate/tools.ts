@@ -43,8 +43,12 @@ export function translateToolCalls(toolCalls: OpenAIToolCall[]): {
     id: tc.id || generateToolUseId(),
     name: tc.function.name,
     input: safeParseJson(tc.function.arguments),
-    // Gemini thinking models require round-tripping thought_signature on tool calls
-    ...(tc.thought_signature ? { thought_signature: tc.thought_signature } : {}),
+    // Gemini thinking models require round-tripping thought_signature on tool calls.
+    // Check both direct field and extra_content.google.thought_signature (OpenAI-compat format).
+    ...((() => {
+      const sig = tc.thought_signature || tc.extra_content?.google?.thought_signature;
+      return sig ? { thought_signature: sig } : {};
+    })()),
   }));
 }
 

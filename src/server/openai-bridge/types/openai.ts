@@ -48,6 +48,11 @@ export type OpenAIContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string; detail?: string } };
 
+/** Gemini extension: thought_signature nested in extra_content for OpenAI-compatible format */
+export interface GeminiExtraContent {
+  google?: { thought_signature?: string };
+}
+
 export interface OpenAIToolCall {
   id: string;
   type: 'function';
@@ -55,8 +60,10 @@ export interface OpenAIToolCall {
     name: string;
     arguments: string;
   };
-  /** Gemini thinking models require round-tripping this field on tool calls */
+  /** Gemini thinking models require round-tripping this field on tool calls (direct field) */
   thought_signature?: string;
+  /** Gemini OpenAI-compat format: thought_signature at extra_content.google.thought_signature */
+  extra_content?: GeminiExtraContent;
 }
 
 export interface OpenAIToolDefinition {
@@ -139,6 +146,8 @@ export interface OpenAIStreamToolCall {
     name?: string;
     arguments?: string;
   };
-  /** Gemini thinking models include this on tool call chunks */
+  /** Gemini thinking models include this on tool call chunks (direct field) */
   thought_signature?: string;
+  /** Gemini OpenAI-compat format: thought_signature at extra_content.google.thought_signature */
+  extra_content?: GeminiExtraContent;
 }
