@@ -248,7 +248,7 @@ export default function ChatInput({
     >
       <div className="mx-auto max-w-3xl">
         <div
-          className={`rounded-3xl bg-white/95 p-2 shadow-[0_20px_60px_rgba(15,23,42,0.15)] backdrop-blur-xl dark:bg-neutral-900/90 dark:shadow-[0_16px_50px_rgba(0,0,0,0.65)] ${
+          className={`rounded-3xl bg-white/95 p-2 shadow-sm backdrop-blur-xl dark:bg-neutral-900/90 ${
             isDragActive ?
               'ring-2 ring-neutral-400/80 dark:ring-neutral-500/80'
             : 'ring-1 ring-neutral-200/80 dark:ring-neutral-700/70'

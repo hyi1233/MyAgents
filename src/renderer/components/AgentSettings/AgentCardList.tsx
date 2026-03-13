@@ -5,6 +5,7 @@ import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import type { AgentConfig } from '../../../shared/types/agent';
 import type { Project } from '@/config/types';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
+import { HeartPulse } from 'lucide-react';
 import WorkspaceIcon from '../launcher/WorkspaceIcon';
 import { DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
 
@@ -49,7 +50,7 @@ export default function AgentCardList({ onSelectAgent }: AgentCardListProps) {
   if (agents.length === 0) {
     return (
       <div className="flex flex-col items-center rounded-xl border border-dashed border-[var(--line)] px-8 py-16">
-        <span className="text-3xl">🦞</span>
+        <HeartPulse className="h-8 w-8 text-[var(--heartbeat)]" />
         <p className="mt-3 text-sm text-[var(--ink-muted)]">
           尚未创建 Agent。在工作区设置中可以将工作区升级为 Agent。
         </p>

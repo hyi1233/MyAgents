@@ -1117,7 +1117,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
           />
         )}
 
-        <div className={`relative border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl ${
+        <div className={`relative border border-[var(--line)] bg-[var(--paper-elevated)] shadow-md ${
           cronModeEnabled && !cronTask && cronConfig
             ? 'rounded-b-2xl rounded-t-none border-t-0'  // StatusBar visible: no top rounded, no top border
             : 'rounded-2xl'  // Normal: fully rounded

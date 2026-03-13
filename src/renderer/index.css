@@ -225,9 +225,11 @@
   --duration-slow: 300ms;
 }
 
-/* Prevent scroll chaining at root level */
+/* Viewport-locked app: prevent document-level scrolling entirely.
+   All scrolling is handled by inner containers (MessageList, panels, etc.). */
 html,
 body {
+  overflow: hidden;
   overscroll-behavior: none;
 }
 

@@ -243,7 +243,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
               )}
             </div>
           )}
-          <article className="relative w-fit max-w-[66%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-lg select-text">
+          <article className="relative w-fit max-w-[66%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-md select-text">
             {hasAttachments && (
               <div className={hasText ? 'mb-2' : ''}>
                 <AttachmentPreviewList

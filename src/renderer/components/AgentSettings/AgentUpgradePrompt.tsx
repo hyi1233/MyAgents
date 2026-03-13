@@ -1,5 +1,6 @@
 // Shown when a workspace is not yet an Agent — explains benefits + upgrade button
 import { useCallback, useEffect, useRef } from 'react';
+import { HeartPulse } from 'lucide-react';
 import { useConfig } from '@/hooks/useConfig';
 import type { AgentConfig } from '../../../shared/types/agent';
 import { addAgentConfig } from '@/config/services/agentConfigService';
@@ -49,7 +50,7 @@ export default function AgentUpgradePrompt({ projectId, workspacePath, onUpgrade
 
   return (
     <div className="flex flex-col items-center justify-center gap-6 py-12">
-      <div className="text-4xl">🦞</div>
+      <HeartPulse className="h-10 w-10 text-[var(--heartbeat)]" />
       <h2 className="text-lg font-semibold text-[var(--ink)]">
         升级为 Agent
       </h2>

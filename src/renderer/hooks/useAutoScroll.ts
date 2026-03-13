@@ -234,7 +234,8 @@ export function useAutoScroll(
       const contentFollowTarget = contentEnd - element.clientHeight + CONTENT_BOTTOM_GAP;
       const naturalTarget = Math.max(userMsgTarget, contentFollowTarget);
 
-      if (spacer) {
+      // Only expand spacer when we actually need to scroll down
+      if (spacer && naturalTarget > 0) {
         const requiredHeight = naturalTarget + element.clientHeight - contentEnd;
         spacer.style.minHeight = `${Math.max(IDLE_SPACER_HEIGHT, Math.ceil(requiredHeight))}px`;
       }
@@ -398,8 +399,13 @@ export function useAutoScroll(
         const contentEnd = spacer.offsetTop;
         const contentFollowTarget = contentEnd - el.clientHeight + CONTENT_BOTTOM_GAP;
         const naturalTarget = Math.max(userMsgTarget, contentFollowTarget);
-        const requiredHeight = naturalTarget + el.clientHeight - contentEnd;
-        spacer.style.minHeight = `${Math.max(IDLE_SPACER_HEIGHT, Math.ceil(requiredHeight))}px`;
+        // Only expand spacer when we actually need to scroll (naturalTarget > 0).
+        // On empty→first-message transition, content fits in viewport and expanding
+        // the spacer would cause an unnecessary layout shift / visual bounce.
+        if (naturalTarget > 0) {
+          const requiredHeight = naturalTarget + el.clientHeight - contentEnd;
+          spacer.style.minHeight = `${Math.max(IDLE_SPACER_HEIGHT, Math.ceil(requiredHeight))}px`;
+        }
       }
 
       cancelAnimation();

@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, HeartPulse, History, Loader2, Plus, PanelRightOpen } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
@@ -1323,7 +1323,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             {agentDir && (
               <span className="text-sm font-medium text-[var(--ink)]">
                 {agentDir.split(/[/\\]/).filter(Boolean).pop()}
-                {isAgentWorkspace && <span className="ml-1 text-xs" title="Agent">🦞</span>}
+                {isAgentWorkspace && <span title="Agent"><HeartPulse className="ml-1 inline h-3 w-3 text-[var(--heartbeat)]" /></span>}
               </span>
             )}
             {/* Session title — click to rename */}
