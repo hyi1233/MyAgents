@@ -42,13 +42,31 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
     );
 }
 
-function InfoRow({ label, value }: { label: string; value: string | undefined }) {
+/** Label-on-top, value-below field. `inline` makes it horizontal for stats row. */
+function DetailField({ label, value, inline }: { label: string; value: string | undefined; inline?: boolean }) {
     if (!value) return null;
+    if (inline) {
+        return (
+            <div>
+                <span className="text-[11px] text-[var(--ink-muted)]/60">{label}</span>
+                <p className="text-[13px] text-[var(--ink-secondary)]">{value}</p>
+            </div>
+        );
+    }
     return (
-        <div className="flex items-baseline justify-between gap-4 py-2">
-            <span className="shrink-0 text-[13px] text-[var(--ink-muted)]">{label}</span>
-            <span className="min-w-0 truncate text-right text-[13px] text-[var(--ink-secondary)]">{value}</span>
+        <div>
+            <span className="text-[12px] text-[var(--ink-muted)]">{label}</span>
+            <p className="mt-0.5 text-[13px] text-[var(--ink)]">{value}</p>
         </div>
+    );
+}
+
+/** Small tag/badge for end conditions & notification status */
+function DetailTag({ label }: { label: string }) {
+    return (
+        <span className="rounded-[var(--radius-sm)] border border-[var(--line)] px-2.5 py-1 text-[12px] text-[var(--ink-muted)]">
+            {label}
+        </span>
     );
 }
 
@@ -173,9 +191,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
     const scheduleDesc = formatScheduleDescription(task);
     const nextExec = formatNextExecution(task.nextExecutionAt, task.status);
     const runModeLabel = task.runMode === 'single_session' ? '保持上下文' : '每次新建';
-    const sourceLabel = botInfo
-        ? `${botInfo.name} (${botInfo.platform})`
-        : task.tabId ? 'Chat 创建' : '手动创建';
+
 
     const editErrors = useMemo(() => {
         if (!isEditing) return [];
@@ -301,25 +317,19 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                             </>
                         ) : (
                             /* ====== DETAIL MODE ====== */
+                            /* Order matches edit mode: 基本信息 → AI指令 → 执行模式 → 执行计划 → 结束条件 → 运行统计 → 执行历史 */
                             <>
+                                {/* Section: 基本信息 */}
                                 <div className="space-y-3">
                                     <SectionTitle>基本信息</SectionTitle>
-                                    <div className="flex items-center justify-between rounded-[var(--radius-sm)] border border-[var(--line)] px-3.5 py-3">
-                                        <span className="text-[13px] font-semibold text-[var(--ink)]">{scheduleDesc}</span>
-                                        <span className={`text-[12px] ${task.status === 'running' ? 'text-[var(--ink-secondary)]' : 'text-[var(--ink-muted)]/50'}`}>
-                                            {task.status === 'running' ? `下次: ${nextExec}` : '已停止'}
-                                        </span>
-                                    </div>
-                                    <div>
-                                        <InfoRow label="工作区" value={getFolderName(task.workspacePath)} />
-                                        <InfoRow label="运行模式" value={runModeLabel} />
-                                        {task.model && <InfoRow label="模型" value={task.model} />}
-                                        <InfoRow label="来源" value={sourceLabel} />
-                                    </div>
+                                    <DetailField label="任务名称" value={displayName} />
+                                    <DetailField label="执行 Agent" value={getFolderName(task.workspacePath)} />
+                                    {botInfo && <DetailField label="来源" value={`${botInfo.name} (${botInfo.platform})`} />}
                                 </div>
 
                                 <div className="my-5 border-t border-[var(--line-subtle)]" />
 
+                                {/* Section: AI 指令 */}
                                 {task.prompt && (
                                     <>
                                         <div className="space-y-3">
@@ -332,29 +342,55 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     </>
                                 )}
 
-                                <div className="space-y-1">
+                                {/* Section: 执行模式 */}
+                                <div className="space-y-3">
+                                    <SectionTitle>执行模式</SectionTitle>
+                                    <p className="text-[13px] text-[var(--ink-secondary)]">{runModeLabel === '每次新建' ? '新开对话（无记忆）' : '连续对话（保持上下文）'}</p>
+                                </div>
+
+                                <div className="my-5 border-t border-[var(--line-subtle)]" />
+
+                                {/* Section: 执行计划 */}
+                                <div className="space-y-3">
+                                    <SectionTitle>执行计划</SectionTitle>
+                                    <div className="flex items-center justify-between rounded-[var(--radius-sm)] border border-[var(--line)] px-3.5 py-3">
+                                        <span className="text-[13px] font-medium text-[var(--ink)]">{scheduleDesc}</span>
+                                        <span className={`text-[12px] ${task.status === 'running' ? 'text-[var(--ink-secondary)]' : 'text-[var(--ink-muted)]/50'}`}>
+                                            {task.status === 'running' ? `下次: ${nextExec}` : '已停止'}
+                                        </span>
+                                    </div>
+                                    {task.model && <DetailField label="模型" value={task.model} />}
+                                </div>
+
+                                <div className="my-5 border-t border-[var(--line-subtle)]" />
+
+                                {/* Section: 结束条件与通知 */}
+                                <div className="space-y-3">
+                                    <SectionTitle>结束条件与通知</SectionTitle>
+                                    <div className="flex flex-wrap gap-2">
+                                        <DetailTag label={task.endConditions.deadline ? `截止 ${new Date(task.endConditions.deadline).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : '无截止'} />
+                                        <DetailTag label={task.endConditions.maxExecutions ? `最多 ${task.endConditions.maxExecutions} 次` : '无限次'} />
+                                        <DetailTag label={task.endConditions.aiCanExit ? 'AI 可退出' : 'AI 不可退出'} />
+                                        <DetailTag label={task.notifyEnabled ? '通知开启' : '通知关闭'} />
+                                    </div>
+                                </div>
+
+                                <div className="my-5 border-t border-[var(--line-subtle)]" />
+
+                                {/* Section: 运行统计 */}
+                                <div className="space-y-3">
                                     <SectionTitle>运行统计</SectionTitle>
-                                    <div>
-                                        <InfoRow label="执行次数" value={task.endConditions.maxExecutions ? `${task.executionCount} / ${task.endConditions.maxExecutions}` : `${task.executionCount} 次`} />
-                                        <InfoRow label="上次执行" value={task.lastExecutedAt ? new Date(task.lastExecutedAt).toLocaleString('zh-CN') : '尚未执行'} />
-                                        {task.exitReason && <InfoRow label="退出原因" value={task.exitReason} />}
+                                    <div className="flex flex-wrap gap-x-6 gap-y-2">
+                                        <DetailField label="执行次数" value={task.endConditions.maxExecutions ? `${task.executionCount} / ${task.endConditions.maxExecutions}` : `${task.executionCount} 次`} inline />
+                                        <DetailField label="上次执行" value={task.lastExecutedAt ? new Date(task.lastExecutedAt).toLocaleString('zh-CN') : '尚未执行'} inline />
+                                        {task.exitReason && <DetailField label="退出原因" value={task.exitReason} inline />}
                                     </div>
                                     {task.lastError && <p className="text-[12px] text-[var(--error)]">{task.lastError}</p>}
                                 </div>
 
                                 <div className="my-5 border-t border-[var(--line-subtle)]" />
 
-                                <div className="space-y-1">
-                                    <SectionTitle>结束条件</SectionTitle>
-                                    <div>
-                                        <InfoRow label="截止时间" value={task.endConditions.deadline ? new Date(task.endConditions.deadline).toLocaleString('zh-CN') : '无'} />
-                                        <InfoRow label="最大次数" value={task.endConditions.maxExecutions ? `${task.endConditions.maxExecutions} 次` : '无限次'} />
-                                        <InfoRow label="AI 退出" value={task.endConditions.aiCanExit ? '允许' : '不允许'} />
-                                    </div>
-                                </div>
-
-                                <div className="my-5 border-t border-[var(--line-subtle)]" />
-
+                                {/* Section: 执行历史 */}
                                 <div>
                                     <SectionTitle>执行历史</SectionTitle>
                                     <div className="mt-2"><TaskRunHistory taskId={task.id} /></div>

@@ -184,7 +184,7 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
             {/* Start time */}
             <div className="mt-3 flex items-center gap-2">
               <span className="text-xs text-[var(--ink-muted)]">开始时间</span>
-              <div className="flex gap-1.5">
+              <div className="flex gap-2">
                 <button
                   type="button"
                   onClick={() => {
@@ -192,10 +192,10 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
                     setStartAt('');
                     onChange(null, intervalMinutes);
                   }}
-                  className={`rounded-[var(--radius-sm)] border px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                  className={`rounded-[var(--radius-sm)] border px-3 py-1.5 text-[13px] font-medium transition-colors ${
                     startMode === 'now'
-                      ? 'border-[var(--accent)] text-[var(--accent)]'
-                      : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--line-strong)]'
+                      ? 'border-[var(--accent)] bg-[var(--accent-warm-subtle)] text-[var(--accent)]'
+                      : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)]'
                   }`}
                 >
                   立刻
@@ -208,10 +208,10 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
                     setStartAt(defaultStart);
                     onChange({ kind: 'every', minutes: intervalMinutes, startAt: new Date(defaultStart).toISOString() }, intervalMinutes);
                   }}
-                  className={`rounded-[var(--radius-sm)] border px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                  className={`rounded-[var(--radius-sm)] border px-3 py-1.5 text-[13px] font-medium transition-colors ${
                     startMode === 'scheduled'
-                      ? 'border-[var(--accent)] text-[var(--accent)]'
-                      : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--line-strong)]'
+                      ? 'border-[var(--accent)] bg-[var(--accent-warm-subtle)] text-[var(--accent)]'
+                      : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)]'
                   }`}
                 >
                   指定时间
