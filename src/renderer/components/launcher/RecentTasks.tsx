@@ -251,7 +251,7 @@ export default memo(function RecentTasks({
                     {/* Create button */}
                     <button
                         onClick={() => setShowCreateModal(true)}
-                        className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--line)] py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors"
+                        className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--line)] py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] transition-colors"
                     >
                         <Plus className="h-3.5 w-3.5" />
                         新建定时任务
