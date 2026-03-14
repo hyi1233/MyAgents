@@ -1026,9 +1026,35 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       // If cron mode is enabled and task hasn't started yet, start the task
       const cron = cronStateRef.current;
       if (cron.isEnabled && !cron.task && cron.config) {
-        // Start the cron task - pass prompt directly to avoid React state timing issues
-        // The prompt is passed as a parameter because updateCronConfig() is async
-        // and the state wouldn't be updated before startCronTask() is called
+        if (cron.config.executionTarget === 'new_task') {
+          // ── New standalone task: create independently, show card in chat ──
+          try {
+            const sessionId = `cron-standalone-${crypto.randomUUID()}`;
+            const task = await createCronTask({
+              workspacePath: agentDir,
+              sessionId,
+              prompt: text,
+              intervalMinutes: cron.config.intervalMinutes,
+              endConditions: cron.config.endConditions,
+              runMode: 'new_session',
+              notifyEnabled: cron.config.notifyEnabled,
+              model: cron.config.model,
+              permissionMode: cron.config.permissionMode,
+              providerEnv: cron.config.providerEnv,
+              schedule: cron.config.schedule,
+            });
+            await startCronTaskIpc(task.id);
+            await startCronScheduler(task.id);
+            setCronCardTask(task);
+            // Disable cron mode — task is standalone, input returns to normal
+            disableCronMode();
+            toastRef.current?.success('定时任务已创建');
+          } catch (err) {
+            toastRef.current?.error(`创建失败: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          return;
+        }
+        // ── Current session: legacy cron behavior ──
         await startCronTask(text);
         return; // startCronTask handles the message sending via onExecute callback
       }
@@ -1483,6 +1509,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onRewind={handleRewind}
               onRetry={handleRetry}
             />
+
+            {/* Inline cron task card — shown in message flow after creating a "新开对话" task */}
+            {cronCardTask && (
+              <div className="mx-auto w-full max-w-3xl px-4 py-2">
+                <CronTaskCard
+                  taskId={cronCardTask.id}
+                  name={cronCardTask.name || cronCardTask.prompt.slice(0, 20)}
+                  scheduleDesc={formatScheduleDescription(cronCardTask)}
+                  onOpenDetail={task => { setCronDetailTask(task); setCronCardTask(null); }}
+                />
+              </div>
+            )}
           </FileActionProvider>
 
           {/* Floating input with integrated cron task components */}
@@ -1602,48 +1640,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             upstreamFormat: currentProvider.upstreamFormat,
           } : undefined;
 
-          if (config.executionTarget === 'new_task') {
-            // ── New standalone task (不占用当前对话) ──
-            try {
-              const sessionId = `cron-standalone-${crypto.randomUUID()}`;
-              const task = await createCronTask({
-                workspacePath: agentDir,
-                sessionId,
-                prompt: config.prompt,
-                intervalMinutes: config.intervalMinutes,
-                endConditions: config.endConditions,
-                runMode: 'new_session',
-                notifyEnabled: config.notifyEnabled,
-                model: selectedModel,
-                permissionMode: permissionMode,
-                providerEnv: providerEnv,
-                schedule: config.schedule,
-              });
-              await startCronTaskIpc(task.id);
-              await startCronScheduler(task.id);
-              // Show card in chat
-              setCronCardTask(task);
-              toast.success('定时任务已创建');
-            } catch (err) {
-              toast.error(`创建失败: ${err instanceof Error ? err.message : String(err)}`);
-            }
+          // Both paths: enable cron mode (shows status bar, waits for user to type and send)
+          // The difference is handled at send time based on executionTarget
+          const enrichedConfig = {
+            ...config,
+            model: selectedModel,
+            permissionMode: permissionMode,
+            providerEnv: providerEnv,
+            executionTarget: config.executionTarget,
+          };
+
+          if (cronState.task) {
+            updateRunningConfig(enrichedConfig);
           } else {
-            // ── Current session (legacy cron behavior) ──
-            if (cronState.task) {
-              updateRunningConfig({
-                ...config,
-                model: selectedModel,
-                permissionMode: permissionMode,
-                providerEnv: providerEnv,
-              });
-            } else {
-              enableCronMode({
-                ...config,
-                model: selectedModel,
-                permissionMode: permissionMode,
-                providerEnv: providerEnv,
-              });
-            }
+            enableCronMode(enrichedConfig);
           }
 
           track('cron_enable', {
@@ -1657,18 +1667,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           setShowCronSettings(false);
         }}
       />
-
-      {/* Standalone cron task card — shown after creating a "新开对话" task */}
-      {cronCardTask && (
-        <div className="absolute bottom-20 left-1/2 z-30 w-full max-w-md -translate-x-1/2">
-          <CronTaskCard
-            taskId={cronCardTask.id}
-            name={cronCardTask.name || cronCardTask.prompt.slice(0, 20)}
-            scheduleDesc={formatScheduleDescription(cronCardTask)}
-            onOpenDetail={task => { setCronDetailTask(task); setCronCardTask(null); }}
-          />
-        </div>
-      )}
 
       {/* Cron task detail panel */}
       {cronDetailTask && (

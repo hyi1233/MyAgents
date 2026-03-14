@@ -34,6 +34,8 @@ export interface CronTaskState {
     providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' };
     /** Flexible schedule (overrides intervalMinutes when present) */
     schedule?: CronSchedule;
+    /** Execution target: current_session (legacy) or new_task (standalone) */
+    executionTarget?: 'current_session' | 'new_task';
   } | null;
   /** Active cron task (after creation) */
   task: CronTask | null;
