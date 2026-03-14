@@ -184,12 +184,17 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                             /* ====== EDIT MODE ====== */
                             <>
                                 <div>
-                                    <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">任务名称<span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span></label>
-                                    <input type="text" value={editName} onChange={e => setEditName(e.target.value)} maxLength={50} placeholder="例如: 每日新闻摘要" className={INPUT_CLS} />
-                                </div>
-                                <div>
-                                    <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">AI 指令</label>
-                                    <textarea value={editPrompt} onChange={e => setEditPrompt(e.target.value)} rows={5} placeholder="描述你希望 AI 定时执行的任务..." className={`${INPUT_CLS} resize-none`} />
+                                    <SectionHeader icon={FileText}>基本信息</SectionHeader>
+                                    <div className="mt-3 space-y-4">
+                                        <div>
+                                            <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">任务名称<span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span></label>
+                                            <input type="text" value={editName} onChange={e => setEditName(e.target.value)} maxLength={50} placeholder="例如: 每日新闻摘要" className={INPUT_CLS} />
+                                        </div>
+                                        <div>
+                                            <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">AI 指令</label>
+                                            <textarea value={editPrompt} onChange={e => setEditPrompt(e.target.value)} rows={5} placeholder="描述你希望 AI 定时执行的任务..." className={`${INPUT_CLS} resize-none`} />
+                                        </div>
+                                    </div>
                                 </div>
 
                                 <div className="border-t border-[var(--line)]" />

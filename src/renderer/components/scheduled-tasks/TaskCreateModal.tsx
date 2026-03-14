@@ -4,7 +4,7 @@
  */
 
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { X, Clock, Bell, Check, Flag } from 'lucide-react';
+import { X, Clock, Bell, Check, Flag, FileText, MessageSquare } from 'lucide-react';
 import { v4 as uuid } from 'uuid';
 
 import ScheduleTypeTabs from './ScheduleTypeTabs';
@@ -206,53 +206,57 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
         {/* ── Body ── */}
         <div className="flex-1 overflow-y-auto px-6 pb-6 space-y-6">
 
-          {/* Task Name */}
+          {/* ── 基本信息 ── */}
           <div>
-            <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
-              任务名称<span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span>
-            </label>
-            <input type="text" value={name} onChange={e => setName(e.target.value)} maxLength={50}
-              placeholder="例如: 每日新闻摘要" className={INPUT_CLS} />
-          </div>
-
-          {/* Agent */}
-          <div>
-            <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">执行 Agent</label>
-            <CustomSelect value={selectedProjectPath} options={projectOptions} onChange={setSelectedProjectPath} placeholder="选择工作区" />
-            <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">使用该 Agent 的默认模型与权限配置</p>
-          </div>
-
-          {/* Prompt */}
-          <div>
-            <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">AI 指令</label>
-            <textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={5}
-              placeholder="描述你希望 AI 定时执行的任务..." className={`${INPUT_CLS} resize-none`} />
-          </div>
-
-          {/* Run Mode */}
-          <div>
-            <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">执行模式</label>
-            <div className="flex gap-2">
-              <PillButton selected={runMode === 'new_session'} onClick={() => { setRunMode('new_session'); setSelectedSessionId(''); }}>新开对话</PillButton>
-              <PillButton selected={runMode === 'single_session'} onClick={() => setRunMode('single_session')}>连续对话</PillButton>
-            </div>
-            <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
-              {runMode === 'new_session' ? '每次执行创建新对话，无记忆' : '所有执行共用同一对话，AI 能记住之前内容'}
-            </p>
-            {runMode === 'single_session' && (
-              <div className="mt-3">
-                <label className="mb-1 block text-[13px] text-[var(--ink-muted)]">选择对话</label>
-                <CustomSelect value={selectedSessionId}
-                  options={[{ value: '', label: '新对话' }, ...workspaceSessions.map(s => ({ value: s.id, label: s.title || s.lastMessagePreview?.slice(0, 30) || s.id.slice(0, 8) }))]}
-                  onChange={setSelectedSessionId} placeholder="选择对话" compact />
+            <SectionHeader icon={FileText}>基本信息</SectionHeader>
+            <div className="mt-3 space-y-4">
+              <div>
+                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                  任务名称<span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span>
+                </label>
+                <input type="text" value={name} onChange={e => setName(e.target.value)} maxLength={50}
+                  placeholder="例如: 每日新闻摘要" className={INPUT_CLS} />
               </div>
-            )}
+              <div>
+                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">执行 Agent</label>
+                <CustomSelect value={selectedProjectPath} options={projectOptions} onChange={setSelectedProjectPath} placeholder="选择工作区" />
+                <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">使用该 Agent 的默认模型与权限配置</p>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">AI 指令</label>
+                <textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={5}
+                  placeholder="描述你希望 AI 定时执行的任务..." className={`${INPUT_CLS} resize-none`} />
+              </div>
+            </div>
           </div>
 
-          {/* Divider */}
           <div className="border-t border-[var(--line)]" />
 
-          {/* 执行计划 */}
+          {/* ── 执行模式 ── */}
+          <div>
+            <SectionHeader icon={MessageSquare}>执行模式</SectionHeader>
+            <div className="mt-3">
+              <div className="flex gap-2">
+                <PillButton selected={runMode === 'new_session'} onClick={() => { setRunMode('new_session'); setSelectedSessionId(''); }}>新开对话</PillButton>
+                <PillButton selected={runMode === 'single_session'} onClick={() => setRunMode('single_session')}>连续对话</PillButton>
+              </div>
+              <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+                {runMode === 'new_session' ? '每次执行创建新对话，无记忆' : '所有执行共用同一对话，AI 能记住之前内容'}
+              </p>
+              {runMode === 'single_session' && (
+                <div className="mt-3">
+                  <label className="mb-1 block text-[13px] text-[var(--ink-muted)]">选择对话</label>
+                  <CustomSelect value={selectedSessionId}
+                    options={[{ value: '', label: '新对话' }, ...workspaceSessions.map(s => ({ value: s.id, label: s.title || s.lastMessagePreview?.slice(0, 30) || s.id.slice(0, 8) }))]}
+                    onChange={setSelectedSessionId} placeholder="选择对话" compact />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="border-t border-[var(--line)]" />
+
+          {/* ── 执行计划 ── */}
           <div>
             <SectionHeader icon={Clock}>执行计划</SectionHeader>
             <div className="mt-3">
