@@ -1700,6 +1700,24 @@ async fn create_bot_instance<R: Runtime>(
                         };
 
                         // 5. SSE stream: route message + stream response to Telegram
+                        //    Spawn keepalive to prevent idle collection during long agentic tasks.
+                        //    stream_to_im() can run 30+ min for multi-tool-use turns, during which
+                        //    heartbeat can't touch last_active (blocked by peer lock).
+                        let keepalive = tokio::spawn({
+                            let router = Arc::clone(&task_router);
+                            let key = session_key.clone();
+                            async move {
+                                let mut tick = tokio::time::interval(
+                                    std::time::Duration::from_secs(300),
+                                );
+                                tick.tick().await; // skip immediate first tick
+                                loop {
+                                    tick.tick().await;
+                                    router.lock().await.touch_session_activity(&key);
+                                }
+                            }
+                        });
+
                         let penv = task_provider_env.read().await.clone();
                         let task_model_val = task_model.read().await.clone();
                         let images = if image_payloads.is_empty() {
@@ -1761,6 +1779,7 @@ async fn create_bot_instance<R: Runtime>(
                                     .send_message(&chat_id, &user_msg)
                                     .await;
                                 task_adapter.ack_clear(&chat_id, &message_id).await;
+                                keepalive.abort();
                                 return;
                             }
                         };
@@ -1884,6 +1903,9 @@ async fn create_bot_instance<R: Runtime>(
                         task_health
                             .set_buffered_messages(task_buffer.lock().await.len())
                             .await;
+
+                        // Stream + buffer replay done — stop keepalive
+                        keepalive.abort();
 
                         // Cleanup: release guards, then remove stale peer_lock entry
                         drop(_permit);
