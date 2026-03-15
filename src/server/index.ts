@@ -29,6 +29,7 @@ import {
 } from './tools/cron-tools';
 import { setImCronContext } from './tools/im-cron-tool';
 import { setImMediaContext } from './tools/im-media-tool';
+import { setImBridgeToolsContext } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
 // NOTE: builtin MCP side-effect imports (registerBuiltinMcp calls) live in agent-session.ts,
 // which is imported by this file — no need to duplicate them here.
@@ -6141,6 +6142,11 @@ async function main() {
             isFirstGroupTurn?: boolean;
             pendingHistory?: string;
             groupToolsDeny?: string[];
+            // Bridge plugin tools context (v0.1.42)
+            bridgePort?: number;
+            bridgePluginId?: string;
+            bridgeEnabledToolGroups?: string[];
+            senderId?: string;
           };
 
           const hasContent = payload.message?.trim() || (payload.images && payload.images.length > 0);
@@ -6172,6 +6178,16 @@ async function main() {
               chatId: payload.sourceId,
               platform: payload.source.split('_')[0],
             });
+
+            // Set Bridge tools context if this is an OpenClaw plugin session with tools
+            if (payload.bridgePort && payload.bridgePluginId) {
+              setImBridgeToolsContext({
+                bridgePort: payload.bridgePort,
+                pluginId: payload.bridgePluginId,
+                enabledToolGroups: payload.bridgeEnabledToolGroups || [],
+                senderId: payload.senderId,
+              });
+            }
           }
 
           // Set IM interaction scenario (L1 + L2-im + L3-heartbeat).

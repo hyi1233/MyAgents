@@ -9,6 +9,7 @@ import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
 import { imMediaToolServer, getImMediaContext, clearImMediaContext } from './tools/im-media-tool';
+import { imBridgeToolServer, getImBridgeToolsContext, clearImBridgeToolsContext } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
 // Side-effect imports: each registers itself in the builtin MCP registry
 import './tools/gemini-image-tool';
@@ -1024,6 +1025,13 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
   if (imMediaCtx && process.env.MYAGENTS_MANAGEMENT_PORT) {
     result['im-media'] = imMediaToolServer;
     console.log(`[agent] Added im-media MCP server for bot ${imMediaCtx.botId}`);
+  }
+
+  // Add Bridge tools proxy if we're in an IM context with a plugin bridge that has tools
+  const bridgeToolsCtx = getImBridgeToolsContext();
+  if (bridgeToolsCtx && bridgeToolsCtx.enabledToolGroups.length > 0) {
+    result['im-bridge-tools'] = imBridgeToolServer;
+    console.log(`[agent] Added im-bridge-tools MCP server for plugin ${bridgeToolsCtx.pluginId} (groups: ${bridgeToolsCtx.enabledToolGroups.join(',')})`);
   }
 
   // --- Pattern 2: Builtin registry MCPs (in-process, user-toggled) ---
@@ -5139,6 +5147,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     clearCronTaskContext();
     clearSessionCronContext();
     clearImMediaContext();
+    clearImBridgeToolsContext();
     resolveTermination!();
 
     if (wasPreWarming) {

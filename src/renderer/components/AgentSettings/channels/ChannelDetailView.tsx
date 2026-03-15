@@ -31,6 +31,7 @@ import type { ChannelStatusData } from '@/hooks/useAgentStatuses';
 import { isOpenClawPlatform } from '../../../../shared/types/im';
 import type { InstalledPlugin } from '../../../../shared/types/im';
 import { findPromotedByPlatform } from '../../ImSettings/promotedPlugins';
+import OpenClawToolGroupsSelector from './OpenClawToolGroupsSelector';
 
 // ===== OpenClaw Plugin Config Editor =====
 function OpenClawConfigEditor({
@@ -600,6 +601,17 @@ export default function ChannelDetailView({
                     </div>
                 )}
             </div>
+
+            {/* OpenClaw Tool Groups (e.g. feishu) */}
+            {isOpenClaw && channel.openclawPluginId && (
+                <OpenClawToolGroupsSelector
+                    enabledGroups={channel.openclawEnabledToolGroups}
+                    onChange={async (newGroups) => {
+                        await patchChannel({ openclawEnabledToolGroups: newGroups });
+                    }}
+                    pluginId={channel.openclawPluginId}
+                />
+            )}
 
             {/* User binding — not for OpenClaw */}
             {!isOpenClaw && (

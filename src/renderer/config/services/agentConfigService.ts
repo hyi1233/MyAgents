@@ -348,6 +348,7 @@ export async function invokeStartAgentChannel(
       openclawNpmSpec: channel.openclawNpmSpec,
       openclawPluginConfig: channel.openclawPluginConfig,
       openclawManifest: channel.openclawManifest,
+      openclawEnabledToolGroups: channel.openclawEnabledToolGroups,
       allowedUsers: channel.allowedUsers || [],
       groupPermissions: channel.groupPermissions || [],
       groupActivation: channel.groupActivation,

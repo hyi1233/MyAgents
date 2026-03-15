@@ -74,6 +74,9 @@ pub struct BridgeAdapter {
     client: Client,
     #[allow(dead_code)]
     max_msg_length: usize,
+    supports_streaming: bool,
+    supports_cardkit: bool,
+    enabled_tool_groups: Vec<String>,
 }
 
 impl BridgeAdapter {
@@ -84,10 +87,13 @@ impl BridgeAdapter {
             bridge_port,
             client,
             max_msg_length: 4096,
+            supports_streaming: false,
+            supports_cardkit: false,
+            enabled_tool_groups: Vec::new(),
         }
     }
 
-    /// Fetch plugin capabilities from bridge and update max_msg_length.
+    /// Fetch plugin capabilities from bridge and update max_msg_length + streaming flags.
     /// Called once after bridge is verified healthy.
     pub async fn sync_capabilities(&mut self) {
         match self.client.get(self.url("/capabilities")).send().await {
@@ -97,12 +103,39 @@ impl BridgeAdapter {
                         self.max_msg_length = limit as usize;
                         ulog_info!("[bridge:{}] textChunkLimit = {}", self.plugin_id, limit);
                     }
+                    // CardKit / streaming capability flags (nested under capabilities object)
+                    let caps = &body["capabilities"];
+                    if caps["streaming"].as_bool() == Some(true) {
+                        self.supports_streaming = true;
+                        ulog_info!("[bridge:{}] streaming enabled", self.plugin_id);
+                    }
+                    if caps["streamingCardKit"].as_bool() == Some(true) {
+                        self.supports_cardkit = true;
+                        ulog_info!("[bridge:{}] CardKit enabled", self.plugin_id);
+                    }
+                    // Tool groups
+                    if let Some(groups) = caps["toolGroups"].as_array() {
+                        self.enabled_tool_groups = groups.iter()
+                            .filter_map(|g| g.as_str().map(String::from))
+                            .collect();
+                        if !self.enabled_tool_groups.is_empty() {
+                            ulog_info!("[bridge:{}] tool groups: {:?}", self.plugin_id, self.enabled_tool_groups);
+                        }
+                    }
                 }
             }
             _ => {
                 ulog_debug!("[bridge:{}] Could not fetch capabilities, using defaults", self.plugin_id);
             }
         }
+    }
+
+    /// Override enabled tool groups with user-configured selection.
+    /// Called after sync_capabilities() to replace plugin-declared groups
+    /// with the user's choices from the channel config UI.
+    pub fn set_enabled_tool_groups(&mut self, groups: Vec<String>) {
+        ulog_info!("[bridge:{}] user-configured tool groups: {:?}", self.plugin_id, groups);
+        self.enabled_tool_groups = groups;
     }
 
     fn url(&self, path: &str) -> String {
@@ -424,6 +457,121 @@ impl ImStreamAdapter for BridgeAdapter {
 
     fn preferred_throttle_ms(&self) -> u64 {
         1000
+    }
+
+    fn bridge_context(&self) -> Option<(u16, String, Vec<String>)> {
+        Some((self.bridge_port, self.plugin_id.clone(), self.enabled_tool_groups.clone()))
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.supports_streaming
+    }
+
+    async fn start_stream(
+        &self,
+        chat_id: &str,
+        initial_text: &str,
+    ) -> AdapterResult<String> {
+        let body = json!({
+            "chatId": chat_id,
+            "initialContent": initial_text,
+            "streamMode": if self.supports_cardkit { "cardkit" } else { "text" },
+        });
+        let resp = self.client
+            .post(self.url("/start-stream"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Bridge start-stream failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Bridge start-stream returned {}: {}", status, text));
+        }
+
+        let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Ok(resp_body["streamId"].as_str().unwrap_or("").to_string())
+    }
+
+    async fn stream_chunk(
+        &self,
+        chat_id: &str,
+        stream_id: &str,
+        text: &str,
+        sequence: u32,
+        is_thinking: bool,
+    ) -> AdapterResult<()> {
+        let body = json!({
+            "chatId": chat_id,
+            "streamId": stream_id,
+            "content": text,
+            "sequence": sequence,
+            "isThinking": is_thinking,
+        });
+        let resp = self.client
+            .post(self.url("/stream-chunk"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Bridge stream-chunk failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Bridge stream-chunk returned {}: {}", status, text));
+        }
+        Ok(())
+    }
+
+    async fn finalize_stream(
+        &self,
+        chat_id: &str,
+        stream_id: &str,
+        final_text: &str,
+    ) -> AdapterResult<()> {
+        let body = json!({
+            "chatId": chat_id,
+            "streamId": stream_id,
+            "finalContent": final_text,
+        });
+        let resp = self.client
+            .post(self.url("/finalize-stream"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Bridge finalize-stream failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Bridge finalize-stream returned {}: {}", status, text));
+        }
+        Ok(())
+    }
+
+    async fn abort_stream(
+        &self,
+        chat_id: &str,
+        stream_id: &str,
+    ) -> AdapterResult<()> {
+        let body = json!({
+            "chatId": chat_id,
+            "streamId": stream_id,
+        });
+        let resp = self.client
+            .post(self.url("/abort-stream"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Bridge abort-stream failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Bridge abort-stream returned {}: {}", status, text));
+        }
+        Ok(())
     }
 }
 

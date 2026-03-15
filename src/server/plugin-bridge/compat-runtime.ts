@@ -130,6 +130,10 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
           const isMention = ctx.IsMention ?? ctx.isMention ?? true;
 
+          // Extract attachment-related fields (for Feishu file/image forwarding, threaded replies, etc.)
+          const attachments = (ctx.Attachments || ctx.attachments || undefined) as Record<string, unknown>[] | undefined;
+          const replyToMessageId = String(ctx.ReplyToMessageId || ctx.replyToMessageId || '') || undefined;
+
           if (!text.trim()) {
             console.log('[compat-runtime] Empty message, skipping');
             return;
@@ -152,6 +156,8 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
                 messageId: messageId || undefined,
                 groupId: groupId || undefined,
                 isMention,
+                attachments: attachments || undefined,
+                replyToMessageId: replyToMessageId || undefined,
               }),
             });
 

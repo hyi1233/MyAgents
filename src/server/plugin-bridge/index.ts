@@ -14,8 +14,10 @@
  *   BRIDGE_PLUGIN_CONFIG  Plugin configuration JSON (env var to avoid leaking secrets in `ps`)
  */
 
-import { createCompatApi, type CapturedPlugin } from './compat-api';
+import { createCompatApi, type CapturedPlugin, type CapturedTool } from './compat-api';
 import { createCompatRuntime } from './compat-runtime';
+import { FeishuStreamingSession } from './streaming-adapter';
+import { createMcpHandler } from './mcp-handler';
 import { parseArgs } from 'util';
 
 // Parse CLI arguments
@@ -48,6 +50,14 @@ let capturedPlugin: CapturedPlugin | null = null;
 let pluginName = 'unknown';
 let gatewayError: string | null = null;
 let gatewayStarted = false; // true once startAccount() has been invoked
+
+// Streaming sessions (keyed by streamId)
+const streamingSessions = new Map<string, FeishuStreamingSession>();
+let streamIdCounter = 0;
+
+// MCP handler — initialized after plugin loads and captures tools
+let mcpHandler: ReturnType<typeof createMcpHandler> | null = null;
+let getCapturedToolsFn: (() => CapturedTool[]) | null = null;
 
 async function loadPlugin() {
   // Create compat API and runtime for plugin registration
@@ -111,6 +121,14 @@ async function loadPlugin() {
   // Update runtime with actual plugin ID (was 'unknown' at creation time)
   if (runtime && typeof (runtime as Record<string, unknown>).setPluginId === 'function') {
     (runtime as Record<string, unknown> & { setPluginId: (id: string) => void }).setPluginId(capturedPlugin.id);
+  }
+
+  // Set up MCP handler with captured tools
+  getCapturedToolsFn = () => compatApi.getCapturedTools();
+  mcpHandler = createMcpHandler(getCapturedToolsFn, pluginConfig);
+  const toolCount = compatApi.getCapturedTools().length;
+  if (toolCount > 0) {
+    console.log(`[plugin-bridge] MCP handler initialized with ${toolCount} captured tool factories`);
   }
 
   // Build OpenClaw-format config from our flat pluginConfig
@@ -247,6 +265,9 @@ const server = Bun.serve({
     if (path === '/capabilities') {
       const outbound = capturedPlugin?.raw?.outbound as Record<string, unknown> | undefined;
       const capabilities = capturedPlugin?.raw?.capabilities as Record<string, unknown> | undefined;
+      const hasCardKitStreaming = !!(pluginConfig.appId && pluginConfig.appSecret);
+      const toolGroups = mcpHandler ? mcpHandler.getToolGroups() : [];
+      const hasTools = getCapturedToolsFn ? getCapturedToolsFn().length > 0 : false;
       return Response.json({
         pluginId: capturedPlugin?.id || 'unknown',
         textChunkLimit: outbound?.textChunkLimit ?? 4096,
@@ -259,6 +280,10 @@ const server = Bun.serve({
           threads: capabilities?.threads ?? false,
           edit: capabilities?.edit ?? false,
           blockStreaming: capabilities?.blockStreaming ?? false,
+          streaming: hasCardKitStreaming,
+          streamingCardKit: hasCardKitStreaming,
+          hasTools,
+          toolGroups,
         },
       });
     }
@@ -351,8 +376,181 @@ const server = Bun.serve({
       }
     }
 
+    // ===== Streaming endpoints (CardKit streaming cards) =====
+
+    if (path === '/start-stream' && req.method === 'POST') {
+      const body = await req.json() as {
+        chatId: string;
+        initialContent?: string;
+        streamMode?: 'text' | 'cardkit';
+        receiveIdType?: 'open_id' | 'user_id' | 'union_id' | 'email' | 'chat_id';
+        replyToMessageId?: string;
+        replyInThread?: boolean;
+        rootId?: string;
+        header?: { title: string; template?: string };
+      };
+
+      if (!pluginConfig.appId || !pluginConfig.appSecret) {
+        return Response.json({ ok: false, error: 'CardKit streaming requires appId and appSecret in plugin config' }, { status: 400 });
+      }
+
+      const creds = {
+        appId: String(pluginConfig.appId),
+        appSecret: String(pluginConfig.appSecret),
+        domain: (pluginConfig.domain as string) || undefined,
+      };
+
+      const session = new FeishuStreamingSession(creds, (msg) => console.log(`[streaming] ${msg}`));
+
+      try {
+        await session.start(body.chatId, body.receiveIdType || 'chat_id', {
+          replyToMessageId: body.replyToMessageId,
+          replyInThread: body.replyInThread,
+          rootId: body.rootId,
+          header: body.header,
+        });
+
+        // If initial content provided, send first update
+        if (body.initialContent) {
+          await session.update(body.initialContent);
+        }
+
+        const streamId = `stream_${++streamIdCounter}_${Date.now()}`;
+        streamingSessions.set(streamId, session);
+
+        const state = session.getState();
+        return Response.json({
+          ok: true,
+          streamId,
+          cardId: state?.cardId,
+          messageId: state?.messageId,
+        });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    if (path === '/stream-chunk' && req.method === 'POST') {
+      const body = await req.json() as {
+        streamId: string;
+        content: string;
+        sequence?: number;
+        isThinking?: boolean;
+      };
+
+      const session = streamingSessions.get(body.streamId);
+      if (!session) {
+        return Response.json({ ok: false, error: 'Stream not found' }, { status: 404 });
+      }
+      if (!session.isActive()) {
+        return Response.json({ ok: false, error: 'Stream is no longer active' }, { status: 409 });
+      }
+
+      try {
+        // Skip thinking/activity chunks — don't merge them into CardKit content
+        // The streaming card only shows actual response text
+        if (body.isThinking) {
+          return Response.json({ ok: true });
+        }
+        await session.update(body.content);
+        return Response.json({ ok: true });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    if (path === '/finalize-stream' && req.method === 'POST') {
+      const body = await req.json() as { streamId: string; finalContent?: string };
+
+      const session = streamingSessions.get(body.streamId);
+      if (!session) {
+        return Response.json({ ok: false, error: 'Stream not found' }, { status: 404 });
+      }
+
+      try {
+        await session.close(body.finalContent);
+        streamingSessions.delete(body.streamId);
+        return Response.json({ ok: true });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    if (path === '/abort-stream' && req.method === 'POST') {
+      const body = await req.json() as { streamId: string };
+
+      const session = streamingSessions.get(body.streamId);
+      if (!session) {
+        return Response.json({ ok: false, error: 'Stream not found' }, { status: 404 });
+      }
+
+      try {
+        // Close with an abort marker so the card shows it was interrupted
+        await session.close('[Aborted]');
+        streamingSessions.delete(body.streamId);
+        return Response.json({ ok: true });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    // ===== MCP tool proxy endpoints =====
+
+    if (path === '/mcp/tools' && req.method === 'GET') {
+      if (!mcpHandler) {
+        return Response.json({ ok: false, error: 'MCP handler not initialized (no tools captured)' }, { status: 503 });
+      }
+
+      const groupsParam = url.searchParams.get('groups');
+      const enabledGroups = groupsParam ? groupsParam.split(',').map((g) => g.trim()).filter(Boolean) : undefined;
+
+      try {
+        const tools = mcpHandler.resolveTools(enabledGroups);
+        return Response.json({ ok: true, tools });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    if (path === '/mcp/call-tool' && req.method === 'POST') {
+      if (!mcpHandler) {
+        return Response.json({ ok: false, error: 'MCP handler not initialized (no tools captured)' }, { status: 503 });
+      }
+
+      const body = await req.json() as { toolName: string; args: Record<string, unknown>; userId?: string; enabledGroups?: string[] };
+
+      if (!body.toolName) {
+        return Response.json({ ok: false, error: 'Missing required field: toolName' }, { status: 400 });
+      }
+
+      // Enforce tool group restrictions: only allow tools in enabled groups
+      if (body.enabledGroups && body.enabledGroups.length > 0) {
+        const allowedTools = mcpHandler.resolveTools(body.enabledGroups);
+        const isAllowed = allowedTools.some(t => t.name === body.toolName);
+        if (!isAllowed) {
+          return Response.json({ ok: false, error: `Tool "${body.toolName}" is not in the enabled tool groups` }, { status: 403 });
+        }
+      }
+
+      try {
+        const result = await mcpHandler.callTool(body.toolName, body.args || {}, body.userId);
+        return Response.json({ ok: true, result });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    // ===== Lifecycle endpoints =====
+
     if (path === '/stop' && req.method === 'POST') {
       console.log('[plugin-bridge] Received stop signal');
+      // Close any active streaming sessions before shutdown
+      for (const [id, session] of streamingSessions) {
+        try {
+          if (session.isActive()) await session.close('[Bridge stopping]');
+        } catch { /* best-effort */ }
+        streamingSessions.delete(id);
+      }
       // Abort the gateway via AbortController
       const abortCtrl = (globalThis as Record<string, unknown>).__bridgeAbort as AbortController | undefined;
       if (abortCtrl) abortCtrl.abort();
