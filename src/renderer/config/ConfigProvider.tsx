@@ -158,7 +158,10 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
             // One-time cleanup: remove imBotConfigs entries whose credentials
             // now exist in agents[].channels[] (post-migration duplicates)
-            if (loadedConfig.agents?.length && loadedConfig.imBotConfigs?.length) {
+            // Re-read from disk in case migration cleared in-memory but didn't persist imBotConfigs
+            const diskImBotConfigs = (await loadAppConfig())?.imBotConfigs ?? loadedConfig.imBotConfigs ?? [];
+            if (loadedConfig.agents?.length && diskImBotConfigs.length) {
+                loadedConfig.imBotConfigs = diskImBotConfigs;
                 // Collect all credential fingerprints from agent channels
                 const agentCredentials = new Set<string>();
                 for (const agent of loadedConfig.agents) {

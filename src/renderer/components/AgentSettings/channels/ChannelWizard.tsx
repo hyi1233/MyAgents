@@ -246,6 +246,8 @@ export default function ChannelWizard({
             // Merge promoted plugin defaults (e.g. dmPolicy: 'open') under user values
             const mergedConfig = { ...(promoted?.defaultConfig ?? {}), ...pluginConfig };
             const pluginName = promoted?.name || installedPlugin?.manifest?.name || openclawPluginId || 'Plugin Bot';
+            // Default enabled tool groups: all except 'perm' (sensitive)
+            const defaultToolGroups = ['doc', 'chat', 'wiki_drive', 'bitable'];
             return {
                 id: channelId,
                 type: platform,
@@ -256,6 +258,7 @@ export default function ChannelWizard({
                 openclawPluginId: openclawPluginId,
                 openclawNpmSpec: installedPlugin?.npmSpec,
                 openclawPluginConfig: Object.keys(mergedConfig).length > 0 ? mergedConfig : undefined,
+                openclawEnabledToolGroups: defaultToolGroups,
             };
         }
         return {

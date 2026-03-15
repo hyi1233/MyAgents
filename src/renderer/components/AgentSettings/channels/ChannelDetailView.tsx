@@ -613,8 +613,8 @@ export default function ChannelDetailView({
                 />
             )}
 
-            {/* User binding — not for OpenClaw */}
-            {!isOpenClaw && (
+            {/* User binding — all platforms including OpenClaw (Rust handles BIND codes) */}
+            {(
             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]">
                 <button
                     type="button"
@@ -633,7 +633,7 @@ export default function ChannelDetailView({
                 </button>
                 {isBindingExpanded && (
                     <div className="space-y-5 px-5 pb-5">
-                        {isRunning && (channel.type === 'feishu' || channel.type === 'dingtalk') && botStatus?.bindCode && (
+                        {isRunning && (channel.type === 'feishu' || channel.type === 'dingtalk' || isOpenClaw) && botStatus?.bindCode && (
                             <BindCodePanel
                                 bindCode={botStatus.bindCode}
                                 hasWhitelistUsers={(channel.allowedUsers?.length ?? 0) > 0}

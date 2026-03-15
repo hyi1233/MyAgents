@@ -69,9 +69,11 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
     config: {
       loadConfig() {
         // Return an OpenClaw-format config with the plugin's channel settings
+        // Use currentPluginId as channel key (not hardcoded 'feishu') so any plugin
+        // can resolve its own config via cfg.channels[pluginId]
         return {
           channels: {
-            feishu: {
+            [currentPluginId]: {
               enabled: true,
               ...bridgePluginConfig,
             },
