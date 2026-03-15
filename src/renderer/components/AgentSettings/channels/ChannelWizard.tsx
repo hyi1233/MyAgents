@@ -292,9 +292,10 @@ export default function ChannelWizard({
         try {
             const channelCfg = { ...buildChannelConfig(), setupCompleted: true };
 
-            // Save channel to agent config
+            // Save channel to agent config (dedup: replace if same ID exists from a previous attempt)
+            const existingChannels = agent.channels.filter(ch => ch.id !== channelCfg.id);
             await patchAgentConfig(agent.id, {
-                channels: [...agent.channels, channelCfg],
+                channels: [...existingChannels, channelCfg],
             });
             await refreshConfig();
 
@@ -369,9 +370,10 @@ export default function ChannelWizard({
         try {
             const channelCfg = buildChannelConfig();
 
-            // Save channel to agent config
+            // Save channel to agent config (dedup: replace if same ID exists from a previous attempt)
+            const existingChannels = agent.channels.filter(ch => ch.id !== channelCfg.id);
             await patchAgentConfig(agent.id, {
-                channels: [...agent.channels, channelCfg],
+                channels: [...existingChannels, channelCfg],
             });
             await refreshConfig();
 
