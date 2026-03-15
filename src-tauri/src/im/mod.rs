@@ -3970,12 +3970,39 @@ fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), 
     let mut config: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
 
-    let bots = config.get_mut("imBotConfigs")
-        .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| format!("[im] No imBotConfigs in config.json"))?;
-    let bot = bots.iter_mut()
-        .find(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id))
-        .ok_or_else(|| format!("[im] Bot {} not found in config.json", bot_id))?;
+    // Find the bot/channel entry: search legacy imBotConfigs first, then agents[].channels[] (v0.1.42)
+    // Use JSON Pointer path to locate the entry, then get a mutable reference.
+    enum BotLocation { Legacy(usize), AgentChannel(usize, usize) }
+    let location = {
+        let mut found: Option<BotLocation> = None;
+        if let Some(bots) = config.get("imBotConfigs").and_then(|v| v.as_array()) {
+            for (i, b) in bots.iter().enumerate() {
+                if b.get("id").and_then(|v| v.as_str()) == Some(bot_id) {
+                    found = Some(BotLocation::Legacy(i));
+                    break;
+                }
+            }
+        }
+        if found.is_none() {
+            if let Some(agents) = config.get("agents").and_then(|v| v.as_array()) {
+                'search: for (ai, agent) in agents.iter().enumerate() {
+                    if let Some(channels) = agent.get("channels").and_then(|v| v.as_array()) {
+                        for (ci, ch) in channels.iter().enumerate() {
+                            if ch.get("id").and_then(|v| v.as_str()) == Some(bot_id) {
+                                found = Some(BotLocation::AgentChannel(ai, ci));
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found.ok_or_else(|| format!("[im] Bot {} not found in config.json", bot_id))?
+    };
+    let bot = match location {
+        BotLocation::Legacy(i) => &mut config["imBotConfigs"][i],
+        BotLocation::AgentChannel(ai, ci) => &mut config["agents"][ai]["channels"][ci],
+    };
 
     // Apply patch fields: None = skip, Some("") = remove field, Some(val) = set
     macro_rules! apply_string_field {
