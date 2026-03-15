@@ -57,9 +57,45 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
   // Mutable — updated after plugin registration when actual ID is known
   let currentPluginId = pluginId;
 
+  // Parse the plugin config once (passed via env var by Bridge spawner)
+  const bridgePluginConfig = JSON.parse(process.env.BRIDGE_PLUGIN_CONFIG || '{}');
+
   const runtime = {
     /** Update the plugin ID after registration */
     setPluginId(id: string) { currentPluginId = id; },
+
+    // ===== Config =====
+    // LarkClient.runtime.config.loadConfig() is called during message handling
+    config: {
+      loadConfig() {
+        // Return an OpenClaw-format config with the plugin's channel settings
+        return {
+          channels: {
+            feishu: {
+              enabled: true,
+              ...bridgePluginConfig,
+            },
+          },
+        };
+      },
+      async writeConfigFile(_cfg: unknown) {
+        // No-op — Bridge doesn't write config files
+      },
+    },
+
+    // ===== Logging =====
+    // LarkClient.runtime.logging.getChildLogger() is called for plugin logging
+    logging: {
+      getChildLogger(opts: Record<string, unknown>) {
+        const prefix = opts?.name ? `[${opts.name}]` : '[plugin]';
+        return {
+          info: (...args: unknown[]) => console.log(prefix, ...args),
+          warn: (...args: unknown[]) => console.warn(prefix, ...args),
+          error: (...args: unknown[]) => console.error(prefix, ...args),
+          debug: (...args: unknown[]) => console.debug(prefix, ...args),
+        };
+      },
+    },
 
     channel: {
       // ===== Activity tracking =====
