@@ -2491,6 +2491,9 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         body["bridgePluginId"] = json!(bridge_plugin_id);
         body["bridgeEnabledToolGroups"] = json!(tool_groups);
         body["senderId"] = json!(msg.sender_id);
+        ulog_info!("[im-stream] Bridge context: port={}, plugin={}, groups={:?}", bridge_port, bridge_plugin_id, tool_groups);
+    } else {
+        ulog_info!("[im-stream] No bridge context (non-Bridge adapter)");
     }
     let url = format!("http://127.0.0.1:{}/api/im/chat", port);
     ulog_info!("[im-stream] POST {} (SSE)", url);

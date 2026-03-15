@@ -1029,9 +1029,12 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
 
   // Add Bridge tools proxy if we're in an IM context with a plugin bridge that has tools
   const bridgeToolsCtx = getImBridgeToolsContext();
-  if (bridgeToolsCtx && bridgeToolsCtx.enabledToolGroups.length > 0) {
+  if (bridgeToolsCtx) {
     result['im-bridge-tools'] = imBridgeToolServer;
-    console.log(`[agent] Added im-bridge-tools MCP server for plugin ${bridgeToolsCtx.pluginId} (groups: ${bridgeToolsCtx.enabledToolGroups.join(',')})`);
+    const groups = bridgeToolsCtx.enabledToolGroups.length > 0
+      ? bridgeToolsCtx.enabledToolGroups.join(',')
+      : 'all (no filter)';
+    console.log(`[agent] Added im-bridge-tools MCP server for plugin ${bridgeToolsCtx.pluginId} (groups: ${groups})`);
   }
 
   // --- Pattern 2: Builtin registry MCPs (in-process, user-toggled) ---
