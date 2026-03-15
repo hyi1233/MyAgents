@@ -106,9 +106,27 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           return { dispatch: async () => {} };
         },
 
-        async dispatchReplyFromConfig(_params: Record<string, unknown>) {},
+        /**
+         * Feishu plugin calls dispatchReplyFromConfig() which is a higher-level
+         * API than dispatchReplyWithBufferedBlockDispatcher(). Route it through
+         * the same interception point so messages reach Rust.
+         */
+        async dispatchReplyFromConfig(params: Record<string, unknown>) {
+          const ctx = (params.ctx || params) as Record<string, unknown>;
+          return runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({ ctx, cfg: params.cfg as Record<string, unknown> });
+        },
 
-        async withReplyDispatcher(_params: Record<string, unknown>) {},
+        /**
+         * Feishu plugin wraps dispatch calls in withReplyDispatcher({ run }).
+         * Execute the run function which will call dispatchReplyFromConfig,
+         * which now correctly routes to our interception point.
+         */
+        async withReplyDispatcher(params: Record<string, unknown>) {
+          const run = params.run as (() => Promise<unknown>) | undefined;
+          if (typeof run === 'function') {
+            await run();
+          }
+        },
 
         /**
          * Core interception point: instead of calling `deliver()`, we POST
@@ -128,7 +146,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
-          const isMention = ctx.IsMention ?? ctx.isMention ?? true;
+          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention ?? true;
 
           // Extract attachment-related fields (for Feishu file/image forwarding, threaded replies, etc.)
           const attachments = (ctx.Attachments || ctx.attachments || undefined) as Record<string, unknown>[] | undefined;
