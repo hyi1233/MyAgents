@@ -60,17 +60,8 @@ pub async fn monitor_webview_health(
     // Tracks the last time we triggered a reload (for post-reload grace period)
     let mut last_reload_time: u64 = now_secs(); // treat startup as a "reload"
 
-    // Platform-specific app origin for navigate()
-    let app_origin: &str = if cfg!(debug_assertions) {
-        "http://localhost:5173"
-    } else if cfg!(target_os = "windows") {
-        "https://tauri.localhost"
-    } else {
-        "tauri://localhost"
-    };
-
-    log::info!("[webview-health] Monitor started (grace={}s, stale={}s, origin={})",
-        GRACE_PERIOD_SECS, STALE_THRESHOLD_SECS, app_origin);
+    log::info!("[webview-health] Monitor started (grace={}s, stale={}s)",
+        GRACE_PERIOD_SECS, STALE_THRESHOLD_SECS);
 
     loop {
         tokio::time::sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
@@ -132,14 +123,42 @@ pub async fn monitor_webview_health(
 
         reload_count += 1;
         consecutive_stale = 0;
+
+        // Get the WebView's current URL origin for reload.
+        // CRITICAL: Do NOT hardcode origin with cfg!(debug_assertions) —
+        // `build_dev.sh --debug` sets debug_assertions=true but has NO Vite
+        // dev server. Hardcoding "http://localhost:5173" would navigate the
+        // WebView to a dead URL, potentially showing an external website.
+        let reload_url = window.url()
+            .ok()
+            .and_then(|u| {
+                // Extract origin (scheme + host) from current URL
+                let origin = format!("{}://{}", u.scheme(), u.host_str().unwrap_or("localhost"));
+                // If port is non-default, include it
+                if let Some(port) = u.port() {
+                    Some(format!("{}:{}", origin, port))
+                } else {
+                    Some(origin)
+                }
+            })
+            .unwrap_or_else(|| {
+                // Fallback: platform-specific default
+                if cfg!(target_os = "windows") {
+                    "https://tauri.localhost".to_string()
+                } else {
+                    "tauri://localhost".to_string()
+                }
+            });
+
         log::warn!(
-            "[webview-health] Heartbeat stale (last={}s ago), reloading WebView (attempt {}/{})",
+            "[webview-health] Heartbeat stale (last={}s ago), reloading WebView to {} (attempt {}/{})",
             now.saturating_sub(last_hb),
+            reload_url,
             reload_count,
             MAX_RELOAD_ATTEMPTS,
         );
 
-        if let Ok(url) = app_origin.parse() {
+        if let Ok(url) = reload_url.parse() {
             let _ = window.navigate(url);
         }
 

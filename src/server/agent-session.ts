@@ -8,8 +8,8 @@ import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform'
 import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
-import { imMediaToolServer, getImMediaContext, clearImMediaContext } from './tools/im-media-tool';
-import { imBridgeToolServer, getImBridgeToolsContext, clearImBridgeToolsContext } from './tools/im-bridge-tools';
+import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
+import { imBridgeToolServer, getImBridgeToolsContext } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
 // Side-effect imports: each registers itself in the builtin MCP registry
 import './tools/gemini-image-tool';
