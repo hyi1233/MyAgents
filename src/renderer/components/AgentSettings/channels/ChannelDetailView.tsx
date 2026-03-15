@@ -637,7 +637,7 @@ export default function ChannelDetailView({
                             <BindCodePanel
                                 bindCode={botStatus.bindCode}
                                 hasWhitelistUsers={(channel.allowedUsers?.length ?? 0) > 0}
-                                platformName={channel.type === 'dingtalk' ? '钉钉' : '飞书'}
+                                platformName={channel.type === 'dingtalk' ? '钉钉' : channel.type === 'feishu' ? '飞书' : (channel.name || '插件 Bot')}
                             />
                         )}
                         {isRunning && channel.type === 'telegram' && botStatus?.bindUrl && (

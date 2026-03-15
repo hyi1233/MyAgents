@@ -42,6 +42,8 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
   const toast = useToast();
   const toastRef = useRef(toast);
   toastRef.current = toast;
+  const isMountedRef = useRef(true);
+  useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,12 +64,14 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('cmd_uninstall_openclaw_plugin', { pluginId: pendingUninstall.pluginId });
+      if (!isMountedRef.current) return;
       setInstalledPlugins(prev => prev.filter(p => p.pluginId !== pendingUninstall.pluginId));
       toastRef.current.success(`已卸载 ${pendingUninstall.manifest?.name || pendingUninstall.pluginId}`);
     } catch (err) {
+      if (!isMountedRef.current) return;
       toastRef.current.error(String(err));
     } finally {
-      setPendingUninstall(null);
+      if (isMountedRef.current) setPendingUninstall(null);
     }
   }, [pendingUninstall]);
 
@@ -83,12 +87,14 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const result = await invoke<InstalledPlugin>('cmd_install_openclaw_plugin', { npmSpec: promoted.npmSpec });
+      if (!isMountedRef.current) return;
       setInstalledPlugins(prev => [...prev, result]);
       onSelect(`openclaw:${result.pluginId}` as ChannelType);
     } catch (err) {
+      if (!isMountedRef.current) return;
       toastRef.current.error(`安装失败: ${err}`);
     } finally {
-      setAutoInstalling(null);
+      if (isMountedRef.current) setAutoInstalling(null);
     }
   }, [installedPlugins, onSelect]);
 
@@ -140,10 +146,7 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
         {allPlatforms.map(p => (
           <div key={p.id} className="group relative">
             <button
-              onClick={() => {
-                if (p.plugin) onSelect(p.id);
-                else onSelect(p.id);
-              }}
+              onClick={() => onSelect(p.id)}
               className="flex w-full flex-col items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-6 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:translate-y-[-1px]"
             >
               {p.icon ? (
