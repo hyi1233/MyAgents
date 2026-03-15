@@ -68,6 +68,8 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
     // LarkClient.runtime.config.loadConfig() is called during message handling
     config: {
       loadConfig() {
+        console.log('[compat-timing] config.loadConfig() called');
+
         // Return an OpenClaw-format config with the plugin's channel settings
         // Use currentPluginId as channel key (not hardcoded 'feishu') so any plugin
         // can resolve its own config via cfg.channels[pluginId]
@@ -139,6 +141,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
         },
 
         finalizeInboundContext(ctx: Record<string, unknown>) {
+          console.log(`[compat-timing] finalizeInboundContext called, Body len=${String(ctx.Body || '').length}`);
           return ctx;
         },
 
@@ -160,8 +163,12 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
          * the same interception point so messages reach Rust.
          */
         async dispatchReplyFromConfig(params: Record<string, unknown>) {
+          const t0 = Date.now();
+          console.log(`[compat-timing] dispatchReplyFromConfig ENTER`);
           const ctx = (params.ctx || params) as Record<string, unknown>;
-          return runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({ ctx, cfg: params.cfg as Record<string, unknown> });
+          const result = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({ ctx, cfg: params.cfg as Record<string, unknown> });
+          console.log(`[compat-timing] dispatchReplyFromConfig EXIT (+${Date.now() - t0}ms)`);
+          return result;
         },
 
         /**
@@ -170,9 +177,16 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
          * which now correctly routes to our interception point.
          */
         async withReplyDispatcher(params: Record<string, unknown>) {
+          const t0 = Date.now();
+          console.log(`[compat-timing] withReplyDispatcher ENTER`);
           const run = params.run as (() => Promise<unknown>) | undefined;
           if (typeof run === 'function') {
-            await run();
+            try {
+              await run();
+              console.log(`[compat-timing] withReplyDispatcher run() OK (+${Date.now() - t0}ms)`);
+            } catch (err) {
+              console.error(`[compat-timing] withReplyDispatcher run() THREW (+${Date.now() - t0}ms):`, err);
+            }
           }
           // Plugin destructures { queuedFinal, counts } from the return value
           return { queuedFinal: 0, counts: {} };
@@ -210,7 +224,8 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
             return;
           }
 
-          console.log(`[compat-runtime] Dispatching message to Rust: sender=${senderId} chat=${chatId} len=${text.length}`);
+          const t0 = Date.now();
+          console.log(`[compat-timing] dispatchReplyWithBufferedBlockDispatcher ENTER: sender=${senderId} chat=${chatId} len=${text.length}`);
 
           try {
             const resp = await fetch(`${rustBaseUrl}/api/im-bridge/message`, {
@@ -232,12 +247,13 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
               }),
             });
 
+            console.log(`[compat-timing] Rust POST completed (+${Date.now() - t0}ms) status=${resp.status}`);
             if (!resp.ok) {
               const body = await resp.text();
               console.error(`[compat-runtime] Rust returned ${resp.status}: ${body}`);
             }
           } catch (err) {
-            console.error('[compat-runtime] Failed to POST to Rust:', err);
+            console.error(`[compat-timing] Rust POST FAILED (+${Date.now() - t0}ms):`, err);
           }
 
           // Do NOT call the deliver callback — AI reply comes back via /send-text
@@ -291,9 +307,9 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
       },
 
       // ===== Pairing (device binding) =====
-      // No-op — MyAgents uses its own allowedUsers mechanism.
+      // No-op — MyAgents uses its own allowedUsers mechanism via BIND codes.
       pairing: {
-        buildPairingReply: () => '',
+        buildPairingReply: () => { console.log('[compat-timing] pairing.buildPairingReply called'); return ''; },
         readAllowFromStore: async () => [],
         upsertPairingRequest: async () => ({}),
       },
