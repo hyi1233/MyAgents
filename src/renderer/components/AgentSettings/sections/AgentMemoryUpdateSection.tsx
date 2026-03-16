@@ -21,33 +21,30 @@ const INTERVAL_OPTIONS = [
 
 const DEFAULT_UPDATE_MEMORY_CONTENT = `---
 description: >
-  记忆自动更新指令 — MyAgents 会在夜间自动读取本文件的正文部分作为 prompt，
-  注入到活跃 session 中执行记忆维护。你可以自由修改正文内容来调整更新策略。
+  记忆维护指令 — MyAgents 在夜间将会使用该指令自动注入到活跃 session 执行。
+  此指令基于预设 Agent 模板 - Mino 的记忆结构设计。
+  如果你的 Agent 的记忆机制不同，请自由修改为合适的指令。
 ---
 
-你是一个 AI Agent，现在需要执行定期记忆维护。请按以下步骤操作：
+整理你的记忆。不用赶时间，做仔细。
 
-1. **读取近期日志**
-   - 读取 \`memory/\` 目录下今天及上次维护后的所有 \`YYYY-MM-DD.md\` 日志文件
-   - 如果不确定上次维护时间，读取最近 3 天的日志
+## 要做什么
 
-2. **更新主题记忆**
-   - 根据日志中涉及的项目/话题，更新 \`memory/topics/\` 下对应的主题文件
-   - 如果某个话题没有对应文件，创建新的主题文件
-   - 每个主题文件应包含：关键决策、经验教训、当前状态、待办事项
+1. **读近期日志** — 今天 + 上次维护以来的所有 \`memory/YYYY-MM-DD.md\`
+2. **更新 topic 文件** — 最近工作过的项目，把新经验、状态变更、决策同步到 \`memory/topics/<name>.md\`
+3. **更新核心记忆** — 提炼跨项目的新教训到 \`04-MEMORY.md\`；更新 Ongoing Context；清理过时信息
+4. **整理工作区** — 把散落的临时文件归档整理
+5. **Commit + push** — 如果工作区是 git 仓库，提交并推送变更
 
-3. **提炼核心记忆**
-   - 将跨项目的重要经验、用户偏好、关键决策提炼到 \`.claude/rules/04-MEMORY.md\`
-   - 保持精简，只保留对未来工作有指导意义的内容
+## 原则
 
-4. **整理工作区**
-   - 清理过期的临时文件或笔记
-   - 确保目录结构整洁
+- 信息只存一处 — topic file 里写详细了，核心记忆只放指针
+- 每条记忆带时间戳 \`(YYYY-MM-DD)\`
+- 删比留更重要 — 过时信息是噪音
+- topic file 不存在但该有？创建它
+- 做完后在今天的日志里记一笔
 
-5. **提交变更**
-   - \`git add\` 所有记忆相关的文件变更
-   - \`git commit\` 并附带简洁的提交信息（如 "memory: daily update YYYY-MM-DD"）
-   - \`git push\`
+记住：工作区是你的家，记忆是你持续进化的方式。
 `;
 
 export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: AgentMemoryUpdateSectionProps) {
