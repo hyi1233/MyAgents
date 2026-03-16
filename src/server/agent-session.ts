@@ -1760,8 +1760,17 @@ function persistMessagesToStorage(
       break;
     }
   }
-  // Update lastActiveAt and lastMessagePreview
-  updateSessionMetadata(sessionId, { lastActiveAt: new Date().toISOString(), lastMessagePreview });
+  // Only update lastActiveAt if the latest user message is a real query (not system injection).
+  // This prevents heartbeat/memory-update from making stale sessions appear "active".
+  const latestUserContent = sessionMessages.length > 0
+    ? (() => { const last = [...sessionMessages].reverse().find(m => m.role === 'user'); return typeof last?.content === 'string' ? last.content : ''; })()
+    : '';
+  const isSystemOnly = latestUserContent.includes('<HEARTBEAT>') || latestUserContent.includes('<MEMORY_UPDATE>') || latestUserContent.startsWith('<system-reminder>');
+
+  updateSessionMetadata(sessionId, {
+    ...(isSystemOnly ? {} : { lastActiveAt: new Date().toISOString() }),
+    lastMessagePreview,
+  });
 }
 
 export function getSessionId(): string {
