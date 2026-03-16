@@ -375,7 +375,7 @@ function AgentRow({
                 }`}
             >
                 <span
-                    className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+                    className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-[var(--toggle-thumb)] transition-transform ${
                         enabled ? 'translate-x-4' : ''
                     }`}
                 />
@@ -410,7 +410,7 @@ function AgentRow({
             {!isGlobalRef && onDelete && (
                 <button
                     onClick={e => { e.stopPropagation(); onDelete(); }}
-                    className="shrink-0 rounded-md p-1.5 text-[var(--ink-muted)] hover:bg-red-500/10 hover:text-red-400"
+                    className="shrink-0 rounded-md p-1.5 text-[var(--ink-muted)] hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
                     title="删除"
                 >
                     <Trash2 className="h-3.5 w-3.5" />

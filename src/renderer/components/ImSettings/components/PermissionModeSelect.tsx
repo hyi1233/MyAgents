@@ -35,7 +35,7 @@ export default function PermissionModeSelect({
                         }`}>
                             {value === mode.value && (
                                 <div className="flex h-full w-full items-center justify-center">
-                                    <div className="h-1.5 w-1.5 rounded-full bg-white" />
+                                    <div className="h-1.5 w-1.5 rounded-full bg-[var(--toggle-thumb)]" />
                                 </div>
                             )}
                         </div>

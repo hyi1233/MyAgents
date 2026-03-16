@@ -185,7 +185,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
 
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-200">
-            <div className="rounded-xl border border-[var(--line)] bg-white dark:bg-[var(--paper-elevated)] shadow-sm overflow-hidden">
+            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] shadow-sm overflow-hidden">
                 {/* Header row */}
                 <div className="flex items-center gap-3 px-4 py-3 border-b border-[var(--line-subtle)]">
                     <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-[var(--accent)]/10">
@@ -326,7 +326,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                         disabled={isSubmitting}
                         className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg
                             text-[var(--ink-muted)] hover:text-[var(--ink)]
-                            border border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-white dark:hover:bg-[var(--paper-elevated)]
+                            border border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-elevated)]
                             transition-colors disabled:opacity-50"
                     >
                         <X className="size-3.5" />
@@ -341,7 +341,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                 disabled={isSubmitting}
                                 className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg
                                     text-[var(--ink-muted)] hover:text-[var(--ink)]
-                                    border border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-white dark:hover:bg-[var(--paper-elevated)]
+                                    border border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-elevated)]
                                     transition-colors disabled:opacity-50"
                             >
                                 <ChevronLeft className="size-3.5" />

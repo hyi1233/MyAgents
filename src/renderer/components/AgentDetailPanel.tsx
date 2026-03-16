@@ -496,7 +496,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                                 </button>
                                 <button
                                     onClick={() => setShowDeleteConfirm(true)}
-                                    className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                                    className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--error)] hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
                                 >
                                     <Trash2 className="h-3.5 w-3.5" />
                                 </button>

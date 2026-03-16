@@ -177,7 +177,7 @@ export default function CustomTitleBar({
                 {updateReady && (
                     <button
                         onClick={onRestartAndUpdate}
-                        className="flex h-7 items-center gap-1.5 px-3 rounded-full text-xs font-medium text-white bg-emerald-600 shadow-sm transition-all hover:bg-emerald-700 active:scale-95"
+                        className="flex h-7 items-center gap-1.5 px-3 rounded-full text-xs font-medium text-white bg-[var(--success)] shadow-sm transition-all hover:bg-[var(--success)] active:scale-95"
                         title={updateVersion ? `更新到 v${updateVersion}` : '重启并更新'}
                     >
                         <RefreshCw className="h-3.5 w-3.5" />
@@ -240,7 +240,7 @@ export default function CustomTitleBar({
                     </button>
                     <button
                         onClick={handleClose}
-                        className="flex w-11 items-center justify-center text-[var(--ink-muted)] hover:bg-red-500 hover:text-white transition-colors"
+                        className="flex w-11 items-center justify-center text-[var(--ink-muted)] hover:bg-[var(--error)] hover:text-white transition-colors"
                         title="关闭"
                     >
                         <X className="h-4 w-4" />

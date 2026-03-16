@@ -2185,7 +2185,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     title={isEnabling ? '启用中...' : isEnabled ? '已启用' : '点击启用'}
                                                 >
                                                     <span
-                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${isEnabled ? 'translate-x-5' : 'translate-x-0'}`}
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${isEnabled ? 'translate-x-5' : 'translate-x-0'}`}
                                                     />
                                                 </button>
                                             </div>
@@ -2259,7 +2259,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         }`}
                                     >
                                         <span
-                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
                                                 autostartEnabled ? 'translate-x-5' : 'translate-x-0'
                                             }`}
                                         />
@@ -2286,11 +2286,34 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         }`}
                                     >
                                         <span
-                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
                                                 config.minimizeToTray ? 'translate-x-5' : 'translate-x-0'
                                             }`}
                                         />
                                     </button>
+                                </div>
+
+                                {/* 主题 */}
+                                <div className="mt-6 flex items-center justify-between">
+                                    <div>
+                                        <p className="text-sm font-medium text-[var(--ink)]">主题</p>
+                                        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">设置应用外观模式</p>
+                                    </div>
+                                    <div className="flex gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
+                                        {(['system', 'light', 'dark'] as const).map((mode) => (
+                                            <button
+                                                key={mode}
+                                                onClick={() => updateConfig({ theme: mode })}
+                                                className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                                                    config.theme === mode
+                                                        ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
+                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
+                                                }`}
+                                            >
+                                                {mode === 'system' ? '跟随系统' : mode === 'light' ? '日间模式' : '夜间模式'}
+                                            </button>
+                                        ))}
+                                    </div>
                                 </div>
                             </div>
 
@@ -2370,7 +2393,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         }`}
                                     >
                                         <span
-                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
                                                 config.cronNotifications ? 'translate-x-5' : 'translate-x-0'
                                             }`}
                                         />
@@ -2412,7 +2435,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         }`}
                                     >
                                         <span
-                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
                                                 config.proxySettings?.enabled ? 'translate-x-5' : 'translate-x-0'
                                             }`}
                                         />
@@ -2740,7 +2763,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                         }`}
                                                 >
                                                     <span
-                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${config.showDevTools ? 'translate-x-5' : 'translate-x-0'
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.showDevTools ? 'translate-x-5' : 'translate-x-0'
                                                             }`}
                                                     />
                                                 </button>
@@ -3143,7 +3166,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         geminiImageSettings.searchGrounding ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
                                     }`}
                                 >
-                                    <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                    <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
                                         geminiImageSettings.searchGrounding ? 'translate-x-5' : 'translate-x-0'
                                     }`} />
                                 </button>
@@ -3216,7 +3239,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         playwrightSettings.headless ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
                                     }`}
                                 >
-                                    <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                    <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
                                         playwrightSettings.headless ? 'translate-x-5' : 'translate-x-0'
                                     }`} />
                                 </button>
@@ -3401,8 +3424,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         {/* Content */}
                         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
                             {/* Free service notice */}
-                            <div className="rounded-lg bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200/60 dark:border-emerald-500/30 px-3 py-2">
-                                <div className="flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-400">
+                            <div className="rounded-lg bg-[var(--success-bg)] border border-[var(--success)]/20 px-3 py-2">
+                                <div className="flex items-center gap-2 text-xs text-[var(--success)]">
                                     <Check className="h-3.5 w-3.5" />
                                     免费服务，无需 API Key，开箱即用
                                 </div>

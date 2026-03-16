@@ -20,40 +20,40 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
             <div className={`rounded-xl border p-4 shadow-sm ${
                 isResolved && !isApproved
-                    ? 'border-gray-200 bg-gray-50/80 dark:border-gray-700 dark:bg-gray-900/40'
-                    : 'border-green-200 bg-green-50/80 dark:border-green-800 dark:bg-green-950/40'
+                    ? 'border-[var(--line)] bg-[var(--paper-inset)]/80'
+                    : 'border-[var(--success)]/30 bg-[var(--success-bg)]/80'
             }`}>
                 {/* Header */}
                 <div className={`${isResolved ? '' : 'mb-3'} flex items-center gap-2`}>
                     <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${
                         isResolved && !isApproved
-                            ? 'bg-gray-100 dark:bg-gray-800'
-                            : 'bg-green-100 dark:bg-green-900/50'
+                            ? 'bg-[var(--paper-inset)]'
+                            : 'bg-[var(--success-bg)]'
                     }`}>
                         <FileCheck className={`h-4.5 w-4.5 ${
                             isResolved && !isApproved
-                                ? 'text-gray-500 dark:text-gray-400'
-                                : 'text-green-600 dark:text-green-400'
+                                ? 'text-[var(--ink-muted)]'
+                                : 'text-[var(--success)]'
                         }`} />
                     </div>
                     <div className="flex-1">
                         <h3 className={`text-sm font-semibold ${
                             isResolved && !isApproved
-                                ? 'text-gray-700 dark:text-gray-300'
-                                : 'text-green-900 dark:text-green-100'
+                                ? 'text-[var(--ink)]'
+                                : 'text-[var(--success)]'
                         }`}>方案审核</h3>
                         <p className={`text-xs ${
                             isResolved && !isApproved
-                                ? 'text-gray-500 dark:text-gray-400'
-                                : 'text-green-600 dark:text-green-400'
+                                ? 'text-[var(--ink-muted)]'
+                                : 'text-[var(--success)]'
                         }`}>AI 完成了方案设计，请审核后决定是否执行</p>
                     </div>
                     {/* Resolved badge in header */}
                     {isResolved && (
                         <div className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${
                             isApproved
-                                ? 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300'
-                                : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                                ? 'bg-[var(--success-bg)] text-[var(--success)]'
+                                : 'bg-[var(--paper-inset)] text-[var(--ink-muted)]'
                         }`}>
                             {isApproved
                                 ? <><CheckCircle className="h-3.5 w-3.5" />已批准</>
@@ -67,8 +67,8 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
                 {request.plan && (
                     <div className={`mt-3 max-h-[26rem] overflow-y-auto rounded-lg border p-3 text-sm ${
                         isResolved && !isApproved
-                            ? 'border-gray-200 bg-gray-50/60 dark:border-gray-700 dark:bg-gray-900/40'
-                            : 'border-green-200 bg-white/80 dark:border-green-800 dark:bg-gray-900/60'
+                            ? 'border-[var(--line)] bg-[var(--paper-inset)]/60'
+                            : 'border-[var(--success)]/30 bg-[var(--paper-elevated)]/80'
                     }`}>
                         <Markdown>{request.plan}</Markdown>
                     </div>
@@ -79,14 +79,14 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
                     <div className="mt-2 space-y-1.5">
                         <p className={`text-xs font-medium ${
                             isResolved && !isApproved
-                                ? 'text-gray-500 dark:text-gray-400'
-                                : 'text-green-700 dark:text-green-300'
+                                ? 'text-[var(--ink-muted)]'
+                                : 'text-[var(--success)]'
                         }`}>需要的权限：</p>
                         {request.allowedPrompts.map((ap, i) => (
                             <div key={i} className={`flex items-center gap-2 rounded-md px-2.5 py-1.5 text-xs ${
                                 isResolved && !isApproved
-                                    ? 'bg-gray-100/60 text-gray-600 dark:bg-gray-800/30 dark:text-gray-400'
-                                    : 'bg-green-100/60 text-green-800 dark:bg-green-900/30 dark:text-green-200'
+                                    ? 'bg-[var(--paper-inset)]/60 text-[var(--ink-muted)]'
+                                    : 'bg-[var(--success-bg)]/60 text-[var(--success)]'
                             }`}>
                                 <Terminal className="h-3.5 w-3.5 shrink-0" />
                                 <span>{ap.prompt}</span>
@@ -100,14 +100,14 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
                     <div className="mt-3 flex justify-end gap-2">
                         <button
                             onClick={onReject}
-                            className="flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                            className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
                         >
                             <X className="h-3.5 w-3.5" />
                             拒绝
                         </button>
                         <button
                             onClick={onApprove}
-                            className="flex items-center gap-1.5 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-700 dark:bg-green-500 dark:hover:bg-green-600"
+                            className="flex items-center gap-1.5 rounded-lg bg-[var(--success)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110"
                         >
                             <Check className="h-3.5 w-3.5" />
                             批准执行

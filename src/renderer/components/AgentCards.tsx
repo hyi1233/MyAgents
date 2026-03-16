@@ -28,7 +28,7 @@ export function AgentCard({ agent, onClick }: { agent: AgentItem; onClick: () =>
                     {agent.scope === 'user' ? '全局' : '项目'}
                 </span>
                 {agent.synced && (
-                    <span className="rounded bg-blue-500/10 px-1.5 py-0.5 text-[11px] text-blue-600">
+                    <span className="rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-[11px] text-[var(--info)]">
                         Claude Code
                     </span>
                 )}

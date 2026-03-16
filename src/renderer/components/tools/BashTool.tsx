@@ -22,13 +22,13 @@ export default function BashTool({ tool }: BashToolProps) {
   return (
     <div className="flex flex-col gap-3 font-sans select-none">
       {/* Command Display (Dark terminal style) */}
-      <div className="group relative overflow-hidden rounded-lg bg-neutral-900 p-3 text-sm text-neutral-200 shadow-sm dark:bg-black border border-neutral-800 select-text">
+      <div className="group relative overflow-hidden rounded-lg bg-[var(--code-bg)] p-3 text-sm text-[var(--code-text)] shadow-sm border border-[var(--line)] select-text">
         <div className="flex items-start gap-3 font-mono leading-relaxed">
-          <span className="select-none text-green-500 font-bold mt-0.5">$</span>
+          <span className="select-none text-[var(--success)] font-bold mt-0.5">$</span>
           <span className="break-all whitespace-pre-wrap">{input.command}</span>
         </div>
         {input.run_in_background && (
-          <div className="absolute right-2 top-2 rounded border border-neutral-700 bg-neutral-800 px-1.5 py-0.5 text-[10px] font-medium text-neutral-400 uppercase tracking-wider">
+          <div className="absolute right-2 top-2 rounded border border-[var(--line)] bg-[var(--code-header-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--code-line-number)] uppercase tracking-wider">
             Background
           </div>
         )}

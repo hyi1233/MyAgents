@@ -13,6 +13,7 @@ import { useUpdater } from '@/hooks/useUpdater';
 import { useTrayEvents } from '@/hooks/useTrayEvents';
 import { notifyCronTaskComplete } from '@/services/notificationService';
 import { useConfig } from '@/hooks/useConfig';
+import { useThemeEffect } from '@/hooks/useTheme';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import Chat from '@/pages/Chat';
 import Launcher from '@/pages/Launcher';
@@ -176,6 +177,9 @@ export default function App() {
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
   const { config, isLoading: configLoading, updateConfig, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+
+  // Apply theme (light/dark/system) to <html> element
+  useThemeEffect();
 
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
