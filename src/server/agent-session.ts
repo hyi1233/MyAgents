@@ -954,7 +954,7 @@ function buildSettingSources(): ('user' | 'project')[] {
 // Known MCP package versions — pin these to avoid npm registry lookups on every startup
 // Update these when upgrading MCP server dependencies
 const PINNED_MCP_VERSIONS: Record<string, string> = {
-  '@playwright/mcp': '0.0.64',
+  '@playwright/mcp': '0.0.68',
 };
 
 /**
@@ -962,7 +962,7 @@ const PINNED_MCP_VERSIONS: Record<string, string> = {
  * This eliminates the npm registry network check that adds 2-5s latency per startup.
  * Unknown packages keep their original version specifiers.
  */
-function pinMcpPackageVersions(args: string[]): string[] {
+export function pinMcpPackageVersions(args: string[]): string[] {
   return args.map(arg => {
     // Match patterns like @playwright/mcp@latest or @scope/pkg@latest
     const latestMatch = arg.match(/^(@?[^@]+)@latest$/);

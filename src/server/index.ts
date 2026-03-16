@@ -3943,7 +3943,9 @@ async function main() {
               }
 
               // Warmup: run bun x <package> --help to download and cache
-              const args = server.args || [];
+              // MUST pin versions here too — otherwise warmup caches @latest but SDK uses pinned version
+              const { pinMcpPackageVersions } = await import('./agent-session');
+              const args = pinMcpPackageVersions(server.args || []);
               console.log(`[api/mcp/enable] Warming up cache: ${runtime} x ${args.join(' ')}`);
 
               const { spawn } = await import('child_process');
@@ -3975,30 +3977,38 @@ async function main() {
                   // Code 0 or 1 is acceptable (--help may return 1 for some packages)
                   // Check stderr for real errors (package not found, network issues, etc.)
                   const stderrLower = stderr.toLowerCase();
-                  const errorKeywords = [
-                    '404',           // HTTP 404 not found
-                    'not found',     // Package not found
+                  const networkKeywords = [
                     'enotfound',     // DNS resolution failed
                     'etimedout',     // Connection timeout
                     'econnrefused',  // Connection refused
                     'econnreset',    // Connection reset
-                    'err!',          // npm error indicator
-                    'error:',        // General error prefix
+                    'proxy error',   // Proxy failures
+                    'proxy authentication', // Proxy auth required
+                    'bad gateway',   // Proxy 502
+                    'socket hang up',// Connection dropped
                   ];
-                  const hasError = errorKeywords.some(kw => stderrLower.includes(kw));
+                  const packageKeywords = [
+                    '404',           // HTTP 404 not found
+                    'not found',     // Package not found
+                    'err!',          // npm error indicator
+                  ];
+                  const isNetworkError = networkKeywords.some(kw => stderrLower.includes(kw));
+                  const isPackageError = packageKeywords.some(kw => stderrLower.includes(kw));
 
-                  if (hasError) {
-                    // Determine error type based on stderr content
-                    const isNetworkError = ['enotfound', 'etimedout', 'econnrefused', 'econnreset'].some(
-                      kw => stderrLower.includes(kw)
-                    );
+                  if (isNetworkError) {
                     resolve(jsonResponse({
                       success: false,
                       error: {
-                        type: isNetworkError ? 'warmup_failed' : 'package_not_found',
-                        message: isNetworkError
-                          ? '网络连接失败，请检查网络设置'
-                          : '包不存在或无法下载，请检查包名',
+                        type: 'warmup_failed',
+                        message: '网络连接失败，请检查网络或代理设置',
+                      }
+                    }));
+                  } else if (isPackageError) {
+                    resolve(jsonResponse({
+                      success: false,
+                      error: {
+                        type: 'package_not_found',
+                        message: '包不存在或无法下载，请检查包名',
                       }
                     }));
                   } else {
