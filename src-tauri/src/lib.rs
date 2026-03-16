@@ -202,6 +202,8 @@ pub fn run() {
             im::cmd_create_agent,
             im::cmd_delete_agent,
             // File utility commands
+            commands::cmd_read_workspace_file,
+            commands::cmd_write_workspace_file,
             commands::cmd_read_file_base64,
             commands::cmd_open_file,
         ])

@@ -781,6 +781,30 @@ fn merge_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Read a workspace text file. Returns content if exists, null if not.
+/// Bypasses Tauri fs plugin scope (which only covers ~/.myagents).
+#[tauri::command]
+pub async fn cmd_read_workspace_file(path: String) -> Result<Option<String>, String> {
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Failed to read {}: {}", path, e)),
+    }
+}
+
+/// Write content to a workspace text file, creating parent directories if needed.
+/// Bypasses Tauri fs plugin scope (which only covers ~/.myagents).
+#[tauri::command]
+pub async fn cmd_write_workspace_file(path: String, content: String) -> Result<(), String> {
+    let file_path = std::path::Path::new(&path);
+    if let Some(parent) = file_path.parent() {
+        tokio::fs::create_dir_all(parent).await
+            .map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
+    tokio::fs::write(&path, content).await
+        .map_err(|e| format!("Failed to write {}: {}", path, e))
+}
+
 /// Read a local file and return its contents as base64.
 /// Used by the audio player to create blob URLs without asset protocol scope issues.
 #[tauri::command]

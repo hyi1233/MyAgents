@@ -67,67 +67,45 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
     onAgentChanged();
   }, [agent.id, agent.memoryAutoUpdate, onAgentChanged]);
 
-  const ensureUpdateMemoryFile = useCallback(async (): Promise<boolean> => {
+  // Resolve file path (cross-platform separator)
+  const filePath = `${agent.workspacePath}${agent.workspacePath.includes('\\') ? '\\' : '/'}UPDATE_MEMORY.md`;
+
+  // Read or create file via Rust invoke (bypasses Tauri fs plugin scope)
+  const ensureFile = useCallback(async (): Promise<{ ok: boolean; content: string }> => {
     try {
-      const { readTextFile, writeTextFile } = await import('@tauri-apps/plugin-fs');
-      const sep = agent.workspacePath.includes('\\') ? '\\' : '/';
-      const filePath = `${agent.workspacePath}${sep}UPDATE_MEMORY.md`;
-      try {
-        await readTextFile(filePath);
-        return true; // File already exists
-      } catch {
-        // File doesn't exist, create with default content
-        await writeTextFile(filePath, DEFAULT_UPDATE_MEMORY_CONTENT);
-        toastRef.current.success('已创建 UPDATE_MEMORY.md');
-        return true;
-      }
+      const { invoke } = await import('@tauri-apps/api/core');
+      const existing = await invoke<string | null>('cmd_read_workspace_file', { path: filePath });
+      if (existing !== null) return { ok: true, content: existing };
+      // File doesn't exist — create with default content
+      await invoke('cmd_write_workspace_file', { path: filePath, content: DEFAULT_UPDATE_MEMORY_CONTENT });
+      toastRef.current.success('已创建 UPDATE_MEMORY.md');
+      return { ok: true, content: DEFAULT_UPDATE_MEMORY_CONTENT };
     } catch (e) {
-      console.warn('[AgentMemoryUpdateSection] Failed to ensure UPDATE_MEMORY.md:', e);
-      toastRef.current.error('无法创建 UPDATE_MEMORY.md，请检查工作区路径');
-      return false;
+      console.warn('[AgentMemoryUpdateSection] File operation failed:', e);
+      toastRef.current.error('无法读写 UPDATE_MEMORY.md，请检查工作区路径');
+      return { ok: false, content: '' };
     }
-  }, [agent.workspacePath]);
+  }, [filePath]);
 
   const handleToggle = useCallback(async () => {
     const newEnabled = !(config?.enabled ?? false);
-
     if (newEnabled) {
-      const ok = await ensureUpdateMemoryFile();
+      const { ok } = await ensureFile();
       if (!ok) return;
     }
-
     await updateConfig({ enabled: newEnabled });
-  }, [config?.enabled, ensureUpdateMemoryFile, updateConfig]);
+  }, [config?.enabled, ensureFile, updateConfig]);
 
   const handleOpenFile = useCallback(async () => {
-    if (!agent.workspacePath) return;
-    try {
-      const { readTextFile, writeTextFile } = await import('@tauri-apps/plugin-fs');
-      const sep = agent.workspacePath.includes('\\') ? '\\' : '/';
-      const filePath = `${agent.workspacePath}${sep}UPDATE_MEMORY.md`;
-      let content = '';
-      try {
-        content = await readTextFile(filePath);
-      } catch {
-        // File doesn't exist — create with default content
-        content = DEFAULT_UPDATE_MEMORY_CONTENT;
-        try {
-          await writeTextFile(filePath, content);
-        } catch {
-          // Write failed, still open preview with default content for reference
-        }
-      }
-      setPreviewFile({ name: 'UPDATE_MEMORY.md', content, size: new TextEncoder().encode(content).length, path: filePath });
-    } catch (e) {
-      console.warn('[AgentMemoryUpdateSection] Failed to open UPDATE_MEMORY.md:', e);
-    }
-  }, [agent.workspacePath]);
+    const { ok, content } = await ensureFile();
+    if (!ok) return;
+    setPreviewFile({ name: 'UPDATE_MEMORY.md', content, size: new TextEncoder().encode(content).length, path: filePath });
+  }, [ensureFile, filePath]);
 
   const handleDirectSave = useCallback(async (content: string) => {
-    if (!previewFile) return;
-    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-    await writeTextFile(previewFile.path, content);
-  }, [previewFile]);
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('cmd_write_workspace_file', { path: filePath, content });
+  }, [filePath]);
 
   const handleRevealFile = useCallback(async () => {
     if (!previewFile) return;
