@@ -4,6 +4,7 @@
 import type {
   ImPlatform,
   HeartbeatConfig,
+  MemoryAutoUpdateConfig,
   GroupPermission,
   GroupActivation,
 } from './im';
@@ -101,6 +102,9 @@ export interface AgentConfig {
 
   // Heartbeat (Agent-level, shared across channels)
   heartbeat?: HeartbeatConfig;
+
+  // Memory Auto-Update (v0.1.43)
+  memoryAutoUpdate?: MemoryAutoUpdateConfig;
 
   // Channels
   channels: ChannelConfig[];

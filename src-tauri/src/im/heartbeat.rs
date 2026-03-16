@@ -3,6 +3,7 @@
 // Supports active hours, instant wake (from cron completion), and dedup.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use chrono::Timelike;
@@ -49,19 +50,25 @@ pub struct HeartbeatRunner {
     current_model: Arc<RwLock<Option<String>>>,
     current_provider_env: Arc<RwLock<Option<serde_json::Value>>>,
     mcp_servers_json: Arc<RwLock<Option<String>>>,
+    // Memory auto-update (v0.1.43)
+    memory_update_config: Arc<RwLock<Option<super::types::MemoryAutoUpdateConfig>>>,
+    memory_update_running: Arc<AtomicBool>,
 }
 
 impl HeartbeatRunner {
     /// Create a new HeartbeatRunner.
-    /// Returns (runner, config_arc) — caller keeps config_arc for hot-updating heartbeat config.
+    /// Returns (runner, config_arc, mau_config_arc, mau_running_arc) — caller keeps arcs for hot-updating.
     pub fn new(
         config: HeartbeatConfig,
         bot_label: String,
         current_model: Arc<RwLock<Option<String>>>,
         current_provider_env: Arc<RwLock<Option<serde_json::Value>>>,
         mcp_servers_json: Arc<RwLock<Option<String>>>,
-    ) -> (Self, Arc<RwLock<HeartbeatConfig>>) {
+        memory_update_config: Option<super::types::MemoryAutoUpdateConfig>,
+    ) -> (Self, Arc<RwLock<HeartbeatConfig>>, Arc<RwLock<Option<super::types::MemoryAutoUpdateConfig>>>, Arc<AtomicBool>) {
         let config = Arc::new(RwLock::new(config));
+        let mau_config = Arc::new(RwLock::new(memory_update_config));
+        let mau_running = Arc::new(AtomicBool::new(false));
         let runner = Self {
             bot_label,
             config: Arc::clone(&config),
@@ -71,8 +78,10 @@ impl HeartbeatRunner {
             current_model,
             current_provider_env,
             mcp_servers_json,
+            memory_update_config: Arc::clone(&mau_config),
+            memory_update_running: Arc::clone(&mau_running),
         };
-        (runner, config)
+        (runner, config, mau_config, mau_running)
     }
 
     /// Main heartbeat loop. Runs until shutdown signal.
@@ -85,6 +94,9 @@ impl HeartbeatRunner {
         adapter: Arc<AnyAdapter>,
         app_handle: AppHandle<R>,
         peer_locks: PeerLocks,
+        agent_id: String,
+        workspace_path: String,
+        permission_mode: Arc<RwLock<String>>,
     ) {
         let initial_interval = {
             let cfg = self.config.read().await;
@@ -130,6 +142,9 @@ impl HeartbeatRunner {
                         &adapter,
                         &app_handle,
                         &peer_locks,
+                        &agent_id,
+                        &workspace_path,
+                        &permission_mode,
                     ).await;
                 }
                 Some(reason) = wake_rx.recv() => {
@@ -152,6 +167,9 @@ impl HeartbeatRunner {
                         &adapter,
                         &app_handle,
                         &peer_locks,
+                        &agent_id,
+                        &workspace_path,
+                        &permission_mode,
                     ).await;
 
                     // Reset interval timer after wake to avoid rapid fire
@@ -179,6 +197,9 @@ impl HeartbeatRunner {
         adapter: &Arc<AnyAdapter>,
         app_handle: &AppHandle<R>,
         peer_locks: &PeerLocks,
+        agent_id: &str,
+        workspace_path: &str,
+        permission_mode: &Arc<RwLock<String>>,
     ) {
         let config = self.config.read().await.clone();
         let is_high_priority = reason.is_high_priority();
@@ -383,6 +404,25 @@ impl HeartbeatRunner {
 
         // Release executing flag (peer_lock is dropped automatically when _peer_guard goes out of scope)
         *self.executing.lock().await = false;
+
+        // Memory auto-update check (v0.1.43)
+        // Lightweight check after heartbeat — spawns independent task if conditions met
+        super::memory_update::check_and_spawn(
+            agent_id,
+            workspace_path,
+            &self.memory_update_config,
+            &self.memory_update_running,
+            permission_mode,
+            sidecar_manager,
+            app_handle,
+            &self.current_model,
+            &self.current_provider_env,
+            &self.mcp_servers_json,
+            {
+                let cfg = self.config.read().await;
+                cfg.active_hours.as_ref().map(|ah| ah.timezone.clone())
+            }.as_deref(),
+        ).await;
     }
 }
 

@@ -936,6 +936,19 @@ function stripHeartbeatToken(text: string, ackMaxChars: number): { status: strin
   return { status: 'content', text: stripped };
 }
 
+
+/**
+ * Strip YAML frontmatter from file content.
+ * Frontmatter is delimited by --- at the start and a second --- line.
+ */
+function stripYamlFrontmatter(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith('---')) return trimmed;
+  const endIndex = trimmed.indexOf('---', 3);
+  if (endIndex === -1) return trimmed;
+  return trimmed.slice(endIndex + 3).trim();
+}
+
 /**
  * Recursively copy a directory (synchronous version)
  * Security: Skips symbolic links to prevent following links to sensitive locations
@@ -6539,6 +6552,61 @@ async function main() {
           console.error('[im/heartbeat] Error:', error);
           return jsonResponse(
             { status: 'error', text: error instanceof Error ? error.message : 'Heartbeat error' },
+            500,
+          );
+        }
+      }
+
+      // POST /api/memory/update — Trigger memory update in current session (v0.1.43)
+      if (pathname === '/api/memory/update' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { source: 'auto' | 'manual' };
+
+          // Read UPDATE_MEMORY.md from workspace root
+          const updateMdPath = join(currentAgentDir, 'UPDATE_MEMORY.md');
+          let rawContent = '';
+          try {
+            rawContent = readFileSync(updateMdPath, 'utf-8');
+          } catch {
+            return jsonResponse({ status: 'skipped', reason: 'file_not_found' });
+          }
+
+          // Strip YAML frontmatter
+          const promptContent = stripYamlFrontmatter(rawContent);
+          if (!promptContent.trim()) {
+            return jsonResponse({ status: 'skipped', reason: 'empty_content' });
+          }
+
+          // Build prompt with <system-reminder> and <MEMORY_UPDATE> tags
+          const now = new Date().toLocaleString('en-US', {
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+          });
+
+          const prompt = `<system-reminder>\n<MEMORY_UPDATE>\n${promptContent}\n\nCurrent time: ${now}\n\n完成所有记忆维护操作后（包括文件读写和 git 操作），仅回复 MEMORY_UPDATE_OK，不要输出其他内容。\n</MEMORY_UPDATE>\n</system-reminder>`;
+
+          const { enqueueUserMessage, waitForSessionIdle } = await import('./agent-session');
+
+          // Inject as user message
+          await enqueueUserMessage(prompt);
+
+          // Wait synchronously for AI completion (10 min timeout).
+          // Rust needs to know when the AI finishes before releasing temp sidecars
+          // and moving to the next session in the serial batch.
+          const completed = await waitForSessionIdle(600000, 500);
+
+          if (completed) {
+            console.log(`[memory-update] AI completed memory update (source=${payload.source})`);
+            return jsonResponse({ status: 'completed' });
+          } else {
+            console.warn('[memory-update] AI memory update timed out (10 min)');
+            return jsonResponse({ status: 'timeout' });
+          }
+        } catch (error) {
+          console.error('[memory-update] Error:', error);
+          return jsonResponse(
+            { status: 'error', reason: error instanceof Error ? error.message : 'Unknown error' },
             500,
           );
         }

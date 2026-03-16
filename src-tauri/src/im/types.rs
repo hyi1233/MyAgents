@@ -576,6 +576,51 @@ pub struct ActiveHours {
     pub timezone: String,
 }
 
+// ===== Memory Auto-Update types (v0.1.43) =====
+
+/// Memory auto-update configuration for periodic memory maintenance.
+/// The actual update instructions live in UPDATE_MEMORY.md in the workspace root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryAutoUpdateConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_mau_interval")]
+    pub interval_hours: u32,
+    #[serde(default = "default_mau_threshold")]
+    pub query_threshold: u32,
+    #[serde(default = "default_mau_window_start")]
+    pub update_window_start: String,
+    #[serde(default = "default_mau_window_end")]
+    pub update_window_end: String,
+    #[serde(default)]
+    pub update_window_timezone: Option<String>,
+    #[serde(default)]
+    pub last_batch_at: Option<String>,
+    #[serde(default)]
+    pub last_batch_session_count: Option<u32>,
+}
+
+fn default_mau_interval() -> u32 { 24 }
+fn default_mau_threshold() -> u32 { 5 }
+fn default_mau_window_start() -> String { "00:00".to_string() }
+fn default_mau_window_end() -> String { "06:00".to_string() }
+
+impl Default for MemoryAutoUpdateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_hours: 24,
+            query_threshold: 5,
+            update_window_start: "00:00".to_string(),
+            update_window_end: "06:00".to_string(),
+            update_window_timezone: None,
+            last_batch_at: None,
+            last_batch_session_count: None,
+        }
+    }
+}
+
 /// Reason for heartbeat wake-up
 #[derive(Debug, Clone)]
 pub enum WakeReason {
@@ -748,6 +793,10 @@ pub struct AgentConfigRust {
     #[serde(default)]
     pub heartbeat: Option<HeartbeatConfig>,
 
+    // Memory auto-update (v0.1.43)
+    #[serde(default)]
+    pub memory_auto_update: Option<MemoryAutoUpdateConfig>,
+
     // Channels
     #[serde(default)]
     pub channels: Vec<ChannelConfigRust>,
@@ -842,6 +891,7 @@ pub struct AgentConfigPatch {
     pub mcp_enabled_servers: Option<Vec<String>>,
     pub mcp_servers_json: Option<String>,
     pub heartbeat_config_json: Option<String>,
+    pub memory_auto_update_config_json: Option<String>,
     pub channels: Option<Vec<ChannelConfigRust>>,
     pub setup_completed: Option<bool>,
 }
