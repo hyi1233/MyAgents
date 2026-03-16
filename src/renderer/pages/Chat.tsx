@@ -11,6 +11,7 @@ import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
+import QueryNavigator from '@/components/chat/QueryNavigator';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
@@ -1496,6 +1497,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             isVisible={showLogs}
             onClose={() => setShowLogs(false)}
             onClearAll={clearUnifiedLogs}
+          />
+
+          {/* Query Navigator — floating right-side panel for quick session navigation */}
+          <QueryNavigator
+            historyMessages={historyMessages}
+            streamingMessage={streamingMessage}
+            scrollContainerRef={messagesContainerRef}
+            pauseAutoScroll={pauseAutoScroll}
           />
 
           {/* Message list with max-width */}
