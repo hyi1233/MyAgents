@@ -174,17 +174,17 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
           <div className="space-y-4 pl-0">
             {/* Interval */}
             <div>
-              <label className="block text-sm font-semibold text-[var(--ink)] mb-1.5">更新间隔</label>
+              <label className="block text-sm font-medium text-[var(--ink)] mb-2">更新间隔</label>
               <div className="flex gap-2">
                 {INTERVAL_OPTIONS.map(opt => (
                   <button
                     key={opt.value}
                     type="button"
                     onClick={() => updateConfig({ intervalHours: opt.value as 24 | 48 | 72 })}
-                    className={`rounded-md px-3 py-1 text-xs transition-colors ${
+                    className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
                       intervalHours === opt.value
                         ? 'bg-[var(--accent)] text-white'
-                        : 'bg-[var(--paper-inset)] text-[var(--ink-subtle)] hover:bg-[var(--paper-hover)]'
+                        : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:bg-[var(--paper-hover)]'
                     }`}
                   >
                     {opt.label}
@@ -195,22 +195,22 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
 
             {/* Update Window */}
             <div>
-              <label className="block text-sm font-semibold text-[var(--ink)] mb-1.5">更新时间窗口</label>
+              <label className="block text-sm font-medium text-[var(--ink)] mb-2">更新时间窗口</label>
               <div className="flex items-center gap-2">
                 <input
                   type="time"
                   value={windowStart}
                   onChange={e => updateConfig({ updateWindowStart: e.target.value })}
-                  className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs text-[var(--ink)] border border-[var(--line)]"
+                  className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
                 />
-                <span className="text-xs text-[var(--ink-subtle)]">—</span>
+                <span className="text-xs text-[var(--ink-muted)]">—</span>
                 <input
                   type="time"
                   value={windowEnd}
                   onChange={e => updateConfig({ updateWindowEnd: e.target.value })}
-                  className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs text-[var(--ink)] border border-[var(--line)]"
+                  className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
                 />
-                <span className="text-xs text-[var(--ink-faint)] ml-1">
+                <span className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 text-xs text-[var(--ink)]">
                   {config?.updateWindowTimezone || agent.heartbeat?.activeHours?.timezone || 'Asia/Shanghai'}
                 </span>
               </div>
@@ -218,9 +218,9 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
 
             {/* Threshold */}
             <div>
-              <label className="block text-sm font-semibold text-[var(--ink)] mb-1.5">触发阈值</label>
+              <label className="block text-sm font-medium text-[var(--ink)] mb-2">触发阈值</label>
               <div className="flex items-center gap-2">
-                <span className="text-xs text-[var(--ink-subtle)]">自上次更新后至少</span>
+                <span className="text-xs text-[var(--ink-muted)]">自上次更新后至少</span>
                 <input
                   type="number"
                   min={3}
@@ -232,14 +232,14 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
                   }}
                   className="w-14 rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs text-[var(--ink)] text-center border border-[var(--line)]"
                 />
-                <span className="text-xs text-[var(--ink-subtle)]">条新对话才会触发</span>
+                <span className="text-xs text-[var(--ink-muted)]">条新对话才会触发</span>
               </div>
             </div>
 
             {/* Last batch info */}
             {lastBatchLabel && (
               <div className="border-t border-dashed border-[var(--line)] pt-3">
-                <span className="text-xs text-[var(--ink-subtle)]">
+                <span className="text-xs text-[var(--ink-muted)]">
                   上次更新{'  '}{lastBatchLabel}
                 </span>
               </div>
