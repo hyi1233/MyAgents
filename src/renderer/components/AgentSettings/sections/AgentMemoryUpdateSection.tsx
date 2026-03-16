@@ -67,44 +67,55 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
     onAgentChanged();
   }, [agent.id, agent.memoryAutoUpdate, onAgentChanged]);
 
+  const ensureUpdateMemoryFile = useCallback(async (): Promise<boolean> => {
+    try {
+      const { readTextFile, writeTextFile } = await import('@tauri-apps/plugin-fs');
+      const sep = agent.workspacePath.includes('\\') ? '\\' : '/';
+      const filePath = `${agent.workspacePath}${sep}UPDATE_MEMORY.md`;
+      try {
+        await readTextFile(filePath);
+        return true; // File already exists
+      } catch {
+        // File doesn't exist, create with default content
+        await writeTextFile(filePath, DEFAULT_UPDATE_MEMORY_CONTENT);
+        toastRef.current.success('已创建 UPDATE_MEMORY.md');
+        return true;
+      }
+    } catch (e) {
+      console.warn('[AgentMemoryUpdateSection] Failed to ensure UPDATE_MEMORY.md:', e);
+      toastRef.current.error('无法创建 UPDATE_MEMORY.md，请检查工作区路径');
+      return false;
+    }
+  }, [agent.workspacePath]);
+
   const handleToggle = useCallback(async () => {
     const newEnabled = !(config?.enabled ?? false);
 
     if (newEnabled) {
-      // Auto-create UPDATE_MEMORY.md if not exists
-      try {
-        const { readTextFile, writeTextFile } = await import('@tauri-apps/plugin-fs');
-        const sep = agent.workspacePath.includes('\\') ? '\\' : '/';
-        const filePath = `${agent.workspacePath}${sep}UPDATE_MEMORY.md`;
-        try {
-          await readTextFile(filePath);
-          // File exists, don't overwrite
-        } catch {
-          // File doesn't exist, create with default content
-          await writeTextFile(filePath, DEFAULT_UPDATE_MEMORY_CONTENT);
-          toastRef.current.success('已创建 UPDATE_MEMORY.md');
-        }
-      } catch (e) {
-        console.warn('[AgentMemoryUpdateSection] Failed to create UPDATE_MEMORY.md:', e);
-        toastRef.current.error('无法创建 UPDATE_MEMORY.md，请检查工作区路径');
-        return; // Don't persist enabled=true if file creation failed
-      }
+      const ok = await ensureUpdateMemoryFile();
+      if (!ok) return;
     }
 
     await updateConfig({ enabled: newEnabled });
-  }, [config?.enabled, agent.workspacePath, updateConfig]);
+  }, [config?.enabled, ensureUpdateMemoryFile, updateConfig]);
 
   const handleOpenFile = useCallback(async () => {
     if (!agent.workspacePath) return;
     try {
-      const { readTextFile } = await import('@tauri-apps/plugin-fs');
+      const { readTextFile, writeTextFile } = await import('@tauri-apps/plugin-fs');
       const sep = agent.workspacePath.includes('\\') ? '\\' : '/';
       const filePath = `${agent.workspacePath}${sep}UPDATE_MEMORY.md`;
       let content = '';
       try {
         content = await readTextFile(filePath);
       } catch {
-        // File doesn't exist
+        // File doesn't exist — create with default content
+        content = DEFAULT_UPDATE_MEMORY_CONTENT;
+        try {
+          await writeTextFile(filePath, content);
+        } catch {
+          // Write failed, still open preview with default content for reference
+        }
       }
       setPreviewFile({ name: 'UPDATE_MEMORY.md', content, size: new TextEncoder().encode(content).length, path: filePath });
     } catch (e) {
@@ -154,8 +165,8 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
         {/* Header + Toggle */}
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-medium text-[var(--ink)]">记忆自动更新</h3>
-            <p className="mt-0.5 text-xs text-[var(--ink-subtle)]">
+            <h3 className="text-base font-medium text-[var(--ink)]">记忆更新 Memory</h3>
+            <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
               在夜间自动读取{' '}
               <button
                 type="button"
