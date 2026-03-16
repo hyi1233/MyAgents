@@ -396,19 +396,12 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
 
               // Group of thinking/tool blocks
               const isLatestActiveSection = index === lastBlockGroupIndex;
-              const hasTextAfter =
-                index < groupedBlocks.length - 1 &&
-                groupedBlocks
-                  .slice(index + 1)
-                  .some((nextItem) => !Array.isArray(nextItem) && nextItem.type === 'text');
-
               return (
                 <Fragment key={`group-${index}`}>
                   <BlockGroup
                     blocks={item}
                     isLatestActiveSection={isLatestActiveSection}
                     isStreaming={isAssistantStreaming}
-                    hasTextAfter={hasTextAfter}
                   />
                   {index === exitPlanModeGroupIndex && exitPlanModeSlot}
                 </Fragment>

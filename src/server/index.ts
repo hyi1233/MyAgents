@@ -4001,9 +4001,10 @@ async function main() {
                     'socket hang up',// Connection dropped
                   ];
                   const packageKeywords = [
-                    '404',           // HTTP 404 not found
-                    'not found',     // Package not found
-                    'err!',          // npm error indicator
+                    '404',                // HTTP 404 not found
+                    'package not found',  // npm/npx package resolution
+                    'module not found',   // Module resolution failure
+                    'err!',               // npm error indicator
                   ];
                   const isNetworkError = networkKeywords.some(kw => stderrLower.includes(kw));
                   const isPackageError = packageKeywords.some(kw => stderrLower.includes(kw));
@@ -4022,6 +4023,15 @@ async function main() {
                       error: {
                         type: 'package_not_found',
                         message: '包不存在或无法下载，请检查包名',
+                      }
+                    }));
+                  } else if (code !== 0 && code !== 1) {
+                    // Non-zero exit (other than 1 which --help may return) is a failure
+                    resolve(jsonResponse({
+                      success: false,
+                      error: {
+                        type: 'warmup_failed',
+                        message: `预热异常退出 (code ${code})`,
                       }
                     }));
                   } else {

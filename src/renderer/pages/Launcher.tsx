@@ -238,7 +238,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             setLauncherSelectedModel(model);
         }
         if (selectedWorkspace) {
-            const patch: Record<string, unknown> = { providerId: providerId ?? null };
+            const patch: Partial<Omit<Project, 'id'>> = { providerId: providerId ?? undefined };
             if (model) patch.model = model;
             void patchProject(selectedWorkspace.id, patch);
         }

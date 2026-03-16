@@ -8,7 +8,6 @@ interface BlockGroupProps {
   blocks: ContentBlock[];
   isLatestActiveSection?: boolean;
   isStreaming?: boolean;
-  hasTextAfter?: boolean;
 }
 
 /** 2 head + N folded + 2 tail — fold kicks in at 6+ blocks */

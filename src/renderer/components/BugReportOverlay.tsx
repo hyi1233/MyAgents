@@ -30,8 +30,12 @@ function isProviderAvailable(
         const status = verifyStatus[provider.id];
         return status?.status === 'valid' && !!status.accountEmail;
     }
-    // Validation status is informational, not gatekeeping — having a key is enough
-    return !!apiKeys[provider.id];
+    // Must have an API key AND not be explicitly invalid
+    const key = apiKeys[provider.id];
+    if (!key) return false;
+    const status = verifyStatus[provider.id];
+    if (status?.status === 'invalid') return false;
+    return true;
 }
 
 export default function BugReportOverlay({

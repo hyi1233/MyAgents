@@ -15,6 +15,31 @@ import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 
+// ===== Module-level pure helpers (extracted from render body) =====
+
+/** Check if a provider is available (can be selected and used) */
+function isProviderAvailable(
+  p: Provider,
+  apiKeys: Record<string, string>,
+  verifyStatus: Record<string, ProviderVerifyStatus>,
+): boolean {
+  if (p.type === 'subscription') {
+    const result = verifyStatus[p.id];
+    return result?.status === 'valid' && !!result?.accountEmail;
+  }
+  return !!apiKeys[p.id];
+}
+
+/** Check if a provider has a warning (key set but verification failed) */
+function isProviderWarning(
+  p: Provider,
+  apiKeys: Record<string, string>,
+  verifyStatus: Record<string, ProviderVerifyStatus>,
+): boolean {
+  if (p.type === 'subscription') return false;
+  return !!apiKeys[p.id] && verifyStatus[p.id]?.status === 'invalid';
+}
+
 // Image attachment type
 export interface ImageAttachment {
   id: string;
@@ -188,25 +213,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     onInputChange?.(inputValue);
   }, [inputValue, onInputChange]);
 
-  // Check if a provider is available (can be selected and used):
-  // - Subscription type: must be verified with an account email
-  // - API type: only requires an API key — validation status is informational, not gatekeeping
-  const isProviderAvailable = (p: Provider): boolean => {
-    if (p.type === 'subscription') {
-      const verifyResult = providerVerifyStatus[p.id];
-      return verifyResult?.status === 'valid' && !!verifyResult?.accountEmail;
-    }
-    return !!apiKeys[p.id];
-  };
-
-  // Check if a provider has a warning (key set but verification failed)
-  const isProviderWarning = (p: Provider): boolean => {
-    if (p.type === 'subscription') return false;
-    return !!apiKeys[p.id] && providerVerifyStatus[p.id]?.status === 'invalid';
-  };
-
   // Ref for current provider availability — used in handleKeyDown without adding deps
-  const isCurrentProviderAvailable = provider ? isProviderAvailable(provider) : false;
+  const isCurrentProviderAvailable = provider ? isProviderAvailable(provider, apiKeys, providerVerifyStatus) : false;
   const isCurrentProviderAvailableRef = useRef(isCurrentProviderAvailable);
   isCurrentProviderAvailableRef.current = isCurrentProviderAvailable;
 
@@ -1568,7 +1576,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <ChevronUp className="h-3 w-3 shrink-0" />
                 </button>
                 {showModelMenu && (() => {
-                  const availableProviders = (providers ?? []).filter(p => isProviderAvailable(p));
+                  const availableProviders = (providers ?? []).filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
                   return (
                     <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
                       {availableProviders.length === 0 ? (
@@ -1591,7 +1599,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
                             <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                               {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
-                              {isProviderWarning(p) && (
+                              {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
                                 <span className="group/warn relative">
                                   <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
                                   <div className="pointer-events-none absolute bottom-full left-0 z-50 mb-1 w-44 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-2.5 py-1.5 text-[11px] font-normal normal-case tracking-normal text-[var(--ink-muted)] opacity-0 shadow-lg transition-opacity group-hover/warn:opacity-100">
