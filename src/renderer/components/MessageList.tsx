@@ -203,26 +203,21 @@ const MessageList = memo(function MessageList({
     : streamingStatusMessage;
 
   // Fade-in: track when session load completes so content appears with a smooth transition.
-  // contentHidden keeps content at opacity:0 between "session loaded" and "animation start",
-  // preventing the flash-then-fade bug where content briefly renders visible before the animation.
+  // When isSessionLoading drops to false, we set fadeIn=true synchronously in the same
+  // effect pass — no RAF indirection. animation-fill-mode:both applies the "from" keyframe
+  // (opacity:0) immediately, so there is no visible flash before the animation starts.
+  // The previous RAF approach caused a second render AFTER useAutoScroll's scrollToBottomInstant,
+  // which could reset scroll position on long sessions (255+ messages, scrollHeight 100k+ px).
   const wasSessionLoadingRef = useRef(false);
   const [fadeIn, setFadeIn] = useState(false);
-  const [contentHidden, setContentHidden] = useState(false);
 
   useEffect(() => {
     if (isSessionLoading) {
       wasSessionLoadingRef.current = true;
       setFadeIn(false);
-      setContentHidden(true);
     } else if (wasSessionLoadingRef.current) {
       wasSessionLoadingRef.current = false;
-      // Content stays hidden (opacity:0) until this RAF fires,
-      // which atomically sets fadeIn=true + contentHidden=false in the same render batch.
-      const rafId = requestAnimationFrame(() => {
-        setFadeIn(true);
-        setContentHidden(false);
-      });
-      return () => cancelAnimationFrame(rafId);
+      setFadeIn(true);
     }
   }, [isSessionLoading]);
 
@@ -241,7 +236,7 @@ const MessageList = memo(function MessageList({
       )}
       <div
         className="mx-auto max-w-3xl space-y-2"
-        style={contentHidden ? { opacity: 0 } : fadeIn ? {
+        style={fadeIn ? {
           animation: 'message-list-fade-in 600ms ease-out both',
         } : undefined}
         onAnimationEnd={() => setFadeIn(false)}

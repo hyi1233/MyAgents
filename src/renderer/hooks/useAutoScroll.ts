@@ -321,6 +321,14 @@ export function useAutoScroll(
 
     element.scrollTop = element.scrollHeight;
 
+    // Belt-and-suspenders: repeat scroll after next paint. Concurrent React renders
+    // (e.g., fadeIn state update) can trigger a second layout pass that resets
+    // scrollTop on very tall containers (100k+ px). The RAF fires after that
+    // second paint, restoring the correct position.
+    requestAnimationFrame(() => {
+      element.scrollTop = element.scrollHeight;
+    });
+
     dbg('scrollToBottomInstant →', element.scrollTop, '/', element.scrollHeight);
   }, [cancelAnimation, cancelCollapseAnimation, clearCollapseGuard]);
 
