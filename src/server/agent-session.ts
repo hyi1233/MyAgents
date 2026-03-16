@@ -1557,7 +1557,7 @@ async function checkToolPermission(
   }
 
   // 5. Request user confirmation via frontend
-  console.log(`[permission] ${toolName}: requesting user confirmation`);  // Keep as info - user action needed
+  console.log(`[permission] ${toolName}: requesting user confirmation (mode=${mode})`);  // Keep as info - user action needed
 
   const requestId = `perm_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
@@ -1745,12 +1745,17 @@ function persistMessagesToStorage(
     };
   });
   saveSessionMessages(sessionId, sessionMessages);
-  // Compute lastMessagePreview from last user message
+  // Compute lastMessagePreview from last real user message
+  // (skip system-injected messages like HEARTBEAT, MEMORY_UPDATE)
   let lastMessagePreview: string | undefined;
   for (let i = sessionMessages.length - 1; i >= 0; i--) {
     if (sessionMessages[i].role === 'user') {
       const content = sessionMessages[i].content;
       const text = typeof content === 'string' ? content : '';
+      // Skip system injections — these shouldn't appear as session previews
+      if (text.includes('<HEARTBEAT>') || text.includes('<MEMORY_UPDATE>') || text.startsWith('<system-reminder>')) {
+        continue;
+      }
       lastMessagePreview = text.trim().slice(0, 60) || undefined;
       break;
     }
@@ -3322,6 +3327,12 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
     try {
       await querySession.setPermissionMode(sdkMode);
       currentPermissionMode = newPermissionMode;
+      // If currently in plan mode (prePlanPermissionMode is set), update the saved mode
+      // so that exiting plan mode restores the user's LATEST choice, not the stale one.
+      if (prePlanPermissionMode) {
+        prePlanPermissionMode = newPermissionMode;
+        console.log(`[agent] updated prePlanPermissionMode to: ${newPermissionMode}`);
+      }
       console.log(`[agent] runtime permission mode switched to: ${newPermissionMode} (SDK: ${sdkMode})`);
     } catch (error) {
       console.error('[agent] failed to set permission mode:', error);
@@ -3457,6 +3468,8 @@ export async function enqueueUserMessage(
     // Update local tracking even if SDK call is skipped (e.g., first message before pre-warm)
     if (permissionMode && permissionMode !== currentPermissionMode) {
       currentPermissionMode = permissionMode;
+      // Keep prePlanPermissionMode in sync (same as applySessionConfig)
+      if (prePlanPermissionMode) prePlanPermissionMode = permissionMode;
       if (isDebugMode) console.log(`[agent] permission mode set to: ${permissionMode}`);
     }
     if (model && model !== currentModel) {
@@ -3472,6 +3485,8 @@ export async function enqueueUserMessage(
     // live (line ~4081), so updating it mid-turn would change permission behavior unexpectedly.
     if (permissionMode && permissionMode !== currentPermissionMode) {
       currentPermissionMode = permissionMode;
+      // Keep prePlanPermissionMode in sync (same as !isSessionBusy branch)
+      if (prePlanPermissionMode) prePlanPermissionMode = permissionMode;
       if (isDebugMode) console.log(`[agent] permission mode staged for restart: ${permissionMode}`);
     }
     if (model && model !== currentModel) {
@@ -4018,8 +4033,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // - fullAgency → bypassPermissions (skip all checks)
       // - custom → default (all tools go through canUseTool)
       permissionMode: sdkPermissionMode,
-      // allowDangerouslySkipPermissions is required when using bypassPermissions
-      ...(sdkPermissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
+      // allowDangerouslySkipPermissions MUST always be true: pre-warm starts with acceptEdits
+      // (currentPermissionMode defaults to 'auto'), user may switch to fullAgency mid-session
+      // via setPermissionMode('bypassPermissions'). Without this flag at query creation time,
+      // the SDK silently ignores the mode switch and keeps calling canUseTool.
+      allowDangerouslySkipPermissions: true,
       model: currentModel, // Use currently selected model
       pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
       executable: 'bun' as const,
@@ -4053,7 +4071,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // Custom permission handling - check rules and prompt user for unknown tools
       // Effective when permissionMode is 'default' or 'acceptEdits' (not 'bypassPermissions')
       canUseTool: async (toolName: string, input: unknown, options: { signal: AbortSignal }) => {
-        console.debug(`[permission] canUseTool checking: ${toolName}`);
+        console.debug(`[permission] canUseTool checking: ${toolName}, mode=${currentPermissionMode}`);
+
+        // SAFETY NET: fullAgency mode MUST auto-approve everything except user-interaction
+        // tools that require explicit human review (AskUserQuestion, EnterPlanMode, ExitPlanMode).
+        // This guard catches the case where the SDK didn't honor setPermissionMode('bypassPermissions')
+        // — e.g., pre-warm started with acceptEdits and the mid-session mode switch was ignored.
+        const USER_INTERACTION_TOOLS = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
+        if (currentPermissionMode === 'fullAgency' && !USER_INTERACTION_TOOLS.includes(toolName)) {
+          console.debug(`[permission] fullAgency fast-path: auto-approved ${toolName}`);
+          return {
+            behavior: 'allow' as const,
+            updatedInput: input as Record<string, unknown>
+          };
+        }
 
         // First check MCP tool permission based on user's enabled MCP servers
         const mcpCheck = checkMcpToolPermission(toolName);
