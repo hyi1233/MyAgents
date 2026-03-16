@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Chat 定时面板改造**：执行模式选择 + 三种调度类型 + 新开对话路径
 - **飞书官方 OpenClaw 插件接入**：CardKit Streaming、工具桥接（多维表格/日历/任务/群聊等 25 个工具）、SDK Shim 兼容层
 - **Tab 状态指示器**：运行中/思考中圆点 + 自定义 tooltip + 通知点击自动跳转
-- **WebView 崩溃保护**：React Error Boundary + Rust 心跳监控自动恢复
+- **WebView 崩溃保护**：React Error Boundary 兜底白屏崩溃
 
 ### Fixed
 - **Windows 白屏死循环**：agent.channels undefined 导致 React 崩溃 → 错误边界卸载 App → cleanup 杀 sidecar → 死循环。防御性归一化 + 移除 useEffect cleanup 中的 stopAllSidecars

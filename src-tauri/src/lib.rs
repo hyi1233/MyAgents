@@ -13,7 +13,6 @@ mod sidecar;
 mod sse_proxy;
 mod tray;
 mod updater;
-mod webview_health;
 
 use sidecar::{
     cleanup_stale_sidecars, create_sidecar_state, stop_all_sidecars,
@@ -73,7 +72,6 @@ pub fn run() {
     let cleanup_done_for_exit = cleanup_done.clone();
     let cleanup_done_for_tray_exit = cleanup_done.clone();
     let cleanup_done_for_monitor = cleanup_done.clone();
-    let cleanup_done_for_webview = cleanup_done.clone();
 
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
@@ -100,7 +98,6 @@ pub fn run() {
         .manage(sse_proxy_state)
         .manage(im_bot_state)
         .manage(agent_state)
-        .manage(webview_health::WebviewHealthState::new())
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
             commands::cmd_start_sidecar,
@@ -130,8 +127,6 @@ pub fn run() {
             updater::test_update_connectivity,
             updater::check_pending_update,
             updater::install_pending_update,
-            // WebView health heartbeat
-            webview_health::webview_heartbeat,
             // Platform & device info
             commands::cmd_get_platform,
             commands::cmd_get_device_id,
@@ -311,19 +306,6 @@ pub fn run() {
                 ).await;
             });
             log::info!("[App] Global sidecar health monitor spawned");
-
-            // Start WebView health monitor (heartbeat-based crash detection)
-            // Gets the managed WebviewHealthState and shares the inner AtomicU64 with the monitor
-            let app_handle_for_webview = app.handle().clone();
-            let webview_heartbeat = app.state::<webview_health::WebviewHealthState>().tracker();
-            tauri::async_runtime::spawn(async move {
-                webview_health::monitor_webview_health(
-                    app_handle_for_webview,
-                    webview_heartbeat,
-                    cleanup_done_for_webview,
-                ).await;
-            });
-            log::info!("[App] WebView health monitor spawned");
 
             // Start background update check (5 second delay to let app initialize)
             log::info!("[App] Setup complete, spawning background update check task...");

@@ -1544,25 +1544,6 @@ export default function App() {
     return () => { unlisten?.(); };
   }, []);
 
-  // WebView heartbeat: signal Rust every 10s that the frontend is alive.
-  // Rust monitors this and reloads the page if heartbeats go stale (white screen recovery).
-  useEffect(() => {
-    if (!isTauriEnvironment()) return;
-
-    let timer: ReturnType<typeof setInterval> | null = null;
-    let cancelled = false;
-    const start = async () => {
-      const { invoke } = await import('@tauri-apps/api/core');
-      if (cancelled) return; // Component unmounted before import resolved
-      invoke('webview_heartbeat').catch(() => {});
-      timer = setInterval(() => {
-        invoke('webview_heartbeat').catch(() => {});
-      }, 10_000);
-    };
-    start();
-    return () => { cancelled = true; if (timer) clearInterval(timer); };
-  }, []);
-
   return (
     <div className="flex h-screen flex-col bg-[var(--paper)]">
       {/* Chrome-style titlebar with tabs */}
