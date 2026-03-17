@@ -79,6 +79,8 @@ pub struct BridgeAdapter {
     supports_streaming: bool,
     supports_cardkit: bool,
     enabled_tool_groups: Vec<String>,
+    /// Plugin-registered slash commands (name → description)
+    commands: Vec<(String, String)>,
 }
 
 impl BridgeAdapter {
@@ -92,6 +94,7 @@ impl BridgeAdapter {
             supports_streaming: false,
             supports_cardkit: false,
             enabled_tool_groups: Vec::new(),
+            commands: Vec::new(),
         }
     }
 
@@ -114,6 +117,19 @@ impl BridgeAdapter {
                     if caps["streamingCardKit"].as_bool() == Some(true) {
                         self.supports_cardkit = true;
                         ulog_info!("[bridge:{}] CardKit enabled", self.plugin_id);
+                    }
+                    // Plugin commands
+                    if let Some(cmds) = caps["commands"].as_array() {
+                        self.commands = cmds.iter()
+                            .filter_map(|c| {
+                                let name = c["name"].as_str()?.to_string();
+                                let desc = c["description"].as_str().unwrap_or("").to_string();
+                                Some((name, desc))
+                            })
+                            .collect();
+                        if !self.commands.is_empty() {
+                            ulog_info!("[bridge:{}] commands: {:?}", self.plugin_id, self.commands.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>());
+                        }
                     }
                     // Tool groups
                     if let Some(groups) = caps["toolGroups"].as_array() {
@@ -146,6 +162,52 @@ impl BridgeAdapter {
 
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
+    }
+
+    /// Check if text matches a plugin-registered command. Returns (command_name, args).
+    pub fn match_command(&self, text: &str) -> Option<(String, String)> {
+        let trimmed = text.trim();
+        for (name, _desc) in &self.commands {
+            let cmd = format!("/{}", name);
+            if trimmed == cmd || trimmed.starts_with(&format!("{} ", cmd)) {
+                let args = trimmed.strip_prefix(&cmd).unwrap_or("").trim().to_string();
+                return Some((name.clone(), args));
+            }
+        }
+        None
+    }
+
+    /// Execute a plugin command via Bridge's /execute-command endpoint.
+    pub async fn execute_command(&self, command: &str, args: &str, user_id: &str, chat_id: &str) -> AdapterResult<String> {
+        let body = serde_json::json!({
+            "command": command,
+            "args": args,
+            "userId": user_id,
+            "chatId": chat_id,
+        });
+        let resp = self.client
+            .post(self.url("/execute-command"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Bridge execute-command failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Bridge execute-command returned {}: {}", status, text));
+        }
+
+        let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
+        if resp_body["ok"].as_bool() != Some(true) {
+            return Err(format!("Command error: {}", resp_body["error"].as_str().unwrap_or("unknown")));
+        }
+        Ok(resp_body["result"].as_str().unwrap_or("OK").to_string())
+    }
+
+    /// Get registered commands for /help display.
+    pub fn get_commands(&self) -> &[(String, String)] {
+        &self.commands
     }
 }
 
@@ -458,7 +520,7 @@ impl ImStreamAdapter for BridgeAdapter {
     }
 
     fn preferred_throttle_ms(&self) -> u64 {
-        1000
+        300
     }
 
     fn bridge_context(&self) -> Option<(u16, String, Vec<String>)> {

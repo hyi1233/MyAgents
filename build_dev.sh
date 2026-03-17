@@ -109,6 +109,13 @@ unset APPLE_API_KEY
 unset APPLE_API_KEY_PATH
 echo -e "${YELLOW}⚠ 已禁用 Apple 公证 (开发版，保留签名)${NC}"
 
+# 确保 Node.js 运行时已下载
+NODEJS_DIR="${PROJECT_DIR}/src-tauri/resources/nodejs"
+if [ ! -f "${NODEJS_DIR}/bin/node" ] && [ ! -f "${NODEJS_DIR}/node.exe" ]; then
+    echo -e "${YELLOW}Node.js 运行时未找到，正在下载...${NC}"
+    "${PROJECT_DIR}/scripts/download_nodejs.sh"
+fi
+
 # 确保签名 Bun 可执行文件 (与 build_macos.sh 相同逻辑)
 if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
     echo -e "  ${CYAN}签名 Bun 可执行文件...${NC}"

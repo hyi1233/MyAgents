@@ -10,7 +10,7 @@
 | 前端 | React 19 + TypeScript + Vite + TailwindCSS |
 | 后端 | Bun + Claude Agent SDK (多实例 Sidecar) |
 | 通信 | Rust HTTP/SSE Proxy (reqwest via `local_http` 模块) |
-| 运行时 | Bun 内置于应用包（用户无需安装 Bun 或 Node.js） |
+| 运行时 | 双运行时：Bun（Agent Runtime / Sidecar）+ Node.js（MCP Server / 社区工具），均内置于应用包 |
 
 ## 项目结构
 
@@ -37,6 +37,12 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 ## 核心架构约束
 
+### 开发前置要求
+
+进行新功能开发或模块重构时，MUST 先阅读整体架构文档 @specs/tech_docs/architecture.md ，从宏观视角理解系统分层、模块边界和数据流，避免局部修改破坏全局设计。对接外部 SDK/插件时，MUST 先读源码确认接口约定（函数签名、config schema、返回值格式），再写适配层。
+
+开发前端界面时，MUST 先阅读项目设计系统（Token/组件/页面规范）：@specs/guides/design_guide.md ，遵循设计系统，并参考行业最佳交互方式进行设计开发。
+
 ### Tab-scoped 隔离
 
 每个 Chat Tab 拥有独立的 Bun Sidecar 进程（Tab/CronTask/BackgroundCompletion/Agent 四种 Owner 共享 SidecarManager）。MUST 在 Tab 内使用 `useTabState()` 返回的 `apiGet`/`apiPost`，**禁止**在 Tab 内使用全局 `apiPostJson`/`apiGetJson`（会发到 Global Sidecar）。
@@ -53,9 +59,23 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 所有 Rust 层子进程 MUST 通过 `crate::process_cmd::new()` 创建，**禁止**裸 `std::process::Command::new()`。内置 Windows `CREATE_NO_WINDOW` 标志，防止 GUI 应用启动子进程（bun.exe Sidecar / Plugin Bridge / bun init 等）时弹出黑色控制台窗口。遵循与 `local_http` 相同的 "pit of success" 模式。例外：`#[cfg(windows)]` 守卫内的系统工具命令（taskkill/powershell/wmic）已内联处理；`commands.rs` 的 OS opener（open/explorer/xdg-open）和 Unix pgrep 是用户可见的系统命令，无需隐藏。
 
-### 零外部依赖
+### 零外部依赖与双运行时
 
-应用内置 Bun 运行时（`getBundledRuntimePath()`），MUST NOT 依赖用户系统的 Node.js/npm/npx。
+应用内置三个运行时依赖，用户无需自行安装任何东西：
+
+| 依赖 | 用途 | 打包位置 |
+|------|------|---------|
+| **Bun** | Agent Runtime — 运行 Claude Agent SDK（`executable: 'bun'`），Sidecar 主进程、Plugin Bridge | `src-tauri/binaries/bun-*` |
+| **Node.js** | 功能层 — MCP Server 执行（`npx`）、社区 npm 包、AI Bash 环境中的 `node`/`npx`/`npm` | `src-tauri/resources/nodejs/`（v0.1.44+，含 node + npm/npx） |
+| **Git** | SDK 依赖 — Claude Code 需要 `git`（代码操作）+ `bash`（工具执行），Windows 无自带 → NSIS 静默安装 Git for Windows | `src-tauri/nsis/Git-Installer.exe`（仅 Windows） |
+
+**分层原则**：Bun 跑我们自己的代码（启动快、行为可控），Node.js 跑社区生态代码（MCP Server / npm 包，设计目标是 Node.js，Bun 兼容性存在系统性缺陷）。
+
+**PATH 注入**：`buildClaudeSessionEnv()` 构造 SDK 子进程的 PATH，决定 AI Bash 工具能找到哪些命令。优先级：`bundledBunDir` → `bundledNodeDir` → `~/.myagents/bin` → 系统路径。
+
+**运行时发现**：`src/server/utils/runtime.ts` 提供 `getBundledRuntimePath()`（Bun）、`getBundledNodePath()`（Node.js）。
+
+详见：@specs/prd/prd_0.1.44_dual_runtime.md
 
 ### 持久 Session 架构
 
@@ -96,7 +116,7 @@ Agent 配置通过 Rust 命令 `cmd_update_agent_config` 写盘，写盘后 MUST
 | WebView 直接 fetch | CORS 失败 | `proxyFetch()` 经 Rust 代理 |
 | Tab 内用全局 API | 请求发到错误 Sidecar | `useTabState()` |
 | 裸 `reqwest::Client` 连 localhost | 系统代理 → 502 | `crate::local_http::builder()` |
-| 依赖系统 npm/npx/Node.js | 用户未安装 | 内置 bun |
+| 依赖用户系统安装的运行时 | 用户未安装 | 使用内置 Bun 或内置 Node.js（`runtime.ts`） |
 | 直接设 `shouldAbortSession = true` | generator 永久阻塞 | `abortPersistentSession()` |
 | 配置变更不设 `resumeSessionId` | AI 失忆 | 先设 resumeSessionId 再 abort |
 | `!preWarm` 条件守卫 | 持久模式下永不执行 | 移除或改用其他条件 |
@@ -111,6 +131,7 @@ Agent 配置通过 Rust 命令 `cmd_update_agent_config` 写盘，写盘后 MUST
 | Rust 子进程日志用 `log::info!` | 不进统一日志 | MUST 用 `ulog_info!` / `ulog_error!` |
 | 裸 `std::process::Command::new()` | Windows 弹出黑色控制台窗口 | `crate::process_cmd::new()` |
 | 前端 `@tauri-apps/plugin-fs` 读写工作区文件 | Tauri fs scope 仅覆盖 `~/.myagents/**`，工作区路径写入必失败 | `invoke('cmd_read_workspace_file')` / `invoke('cmd_write_workspace_file')` 走 Rust 原生 I/O |
+| 对接外部 SDK/插件时凭假设写适配代码 | 函数签名、config 格式、返回值结构全部猜错 | MUST 先读源码确认接口约定（函数签名、config schema、返回值格式），再写适配层 |
 
 ---
 

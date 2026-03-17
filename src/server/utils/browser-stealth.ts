@@ -177,6 +177,10 @@ export function ensureBrowserStealthConfig(): void {
     // Suppress first-run / default-browser prompts that reveal fresh profile
     '--no-first-run',
     '--no-default-browser-check',
+    // Suppress "Chrome didn't shut down correctly" restore dialog — blocks automation
+    // when user-data-dir is set and browser was previously killed/crashed
+    '--disable-session-crashed-bubble',
+    '--hide-crash-restore-bubble',
   ].join('\n');
 
   const config = {

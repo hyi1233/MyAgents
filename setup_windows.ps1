@@ -112,6 +112,74 @@ try {
         Write-Host "OK - Git installer ready" -ForegroundColor Green
     }
 
+    function Get-NodeJSBinary {
+        $NodeVersion = "22.16.0"
+        $NodeDir = Join-Path $ProjectDir "src-tauri\resources\nodejs"
+        if (-not (Test-Path $NodeDir)) {
+            New-Item -ItemType Directory -Path $NodeDir -Force | Out-Null
+        }
+
+        Write-Host "下载 Node.js 运行时 (v$NodeVersion)..." -ForegroundColor Blue
+
+        $NodeExe = Join-Path $NodeDir "node.exe"
+        if (Test-Path $NodeExe) {
+            # Check version
+            $existingVer = & $NodeExe --version 2>$null
+            if ($existingVer -eq "v$NodeVersion") {
+                Write-Host "  OK - Node.js v$NodeVersion (already exists)" -ForegroundColor Green
+                Write-Host "OK - Node.js runtime ready" -ForegroundColor Green
+                return
+            }
+            Write-Host "  版本不匹配 ($existingVer), 重新下载..." -ForegroundColor Yellow
+        }
+
+        Write-Host "  下载 Windows x64 版本..." -ForegroundColor Cyan
+        $ZipName = "node-v$NodeVersion-win-x64.zip"
+        $DownloadUrl = "https://nodejs.org/dist/v$NodeVersion/$ZipName"
+        $TempZip = Join-Path $env:TEMP "node-windows.zip"
+        $TempDir = Join-Path $env:TEMP "node-windows-extract"
+
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $DownloadUrl -OutFile $TempZip -UseBasicParsing -TimeoutSec 300
+
+            if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
+            Expand-Archive -Path $TempZip -DestinationPath $TempDir -Force
+
+            $ExtractedDir = Join-Path $TempDir "node-v$NodeVersion-win-x64"
+
+            # Clean and copy full distribution (node.exe + npm + npx)
+            if (Test-Path $NodeDir) { Remove-Item -Recurse -Force $NodeDir }
+            New-Item -ItemType Directory -Path $NodeDir -Force | Out-Null
+
+            Copy-Item -Path (Join-Path $ExtractedDir "node.exe") -Destination $NodeDir -Force
+            Copy-Item -Path (Join-Path $ExtractedDir "npm.cmd") -Destination $NodeDir -Force
+            Copy-Item -Path (Join-Path $ExtractedDir "npx.cmd") -Destination $NodeDir -Force
+            Copy-Item -Path (Join-Path $ExtractedDir "npm") -Destination $NodeDir -Force
+            Copy-Item -Path (Join-Path $ExtractedDir "npx") -Destination $NodeDir -Force
+            if (Test-Path (Join-Path $ExtractedDir "node_modules")) {
+                Copy-Item -Path (Join-Path $ExtractedDir "node_modules") -Destination $NodeDir -Recurse -Force
+            }
+
+            # Remove corepack (not needed)
+            $corepackCmd = Join-Path $NodeDir "corepack.cmd"
+            $corepackDir = Join-Path $NodeDir "node_modules\corepack"
+            if (Test-Path $corepackCmd) { Remove-Item -Force $corepackCmd }
+            if (Test-Path $corepackDir) { Remove-Item -Recurse -Force $corepackDir }
+
+            Write-Host "  OK - Windows x64" -ForegroundColor Green
+        } catch {
+            Write-Host "  下载失败: $_" -ForegroundColor Red
+            Write-Host "  请手动下载: $DownloadUrl" -ForegroundColor Yellow
+            throw "Node.js download failed"
+        } finally {
+            if (Test-Path $TempZip) { Remove-Item -Force $TempZip }
+            if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
+        }
+
+        Write-Host "OK - Node.js runtime ready" -ForegroundColor Green
+    }
+
     function Get-VCRuntime {
         $ResourcesDir = Join-Path $ProjectDir "src-tauri\resources"
         if (-not (Test-Path $ResourcesDir)) {
@@ -188,16 +256,19 @@ try {
         exit 1
     }
 
-    Write-Host "`nStep 2/8: 下载 Bun 运行时" -ForegroundColor Blue
+    Write-Host "`nStep 2/9: 下载 Bun 运行时" -ForegroundColor Blue
     Get-BunBinary
 
-    Write-Host "`nStep 3/8: 下载 Git 安装包 (用于 NSIS 打包)" -ForegroundColor Blue
+    Write-Host "`nStep 3/9: 下载 Node.js 运行时 (MCP Server / 社区工具)" -ForegroundColor Blue
+    Get-NodeJSBinary
+
+    Write-Host "`nStep 4/9: 下载 Git 安装包 (用于 NSIS 打包)" -ForegroundColor Blue
     Get-GitInstaller
 
-    Write-Host "`nStep 4/8: 提取 VC++ Runtime DLL" -ForegroundColor Blue
+    Write-Host "`nStep 5/9: 提取 VC++ Runtime DLL" -ForegroundColor Blue
     Get-VCRuntime
 
-    Write-Host "`nStep 5/8: 安装前端依赖" -ForegroundColor Blue
+    Write-Host "`nStep 6/9: 安装前端依赖" -ForegroundColor Blue
     & bun install
     if ($LASTEXITCODE -ne 0) {
         Write-Host "前端依赖安装失败" -ForegroundColor Red
@@ -207,7 +278,7 @@ try {
     }
     Write-Host "OK - 前端依赖安装完成" -ForegroundColor Green
 
-    Write-Host "`nStep 6/8: 下载 Rust 依赖" -ForegroundColor Blue
+    Write-Host "`nStep 7/9: 下载 Rust 依赖" -ForegroundColor Blue
     Write-Host "  正在下载 Rust 依赖包，请稍候..." -ForegroundColor Cyan
     Push-Location (Join-Path $ProjectDir "src-tauri")
     & cargo fetch
@@ -223,7 +294,7 @@ try {
 
     # 准备默认工作区 (mino) — 每次拉取最新版本
     # .git 不保留：避免 Tauri 资源打包权限问题 + rerun-if-changed 性能问题
-    Write-Host "`nStep 7/8: 准备默认工作区 (mino)" -ForegroundColor Blue
+    Write-Host "`nStep 8/9: 准备默认工作区 (mino)" -ForegroundColor Blue
     $MinoDir = Join-Path $ProjectDir "mino"
     if (Test-Path $MinoDir) {
         Remove-Item -Recurse -Force $MinoDir
@@ -242,7 +313,7 @@ try {
     }
     Write-Host "OK - mino 默认工作区已就绪" -ForegroundColor Green
 
-    Write-Host "`nStep 8/8: 初始化完成!" -ForegroundColor Blue
+    Write-Host "`nStep 9/9: 初始化完成!" -ForegroundColor Blue
     Write-Host "`n=========================================" -ForegroundColor Green
     Write-Host "  开发环境准备就绪!" -ForegroundColor Green
     Write-Host "=========================================`n" -ForegroundColor Green

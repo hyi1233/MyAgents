@@ -58,15 +58,12 @@ let streamIdCounter = 0;
 // MCP handler — initialized after plugin loads and captures tools
 let mcpHandler: ReturnType<typeof createMcpHandler> | null = null;
 let getCapturedToolsFn: (() => CapturedTool[]) | null = null;
+let getCapturedCommandsFn: (() => import('./compat-api').CapturedCommand[]) | null = null;
+/** OpenClaw-format config (channels.{brand}.{...}), set during loadPlugin() */
+let loadedOpenclawConfig: Record<string, unknown> = {};
 
 async function loadPlugin() {
-  // Create compat API and runtime for plugin registration
-  const compatApi = createCompatApi(pluginConfig);
-  // Runtime must be created early — plugins call setRuntime(api.runtime) during register()
-  const runtime = createCompatRuntime(rustPort, botId, 'unknown');
-  compatApi.runtime = runtime;
-
-  // Find the plugin entry point
+  // Find the plugin entry point FIRST — we need the module name to infer the channel brand
   const pkgJsonPath = `${pluginDir}/package.json`;
   const pkgJson = await Bun.file(pkgJsonPath).json().catch(() => ({}));
 
@@ -93,6 +90,40 @@ async function loadPlugin() {
   }
 
   console.log(`[plugin-bridge] Loading plugin: ${entryModule}`);
+
+  // Infer channel brand from module name — needed to build OpenClaw-format config
+  // before register(). Plugin tools (e.g. getEnabledLarkAccounts) look for
+  // cfg.channels.feishu, not a flat {appId, appSecret} object.
+  let channelKey = entryModule.replace(/^@[^/]+\//, ''); // strip scope
+  if (/lark|feishu/i.test(entryModule)) {
+    channelKey = 'feishu';
+  } else if (/qqbot|qq/i.test(entryModule)) {
+    channelKey = 'qqbot';
+  } else if (/dingtalk/i.test(entryModule)) {
+    channelKey = 'dingtalk';
+  } else if (/telegram/i.test(entryModule)) {
+    channelKey = 'telegram';
+  }
+
+  // Build OpenClaw-format config BEFORE register() so plugin tools can discover accounts.
+  // The flat pluginConfig {appId, appSecret, ...} must be nested under channels.<brand>.
+  const openclawConfig: Record<string, unknown> = {
+    channels: {
+      [channelKey]: {
+        enabled: true,
+        ...pluginConfig,
+        dmPolicy: 'open',
+        groupPolicy: 'open',
+      },
+    },
+  };
+
+  // Create compat API with properly structured config
+  loadedOpenclawConfig = openclawConfig;
+  const compatApi = createCompatApi(openclawConfig);
+  // Runtime must be created early — plugins call setRuntime(api.runtime) during register()
+  const runtime = createCompatRuntime(rustPort, botId, 'unknown');
+  compatApi.runtime = runtime;
 
   // CRITICAL: Patch axios BEFORE importing the plugin.
   // @larksuiteoapi/node-sdk creates `defaultHttpInstance = axios.create()` at import time.
@@ -146,29 +177,22 @@ async function loadPlugin() {
     (runtime as Record<string, unknown> & { setPluginId: (id: string) => void }).setPluginId(capturedPlugin.id);
   }
 
-  // Set up MCP handler with captured tools
+  // Set up MCP handler with captured tools (use openclawConfig so tools resolve accounts)
   getCapturedToolsFn = () => compatApi.getCapturedTools();
-  mcpHandler = createMcpHandler(getCapturedToolsFn, pluginConfig);
+  getCapturedCommandsFn = () => compatApi.getCapturedCommands();
+  mcpHandler = createMcpHandler(getCapturedToolsFn, openclawConfig);
   const toolCount = compatApi.getCapturedTools().length;
   if (toolCount > 0) {
     console.log(`[plugin-bridge] MCP handler initialized with ${toolCount} captured tool factories`);
   }
 
-  // Build OpenClaw-format config from our flat pluginConfig
-  // QQBot expects: cfg.channels.qqbot.appId, cfg.channels.qqbot.clientSecret, etc.
-  const openclawCfg: Record<string, unknown> = {
-    channels: {
-      [capturedPlugin.id]: {
-        enabled: true,
-        ...pluginConfig,
-        // Force open policies — MyAgents handles access control at the Rust layer
-        // via BIND_xxx codes + allowedUsers whitelist. OpenClaw's pairing mechanism
-        // requires an external dashboard that MyAgents doesn't have.
-        dmPolicy: 'open',
-        groupPolicy: 'open',
-      },
-    },
-  };
+  // Add plugin ID as additional channel key if it differs from inferred brand
+  // (e.g., plugin.id="openclaw-lark" but tools need channels.feishu)
+  const openclawCfg = openclawConfig;
+  if (capturedPlugin.id !== channelKey) {
+    (openclawCfg.channels as Record<string, unknown>)[capturedPlugin.id] =
+      (openclawCfg.channels as Record<string, unknown>)[channelKey];
+  }
 
   // Resolve account using the plugin's own config.resolveAccount if available
   const configAccessor = capturedPlugin.raw?.config as Record<string, unknown> | undefined;
@@ -296,6 +320,9 @@ const server = Bun.serve({
       const hasCardKitStreaming = !!(pluginConfig.appId && pluginConfig.appSecret);
       const toolGroups = mcpHandler ? mcpHandler.getToolGroups() : [];
       const hasTools = getCapturedToolsFn ? getCapturedToolsFn().length > 0 : false;
+      const commands = getCapturedCommandsFn
+        ? getCapturedCommandsFn().map(c => ({ name: c.name, description: c.description }))
+        : [];
       return Response.json({
         pluginId: capturedPlugin?.id || 'unknown',
         textChunkLimit: outbound?.textChunkLimit ?? 4096,
@@ -312,6 +339,7 @@ const server = Bun.serve({
           streamingCardKit: hasCardKitStreaming,
           hasTools,
           toolGroups,
+          commands,
         },
       });
     }
@@ -549,7 +577,7 @@ const server = Bun.serve({
         return Response.json({ ok: false, error: 'MCP handler not initialized (no tools captured)' }, { status: 503 });
       }
 
-      const body = await req.json() as { toolName: string; args: Record<string, unknown>; userId?: string; enabledGroups?: string[] };
+      const body = await req.json() as { toolName: string; args: Record<string, unknown>; userId?: string; isOwner?: boolean; enabledGroups?: string[] };
 
       if (!body.toolName) {
         return Response.json({ ok: false, error: 'Missing required field: toolName' }, { status: 400 });
@@ -565,8 +593,38 @@ const server = Bun.serve({
       }
 
       try {
-        const result = await mcpHandler.callTool(body.toolName, body.args || {}, body.userId);
-        return Response.json({ ok: true, result });
+        const result = await mcpHandler.callTool(body.toolName, body.args || {}, body.userId, body.isOwner);
+        // Ensure result is never undefined — JSON.stringify omits undefined keys,
+        // causing downstream MCP SDK validation to fail (text: undefined)
+        return Response.json({ ok: true, result: result ?? null });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    // ===== Plugin command execution =====
+
+    if (path === '/execute-command' && req.method === 'POST') {
+      const body = await req.json() as { command: string; args?: string; userId?: string; chatId?: string };
+      if (!body.command) {
+        return Response.json({ ok: false, error: 'Missing required field: command' }, { status: 400 });
+      }
+
+      const commands = getCapturedCommandsFn ? getCapturedCommandsFn() : [];
+      const cmd = commands.find(c => c.name === body.command);
+      if (!cmd) {
+        return Response.json({ ok: false, error: `Unknown command: /${body.command}` }, { status: 404 });
+      }
+
+      try {
+        const result = await cmd.execute({
+          args: body.args || '',
+          userId: body.userId,
+          chatId: body.chatId,
+          config: loadedOpenclawConfig,
+        });
+        const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+        return Response.json({ ok: true, result: text });
       } catch (err) {
         return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
       }

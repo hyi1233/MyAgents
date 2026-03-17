@@ -11,23 +11,24 @@ export interface McpToolDefinition {
   name: string;
   description: string;
   group: string;
+  ownerOnly: boolean;
   parameters: Record<string, unknown>;
 }
 
-// ===== Tool group mapping (hardcoded for feishu plugin) =====
+// ===== Tool group resolution =====
+// Generic protocol: trust plugin-declared group. Feishu-specific fallback when undeclared.
 
-const TOOL_GROUPS: Record<string, string> = {
-  feishu_doc: 'doc',
-  feishu_app_scopes: 'doc',
-  feishu_chat: 'chat',
-  feishu_wiki: 'wiki_drive',
-  feishu_drive: 'wiki_drive',
-  feishu_perm: 'perm',
-};
-
-function getToolGroup(toolName: string): string {
+/**
+ * Feishu-specific fallback: derive group from tool name when the plugin
+ * doesn't declare a `group` field. Other plugins should declare their own groups.
+ */
+function inferToolGroupFeishu(toolName: string): string {
   if (toolName.startsWith('feishu_bitable_')) return 'bitable';
-  return TOOL_GROUPS[toolName] || 'other';
+  if (toolName.startsWith('feishu_chat')) return 'chat';
+  if (toolName.startsWith('feishu_wiki') || toolName.startsWith('feishu_drive')) return 'wiki_drive';
+  if (toolName.startsWith('feishu_doc') || (toolName.startsWith('feishu_') && toolName.endsWith('_doc')) || toolName === 'feishu_app_scopes') return 'doc';
+  if (toolName.startsWith('feishu_perm')) return 'perm';
+  return 'other';
 }
 
 // ===== Resolved tool cache =====
@@ -36,8 +37,9 @@ interface ResolvedTool {
   name: string;
   description: string;
   group: string;
+  ownerOnly: boolean;
   parameters: Record<string, unknown>;
-  execute: (args: Record<string, unknown>, userId?: string) => Promise<unknown>;
+  execute: (toolCallIdOrArgs: unknown, paramsOrUserId?: unknown) => Promise<unknown>;
 }
 
 export function createMcpHandler(
@@ -73,10 +75,14 @@ export function createMcpHandler(
             ? (tool.execute as ResolvedTool['execute'])
             : async () => ({ error: 'Tool has no execute method' });
 
+          // Generic protocol: use plugin-declared group if present.
+          // Feishu fallback: infer group from tool name when plugin doesn't declare one.
+          const declaredGroup = typeof tool.group === 'string' ? tool.group.trim() : '';
           resolved.push({
             name,
             description,
-            group: getToolGroup(name),
+            group: declaredGroup || inferToolGroupFeishu(name),
+            ownerOnly: !!(tool as Record<string, unknown>).ownerOnly,
             parameters,
             execute,
           });
@@ -104,6 +110,7 @@ export function createMcpHandler(
       name: t.name,
       description: t.description,
       group: t.group,
+      ownerOnly: t.ownerOnly,
       parameters: t.parameters,
     }));
   }
@@ -115,13 +122,20 @@ export function createMcpHandler(
     toolName: string,
     args: Record<string, unknown>,
     userId?: string,
+    isOwner?: boolean,
   ): Promise<unknown> {
     const all = resolveAllTools();
     const tool = all.find((t) => t.name === toolName);
     if (!tool) {
       throw new Error(`Tool not found: ${toolName}`);
     }
-    return tool.execute(args, userId);
+    // ownerOnly tools require sender to be in the allowed_users whitelist
+    if (tool.ownerOnly && !isOwner) {
+      throw new Error(`Tool "${toolName}" requires owner permission`);
+    }
+    // OpenClaw plugin execute signature: execute(toolCallId, params)
+    // First arg is a call ID (plugins ignore it with _), second is actual parameters
+    return tool.execute(userId || '', args);
   }
 
   /**

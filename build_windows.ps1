@@ -150,6 +150,43 @@ try {
         $depOk = $false
     }
 
+    $nodejsPath = "src-tauri\resources\nodejs\node.exe"
+    Write-Host "  检查 bundled Node.js... " -NoNewline
+    if (Test-Path $nodejsPath) {
+        Write-Host "OK" -ForegroundColor Green
+    } else {
+        Write-Host "MISSING - downloading..." -ForegroundColor Yellow
+        # Auto-download Node.js if setup_windows.ps1 was not run
+        try {
+            $NodeVersion = "22.16.0"
+            $NodeDir = "src-tauri\resources\nodejs"
+            $ZipName = "node-v$NodeVersion-win-x64.zip"
+            $TempZip = Join-Path $env:TEMP "node-windows.zip"
+            $TempDir = Join-Path $env:TEMP "node-windows-extract"
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri "https://nodejs.org/dist/v$NodeVersion/$ZipName" -OutFile $TempZip -UseBasicParsing -TimeoutSec 300
+            if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
+            Expand-Archive -Path $TempZip -DestinationPath $TempDir -Force
+            $ExtractedDir = Join-Path $TempDir "node-v$NodeVersion-win-x64"
+            if (Test-Path $NodeDir) { Remove-Item -Recurse -Force $NodeDir }
+            New-Item -ItemType Directory -Path $NodeDir -Force | Out-Null
+            Copy-Item (Join-Path $ExtractedDir "node.exe") $NodeDir -Force
+            Copy-Item (Join-Path $ExtractedDir "npm.cmd") $NodeDir -Force
+            Copy-Item (Join-Path $ExtractedDir "npx.cmd") $NodeDir -Force
+            Copy-Item (Join-Path $ExtractedDir "npm") $NodeDir -Force
+            Copy-Item (Join-Path $ExtractedDir "npx") $NodeDir -Force
+            if (Test-Path (Join-Path $ExtractedDir "node_modules")) {
+                Copy-Item (Join-Path $ExtractedDir "node_modules") $NodeDir -Recurse -Force
+            }
+            if (Test-Path $TempZip) { Remove-Item -Force $TempZip }
+            if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
+            Write-Host "    OK - Node.js downloaded" -ForegroundColor Green
+        } catch {
+            Write-Host "    下载失败，请先运行 .\setup_windows.ps1" -ForegroundColor Red
+            $depOk = $false
+        }
+    }
+
     $gitInstallerPath = "src-tauri\nsis\Git-Installer.exe"
     Write-Host "  检查 Git installer... " -NoNewline
     if (Test-Path $gitInstallerPath) {

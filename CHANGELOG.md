@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.44] - 2026-03-18
+
+### Added
+- **双运行时架构**：内置 Node.js 运行 MCP Server / 社区 npm 包，Bun 运行 Agent Runtime / Sidecar。用户无需自行安装任何运行时。PATH 注入优先级：bundledBun → bundledNode → ~/.myagents/bin → 系统路径
+- **OpenClaw 插件工具动态透传**：Bridge MCP handler 动态发现插件注册的工具，通过 im-bridge-tools 创建 SDK MCP server 透传到 AI，支持工具组过滤与 ownerOnly 权限控制
+- **OpenClaw 插件斜杠命令**：Rust 层路由插件注册的 `/feishu auth`、`/feishu_diagnose` 等命令，/help 中展示并翻译为中文
+- **飞书自动 OAuth 授权**：工具返回 `need_user_authorization` 时自动触发授权卡片，用户无需手动发送 `/feishu auth`
+
+### Improved
+- **飞书流式响应速度**：CardKit streaming 节流从 100ms 提升到 500ms，减少 5 倍 API 调用量，响应延迟从 15 秒降至 ≤5 秒
+- **Channel 模型选择器**：增加「默认（继承 Agent）」选项，Channel 可不指定独立模型
+- **Channel AI config 持久化**：写入 agentConfig.overrides，重启不丢失
+
+### Fixed
+- **飞书流式内容三倍重复**：`mergeStreamingText()` 的 append fallback 在 AI 中途切换 Markdown 格式时触发拼接，改为 `return next`（累积文本总是最新权威版本）
+- **Pre-warm 竞态导致消息孤立**：`schedulePreWarm` 从 stale await 改为递归重试 + enqueueUserMessage 安全网 + interruptCurrentResponse 孤立队列清理
+- **Stop 按钮 UI 卡死**：`alreadyStopped` 分支 flushSync 重置 isLoading/isStreamingRef
+- **Tab 加入已完成 IM 会话时 isLoading 卡住**
+- **Bridge 工具组匹配 403**：从精确 key 匹配改为前缀推断
+- **OpenClaw execute 参数顺序 + 返回值格式**
+- **ownerOnly fail-closed**：无白名单 = 无 owner，非 owner 调用 ownerOnly 工具被拒绝
+- **群聊 mention 门控**：插件斜杠命令绕过 mention 检查（与内置 /help /model 一致）
+- **macOS 构建 Node.js 二进制签名**：补充 TCC/notarization codesign
+- **Memory Update toggle 尺寸**：与 Heartbeat toggle 统一
+
+---
+
 ## [0.1.43] - 2026-03-17
 
 ### Added

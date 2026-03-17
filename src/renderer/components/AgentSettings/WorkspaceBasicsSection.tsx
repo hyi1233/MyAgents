@@ -1,5 +1,6 @@
 // WorkspaceBasicsSection — workspace name, icon, model, permission, MCP tools
-// Reads from Project, writes to both Project and AgentConfig (for Rust shim compat)
+// AI config (model/provider/permission/mcp) reads from AgentConfig (source of truth).
+// Metadata (name/icon) writes to both Project and AgentConfig.
 
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { ChevronRight } from 'lucide-react';
@@ -56,69 +57,88 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
   const availableMcpServers = mcpServers.filter(s => globalEnabledMcp.includes(s.id));
 
-  // Save to Project + sync relevant fields to AgentConfig for Rust shim
-  const saveToProject = useCallback(async (updates: Partial<Omit<Project, 'id'>>) => {
+  // Save workspace metadata (name, icon) to Project + AgentConfig
+  const saveProjectMeta = useCallback(async (updates: Partial<Pick<Project, 'displayName' | 'icon'>>) => {
     if (!project) return;
     await patchProject(project.id, updates);
-    // Sync AI-related fields to AgentConfig if it exists
     if (agent) {
       const agentPatch: Record<string, unknown> = {};
       if (updates.displayName !== undefined) agentPatch.name = updates.displayName || project.name;
       if (updates.icon !== undefined) agentPatch.icon = updates.icon;
-      if (updates.providerId !== undefined) agentPatch.providerId = updates.providerId;
-      if (updates.model !== undefined) agentPatch.model = updates.model;
-      if (updates.permissionMode !== undefined) agentPatch.permissionMode = updates.permissionMode || 'plan';
-      if (updates.mcpEnabledServers !== undefined) agentPatch.mcpEnabledServers = updates.mcpEnabledServers;
       if (Object.keys(agentPatch).length > 0) {
-        // patchAgentConfig auto-resolves providerEnvJson when providerId changes
         await patchAgentConfig(agent.id, agentPatch as Partial<Omit<AgentConfig, 'id'>>);
       }
     }
     await refreshConfig();
   }, [project, agent, patchProject, refreshConfig]);
 
+  // Save AI config (model, provider, permission, mcp).
+  // AgentConfig is the single source of truth when available; fallback to Project for non-agent workspaces.
+  const saveAgentConfig = useCallback(async (updates: Partial<Pick<AgentConfig, 'providerId' | 'model' | 'permissionMode' | 'mcpEnabledServers'>>) => {
+    if (agent) {
+      // patchAgentConfig auto-resolves providerEnvJson when providerId changes
+      await patchAgentConfig(agent.id, updates);
+    }
+    // Always sync to Project (Launcher compat + non-agent workspace fallback)
+    if (project) {
+      const projectSync: Record<string, unknown> = {};
+      if (updates.providerId !== undefined) projectSync.providerId = updates.providerId;
+      if (updates.model !== undefined) projectSync.model = updates.model;
+      if (updates.permissionMode !== undefined) projectSync.permissionMode = updates.permissionMode;
+      if (updates.mcpEnabledServers !== undefined) projectSync.mcpEnabledServers = updates.mcpEnabledServers;
+      if (Object.keys(projectSync).length > 0) {
+        await patchProject(project.id, projectSync);
+      }
+    }
+    await refreshConfig();
+  }, [agent, project, patchProject, refreshConfig]);
+
   const handleNameBlur = useCallback(() => {
     const trimmed = name.trim();
     const currentName = project?.displayName || project?.name || '';
     if (trimmed && trimmed !== currentName) {
-      void saveToProject({ displayName: trimmed });
+      void saveProjectMeta({ displayName: trimmed });
     }
-  }, [name, project, saveToProject]);
+  }, [name, project, saveProjectMeta]);
 
   const handleIconSelect = useCallback((iconId: string) => {
-    void saveToProject({ icon: iconId || undefined });
+    void saveProjectMeta({ icon: iconId || undefined });
     setOpenPopup(null);
-  }, [saveToProject]);
+  }, [saveProjectMeta]);
 
   const handleModelSelect = useCallback((providerId: string, model: string) => {
-    void saveToProject({ providerId, model });
+    void saveAgentConfig({ providerId, model });
     setOpenPopup(null);
-  }, [saveToProject]);
+  }, [saveAgentConfig]);
 
   const handlePermissionSelect = useCallback((mode: string) => {
-    void saveToProject({ permissionMode: mode as Project['permissionMode'] });
+    void saveAgentConfig({ permissionMode: mode });
     setOpenPopup(null);
-  }, [saveToProject]);
+  }, [saveAgentConfig]);
 
   const handleMcpToggle = useCallback((serverId: string) => {
-    const current = project?.mcpEnabledServers || [];
+    const current = agent?.mcpEnabledServers || [];
     const newEnabled = current.includes(serverId)
       ? current.filter(id => id !== serverId)
       : [...current, serverId];
-    void saveToProject({ mcpEnabledServers: newEnabled });
-  }, [project?.mcpEnabledServers, saveToProject]);
+    void saveAgentConfig({ mcpEnabledServers: newEnabled });
+  }, [agent?.mcpEnabledServers, saveAgentConfig]);
 
-  // Derived display values
-  const selectedProvider = providers.find(p => p.id === project?.providerId);
-  const modelName = project?.model
-    ? (selectedProvider?.models?.find(m => m.model === project.model)?.modelName || project.model)
+  // Derived display values — read from AgentConfig (source of truth), fallback to Project
+  const effectiveProviderId = agent?.providerId ?? project?.providerId;
+  const effectiveModel = agent?.model ?? project?.model;
+  const selectedProvider = providers.find(p => p.id === effectiveProviderId);
+  const modelName = effectiveModel
+    ? (selectedProvider?.models?.find(m => m.model === effectiveModel)?.modelName || effectiveModel)
     : (selectedProvider?.primaryModel || '未设置');
   const providerName = selectedProvider?.name || '默认';
 
-  const permissionMode = PERMISSION_MODES.find(m => m.value === project?.permissionMode) || PERMISSION_MODES[0];
+  const effectivePermissionMode = agent?.permissionMode ?? project?.permissionMode;
+  const permissionMode = PERMISSION_MODES.find(m => m.value === effectivePermissionMode) || PERMISSION_MODES[0];
 
+  const effectiveMcpServers = agent?.mcpEnabledServers ?? project?.mcpEnabledServers;
   const enabledMcpNames = availableMcpServers
-    .filter(s => project?.mcpEnabledServers?.includes(s.id))
+    .filter(s => effectiveMcpServers?.includes(s.id))
     .map(s => s.name);
   const mcpSummary = enabledMcpNames.length === 0
     ? '未启用工具'
@@ -223,7 +243,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
                     <button
                       key={`${provider.id}:${model.model}`}
                       className={`flex w-full items-center rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
-                        project.providerId === provider.id && project.model === model.model
+                        effectiveProviderId === provider.id && effectiveModel === model.model
                           ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)]'
                           : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
                       }`}
@@ -258,7 +278,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
                 <button
                   key={mode.value}
                   className={`flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left transition-colors ${
-                    project.permissionMode === mode.value
+                    effectivePermissionMode === mode.value
                       ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)]'
                       : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
                   }`}
@@ -297,7 +317,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
                 </p>
               ) : (
                 availableMcpServers.map(server => {
-                  const checked = project.mcpEnabledServers?.includes(server.id) ?? false;
+                  const checked = effectiveMcpServers?.includes(server.id) ?? false;
                   return (
                     <label
                       key={server.id}

@@ -3,13 +3,13 @@ import { existsSync, mkdirSync, readdirSync, symlinkSync, lstatSync, readFileSyn
 import { join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { getScriptDir, getBundledBunDir, getAgentBrowserCliPath } from './utils/runtime';
+import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
 import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
-import { imBridgeToolServer, getImBridgeToolsContext } from './tools/im-bridge-tools';
+import { getImBridgeToolsContext, getImBridgeToolServer } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
 // Side-effect imports: each registers itself in the builtin MCP registry
 import './tools/gemini-image-tool';
@@ -852,12 +852,21 @@ function schedulePreWarm(): void {
 
   preWarmTimer = setTimeout(() => {
     preWarmTimer = null;
-    if (!isSessionActive() && agentDir) {
-      console.log('[agent] pre-warming SDK subprocess + MCP servers');
-      startStreamingSession(true).catch((error) => {
-        console.error('[agent] pre-warm failed:', error);
-      });
+    if (!agentDir) return;
+    if (isSessionActive()) {
+      // Session still cleaning up — RETRY instead of calling startStreamingSession().
+      // We must NOT call startStreamingSession() here because it would await
+      // sessionTerminationPromise and become a "stale awaiter" — waking up minutes later
+      // when the promise resolves for a completely different reason (rewind, provider change),
+      // starting an unwanted session with stale config and corrupting shared state.
+      // Retry ensures we only start when the session is truly idle.
+      schedulePreWarm();
+      return;
     }
+    console.log('[agent] pre-warming SDK subprocess + MCP servers');
+    startStreamingSession(true).catch((error) => {
+      console.error('[agent] pre-warm failed:', error);
+    });
   }, 500);
 }
 
@@ -1027,14 +1036,13 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
     console.log(`[agent] Added im-media MCP server for bot ${imMediaCtx.botId}`);
   }
 
-  // Add Bridge tools proxy if we're in an IM context with a plugin bridge that has tools
+  // Add Bridge tools if we're in an IM context with a plugin bridge that has tools
+  // Dynamic server is created from actual plugin tool definitions — transparent passthrough
   const bridgeToolsCtx = getImBridgeToolsContext();
-  if (bridgeToolsCtx) {
-    result['im-bridge-tools'] = imBridgeToolServer;
-    const groups = bridgeToolsCtx.enabledToolGroups.length > 0
-      ? bridgeToolsCtx.enabledToolGroups.join(',')
-      : 'all (no filter)';
-    console.log(`[agent] Added im-bridge-tools MCP server for plugin ${bridgeToolsCtx.pluginId} (groups: ${groups})`);
+  const bridgeServer = getImBridgeToolServer();
+  if (bridgeToolsCtx && bridgeServer) {
+    result['im-bridge-tools'] = bridgeServer;
+    console.log(`[agent] Added im-bridge-tools MCP server for plugin ${bridgeToolsCtx.pluginId}`);
   }
 
   // --- Pattern 2: Builtin registry MCPs (in-process, user-toggled) ---
@@ -1069,24 +1077,35 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
       let command = server.command;
       let args = server.args || [];
 
-      // For npx commands: builtin MCP uses bundled bun, custom MCP uses system npx
+      // For npx commands: prefer bundled Node.js npx, fallback to bun x
       if (command === 'npx') {
         if (server.isBuiltin) {
-          // Builtin MCP: use bundled bun x (no Node.js dependency)
           // Pin @latest to known versions to avoid npm registry check on every startup
           args = pinMcpPackageVersions(args);
 
-          // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic import for runtime detection
-          const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
-          const runtime = getBundledRuntimePath();
+          // Dual runtime strategy: MCP servers are community npm packages designed for
+          // Node.js. Running them under Bun causes compatibility issues (Playwright pipe
+          // transport, axios adapter, postinstall scripts, etc.). Use bundled Node.js npx
+          // when available; fallback to bun x only if Node.js is not bundled.
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getBundledNodeDir: getNodeDir, getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
+          const nodeDir = getNodeDir();
 
-          if (isBunRuntime(runtime)) {
-            command = runtime;
-            args = ['x', ...args];
-            console.log(`[agent] MCP ${server.id}: Using bundled bun x`);
-          } else {
+          if (nodeDir) {
+            // Bundled Node.js available — use npx natively (all platforms unified)
             args = ['-y', ...args];
-            console.log(`[agent] MCP ${server.id}: Using npx (bun not available)`);
+            console.log(`[agent] MCP ${server.id}: Using bundled Node.js npx (${nodeDir})`);
+          } else {
+            // Fallback: no bundled Node.js — use bun x (legacy behavior)
+            const runtime = getBundledRuntimePath();
+            if (isBunRuntime(runtime)) {
+              command = runtime;
+              args = ['x', ...args];
+              console.log(`[agent] MCP ${server.id}: Using bundled bun x (Node.js not available)`);
+            } else {
+              args = ['-y', ...args];
+              console.log(`[agent] MCP ${server.id}: Using system npx`);
+            }
           }
         } else {
           // Custom MCP: use system npx with -y for auto-confirm
@@ -1900,10 +1919,10 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   const PATH_SEP = process.platform === 'win32' ? ';' : ':';
   const PATH_KEY = process.platform === 'win32' ? 'Path' : 'PATH';
 
-  // Detect bundled bun directory using shared utility from runtime.ts
-  // This ensures consistent path detection across the codebase (DRY principle)
+  // Detect bundled runtime directories using shared utility from runtime.ts
   const isWindows = process.platform === 'win32';
   const bundledBunDir = getBundledBunDir();
+  const bundledNodeDir = getBundledNodeDir();
 
   // Windows directory env vars — hoisted for reuse across essentialPaths + git-bash detection
   const winProgramFiles = isWindows ? (process.env.PROGRAMFILES || 'C:\\Program Files') : '';
@@ -1912,15 +1931,21 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
 
   if (isDebug) {
     console.log('[env] Script directory:', getScriptDir());
-    console.log(`[env] Checking bundled bun: ${bundledBunDir || 'NOT FOUND'} -> ${bundledBunDir ? 'EXISTS' : 'NOT FOUND'}`);
+    console.log(`[env] Bundled bun: ${bundledBunDir || 'NOT FOUND'}`);
+    console.log(`[env] Bundled Node.js: ${bundledNodeDir || 'NOT FOUND'}`);
   }
 
   // Build essential paths based on platform
   const essentialPaths: string[] = [];
 
-  // Bundled bun directory (highest priority)
+  // Bundled bun directory (highest priority — Sidecar/agent-browser need it)
   if (bundledBunDir) {
     essentialPaths.push(bundledBunDir);
+  }
+
+  // Bundled Node.js directory — MCP servers, AI bash `node`/`npm`/`npx` commands
+  if (bundledNodeDir) {
+    essentialPaths.push(bundledNodeDir);
   }
 
   // MyAgents bin directory — user-facing commands (agent-browser wrapper etc.)
@@ -3638,6 +3663,14 @@ export async function enqueueUserMessage(
     wakeGenerator(queueItem);
     console.log(`[agent] Message queued (mid-turn injection): queueId=${queueId} text="${trimmed.slice(0, 50)}"`);
     broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100) });
+
+    // Safety net: if message was queued because shouldAbortSession is true but no session
+    // or pre-warm timer exists to process it, schedule recovery. This prevents orphaned
+    // messages when a deferred config restart races with session cleanup.
+    if (shouldAbortSession && !preWarmTimer && !messageResolver) {
+      console.warn('[agent] Safety net: queued message during abort with no pending recovery, scheduling pre-warm');
+      schedulePreWarm();
+    }
     return { queued: true, queueId };
   }
 
@@ -3736,6 +3769,12 @@ export async function waitForSessionIdle(
 
 export async function interruptCurrentResponse(): Promise<boolean> {
   if (!isTurnInFlight()) {
+    // No active turn, but there might be orphaned queued messages.
+    // Drain them and notify the frontend so the UI can recover.
+    if (messageQueue.length > 0) {
+      console.warn(`[agent] No active turn but ${messageQueue.length} orphaned message(s) in queue, draining`);
+      drainQueueWithCancellation();
+    }
     return false;
   }
 
@@ -4024,6 +4063,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       });
     }
 
+    // Build disallowed tools list: group deny + IM-incompatible UI tools
+    const disallowedToolsList = [...currentGroupToolsDeny];
+    if (currentScenario.type === 'im') {
+      disallowedToolsList.push('AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode');
+    }
+
     // Build common query options (shared between normal start and "already in use" fallback)
     const commonQueryOptions = {
       enableFileCheckpointing: true,
@@ -4071,9 +4116,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
       ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
         ? { agents: currentAgentDefinitions, allowedTools: ['Task'] } : {}),
-      // Group chat tool deny list (v0.1.28): use SDK disallowedTools instead of canUseTool
-      // because canUseTool is skipped in bypassPermissions mode (IM Bot default: fullAgency)
-      ...(currentGroupToolsDeny.length > 0 ? { disallowedTools: [...currentGroupToolsDeny] } : {}),
+      // disallowedTools: group chat deny list + IM-incompatible UI-interaction tools
+      // Uses SDK disallowedTools because canUseTool is skipped in bypassPermissions mode
+      ...(disallowedToolsList.length > 0 ? { disallowedTools: disallowedToolsList } : {}),
       // Custom permission handling - check rules and prompt user for unknown tools
       // Effective when permissionMode is 'default' or 'acceptEdits' (not 'bypassPermissions')
       canUseTool: async (toolName: string, input: unknown, options: { signal: AbortSignal }) => {

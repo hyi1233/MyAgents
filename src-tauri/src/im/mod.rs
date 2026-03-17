@@ -1177,8 +1177,7 @@ async fn create_bot_instance<R: Runtime>(
                     }
 
                     if text == "/help" {
-                        let _ = adapter_for_reply.send_message(
-                            &chat_id,
+                        let mut help = String::from(
                             "📖 可用命令\n\n\
                              /new — 开始新对话（清空当前上下文）\n\
                              /workspace — 查看当前工作区\n\
@@ -1190,10 +1189,21 @@ async fn create_bot_instance<R: Runtime>(
                              /mode — 查看当前权限模式\n\
                              /mode <模式> — 切换模式（plan / auto / full）\n\
                              /status — 查看会话状态\n\
-                             /help — 显示本帮助\n\n\
-                             💬 直接发送文字即可与 AI 对话。\n\
-                             🔒 工具审批：收到权限请求时，回复「允许」「始终允许」或「拒绝」。",
-                        ).await;
+                             /help — 显示本帮助",
+                        );
+                        // Append plugin commands if available (translate English descriptions to Chinese)
+                        if let AnyAdapter::Bridge(ref bridge) = *adapter_for_reply {
+                            let cmds = bridge.get_commands();
+                            if !cmds.is_empty() {
+                                help.push_str("\n\n📦 插件命令\n");
+                                for (name, desc) in cmds {
+                                    let cn_desc = translate_plugin_command_desc(name, desc);
+                                    help.push_str(&format!("/{} — {}\n", name, cn_desc));
+                                }
+                            }
+                        }
+                        help.push_str("\n\n💬 直接发送文字即可与 AI 对话。\n🔒 工具审批：收到权限请求时，回复「允许」「始终允许」或「拒绝」。");
+                        let _ = adapter_for_reply.send_message(&chat_id, &help).await;
                         continue;
                     }
 
@@ -1646,8 +1656,13 @@ async fn create_bot_instance<R: Runtime>(
                         }
 
                         // Trigger check: in Mention mode, non-triggered messages go to history buffer
+                        // Exception: plugin slash commands bypass mention gate (like built-in /help /model)
+                        let is_plugin_command = is_bridge_platform && matches!(
+                            adapter_for_reply.as_ref(),
+                            AnyAdapter::Bridge(bridge) if bridge.match_command(&text).is_some()
+                        );
                         let activation = group_activation_for_loop.read().await.clone();
-                        if activation == GroupActivation::Mention && !msg.is_mention {
+                        if activation == GroupActivation::Mention && !msg.is_mention && !is_plugin_command {
                             group_history_for_loop.lock().await.push(
                                 &session_key,
                                 GroupHistoryEntry {
@@ -1667,6 +1682,32 @@ async fn create_bot_instance<R: Runtime>(
                         session_key,
                         text.len(),
                     );
+
+                    // Bridge plugin commands: check if text matches a registered command
+                    // Must be checked AFTER standard commands (/help, /model, etc.)
+                    if is_bridge_platform {
+                        if let AnyAdapter::Bridge(ref bridge) = *adapter_for_reply {
+                            if let Some((cmd_name, cmd_args)) = bridge.match_command(&text) {
+                                ulog_info!("[im] Plugin command /{} from {} (args: {:?})", cmd_name, msg.sender_id, cmd_args);
+                                let bridge_clone = adapter_for_reply.clone();
+                                let chat_id_clone = chat_id.clone();
+                                let sender_id = msg.sender_id.clone();
+                                tokio::spawn(async move {
+                                    if let AnyAdapter::Bridge(ref b) = *bridge_clone {
+                                        match b.execute_command(&cmd_name, &cmd_args, &sender_id, &chat_id_clone).await {
+                                            Ok(result) => {
+                                                let _ = bridge_clone.send_message(&chat_id_clone, &result).await;
+                                            }
+                                            Err(e) => {
+                                                let _ = bridge_clone.send_message(&chat_id_clone, &format!("❌ 命令执行失败: {}", e)).await;
+                                            }
+                                        }
+                                    }
+                                });
+                                continue;
+                            }
+                        }
+                    }
 
                     // Clone shared state for the spawned task
                     let task_router = Arc::clone(&router_clone);
@@ -1690,6 +1731,7 @@ async fn create_bot_instance<R: Runtime>(
                     let task_group_tools_deny = Arc::clone(&group_tools_deny_for_loop);
                     let task_group_permissions = Arc::clone(&group_permissions_for_loop);
                     let task_agent_link = Arc::clone(&agent_link_for_loop);
+                    let task_allowed_users = Arc::clone(&allowed_users_for_loop);
 
                     in_flight.spawn(async move {
                         // 1. Acquire per-peer lock FIRST (serialize requests to same Sidecar).
@@ -1821,6 +1863,7 @@ async fn create_bot_instance<R: Runtime>(
                         } else {
                             Some(&image_payloads)
                         };
+                        let allowed_snapshot = task_allowed_users.read().await.clone();
                         let session_id = match stream_to_im(
                             &task_stream_client,
                             port,
@@ -1835,6 +1878,7 @@ async fn create_bot_instance<R: Runtime>(
                             Some(&task_bot_id),
                             task_bot_name.as_deref(),
                             group_ctx.as_ref(),
+                            Some(&allowed_snapshot),
                         )
                         .await
                         {
@@ -1941,6 +1985,7 @@ async fn create_bot_instance<R: Runtime>(
                                 Some(buffered) => {
                                     let buf_chat_id = buffered.chat_id.clone();
                                     let buf_msg = buffered.to_im_message();
+                                    let buf_allowed = task_allowed_users.read().await.clone();
                                     match stream_to_im(
                                         &task_stream_client,
                                         port,
@@ -1955,6 +2000,7 @@ async fn create_bot_instance<R: Runtime>(
                                         Some(&task_bot_id),
                                         task_bot_name.as_deref(),
                                         None, // buffered messages don't carry group context
+                                        Some(&buf_allowed),
                                     )
                                     .await
                                     {
@@ -2447,6 +2493,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     bot_id: Option<&str>,
     bot_name: Option<&str>,
     group_context: Option<&GroupStreamContext>,
+    allowed_users: Option<&[String]>,
 ) -> Result<Option<String>, RouteError> {
     // Build request body (same as original route_to_sidecar)
     let source_owned;
@@ -2518,6 +2565,13 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         body["bridgePluginId"] = json!(bridge_plugin_id);
         body["bridgeEnabledToolGroups"] = json!(tool_groups);
         body["senderId"] = json!(msg.sender_id);
+        // ownerOnly check: sender is owner only if explicitly in allowed_users.
+        // Fail-closed: no whitelist or empty whitelist = no owner (ownerOnly tools blocked).
+        let is_owner = match allowed_users {
+            Some(users) if !users.is_empty() => users.contains(&msg.sender_id),
+            _ => false,
+        };
+        body["senderIsOwner"] = json!(is_owner);
         ulog_info!("[im-stream] Bridge context: port={}, plugin={}, groups={:?}", bridge_port, bridge_plugin_id, tool_groups);
     } else {
         ulog_info!("[im-stream] No bridge context (non-Bridge adapter)");
@@ -2620,14 +2674,16 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
 
                         // Throttled edit — re-evaluate interval dynamically so fallback
                         // from 300ms→1000ms takes effect mid-stream.
+                        // Reset last_edit BEFORE await so cycle = max(throttle, edit_latency)
+                        // instead of throttle + edit_latency (important for Bridge path).
                         if let Some(ref did) = draft_id {
                             let throttle = Duration::from_millis(adapter.preferred_throttle_ms());
                             if last_edit.elapsed() >= throttle {
+                                last_edit = Instant::now();
                                 let display = format_draft_text(&block_text, adapter.max_message_length());
                                 if let Err(e) = adapter.edit_message(chat_id, did, &display).await {
                                     ulog_warn!("[im] Draft edit failed: {}", e);
                                 }
-                                last_edit = Instant::now();
                             }
                         }
                     }
@@ -3067,6 +3123,21 @@ fn has_sentence_boundary(text: &str) -> bool {
         || trimmed.ends_with('?')
         || trimmed.ends_with(';')
         || trimmed.ends_with(':')
+}
+
+/// Translate plugin command descriptions to Chinese for /help display.
+/// Falls back to the original English description if no translation is available.
+fn translate_plugin_command_desc(name: &str, desc: &str) -> String {
+    // Match by command name for known OpenClaw plugin commands
+    match name {
+        "feishu_diagnose" => "运行飞书插件诊断，检查配置、连接和权限".to_string(),
+        "feishu_doctor" => "运行飞书插件诊断".to_string(),
+        "feishu_auth" | "feishu auth" => "批量授权飞书用户权限".to_string(),
+        "feishu" => "飞书插件命令（子命令：auth, doctor, start）".to_string(),
+        _ => {
+            if desc.is_empty() { "无描述".to_string() } else { desc.to_string() }
+        }
+    }
 }
 
 /// Extract `data:` payload from SSE event string.
@@ -4067,35 +4138,59 @@ fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), 
         }
         found.ok_or_else(|| format!("[im] Bot {} not found in config.json", bot_id))?
     };
+    let is_channel = matches!(location, BotLocation::AgentChannel(_, _));
     let bot = match location {
         BotLocation::Legacy(i) => &mut config["imBotConfigs"][i],
         BotLocation::AgentChannel(ai, ci) => &mut config["agents"][ai]["channels"][ci],
     };
 
-    // Apply patch fields: None = skip, Some("") = remove field, Some(val) = set
-    macro_rules! apply_string_field {
-        ($field:ident, $key:expr) => {
-            if let Some(ref val) = patch.$field {
-                if val.is_empty() {
-                    if let Some(o) = bot.as_object_mut() { o.remove($key); }
-                } else {
-                    bot[$key] = serde_json::json!(val);
-                }
+    // Helper: apply optional string field (None=skip, Some("")=remove, Some(val)=set)
+    fn apply_opt(target: &mut serde_json::Value, key: &str, val: &Option<String>) {
+        if let Some(ref v) = *val {
+            if v.is_empty() {
+                if let Some(o) = target.as_object_mut() { o.remove(key); }
+            } else {
+                target[key] = serde_json::json!(v);
             }
-        };
+        }
     }
-    apply_string_field!(model, "model");
-    apply_string_field!(provider_id, "providerId");
-    apply_string_field!(provider_env_json, "providerEnvJson");
-    apply_string_field!(permission_mode, "permissionMode");
-    apply_string_field!(default_workspace_path, "defaultWorkspacePath");
-    apply_string_field!(name, "name");
-    apply_string_field!(bot_token, "botToken");
-    apply_string_field!(feishu_app_id, "feishuAppId");
-    apply_string_field!(feishu_app_secret, "feishuAppSecret");
-    apply_string_field!(dingtalk_client_id, "dingtalkClientId");
-    apply_string_field!(dingtalk_client_secret, "dingtalkClientSecret");
-    apply_string_field!(dingtalk_card_template_id, "dingtalkCardTemplateId");
+
+    // AI-related fields: for AgentChannel → write to `overrides` sub-object
+    // (ChannelConfigRust::to_im_config reads from overrides, not channel root)
+    // For Legacy → write to root (backward compat)
+    if is_channel {
+        // Ensure overrides object exists
+        if bot["overrides"].is_null() {
+            bot["overrides"] = serde_json::json!({});
+        }
+        // Clean up stale root-level AI fields left by pre-fix code
+        if let Some(obj) = bot.as_object_mut() {
+            obj.remove("model");
+            obj.remove("providerId");
+            obj.remove("providerEnvJson");
+            obj.remove("permissionMode");
+        }
+        let ov = &mut bot["overrides"];
+        apply_opt(ov, "model", &patch.model);
+        apply_opt(ov, "providerId", &patch.provider_id);
+        apply_opt(ov, "providerEnvJson", &patch.provider_env_json);
+        apply_opt(ov, "permissionMode", &patch.permission_mode);
+    } else {
+        apply_opt(bot, "model", &patch.model);
+        apply_opt(bot, "providerId", &patch.provider_id);
+        apply_opt(bot, "providerEnvJson", &patch.provider_env_json);
+        apply_opt(bot, "permissionMode", &patch.permission_mode);
+    }
+
+    // Platform-specific fields → always at channel/bot root
+    apply_opt(bot, "defaultWorkspacePath", &patch.default_workspace_path);
+    apply_opt(bot, "name", &patch.name);
+    apply_opt(bot, "botToken", &patch.bot_token);
+    apply_opt(bot, "feishuAppId", &patch.feishu_app_id);
+    apply_opt(bot, "feishuAppSecret", &patch.feishu_app_secret);
+    apply_opt(bot, "dingtalkClientId", &patch.dingtalk_client_id);
+    apply_opt(bot, "dingtalkClientSecret", &patch.dingtalk_client_secret);
+    apply_opt(bot, "dingtalkCardTemplateId", &patch.dingtalk_card_template_id);
 
     // dingtalk_use_ai_card → boolean field
     if let Some(val) = patch.dingtalk_use_ai_card {
@@ -4164,7 +4259,18 @@ fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), 
         }
     }
     if let Some(ref tools) = patch.group_tools_deny {
-        bot["groupToolsDeny"] = serde_json::json!(tools);
+        // For channels: toolsDeny lives in overrides (ChannelOverrides.tools_deny)
+        // For legacy: groupToolsDeny at root
+        if is_channel {
+            if bot["overrides"].is_null() {
+                bot["overrides"] = serde_json::json!({});
+            }
+            bot["overrides"]["toolsDeny"] = serde_json::json!(tools);
+            // Clean up stale root-level field
+            if let Some(obj) = bot.as_object_mut() { obj.remove("groupToolsDeny"); }
+        } else {
+            bot["groupToolsDeny"] = serde_json::json!(tools);
+        }
     }
 
     // Atomic write

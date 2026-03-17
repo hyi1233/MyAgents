@@ -580,15 +580,16 @@ export default function TabProvider({
                 }
 
                 // Sync isLoading with backend state on SSE connect/reconnect
-                // This catches cases where message-complete was lost during connection issues
+                // When backend reports 'idle', unconditionally reset frontend loading state.
+                // This catches: (1) message-complete lost during connection issues,
+                // (2) Tab joining a sidecar whose query already finished (no streaming ref set).
                 const initPayload = data as { sessionState?: SessionState } | null;
                 if (initPayload?.sessionState) {
                     setSessionState(initPayload.sessionState);
-                    if (initPayload.sessionState === 'idle' && isStreamingRef.current) {
-                        console.debug(`[TabProvider ${tabId}] chat:init state=idle, syncing isLoading`);
+                    if (initPayload.sessionState === 'idle') {
                         isStreamingRef.current = false;
                         setIsLoading(false);
-                        setSystemStatus(null);  // Also clear system status when syncing to idle
+                        setSystemStatus(null);
                     }
                 }
                 break;
@@ -646,13 +647,11 @@ export default function TabProvider({
                 const payload = data as { sessionState: SessionState } | null;
                 if (payload?.sessionState) {
                     setSessionState(payload.sessionState);
-                    // Sync isLoading with sessionState - defensive fix for when message-complete event is lost
-                    // When backend reports 'idle', ensure frontend isLoading is also false
-                    if (payload.sessionState === 'idle' && isStreamingRef.current) {
-                        console.debug(`[TabProvider ${tabId}] chat:status=idle, syncing isLoading`);
+                    // When backend reports 'idle', unconditionally reset frontend loading state.
+                    if (payload.sessionState === 'idle') {
                         isStreamingRef.current = false;
                         setIsLoading(false);
-                        setSystemStatus(null);  // Also clear system status when syncing to idle
+                        setSystemStatus(null);
                     }
                 }
                 break;
@@ -1651,9 +1650,16 @@ export default function TabProvider({
         try {
             const response = await postJson<{ success: boolean; alreadyStopped?: boolean; error?: string }>('/chat/stop');
             if (response.success) {
-                // Nothing was active — restore UI immediately, no need to wait for SSE
+                // Nothing was active — restore UI immediately, no need to wait for SSE.
+                // Also reset isLoading: the backend may have drained orphaned queued messages
+                // (queue:cancelled events will clean up queuedMessages), and the UI was stuck
+                // with isLoading=true because no chat:message-complete ever arrived.
                 if (response.alreadyStopped) {
-                    setSessionState(prev => prev === 'stopping' ? 'idle' : prev);
+                    flushSync(() => {
+                        isStreamingRef.current = false;
+                        setIsLoading(false);
+                        setSessionState(prev => prev === 'stopping' ? 'idle' : prev);
+                    });
                     return true;
                 }
                 // 设置 5 秒超时，如果没有收到 SSE 事件确认则强制恢复 UI

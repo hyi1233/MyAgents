@@ -415,12 +415,17 @@ function cleanupStalePlaywrightProfile(): void {
 
     if (!existsSync(lockPath)) return;
 
-    // SingletonLock is a symlink: "hostname-pid". Check if the pid is still running.
+    // macOS/Linux: SingletonLock is a symlink containing "hostname-pid"
+    // Windows: SingletonLock is a regular file containing "hostname-pid"
     let linkTarget: string;
     try {
       linkTarget = readlinkSync(lockPath);
     } catch {
-      return; // Can't read lock symlink, skip cleanup
+      try {
+        linkTarget = readFileSync(lockPath, 'utf-8').trim();
+      } catch {
+        return; // Can't read lock content, skip cleanup
+      }
     }
 
     // Format: "hostname-pid" (e.g., "Ethan.local-82424")
@@ -3733,6 +3738,11 @@ async function main() {
               const headers: Record<string, string> = {
                 // Streamable HTTP 规范要求同时声明两种格式；SSE 只需 event-stream
                 'Accept': server.type === 'sse' ? 'text/event-stream' : 'application/json, text/event-stream',
+                // Request uncompressed response to avoid ZlibError.
+                // Some servers (e.g., behind WAF/CDN like Huawei Cloud) return
+                // content-encoding: gzip with a non-compressed body, causing Bun's
+                // fetch() auto-decompression to crash. Validation doesn't need compression.
+                'Accept-Encoding': 'identity',
                 ...(server.headers || {}),
               };
 
@@ -3925,6 +3935,11 @@ async function main() {
                 message = '连接被重置，请检查网络或服务器状态';
               } else if (error.message.includes('certificate') || error.message.includes('SSL') || error.message.includes('TLS')) {
                 message = 'SSL/TLS 证书错误，请检查服务器证书配置';
+              } else if (error.message.includes('Zlib') || error.message.includes('Decompression')) {
+                // WAF/CDN may return content-encoding: gzip with non-compressed body.
+                // Bun's fetch auto-decompression crashes. Skip validation and let SDK handle it.
+                console.warn(`[api/mcp/enable] ZlibError during validation (WAF/CDN issue), allowing MCP: ${server.id}`);
+                return jsonResponse({ success: true });
               } else {
                 message = `连接失败: ${error.message}`;
               }
@@ -3940,33 +3955,55 @@ async function main() {
           if (server.type === 'stdio' && server.command) {
             const command = server.command;
 
-            // Preset MCP (isBuiltin: true) with npx → warmup with bundled bun
+            // Preset MCP (isBuiltin: true) with npx → warmup to download and cache package
             if (server.isBuiltin && command === 'npx') {
-              const { getBundledRuntimePath, isBunRuntime } = await import('./utils/runtime');
-              const runtime = getBundledRuntimePath();
-
-              if (!isBunRuntime(runtime)) {
-                return jsonResponse({
-                  success: false,
-                  error: {
-                    type: 'runtime_error',
-                    message: '内置运行时不可用',
-                  }
-                });
-              }
-
-              // Warmup: run bun x <package> --help to download and cache
-              // MUST pin versions here too — otherwise warmup caches @latest but SDK uses pinned version
+              const { getBundledNodeDir, getBundledRuntimePath, isBunRuntime } = await import('./utils/runtime');
               const { pinMcpPackageVersions } = await import('./agent-session');
               const args = pinMcpPackageVersions(server.args || []);
-              console.log(`[api/mcp/enable] Warming up cache: ${runtime} x ${args.join(' ')}`);
 
               const { spawn } = await import('child_process');
               const { getShellEnv } = await import('./utils/shell');
+              const baseEnv = getShellEnv();
+
+              // Dual runtime: prefer bundled Node.js npx, fallback to bun x
+              const nodeDir = getBundledNodeDir();
+              let warmupCmd: string;
+              let warmupArgs: string[];
+
+              if (nodeDir) {
+                // Bundled Node.js: warmup with npx (uses same npm cache as actual execution)
+                const npxPath = process.platform === 'win32'
+                  ? join(nodeDir, 'npx.cmd')
+                  : join(nodeDir, 'npx');
+                warmupCmd = npxPath;
+                warmupArgs = ['-y', ...args, '--help'];
+
+                // Ensure bundled Node.js bin dir is in PATH for npx to find node
+                const pathKey = process.platform === 'win32' ? 'Path' : 'PATH';
+                const sep = process.platform === 'win32' ? ';' : ':';
+                baseEnv[pathKey] = nodeDir + sep + (baseEnv[pathKey] || '');
+
+                console.log(`[api/mcp/enable] Warming up with bundled npx: ${warmupArgs.join(' ')}`);
+              } else {
+                // Fallback: use bun x
+                const runtime = getBundledRuntimePath();
+                if (!isBunRuntime(runtime)) {
+                  return jsonResponse({
+                    success: false,
+                    error: {
+                      type: 'runtime_error',
+                      message: '内置运行时不可用（Node.js 和 Bun 均未找到）',
+                    }
+                  });
+                }
+                warmupCmd = runtime;
+                warmupArgs = ['x', ...args, '--help'];
+                console.log(`[api/mcp/enable] Warming up with bun x: ${warmupArgs.join(' ')}`);
+              }
 
               return new Promise<Response>((resolve) => {
-                const proc = spawn(runtime, ['x', ...args, '--help'], {
-                  env: getShellEnv(),
+                const proc = spawn(warmupCmd, warmupArgs, {
+                  env: baseEnv,
                   timeout: 120000, // 2 min timeout
                   stdio: ['ignore', 'pipe', 'pipe'],
                 });
@@ -6184,6 +6221,7 @@ async function main() {
             bridgePluginId?: string;
             bridgeEnabledToolGroups?: string[];
             senderId?: string;
+            senderIsOwner?: boolean;
           };
 
           const hasContent = payload.message?.trim() || (payload.images && payload.images.length > 0);
@@ -6217,12 +6255,15 @@ async function main() {
             });
 
             // Set Bridge tools context if this is an OpenClaw plugin session with tools
+            // Async: fetches tool definitions from Bridge and creates dynamic MCP server
             if (payload.bridgePort && payload.bridgePluginId) {
-              setImBridgeToolsContext({
+              await setImBridgeToolsContext({
                 bridgePort: payload.bridgePort,
                 pluginId: payload.bridgePluginId,
                 enabledToolGroups: payload.bridgeEnabledToolGroups || [],
                 senderId: payload.senderId,
+                chatId: payload.sourceId,
+                isOwner: payload.senderIsOwner ?? false,
               });
             }
           }

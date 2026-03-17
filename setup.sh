@@ -106,18 +106,23 @@ fi
 
 # 下载 Bun 二进制
 echo ""
-echo -e "${BLUE}[2/6] 下载 Bun 运行时${NC}"
+echo -e "${BLUE}[2/7] 下载 Bun 运行时${NC}"
 download_bun_binaries
 echo ""
 
+# 下载 Node.js 二进制（MCP Server / 社区工具需要）
+echo -e "${BLUE}[3/7] 下载 Node.js 运行时${NC}"
+"${PROJECT_DIR}/scripts/download_nodejs.sh"
+echo ""
+
 # 安装前端依赖
-echo -e "${BLUE}[3/6] 安装前端依赖${NC}"
+echo -e "${BLUE}[4/7] 安装前端依赖${NC}"
 bun install
 echo -e "${GREEN}✓ 前端依赖安装完成${NC}"
 echo ""
 
 # 安装 Rust 依赖
-echo -e "${BLUE}[4/6] 检查 Rust 依赖${NC}"
+echo -e "${BLUE}[5/7] 检查 Rust 依赖${NC}"
 cd src-tauri
 cargo check --quiet 2>/dev/null || cargo fetch
 cd ..
@@ -126,7 +131,7 @@ echo ""
 
 # 准备默认工作区 (mino) — 每次拉取最新版本
 # .git 不保留：避免 Tauri 资源打包权限问题 + rerun-if-changed 性能问题
-echo -e "${BLUE}[5/6] 准备默认工作区 (mino)${NC}"
+echo -e "${BLUE}[6/7] 准备默认工作区 (mino)${NC}"
 MINO_DIR="${PROJECT_DIR}/mino"
 rm -rf "$MINO_DIR"
 echo -e "  ${CYAN}克隆 openmino 默认工作区 (最新版本)...${NC}"
@@ -136,7 +141,7 @@ echo -e "${GREEN}✓ mino 默认工作区已就绪${NC}"
 echo ""
 
 # 完成
-echo -e "${BLUE}[6/6] 初始化完成!${NC}"
+echo -e "${BLUE}[7/7] 初始化完成!${NC}"
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════${NC}"
 echo -e "${GREEN}  开发环境准备就绪!${NC}"

@@ -148,16 +148,16 @@ export default function QueryNavigator({
 
   return (
     <div
-      className="absolute right-0 top-0 bottom-0 z-30 hidden md:flex items-center"
-      onMouseEnter={() => setIsExpanded(true)}
-      onMouseLeave={() => setIsExpanded(false)}
+      className="absolute right-0 top-0 bottom-0 z-30 hidden md:flex items-center pointer-events-none"
     >
       {/* Single unified container — dashes always anchored right, text slides in */}
       <div
         aria-hidden={!isExpanded}
-        className={`relative max-h-[60vh] overflow-hidden transition-[width,background-color,border-color,box-shadow] duration-200 ${
+        onMouseEnter={() => setIsExpanded(true)}
+        onMouseLeave={() => setIsExpanded(false)}
+        className={`pointer-events-auto relative max-h-[60vh] overflow-hidden transition-[width,background-color,border-color,box-shadow] duration-200 ${
           isExpanded
-            ? 'w-56 rounded-xl border border-[var(--line)] shadow-lg'
+            ? 'w-72 rounded-xl border border-[var(--line)] shadow-lg'
             : 'w-5 border border-transparent'
         }`}
         style={isExpanded ? {
@@ -190,7 +190,7 @@ export default function QueryNavigator({
                 onClick={() => isExpanded && handleQueryClick(q.id)}
                 className={`flex w-full items-center gap-1.5 py-[5px] text-left transition-colors ${
                   isExpanded
-                    ? `px-2 cursor-pointer rounded-lg ${isActive ? 'bg-[var(--hover-bg)]' : 'hover:bg-[var(--hover-bg)]'}`
+                    ? `px-3 cursor-pointer rounded-lg ${isActive ? 'bg-[var(--hover-bg)]' : 'hover:bg-[var(--hover-bg)]'}`
                     : 'px-0 cursor-default justify-end'
                 }`}
               >
