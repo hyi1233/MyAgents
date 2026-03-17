@@ -12,6 +12,12 @@ export interface CapturedTool {
   optional: boolean;
 }
 
+export interface CapturedCommand {
+  name: string;
+  description: string;
+  execute: (ctx: Record<string, unknown>) => Promise<string | Record<string, unknown>>;
+}
+
 export interface CapturedPlugin {
   id: string;
   name: string;
@@ -30,6 +36,7 @@ export interface CapturedPlugin {
 export function createCompatApi(config: Record<string, unknown>) {
   let capturedPlugin: CapturedPlugin | null = null;
   const capturedTools: CapturedTool[] = [];
+  const capturedCommands: CapturedCommand[] = [];
 
   const api = {
     /**
@@ -126,9 +133,21 @@ export function createCompatApi(config: Record<string, unknown>) {
     off(_event: string, _handler: (...args: unknown[]) => void) {},
     emit(_event: string, ..._args: unknown[]) {},
 
-    // Command registration — Bridge doesn't support chat commands
-    registerCommand(_cmd: Record<string, unknown>) {},
-    registerChatCommand(_cmd: Record<string, unknown>) {},
+    // Command registration — capture for Rust IM layer routing
+    registerCommand(cmd: Record<string, unknown>) {
+      const name = String(cmd.name || cmd.command || '');
+      if (!name) return;
+      const description = String(cmd.description || cmd.help || '');
+      const handler = (cmd.handler || cmd.execute) as CapturedCommand['execute'] | undefined;
+      if (typeof handler === 'function') {
+        capturedCommands.push({ name, description, execute: handler });
+        console.log(`[compat-api] Command registered: /${name}`);
+      }
+    },
+    registerChatCommand(cmd: Record<string, unknown>) {
+      // Alias — same as registerCommand
+      api.registerCommand(cmd);
+    },
 
     // MCP tool registration — no-op (Bridge uses its own MCP proxy)
     registerMcpServer(_server: unknown) {},
@@ -148,6 +167,13 @@ export function createCompatApi(config: Record<string, unknown>) {
      */
     getCapturedTools(): CapturedTool[] {
       return capturedTools;
+    },
+
+    /**
+     * Get all captured command definitions after registration.
+     */
+    getCapturedCommands(): CapturedCommand[] {
+      return capturedCommands;
     },
   };
 

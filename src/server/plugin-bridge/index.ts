@@ -58,6 +58,9 @@ let streamIdCounter = 0;
 // MCP handler — initialized after plugin loads and captures tools
 let mcpHandler: ReturnType<typeof createMcpHandler> | null = null;
 let getCapturedToolsFn: (() => CapturedTool[]) | null = null;
+let getCapturedCommandsFn: (() => import('./compat-api').CapturedCommand[]) | null = null;
+/** OpenClaw-format config (channels.{brand}.{...}), set during loadPlugin() */
+let loadedOpenclawConfig: Record<string, unknown> = {};
 
 async function loadPlugin() {
   // Find the plugin entry point FIRST — we need the module name to infer the channel brand
@@ -116,6 +119,7 @@ async function loadPlugin() {
   };
 
   // Create compat API with properly structured config
+  loadedOpenclawConfig = openclawConfig;
   const compatApi = createCompatApi(openclawConfig);
   // Runtime must be created early — plugins call setRuntime(api.runtime) during register()
   const runtime = createCompatRuntime(rustPort, botId, 'unknown');
@@ -175,6 +179,7 @@ async function loadPlugin() {
 
   // Set up MCP handler with captured tools (use openclawConfig so tools resolve accounts)
   getCapturedToolsFn = () => compatApi.getCapturedTools();
+  getCapturedCommandsFn = () => compatApi.getCapturedCommands();
   mcpHandler = createMcpHandler(getCapturedToolsFn, openclawConfig);
   const toolCount = compatApi.getCapturedTools().length;
   if (toolCount > 0) {
@@ -315,6 +320,9 @@ const server = Bun.serve({
       const hasCardKitStreaming = !!(pluginConfig.appId && pluginConfig.appSecret);
       const toolGroups = mcpHandler ? mcpHandler.getToolGroups() : [];
       const hasTools = getCapturedToolsFn ? getCapturedToolsFn().length > 0 : false;
+      const commands = getCapturedCommandsFn
+        ? getCapturedCommandsFn().map(c => ({ name: c.name, description: c.description }))
+        : [];
       return Response.json({
         pluginId: capturedPlugin?.id || 'unknown',
         textChunkLimit: outbound?.textChunkLimit ?? 4096,
@@ -331,6 +339,7 @@ const server = Bun.serve({
           streamingCardKit: hasCardKitStreaming,
           hasTools,
           toolGroups,
+          commands,
         },
       });
     }
@@ -568,7 +577,7 @@ const server = Bun.serve({
         return Response.json({ ok: false, error: 'MCP handler not initialized (no tools captured)' }, { status: 503 });
       }
 
-      const body = await req.json() as { toolName: string; args: Record<string, unknown>; userId?: string; enabledGroups?: string[] };
+      const body = await req.json() as { toolName: string; args: Record<string, unknown>; userId?: string; isOwner?: boolean; enabledGroups?: string[] };
 
       if (!body.toolName) {
         return Response.json({ ok: false, error: 'Missing required field: toolName' }, { status: 400 });
@@ -584,10 +593,38 @@ const server = Bun.serve({
       }
 
       try {
-        const result = await mcpHandler.callTool(body.toolName, body.args || {}, body.userId);
+        const result = await mcpHandler.callTool(body.toolName, body.args || {}, body.userId, body.isOwner);
         // Ensure result is never undefined — JSON.stringify omits undefined keys,
         // causing downstream MCP SDK validation to fail (text: undefined)
         return Response.json({ ok: true, result: result ?? null });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    // ===== Plugin command execution =====
+
+    if (path === '/execute-command' && req.method === 'POST') {
+      const body = await req.json() as { command: string; args?: string; userId?: string; chatId?: string };
+      if (!body.command) {
+        return Response.json({ ok: false, error: 'Missing required field: command' }, { status: 400 });
+      }
+
+      const commands = getCapturedCommandsFn ? getCapturedCommandsFn() : [];
+      const cmd = commands.find(c => c.name === body.command);
+      if (!cmd) {
+        return Response.json({ ok: false, error: `Unknown command: /${body.command}` }, { status: 404 });
+      }
+
+      try {
+        const result = await cmd.execute({
+          args: body.args || '',
+          userId: body.userId,
+          chatId: body.chatId,
+          config: loadedOpenclawConfig,
+        });
+        const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+        return Response.json({ ok: true, result: text });
       } catch (err) {
         return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
       }

@@ -11,6 +11,7 @@ export interface McpToolDefinition {
   name: string;
   description: string;
   group: string;
+  ownerOnly: boolean;
   parameters: Record<string, unknown>;
 }
 
@@ -36,6 +37,7 @@ interface ResolvedTool {
   name: string;
   description: string;
   group: string;
+  ownerOnly: boolean;
   parameters: Record<string, unknown>;
   execute: (toolCallIdOrArgs: unknown, paramsOrUserId?: unknown) => Promise<unknown>;
 }
@@ -80,6 +82,7 @@ export function createMcpHandler(
             name,
             description,
             group: declaredGroup || inferToolGroupFeishu(name),
+            ownerOnly: !!(tool as Record<string, unknown>).ownerOnly,
             parameters,
             execute,
           });
@@ -107,6 +110,7 @@ export function createMcpHandler(
       name: t.name,
       description: t.description,
       group: t.group,
+      ownerOnly: t.ownerOnly,
       parameters: t.parameters,
     }));
   }
@@ -118,11 +122,16 @@ export function createMcpHandler(
     toolName: string,
     args: Record<string, unknown>,
     userId?: string,
+    isOwner?: boolean,
   ): Promise<unknown> {
     const all = resolveAllTools();
     const tool = all.find((t) => t.name === toolName);
     if (!tool) {
       throw new Error(`Tool not found: ${toolName}`);
+    }
+    // ownerOnly tools require sender to be in the allowed_users whitelist
+    if (tool.ownerOnly && !isOwner) {
+      throw new Error(`Tool "${toolName}" requires owner permission`);
     }
     // OpenClaw plugin execute signature: execute(toolCallId, params)
     // First arg is a call ID (plugins ignore it with _), second is actual parameters

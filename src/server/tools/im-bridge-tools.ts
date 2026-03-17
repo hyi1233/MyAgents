@@ -18,6 +18,8 @@ interface ImBridgeToolsContext {
   pluginId: string;
   /** Feishu sender open_id for tool calls that need user context */
   senderId?: string;
+  /** Whether the sender is in the allowed_users whitelist (owner) */
+  isOwner?: boolean;
 }
 
 let bridgeToolsContext: ImBridgeToolsContext | null = null;
@@ -81,6 +83,7 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
                 toolName: pluginTool.name,
                 args: params.args,
                 userId: bridgeToolsContext.senderId,
+                isOwner: bridgeToolsContext.isOwner ?? true,
                 enabledGroups: bridgeToolsContext.enabledToolGroups,
               }),
             });

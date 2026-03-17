@@ -415,12 +415,17 @@ function cleanupStalePlaywrightProfile(): void {
 
     if (!existsSync(lockPath)) return;
 
-    // SingletonLock is a symlink: "hostname-pid". Check if the pid is still running.
+    // macOS/Linux: SingletonLock is a symlink containing "hostname-pid"
+    // Windows: SingletonLock is a regular file containing "hostname-pid"
     let linkTarget: string;
     try {
       linkTarget = readlinkSync(lockPath);
     } catch {
-      return; // Can't read lock symlink, skip cleanup
+      try {
+        linkTarget = readFileSync(lockPath, 'utf-8').trim();
+      } catch {
+        return; // Can't read lock content, skip cleanup
+      }
     }
 
     // Format: "hostname-pid" (e.g., "Ethan.local-82424")
@@ -3942,6 +3947,16 @@ async function main() {
 
             // Preset MCP (isBuiltin: true) with npx → warmup with bundled bun
             if (server.isBuiltin && command === 'npx') {
+              // On Windows, @playwright/mcp uses system npx (not bun x) due to Bun pipe
+              // transport bug — skip bun warmup and succeed immediately.
+              // See: oven-sh/bun#15679, oven-sh/bun#27977
+              const isPlaywrightOnWin = process.platform === 'win32' &&
+                (server.args || []).some((a: string) => a.includes('@playwright/mcp'));
+              if (isPlaywrightOnWin) {
+                console.log('[api/mcp/enable] Playwright on Windows: skipping bun warmup (uses system npx)');
+                return jsonResponse({ success: true });
+              }
+
               const { getBundledRuntimePath, isBunRuntime } = await import('./utils/runtime');
               const runtime = getBundledRuntimePath();
 
@@ -6184,6 +6199,7 @@ async function main() {
             bridgePluginId?: string;
             bridgeEnabledToolGroups?: string[];
             senderId?: string;
+            senderIsOwner?: boolean;
           };
 
           const hasContent = payload.message?.trim() || (payload.images && payload.images.length > 0);
@@ -6224,6 +6240,7 @@ async function main() {
                 pluginId: payload.bridgePluginId,
                 enabledToolGroups: payload.bridgeEnabledToolGroups || [],
                 senderId: payload.senderId,
+                isOwner: payload.senderIsOwner ?? true,
               });
             }
           }

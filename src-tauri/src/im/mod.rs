@@ -1690,6 +1690,7 @@ async fn create_bot_instance<R: Runtime>(
                     let task_group_tools_deny = Arc::clone(&group_tools_deny_for_loop);
                     let task_group_permissions = Arc::clone(&group_permissions_for_loop);
                     let task_agent_link = Arc::clone(&agent_link_for_loop);
+                    let task_allowed_users = Arc::clone(&allowed_users_for_loop);
 
                     in_flight.spawn(async move {
                         // 1. Acquire per-peer lock FIRST (serialize requests to same Sidecar).
@@ -1821,6 +1822,7 @@ async fn create_bot_instance<R: Runtime>(
                         } else {
                             Some(&image_payloads)
                         };
+                        let allowed_snapshot = task_allowed_users.read().await.clone();
                         let session_id = match stream_to_im(
                             &task_stream_client,
                             port,
@@ -1835,6 +1837,7 @@ async fn create_bot_instance<R: Runtime>(
                             Some(&task_bot_id),
                             task_bot_name.as_deref(),
                             group_ctx.as_ref(),
+                            Some(&allowed_snapshot),
                         )
                         .await
                         {
@@ -1941,6 +1944,7 @@ async fn create_bot_instance<R: Runtime>(
                                 Some(buffered) => {
                                     let buf_chat_id = buffered.chat_id.clone();
                                     let buf_msg = buffered.to_im_message();
+                                    let buf_allowed = task_allowed_users.read().await.clone();
                                     match stream_to_im(
                                         &task_stream_client,
                                         port,
@@ -1955,6 +1959,7 @@ async fn create_bot_instance<R: Runtime>(
                                         Some(&task_bot_id),
                                         task_bot_name.as_deref(),
                                         None, // buffered messages don't carry group context
+                                        Some(&buf_allowed),
                                     )
                                     .await
                                     {
@@ -2447,6 +2452,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     bot_id: Option<&str>,
     bot_name: Option<&str>,
     group_context: Option<&GroupStreamContext>,
+    allowed_users: Option<&[String]>,
 ) -> Result<Option<String>, RouteError> {
     // Build request body (same as original route_to_sidecar)
     let source_owned;
@@ -2518,6 +2524,12 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         body["bridgePluginId"] = json!(bridge_plugin_id);
         body["bridgeEnabledToolGroups"] = json!(tool_groups);
         body["senderId"] = json!(msg.sender_id);
+        // ownerOnly check: sender is owner if in allowed_users (or no whitelist = open access)
+        let is_owner = match allowed_users {
+            Some(users) => users.is_empty() || users.contains(&msg.sender_id),
+            None => true, // No whitelist info = trust sender
+        };
+        body["senderIsOwner"] = json!(is_owner);
         ulog_info!("[im-stream] Bridge context: port={}, plugin={}, groups={:?}", bridge_port, bridge_plugin_id, tool_groups);
     } else {
         ulog_info!("[im-stream] No bridge context (non-Bridge adapter)");
