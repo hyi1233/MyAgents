@@ -104,7 +104,7 @@ export default memo(function WorkspaceEditDialog({
                         type="text"
                         value={name}
                         onChange={(e) => setName(e.target.value)}
-                        className="w-full rounded-[6px] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--ink)] focus:outline-none transition-colors"
+                        className="w-full rounded-[6px] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none transition-colors"
                         placeholder="工作区名称"
                         autoFocus
                         onKeyDown={(e) => { if (e.key === 'Enter' && name.trim()) void handleSave(); }}

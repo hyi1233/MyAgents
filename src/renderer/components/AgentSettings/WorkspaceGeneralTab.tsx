@@ -12,6 +12,7 @@ import { DEFAULT_HEARTBEAT_CONFIG } from '../../../shared/types/im';
 import WorkspaceBasicsSection from './WorkspaceBasicsSection';
 import AgentChannelsSection from './sections/AgentChannelsSection';
 import AgentHeartbeatSection from './sections/AgentHeartbeatSection';
+import AgentMemoryUpdateSection from './sections/AgentMemoryUpdateSection';
 import AgentTasksSection from './sections/AgentTasksSection';
 import { Settings2, HeartPulse } from 'lucide-react';
 
@@ -174,7 +175,7 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
               disabled={toggling}
             >
               <span
-                className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
                   isProactive ? 'translate-x-5' : 'translate-x-0'
                 }`}
               />
@@ -190,6 +191,10 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
 
               <div className="mt-6 border-t border-[var(--line)] pt-5">
                 <AgentHeartbeatSection agent={agent} onAgentChanged={handleAgentChanged} />
+              </div>
+
+              <div className="mt-6 border-t border-[var(--line)] pt-5">
+                <AgentMemoryUpdateSection agent={agent} onAgentChanged={handleAgentChanged} />
               </div>
 
               <div className="mt-6 border-t border-[var(--line)] pt-5">

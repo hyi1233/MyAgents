@@ -39,7 +39,7 @@ export default function BotTokenInput({
                         onBlur={handleBlur}
                         onKeyDown={(e) => e.key === 'Enter' && handleBlur()}
                         placeholder="从 @BotFather 获取 Bot Token"
-                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 pr-10 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--ink)] focus:outline-none"
+                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 pr-10 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none"
                     />
                     <button
                         type="button"

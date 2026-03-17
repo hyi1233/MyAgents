@@ -281,6 +281,10 @@ async function syncAgentRuntime(
     runtimePatch.heartbeatConfigJson = patch.heartbeat ? JSON.stringify(patch.heartbeat) : null;
     hasRuntimeChanges = true;
   }
+  if ('memoryAutoUpdate' in patch) {
+    runtimePatch.memoryAutoUpdateConfigJson = patch.memoryAutoUpdate ? JSON.stringify(patch.memoryAutoUpdate) : null;
+    hasRuntimeChanges = true;
+  }
 
   // mcpEnabledServers changed → use pre-resolved JSON (already persisted to disk atomically)
   if ('mcpEnabledServers' in patch) {
@@ -368,6 +372,7 @@ export async function invokeStartAgentChannel(
       mcpEnabledServers: agent.mcpEnabledServers,
       mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
       heartbeat: agent.heartbeat,
+      memoryAutoUpdate: agent.memoryAutoUpdate,
       channels: [],
       lastActiveChannel: agent.lastActiveChannel,
     },

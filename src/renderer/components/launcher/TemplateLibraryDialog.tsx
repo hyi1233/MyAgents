@@ -496,7 +496,7 @@ export default memo(function TemplateLibraryDialog({
                                         type="text"
                                         value={projectName}
                                         onChange={(e) => setProjectName(e.target.value.replace(/[/\\]/g, ''))}
-                                        className="w-full rounded-[6px] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--ink)] focus:outline-none transition-colors"
+                                        className="w-full rounded-[6px] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none transition-colors"
                                         placeholder="输入 Agent 名称"
                                     />
                                 </div>

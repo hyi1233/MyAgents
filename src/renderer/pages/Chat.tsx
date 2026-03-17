@@ -11,6 +11,7 @@ import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
+import QueryNavigator from '@/components/chat/QueryNavigator';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
@@ -929,10 +930,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     return () => window.removeEventListener(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, handleSkillCopied);
   }, []);
 
-  // Handle provider change with analytics tracking
-  const handleProviderChange = useCallback((providerId: string) => {
+  // Handle provider change with analytics tracking.
+  // targetModel: when provided, use this model instead of the provider's primaryModel
+  // (avoids useEffect race when user picks a specific model from a different provider).
+  const handleProviderChange = useCallback((providerId: string, targetModel?: string) => {
     // Skip if selecting the same provider (compare against local state, not shared project)
     if (selectedProviderId === providerId) {
+      // Provider unchanged but caller passed a specific model — treat as model change
+      if (targetModel) {
+        setSelectedModel(targetModel);
+        if (currentProject && !isAgentWorkspace) {
+          void patchProject(currentProject.id, { model: targetModel });
+        }
+      }
       return;
     }
 
@@ -944,13 +954,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // providerInitRef may be stale (re-armed by one-time sync) and suppress it.
     setSelectedProviderId(providerId);
     const newProvider = providers.find(p => p.id === providerId);
-    if (newProvider?.primaryModel) {
-      setSelectedModel(newProvider.primaryModel);
+    const model = targetModel ?? newProvider?.primaryModel;
+    if (model) {
+      setSelectedModel(model);
     }
+
+    // Suppress the deferred provider-change useEffect — we've already set the correct model
+    providerInitRef.current = true;
 
     // Write back to project (last-writer-wins for new tabs)
     if (currentProject && !isAgentWorkspace) {
-      void patchProject(currentProject.id, { providerId, model: newProvider?.primaryModel ?? null });
+      void patchProject(currentProject.id, { providerId, model: model ?? null });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps
   }, [selectedProviderId, currentProject?.id, patchProject, providers]);
@@ -1343,7 +1357,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     <div className="flex h-full flex-col overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)] md:flex-row">
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden border-b border-[var(--line-subtle)] md:border-r md:border-b-0 ${showWorkspace ? 'w-full md:w-3/4' : 'w-full'}`}>
         {/* Compact header - single row */}
-        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)]/60 after:to-transparent">
+        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-transparent">
           <div className="flex items-center gap-2">
             {onBack && (
               <button
@@ -1483,6 +1497,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             isVisible={showLogs}
             onClose={() => setShowLogs(false)}
             onClearAll={clearUnifiedLogs}
+          />
+
+          {/* Query Navigator — floating right-side panel for quick session navigation */}
+          <QueryNavigator
+            historyMessages={historyMessages}
+            streamingMessage={streamingMessage}
+            scrollContainerRef={messagesContainerRef}
+            pauseAutoScroll={pauseAutoScroll}
           />
 
           {/* Message list with max-width */}

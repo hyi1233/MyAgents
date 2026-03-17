@@ -666,7 +666,7 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         bun_path, bridge_script, plugin_dir, port, rust_port
     );
 
-    let mut cmd = std::process::Command::new(&bun_path);
+    let mut cmd = crate::process_cmd::new(&bun_path);
     cmd.arg(bridge_script.to_string_lossy().as_ref())
         // Same marker as regular sidecars — ensures cleanup_stale_sidecars()
         // can find and kill orphaned bridge processes after a crash
@@ -837,7 +837,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     let bun_for_init = bun_path.clone();
     let base_for_init = base_dir.clone();
     let init_output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(&bun_for_init)
+        crate::process_cmd::new(&bun_for_init)
             .args(["init", "-y"])
             .current_dir(&base_for_init)
             .output()
@@ -855,7 +855,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     let base_for_add = base_dir.clone();
     let npm_spec_owned = npm_spec.to_string();
     let add_output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(&bun_for_add)
+        crate::process_cmd::new(&bun_for_add)
             .args(["add", &npm_spec_owned])
             .current_dir(&base_for_add)
             .output()

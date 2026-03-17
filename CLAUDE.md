@@ -49,6 +49,10 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 所有连接本地 Sidecar（`127.0.0.1`）的 reqwest 客户端 MUST 通过 `crate::local_http::builder()` / `blocking_builder()` / `json_client()` / `sse_client()` 创建。内置 `.no_proxy()` 防止系统代理拦截 localhost。**禁止**裸 `reqwest::Client::builder()` 或 `reqwest::Client::new()` 连接 localhost，否则系统代理（Clash/V2Ray）会导致 502。
 
+### process_cmd 模块（Windows 控制台窗口陷阱）
+
+所有 Rust 层子进程 MUST 通过 `crate::process_cmd::new()` 创建，**禁止**裸 `std::process::Command::new()`。内置 Windows `CREATE_NO_WINDOW` 标志，防止 GUI 应用启动子进程（bun.exe Sidecar / Plugin Bridge / bun init 等）时弹出黑色控制台窗口。遵循与 `local_http` 相同的 "pit of success" 模式。例外：`#[cfg(windows)]` 守卫内的系统工具命令（taskkill/powershell/wmic）已内联处理；`commands.rs` 的 OS opener（open/explorer/xdg-open）和 Unix pgrep 是用户可见的系统命令，无需隐藏。
+
 ### 零外部依赖
 
 应用内置 Bun 运行时（`getBundledRuntimePath()`），MUST NOT 依赖用户系统的 Node.js/npm/npx。
@@ -105,6 +109,8 @@ Agent 配置通过 Rust 命令 `cmd_update_agent_config` 写盘，写盘后 MUST
 | Plugin Bridge 用裸 `reqwest::Client` | 系统代理 → 502 | `local_http::json_client()` — Bridge 进程也在 localhost |
 | CronTask 新增字段不加 `#[serde(default)]` | 旧版 JSON 反序列化失败 | 非核心字段 MUST 加 `#[serde(default)]` |
 | Rust 子进程日志用 `log::info!` | 不进统一日志 | MUST 用 `ulog_info!` / `ulog_error!` |
+| 裸 `std::process::Command::new()` | Windows 弹出黑色控制台窗口 | `crate::process_cmd::new()` |
+| 前端 `@tauri-apps/plugin-fs` 读写工作区文件 | Tauri fs scope 仅覆盖 `~/.myagents/**`，工作区路径写入必失败 | `invoke('cmd_read_workspace_file')` / `invoke('cmd_write_workspace_file')` 走 Rust 原生 I/O |
 
 ---
 

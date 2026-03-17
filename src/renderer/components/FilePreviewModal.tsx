@@ -427,7 +427,7 @@ export default function FilePreviewModal({
                                     type="button"
                                     onClick={handleEdit}
                                     disabled={isLoading || !!error}
-                                    className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--ink)] px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm transition-all duration-150 hover:bg-[var(--ink-secondary)] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
+                                    className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--button-dark-bg)] px-3 py-1.5 text-[11px] font-semibold text-[var(--button-primary-text)] shadow-sm transition-all duration-150 hover:bg-[var(--button-dark-bg-hover)] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
                                 >
                                     <Edit2 className="h-3.5 w-3.5" />
                                     编辑

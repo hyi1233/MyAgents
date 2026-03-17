@@ -9,6 +9,7 @@ pub mod feishu;
 pub mod group_history;
 pub mod health;
 pub mod heartbeat;
+pub mod memory_update;
 pub mod router;
 pub mod telegram;
 pub mod types;
@@ -413,6 +414,9 @@ pub struct AgentInstance {
     pub current_provider_env: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
     pub permission_mode: Arc<tokio::sync::RwLock<String>>,
     pub mcp_servers_json: Arc<tokio::sync::RwLock<Option<String>>>,
+    // Memory auto-update (v0.1.43)
+    pub memory_update_config: Option<Arc<tokio::sync::RwLock<Option<types::MemoryAutoUpdateConfig>>>>,
+    pub memory_update_running: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Managed state for the Agent subsystem (agent_id → instance)
@@ -588,6 +592,7 @@ async fn create_bot_instance<R: Runtime>(
         });
 
     ulog_info!("[im] Resolved workspace: {}", default_workspace.display());
+    let default_workspace_str = default_workspace.to_string_lossy().to_string();
 
     // Initialize components (TD-3: agent channels use agent-scoped paths)
     let health_path = match &agent_id {
@@ -2212,12 +2217,13 @@ async fn create_bot_instance<R: Runtime>(
     let (heartbeat_handle, heartbeat_wake_tx, heartbeat_config_arc) = {
         let hb_config = config.heartbeat_config.clone().unwrap_or_default();
         let hb_bot_label = bot_username_for_url.clone().unwrap_or_else(|| bot_id.to_string());
-        let (runner, config_arc) = heartbeat::HeartbeatRunner::new(
+        let (runner, config_arc, _mau_config_arc, _mau_running_arc) = heartbeat::HeartbeatRunner::new(
             hb_config,
             hb_bot_label,
             Arc::clone(&current_model),
             Arc::clone(&current_provider_env),
             Arc::clone(&mcp_servers_json),
+            None, // Memory auto-update: not used for per-channel heartbeat (Agent-level only)
         );
         let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
 
@@ -2227,6 +2233,9 @@ async fn create_bot_instance<R: Runtime>(
         let hb_adapter = Arc::clone(&adapter);
         let hb_app = app_handle.clone();
         let hb_peer_locks = Arc::clone(&peer_locks);
+        let hb_agent_id = agent_id.clone().unwrap_or_else(|| bot_id.to_string());
+        let hb_workspace = default_workspace_str.clone();
+        let hb_permission_mode = Arc::clone(&permission_mode);
 
         let handle = tokio::spawn(async move {
             runner.run_loop(
@@ -2237,6 +2246,9 @@ async fn create_bot_instance<R: Runtime>(
                 hb_adapter,
                 hb_app,
                 hb_peer_locks,
+                hb_agent_id,
+                hb_workspace,
+                hb_permission_mode,
             ).await;
         });
 
@@ -3550,6 +3562,8 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                     )),
                                     permission_mode: Arc::new(RwLock::new(agent_config.permission_mode.clone())),
                                     mcp_servers_json: Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
+                                    memory_update_config: None,
+                                    memory_update_running: None,
                                 }
                             });
                             // Set agent_link so the processing loop can update lastActiveChannel
@@ -3581,6 +3595,35 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                 let (wake_tx, mut wake_rx) = mpsc::channel::<types::WakeReason>(64);
                 let hb_config_arc = Arc::new(RwLock::new(hb_config));
                 let hb_config_for_loop = Arc::clone(&hb_config_arc);
+                // Memory auto-update arcs (v0.1.43)
+                let mau_config_arc = Arc::new(RwLock::new(agent_config.memory_auto_update.clone()));
+                let mau_running_arc = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let mau_config_for_loop = Arc::clone(&mau_config_arc);
+                let mau_running_for_loop = Arc::clone(&mau_running_arc);
+                let mau_workspace = agent_config.workspace_path.clone();
+                let mau_agent_id = agent_config.id.clone();
+                let mau_sidecar_mgr = Arc::clone(&*sidecar_manager);
+                let mau_app_handle = app_handle.clone();
+                // Clone agent-level AI config Arcs from AgentInstance
+                let (mau_model, mau_provider_env, mau_permission_mode, mau_mcp_json) = {
+                    let agents_guard = agent_state.lock().await;
+                    if let Some(inst) = agents_guard.get(&agent_config.id) {
+                        (
+                            Arc::clone(&inst.current_model),
+                            Arc::clone(&inst.current_provider_env),
+                            Arc::clone(&inst.permission_mode),
+                            Arc::clone(&inst.mcp_servers_json),
+                        )
+                    } else {
+                        // Agent instance not found (shouldn't happen), use defaults
+                        (
+                            Arc::new(RwLock::new(agent_config.model.clone())),
+                            Arc::new(RwLock::new(None)),
+                            Arc::new(RwLock::new(agent_config.permission_mode.clone())),
+                            Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
+                        )
+                    }
+                };
 
                 let hb_handle = tokio::spawn(async move {
                     use heartbeat::is_in_active_hours;
@@ -3630,7 +3673,29 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
 
                         let is_high_priority = reason.is_high_priority();
 
-                        // Gate: enabled check
+                        // Memory auto-update check (v0.1.43) — runs independently of heartbeat enabled
+                        // Placed BEFORE heartbeat gate so memory update works even when heartbeat is off
+                        {
+                            let hb_tz = {
+                                let cfg = hb_config_for_loop.read().await;
+                                cfg.active_hours.as_ref().map(|ah| ah.timezone.clone())
+                            };
+                            memory_update::check_and_spawn(
+                                &mau_agent_id,
+                                &mau_workspace,
+                                &mau_config_for_loop,
+                                &mau_running_for_loop,
+                                &mau_permission_mode,
+                                &mau_sidecar_mgr,
+                                &mau_app_handle,
+                                &mau_model,
+                                &mau_provider_env,
+                                &mau_mcp_json,
+                                hb_tz.as_deref(),
+                            ).await;
+                        }
+
+                        // Gate: heartbeat enabled check
                         let config = hb_config_for_loop.read().await.clone();
                         if !config.enabled {
                             ulog_debug!("[agent-heartbeat] Skipped: disabled");
@@ -3740,6 +3805,7 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                         if is_high_priority {
                             interval.reset();
                         }
+
                     }
 
                     ulog_info!("[agent-heartbeat] Runner stopped for agent {}", agent_label);
@@ -3751,6 +3817,8 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                     agent_instance.heartbeat_handle = Some(hb_handle);
                     agent_instance.heartbeat_wake_tx = Some(wake_tx);
                     agent_instance.heartbeat_config = Some(hb_config_arc);
+                    agent_instance.memory_update_config = Some(mau_config_arc);
+                    agent_instance.memory_update_running = Some(mau_running_arc);
                     ulog_info!("[agent] Agent-level heartbeat started for {}", agent_config.id);
                 }
                 drop(agents_guard);
@@ -4794,6 +4862,8 @@ pub async fn cmd_start_agent_channel(
             )),
             permission_mode: Arc::new(RwLock::new(agentConfig.permission_mode.clone())),
             mcp_servers_json: Arc::new(RwLock::new(agentConfig.mcp_servers_json.clone())),
+            memory_update_config: None,
+            memory_update_running: None,
         }
     });
 
@@ -5203,6 +5273,17 @@ pub async fn cmd_update_agent_config(
                 if let Some(ref hb_arc) = agent.heartbeat_config {
                     *hb_arc.write().await = hb_config;
                 }
+            }
+        }
+        // Hot-reload memory auto-update config (v0.1.43)
+        if let Some(ref mau_json) = patch.memory_auto_update_config_json {
+            if let Some(ref mau_arc) = agent.memory_update_config {
+                let parsed: Option<types::MemoryAutoUpdateConfig> = if mau_json.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(mau_json).ok()
+                };
+                *mau_arc.write().await = parsed;
             }
         }
 

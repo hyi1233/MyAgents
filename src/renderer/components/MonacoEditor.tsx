@@ -18,7 +18,7 @@ import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
 import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 // CRITICAL: Must import Monaco CSS for styles to work in Vite bundled mode
 import 'monaco-editor/min/vs/editor/editor.main.css';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 // Configure Monaco Environment for bundled workers (required for Tauri CSP)
 self.MonacoEnvironment = {
@@ -42,8 +42,9 @@ self.MonacoEnvironment = {
 // Configure Monaco to use local bundle instead of CDN
 loader.config({ monaco });
 
-// Custom theme name
-const CUSTOM_THEME_NAME = 'warmLight';
+// Custom theme names
+const LIGHT_THEME_NAME = 'warmLight';
+const DARK_THEME_NAME = 'warmDark';
 
 // Re-export language utilities from shared module for backward compatibility
 export { getMonacoLanguage, shouldShowLineNumbers } from '@/utils/languageUtils';
@@ -73,8 +74,22 @@ export default function MonacoEditor({
     // Register custom theme in beforeMount using the callback's monaco instance
     // This ensures we're defining the theme on the exact instance the Editor will use
     // Colors are aligned with Prism oneLight theme for consistency between preview and edit modes
+    // Detect dark mode from <html> class and watch for changes
+    const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains('dark'));
+
+    useEffect(() => {
+        const htmlEl = document.documentElement;
+        const observer = new MutationObserver(() => {
+            setIsDark(htmlEl.classList.contains('dark'));
+        });
+        observer.observe(htmlEl, { attributes: true, attributeFilter: ['class'] });
+        return () => observer.disconnect();
+    }, []);
+
+    const activeTheme = isDark ? DARK_THEME_NAME : LIGHT_THEME_NAME;
+
     const handleBeforeMount = useCallback((monacoInstance: Monaco) => {
-        monacoInstance.editor.defineTheme(CUSTOM_THEME_NAME, {
+        monacoInstance.editor.defineTheme(LIGHT_THEME_NAME, {
             base: 'vs',
             inherit: true,
             rules: [
@@ -127,18 +142,72 @@ export default function MonacoEditor({
                 'editorIndentGuide.activeBackground': '#d8d4cb',
             }
         });
+
+        monacoInstance.editor.defineTheme(DARK_THEME_NAME, {
+            base: 'vs-dark',
+            inherit: true,
+            rules: [
+                // oneDark-inspired colors adapted for warm dark theme
+                { token: 'comment', foreground: '685c52', fontStyle: 'italic' },  // --code-line-number
+                { token: 'keyword', foreground: 'c678dd' },                        // purple
+                { token: 'keyword.control', foreground: 'c678dd' },
+                { token: 'storage', foreground: 'c678dd' },
+                { token: 'storage.type', foreground: 'c678dd' },
+                { token: 'string', foreground: '98c379' },                         // green
+                { token: 'string.quoted', foreground: '98c379' },
+                { token: 'number', foreground: 'd19a66' },                         // orange
+                { token: 'constant', foreground: 'd19a66' },
+                { token: 'constant.numeric', foreground: 'd19a66' },
+                { token: 'type', foreground: 'e5c07b' },                           // yellow
+                { token: 'type.identifier', foreground: 'e5c07b' },
+                { token: 'class', foreground: 'e5c07b' },
+                { token: 'function', foreground: '61afef' },                       // blue
+                { token: 'function.call', foreground: '61afef' },
+                { token: 'variable', foreground: 'e06c75' },                       // red
+                { token: 'variable.other', foreground: 'e06c75' },
+                { token: 'operator', foreground: '56b6c2' },                       // cyan
+                { token: 'tag', foreground: 'e06c75' },                            // red
+                { token: 'attribute.name', foreground: 'd19a66' },
+                { token: 'attribute.value', foreground: '98c379' },
+                { token: 'delimiter', foreground: 'abb2bf' },                      // punctuation
+                { token: 'delimiter.bracket', foreground: 'abb2bf' },
+            ],
+            colors: {
+                // Dark warm background matching --code-bg / --paper dark vars
+                'editor.background': '#141210',           // --code-bg (dark)
+                'editor.foreground': '#d4d4d4',           // --code-text
+                'editor.lineHighlightBackground': '#1e1a16', // --code-header-bg (dark)
+                'editor.selectionBackground': '#3a342c',  // muted warm selection
+                'editor.inactiveSelectionBackground': '#302a22',
+                // Line numbers
+                'editorLineNumber.foreground': '#685c52', // --code-line-number (dark)
+                'editorLineNumber.activeForeground': '#cfc5ba', // --ink-secondary (dark)
+                // Scrollbar
+                'scrollbar.shadow': '#00000000',
+                'scrollbarSlider.background': '#4a403840',
+                'scrollbarSlider.hoverBackground': '#5a504860',
+                'scrollbarSlider.activeBackground': '#6a605880',
+                // Gutter
+                'editorGutter.background': '#141210',
+                // Cursor
+                'editorCursor.foreground': '#e4dcd4',     // --ink (dark)
+                // Indent guides
+                'editorIndentGuide.background': '#2a2420',
+                'editorIndentGuide.activeBackground': '#3a342c',
+            }
+        });
     }, []);
 
     // Force apply theme after mount to ensure it takes effect
     // This handles the case where beforeMount's defineTheme might not sync immediately
     // Also handles autoFocus if requested
     const handleOnMount = useCallback((editor: monaco.editor.IStandaloneCodeEditor, monacoInstance: Monaco) => {
-        monacoInstance.editor.setTheme(CUSTOM_THEME_NAME);
+        monacoInstance.editor.setTheme(activeTheme);
         if (autoFocus) {
             // Use setTimeout to ensure editor is fully ready
             setTimeout(() => editor.focus(), 0);
         }
-    }, [autoFocus]);
+    }, [autoFocus, activeTheme]);
 
     // Monaco editor options optimized for performance
     const options = useMemo(() => ({
@@ -198,7 +267,7 @@ export default function MonacoEditor({
                 language={language}
                 value={value}
                 onChange={handleChange}
-                theme={CUSTOM_THEME_NAME}
+                theme={activeTheme}
                 options={options}
                 beforeMount={handleBeforeMount}
                 onMount={handleOnMount}

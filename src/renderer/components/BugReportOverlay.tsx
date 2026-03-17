@@ -30,10 +30,12 @@ function isProviderAvailable(
         const status = verifyStatus[provider.id];
         return status?.status === 'valid' && !!status.accountEmail;
     }
-    // api type
-    const hasKey = !!apiKeys[provider.id];
-    const isInvalid = verifyStatus[provider.id]?.status === 'invalid';
-    return hasKey && !isInvalid;
+    // Must have an API key AND not be explicitly invalid
+    const key = apiKeys[provider.id];
+    if (!key) return false;
+    const status = verifyStatus[provider.id];
+    if (status?.status === 'invalid') return false;
+    return true;
 }
 
 export default function BugReportOverlay({

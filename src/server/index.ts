@@ -936,6 +936,19 @@ function stripHeartbeatToken(text: string, ackMaxChars: number): { status: strin
   return { status: 'content', text: stripped };
 }
 
+
+/**
+ * Strip YAML frontmatter from file content.
+ * Frontmatter is delimited by --- at the start and a second --- line.
+ */
+function stripYamlFrontmatter(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith('---')) return trimmed;
+  const endIndex = trimmed.indexOf('---', 3);
+  if (endIndex === -1) return trimmed;
+  return trimmed.slice(endIndex + 3).trim();
+}
+
 /**
  * Recursively copy a directory (synchronous version)
  * Security: Skips symbolic links to prevent following links to sensitive locations
@@ -3943,7 +3956,9 @@ async function main() {
               }
 
               // Warmup: run bun x <package> --help to download and cache
-              const args = server.args || [];
+              // MUST pin versions here too — otherwise warmup caches @latest but SDK uses pinned version
+              const { pinMcpPackageVersions } = await import('./agent-session');
+              const args = pinMcpPackageVersions(server.args || []);
               console.log(`[api/mcp/enable] Warming up cache: ${runtime} x ${args.join(' ')}`);
 
               const { spawn } = await import('child_process');
@@ -3975,30 +3990,48 @@ async function main() {
                   // Code 0 or 1 is acceptable (--help may return 1 for some packages)
                   // Check stderr for real errors (package not found, network issues, etc.)
                   const stderrLower = stderr.toLowerCase();
-                  const errorKeywords = [
-                    '404',           // HTTP 404 not found
-                    'not found',     // Package not found
+                  const networkKeywords = [
                     'enotfound',     // DNS resolution failed
                     'etimedout',     // Connection timeout
                     'econnrefused',  // Connection refused
                     'econnreset',    // Connection reset
-                    'err!',          // npm error indicator
-                    'error:',        // General error prefix
+                    'proxy error',   // Proxy failures
+                    'proxy authentication', // Proxy auth required
+                    'bad gateway',   // Proxy 502
+                    'socket hang up',// Connection dropped
                   ];
-                  const hasError = errorKeywords.some(kw => stderrLower.includes(kw));
+                  const packageKeywords = [
+                    '404',                // HTTP 404 not found
+                    'package not found',  // npm/npx package resolution
+                    'module not found',   // Module resolution failure
+                    'err!',               // npm error indicator
+                  ];
+                  const isNetworkError = networkKeywords.some(kw => stderrLower.includes(kw));
+                  const isPackageError = packageKeywords.some(kw => stderrLower.includes(kw));
 
-                  if (hasError) {
-                    // Determine error type based on stderr content
-                    const isNetworkError = ['enotfound', 'etimedout', 'econnrefused', 'econnreset'].some(
-                      kw => stderrLower.includes(kw)
-                    );
+                  if (isNetworkError) {
                     resolve(jsonResponse({
                       success: false,
                       error: {
-                        type: isNetworkError ? 'warmup_failed' : 'package_not_found',
-                        message: isNetworkError
-                          ? '网络连接失败，请检查网络设置'
-                          : '包不存在或无法下载，请检查包名',
+                        type: 'warmup_failed',
+                        message: '网络连接失败，请检查网络或代理设置',
+                      }
+                    }));
+                  } else if (isPackageError) {
+                    resolve(jsonResponse({
+                      success: false,
+                      error: {
+                        type: 'package_not_found',
+                        message: '包不存在或无法下载，请检查包名',
+                      }
+                    }));
+                  } else if (code !== 0 && code !== 1) {
+                    // Non-zero exit (other than 1 which --help may return) is a failure
+                    resolve(jsonResponse({
+                      success: false,
+                      error: {
+                        type: 'warmup_failed',
+                        message: `预热异常退出 (code ${code})`,
                       }
                     }));
                   } else {
@@ -6413,16 +6446,25 @@ async function main() {
 
           // --- Gate: Read HEARTBEAT.md from workspace root ---
           // The actual checklist lives in HEARTBEAT.md, not in config.
-          // If the file is empty/missing AND no system events AND not high-priority → skip AI call.
+          // If the file body is empty/missing AND no system events → skip AI call.
           const heartbeatMdPath = join(currentAgentDir, 'HEARTBEAT.md');
           let heartbeatMdContent = '';
           try {
-            heartbeatMdContent = readFileSync(heartbeatMdPath, 'utf-8').trim();
+            const rawContent = readFileSync(heartbeatMdPath, 'utf-8');
+            // Strip YAML frontmatter — only the body is used as prompt
+            heartbeatMdContent = stripYamlFrontmatter(rawContent);
           } catch {
-            // File doesn't exist — create an empty one so the user knows where to edit
+            // File doesn't exist — create with descriptive frontmatter
             try {
-              writeFileSync(heartbeatMdPath, '', 'utf-8');
-              console.log(`[im/heartbeat] Created empty HEARTBEAT.md at ${heartbeatMdPath}`);
+              const defaultHeartbeat = `---
+description: >
+  心跳清单 — Agent 按心跳间隔定时苏醒时会读取本文件的正文部分作为指令执行。
+  正文为空时心跳会直接跳过，不请求 AI（节省 token）。
+  你可以在正文中写入需要 Agent 定期检查的任务、监控项或提醒事项。
+---
+`;
+              writeFileSync(heartbeatMdPath, defaultHeartbeat, 'utf-8');
+              console.log(`[im/heartbeat] Created HEARTBEAT.md with frontmatter at ${heartbeatMdPath}`);
             } catch (writeErr) {
               console.warn(`[im/heartbeat] Failed to create HEARTBEAT.md: ${writeErr}`);
             }
@@ -6464,14 +6506,14 @@ async function main() {
             }
           }
 
-          // Wrap the entire heartbeat message in <HEARTBEAT> tags
-          enrichedPrompt = `<HEARTBEAT>\n${enrichedPrompt}\n</HEARTBEAT>`;
+          // Wrap the entire heartbeat message in <system-reminder><HEARTBEAT> tags
+          enrichedPrompt = `<system-reminder>\n<HEARTBEAT>\n${enrichedPrompt}\n</HEARTBEAT>\n</system-reminder>`;
 
           const {
             enqueueUserMessage, waitForSessionIdle, getMessages,
           } = await import('./agent-session');
 
-          // Inject heartbeat prompt as user message (wrapped in <HEARTBEAT> tags)
+          // Inject heartbeat prompt as user message (wrapped in <system-reminder><HEARTBEAT> tags)
           // System prompt is already permanently injected at IM session creation (/api/im/chat)
           await enqueueUserMessage(
             enrichedPrompt,
@@ -6529,6 +6571,61 @@ async function main() {
           console.error('[im/heartbeat] Error:', error);
           return jsonResponse(
             { status: 'error', text: error instanceof Error ? error.message : 'Heartbeat error' },
+            500,
+          );
+        }
+      }
+
+      // POST /api/memory/update — Trigger memory update in current session (v0.1.43)
+      if (pathname === '/api/memory/update' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { source: 'auto' | 'manual' };
+
+          // Read UPDATE_MEMORY.md from workspace root
+          const updateMdPath = join(currentAgentDir, 'UPDATE_MEMORY.md');
+          let rawContent = '';
+          try {
+            rawContent = readFileSync(updateMdPath, 'utf-8');
+          } catch {
+            return jsonResponse({ status: 'skipped', reason: 'file_not_found' });
+          }
+
+          // Strip YAML frontmatter
+          const promptContent = stripYamlFrontmatter(rawContent);
+          if (!promptContent.trim()) {
+            return jsonResponse({ status: 'skipped', reason: 'empty_content' });
+          }
+
+          // Build prompt with <system-reminder> and <MEMORY_UPDATE> tags
+          const now = new Date().toLocaleString('en-US', {
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+          });
+
+          const prompt = `<system-reminder>\n<MEMORY_UPDATE>\n${promptContent}\n\nCurrent time: ${now}\n\n完成所有记忆维护操作后（包括文件读写和 git 操作），仅回复 MEMORY_UPDATE_OK，不要输出其他内容。\n</MEMORY_UPDATE>\n</system-reminder>`;
+
+          const { enqueueUserMessage, waitForSessionIdle } = await import('./agent-session');
+
+          // Inject as user message
+          await enqueueUserMessage(prompt);
+
+          // Wait synchronously for AI completion (60 min timeout — same as background tasks).
+          // Memory update can be slow for large sessions: loading 100K+ token context,
+          // reading multiple log/topic files, writing updates, git commit+push.
+          const completed = await waitForSessionIdle(3600000, 1000);
+
+          if (completed) {
+            console.log(`[memory-update] AI completed memory update (source=${payload.source})`);
+            return jsonResponse({ status: 'completed' });
+          } else {
+            console.warn('[memory-update] AI memory update timed out (10 min)');
+            return jsonResponse({ status: 'timeout' });
+          }
+        } catch (error) {
+          console.error('[memory-update] Error:', error);
+          return jsonResponse(
+            { status: 'error', reason: error instanceof Error ? error.message : 'Unknown error' },
             500,
           );
         }

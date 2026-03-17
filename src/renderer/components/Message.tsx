@@ -14,7 +14,7 @@ function Tip({ label, children }: { label: string; children: React.ReactNode }) 
   return (
     <span className="group/tip relative inline-flex">
       {children}
-      <span className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)]/90 px-2 py-1 text-[11px] text-white opacity-0 transition-opacity group-hover/tip:opacity-100">
+      <span className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)]/90 px-2 py-1 text-[11px] text-[var(--button-primary-text)] opacity-0 transition-opacity group-hover/tip:opacity-100">
         {label}
       </span>
     </span>
@@ -396,19 +396,12 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
 
               // Group of thinking/tool blocks
               const isLatestActiveSection = index === lastBlockGroupIndex;
-              const hasTextAfter =
-                index < groupedBlocks.length - 1 &&
-                groupedBlocks
-                  .slice(index + 1)
-                  .some((nextItem) => !Array.isArray(nextItem) && nextItem.type === 'text');
-
               return (
                 <Fragment key={`group-${index}`}>
                   <BlockGroup
                     blocks={item}
                     isLatestActiveSection={isLatestActiveSection}
                     isStreaming={isAssistantStreaming}
-                    hasTextAfter={hasTextAfter}
                   />
                   {index === exitPlanModeGroupIndex && exitPlanModeSlot}
                 </Fragment>

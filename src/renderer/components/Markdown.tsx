@@ -54,7 +54,7 @@ const MarkdownLink: Components['a'] = ({ href, children, ...props }) => {
     <a
       href={href}
       onClick={handleClick}
-      className="text-amber-700 underline decoration-amber-300 underline-offset-2 transition-colors hover:text-amber-600 hover:decoration-amber-400 dark:text-amber-400 dark:decoration-amber-600 dark:hover:text-amber-300"
+      className="text-[var(--accent-warm)] underline decoration-[var(--accent-warm)]/40 underline-offset-2 transition-colors hover:text-[var(--accent-warm-hover)] hover:decoration-[var(--accent-warm)]/60"
       style={{ userSelect: 'text' }}
       {...props}
     >
@@ -114,19 +114,19 @@ const PreComponent: Components['pre'] = ({ children }) => {
 
 // Custom table components for better styling
 const TableComponent: Components['table'] = ({ children }) => (
-  <div className="my-4 overflow-x-auto rounded-lg border border-stone-200/60 dark:border-neutral-700/50">
-    <table className="min-w-full divide-y divide-stone-200 dark:divide-neutral-700">
+  <div className="my-4 overflow-x-auto rounded-lg border border-[var(--line)]">
+    <table className="min-w-full divide-y divide-[var(--line)]">
       {children}
     </table>
   </div>
 );
 
 const TableHeadComponent: Components['thead'] = ({ children }) => (
-  <thead className="bg-stone-100/80 dark:bg-neutral-800/50">{children}</thead>
+  <thead className="bg-[var(--paper-inset)]/80">{children}</thead>
 );
 
 const TableRowComponent: Components['tr'] = ({ children }) => (
-  <tr className="border-b border-stone-100 last:border-0 dark:border-neutral-800">
+  <tr className="border-b border-[var(--line-subtle)] last:border-0">
     {children}
   </tr>
 );
@@ -136,7 +136,7 @@ const TableCellComponent: Components['td'] = ({ children }) => (
 );
 
 const TableHeaderComponent: Components['th'] = ({ children }) => (
-  <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-stone-600 dark:text-neutral-400">
+  <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-[var(--ink-muted)]">
     {children}
   </th>
 );
@@ -209,7 +209,7 @@ const ParagraphComponent: Components['p'] = ({ children }) => (
 
 // Horizontal rule
 const HrComponent: Components['hr'] = () => (
-  <hr className="my-6 border-stone-200 dark:border-neutral-700" />
+  <hr className="my-6 border-[var(--line)]" />
 );
 
 // Combine all custom components
@@ -361,7 +361,7 @@ function MarkdownImage({ src, alt, basePath, tabId }: {
   }
 
   if (!blobUrl) {
-    return <span className="inline-block h-4 w-16 animate-pulse rounded bg-stone-200 dark:bg-neutral-700" />;
+    return <span className="inline-block h-4 w-16 animate-pulse rounded bg-[var(--paper-inset)]" />;
   }
 
   return <img src={blobUrl} alt={alt ?? ''} className="max-w-full" />;

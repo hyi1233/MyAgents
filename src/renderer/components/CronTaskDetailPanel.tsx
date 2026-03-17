@@ -52,7 +52,7 @@ function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: b
     return (
         <button type="button" role="switch" aria-checked={enabled} onClick={() => onChange(!enabled)}
             className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors ${enabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'}`}>
-            <span className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+            <span className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-[var(--toggle-thumb)] shadow-sm transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
         </button>
     );
 }

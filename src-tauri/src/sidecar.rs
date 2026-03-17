@@ -1498,7 +1498,7 @@ pub fn start_tab_sidecar<R: Runtime>(
 
     // Build command - 直接用 bun <script> 而非 bun run <script>（更稳定）
     // Add SIDECAR_MARKER for reliable process identification and cleanup
-    let mut cmd = Command::new(&bun_path);
+    let mut cmd = crate::process_cmd::new(&bun_path);
     cmd.arg(&script_path)
         .arg("--port")
         .arg(port.to_string())
@@ -1597,13 +1597,7 @@ pub fn start_tab_sidecar<R: Runtime>(
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
 
-    // Windows: Hide console window for GUI app
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    // Windows: CREATE_NO_WINDOW already applied by process_cmd::new()
 
     // Unix: Make child a process group leader so kill(-PGID) kills the entire tree
     #[cfg(unix)]
@@ -2129,7 +2123,7 @@ fn create_new_session_sidecar<R: Runtime>(
     );
 
     // Build command
-    let mut cmd = Command::new(&bun_path);
+    let mut cmd = crate::process_cmd::new(&bun_path);
     cmd.arg(&script_path)
         .arg("--port")
         .arg(port.to_string())
@@ -2192,12 +2186,7 @@ fn create_new_session_sidecar<R: Runtime>(
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
 
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    // Windows: CREATE_NO_WINDOW already applied by process_cmd::new()
 
     // Unix: Make child a process group leader so kill(-PGID) kills the entire tree
     #[cfg(unix)]

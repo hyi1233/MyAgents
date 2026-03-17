@@ -13,6 +13,7 @@ import { useUpdater } from '@/hooks/useUpdater';
 import { useTrayEvents } from '@/hooks/useTrayEvents';
 import { notifyCronTaskComplete } from '@/services/notificationService';
 import { useConfig } from '@/hooks/useConfig';
+import { useThemeEffect } from '@/hooks/useTheme';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import Chat from '@/pages/Chat';
 import Launcher from '@/pages/Launcher';
@@ -176,6 +177,9 @@ export default function App() {
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
   const { config, isLoading: configLoading, updateConfig, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+
+  // Apply theme (light/dark/system) to <html> element
+  useThemeEffect();
 
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
@@ -1538,25 +1542,6 @@ export default function App() {
     };
     setup();
     return () => { unlisten?.(); };
-  }, []);
-
-  // WebView heartbeat: signal Rust every 10s that the frontend is alive.
-  // Rust monitors this and reloads the page if heartbeats go stale (white screen recovery).
-  useEffect(() => {
-    if (!isTauriEnvironment()) return;
-
-    let timer: ReturnType<typeof setInterval> | null = null;
-    let cancelled = false;
-    const start = async () => {
-      const { invoke } = await import('@tauri-apps/api/core');
-      if (cancelled) return; // Component unmounted before import resolved
-      invoke('webview_heartbeat').catch(() => {});
-      timer = setInterval(() => {
-        invoke('webview_heartbeat').catch(() => {});
-      }, 10_000);
-    };
-    start();
-    return () => { cancelled = true; if (timer) clearInterval(timer); };
   }, []);
 
   return (

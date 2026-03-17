@@ -134,7 +134,7 @@ export default function ChannelConfigPanel({ agent, channel, onBack, onChanged }
           onClick={handleToggleEnabled}
         >
           <span
-            className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm ring-0 transition-transform ${
+            className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-[var(--toggle-thumb)] shadow-sm ring-0 transition-transform ${
               channel.enabled ? 'translate-x-4' : 'translate-x-0.5'
             }`}
           />

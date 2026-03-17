@@ -49,7 +49,7 @@ const codeTheme = {
     ...oneDark,
     'pre[class*="language-"]': {
         ...oneDark['pre[class*="language-"]'],
-        background: '#1e1e1e',
+        background: 'var(--code-bg)',
         borderRadius: 0,
         padding: '1rem',
         margin: 0,
@@ -182,20 +182,20 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
 
     // Header bar with toggle and copy button (shared across all states)
     const headerBar = (
-        <div className="flex items-center justify-between bg-[#2d2d2d] px-4 py-2 text-xs">
-            <span className="font-mono uppercase tracking-wide text-neutral-400">
+        <div className="flex items-center justify-between bg-[var(--code-header-bg)] px-4 py-2 text-xs">
+            <span className="font-mono uppercase tracking-wide text-[var(--code-line-number)]">
                 mermaid
             </span>
             <div className="flex items-center gap-2">
                 {/* Preview / Code toggle */}
-                <div className="flex items-center rounded-md bg-neutral-800 p-0.5">
+                <div className="flex items-center rounded-md bg-[var(--code-bg)] p-0.5">
                     <button
                         type="button"
                         onClick={() => setViewMode('preview')}
                         className={`flex items-center gap-1 rounded px-2 py-0.5 transition-colors ${
                             viewMode === 'preview'
-                                ? 'bg-neutral-600 text-neutral-100'
-                                : 'text-neutral-500 hover:text-neutral-300'
+                                ? 'bg-[var(--code-header-bg)] text-[var(--code-text)]'
+                                : 'text-[var(--code-line-number)] hover:text-[var(--code-text)]'
                         }`}
                     >
                         <Eye className="size-3" />
@@ -206,8 +206,8 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
                         onClick={() => setViewMode('code')}
                         className={`flex items-center gap-1 rounded px-2 py-0.5 transition-colors ${
                             viewMode === 'code'
-                                ? 'bg-neutral-600 text-neutral-100'
-                                : 'text-neutral-500 hover:text-neutral-300'
+                                ? 'bg-[var(--code-header-bg)] text-[var(--code-text)]'
+                                : 'text-[var(--code-line-number)] hover:text-[var(--code-text)]'
                         }`}
                     >
                         <Code className="size-3" />
@@ -218,7 +218,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
                 <button
                     type="button"
                     onClick={handleCopy}
-                    className="flex items-center gap-1.5 rounded px-2 py-1 text-neutral-400 transition-colors hover:bg-neutral-700 hover:text-neutral-200"
+                    className="flex items-center gap-1.5 rounded px-2 py-1 text-[var(--code-line-number)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     title={copied ? '已复制' : '复制代码'}
                 >
                     {copied ? (
@@ -247,7 +247,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
             lineNumberStyle={{
                 minWidth: '2.5em',
                 paddingRight: '1em',
-                color: '#4a4a4a',
+                color: 'var(--code-line-number)',
                 userSelect: 'none',
             }}
             wrapLongLines={false}
@@ -263,7 +263,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
             return (
                 <>
                     {isRendering && (
-                        <div className="flex items-center gap-1.5 border-b border-neutral-700/50 px-3 py-1.5 text-xs text-neutral-400">
+                        <div className="flex items-center gap-1.5 border-b border-[var(--line)] px-3 py-1.5 text-xs text-[var(--code-line-number)]">
                             <RefreshCw className="size-3 animate-spin" />
                             <span>更新中...</span>
                         </div>

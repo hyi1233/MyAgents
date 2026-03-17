@@ -24,7 +24,7 @@ interface BrandSectionProps {
     provider?: Provider | null;
     providers?: Provider[];
     selectedModel?: string;
-    onProviderChange?: (id: string) => void;
+    onProviderChange?: (id: string, targetModel?: string) => void;
     onModelChange?: (id: string) => void;
     permissionMode?: PermissionMode;
     onPermissionModeChange?: (mode: PermissionMode) => void;
@@ -69,14 +69,15 @@ export default memo(function BrandSection({
         return undefined; // SimpleChatInput expects boolean | void
     }, [onSend]);
 
-    // Check if any provider is available (has valid subscription or API key)
+    // Check if any provider is available (has valid subscription or API key configured)
+    // Validation status is informational — having a key is enough to be "available"
     const hasAnyProvider = useMemo(() => {
         return providers?.some(p => {
             if (p.type === 'subscription') {
                 const v = providerVerifyStatus?.[p.id];
                 return v?.status === 'valid' && !!v?.accountEmail;
             }
-            return !!apiKeys?.[p.id] && providerVerifyStatus?.[p.id]?.status !== 'invalid';
+            return !!apiKeys?.[p.id];
         }) ?? false;
     }, [providers, apiKeys, providerVerifyStatus]);
 

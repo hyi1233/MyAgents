@@ -177,7 +177,7 @@ export default memo(function WorkspaceCard({
                         }}
                     >
                         <SlidersHorizontal className="h-4 w-4" strokeWidth={2.2} />
-                        <span className="pointer-events-none absolute -bottom-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)] px-2 py-0.5 text-[11px] text-white opacity-0 shadow-lg transition-opacity group-hover/btn:opacity-100">
+                        <span className="pointer-events-none absolute -bottom-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-[11px] text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/btn:opacity-100">
                             Agent 设置
                         </span>
                     </div>

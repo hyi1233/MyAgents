@@ -90,11 +90,17 @@ export default memo(function TaskCenterOverlay({
 
     // Filter sessions
     const filteredSessions = useMemo(() => {
+        // 48h cutoff for "active" filter — computed per-filter to avoid stale mount-time values.
+        // sessions is the dependency, so this recomputes whenever session data refreshes.
+        const activeCutoff48h = new Date(+new Date() - 48 * 3600000).toISOString();
         return sessions.filter(session => {
             // Status filter (source-based for bot/desktop)
             if (statusFilter === 'active') {
                 const tags = sessionTagsMap.get(session.id) ?? [];
                 if (tags.length === 0) return false;
+                // Require recent activity (48h) — prevents stale IM sessions
+                // from permanently appearing as "active" just because they have a source tag
+                if (session.lastActiveAt && session.lastActiveAt < activeCutoff48h) return false;
             }
             if (statusFilter === 'desktop' && isImSource(session.source)) return false;
             if (statusFilter === 'bot' && !isImSource(session.source)) return false;

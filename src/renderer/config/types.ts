@@ -801,7 +801,7 @@ export function getEffectiveModelAliases(
 export const DEFAULT_CONFIG: AppConfig = {
   defaultProviderId: 'anthropic-sub',
   defaultPermissionMode: 'auto',
-  theme: 'light',
+  theme: 'system',
   minimizeToTray: true,   // 默认开启最小化到托盘
   showDevTools: false,
   autoStart: false,       // 默认不开启开机启动

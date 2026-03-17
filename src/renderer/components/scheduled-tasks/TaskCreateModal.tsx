@@ -41,7 +41,7 @@ function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: b
         enabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
       }`}
     >
-      <span className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
+      <span className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-[var(--toggle-thumb)] shadow-sm transition-transform ${
         enabled ? 'translate-x-4' : 'translate-x-0.5'
       }`} />
     </button>

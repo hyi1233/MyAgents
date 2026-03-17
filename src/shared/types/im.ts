@@ -169,6 +169,42 @@ export const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
 };
 
 /**
+ * Memory auto-update configuration for periodic memory maintenance.
+ * The actual update instructions live in UPDATE_MEMORY.md in the workspace root.
+ * System reads the file body (stripping YAML frontmatter) as the prompt.
+ */
+export interface MemoryAutoUpdateConfig {
+  /** Enable/disable auto memory update (default: false) */
+  enabled: boolean;
+  /** Minimum interval between update batches in hours (default: 24) */
+  intervalHours: 24 | 48 | 72;
+  /** Minimum new user queries in a session since last update to qualify (default: 5) */
+  queryThreshold: number;
+  /** Update window start time in HH:MM format (default: "00:00") */
+  updateWindowStart: string;
+  /** Update window end time in HH:MM format (default: "06:00") */
+  updateWindowEnd: string;
+  /** IANA timezone for update window (defaults to heartbeat timezone or "Asia/Shanghai") */
+  updateWindowTimezone?: string;
+  /** ISO timestamp of last batch start */
+  lastBatchAt?: string;
+  /** Number of sessions updated in last batch */
+  lastBatchSessionCount?: number;
+}
+
+/**
+ * Default memory auto-update configuration
+ */
+export const DEFAULT_MEMORY_AUTO_UPDATE_CONFIG: MemoryAutoUpdateConfig = {
+  enabled: false,
+  intervalHours: 24,
+  queryThreshold: 5,
+  updateWindowStart: '00:00',
+  updateWindowEnd: '06:00',
+  updateWindowTimezone: undefined,
+};
+
+/**
  * Active IM session info (for status display)
  */
 export interface ImActiveSession {

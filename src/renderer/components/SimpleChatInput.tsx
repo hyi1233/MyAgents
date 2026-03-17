@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2 } from 'lucide-react';
+import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2 } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
@@ -14,6 +14,31 @@ import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../sh
 import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
+
+// ===== Module-level pure helpers (extracted from render body) =====
+
+/** Check if a provider is available (can be selected and used) */
+function isProviderAvailable(
+  p: Provider,
+  apiKeys: Record<string, string>,
+  verifyStatus: Record<string, ProviderVerifyStatus>,
+): boolean {
+  if (p.type === 'subscription') {
+    const result = verifyStatus[p.id];
+    return result?.status === 'valid' && !!result?.accountEmail;
+  }
+  return !!apiKeys[p.id];
+}
+
+/** Check if a provider has a warning (key set but verification failed) */
+function isProviderWarning(
+  p: Provider,
+  apiKeys: Record<string, string>,
+  verifyStatus: Record<string, ProviderVerifyStatus>,
+): boolean {
+  if (p.type === 'subscription') return false;
+  return !!apiKeys[p.id] && verifyStatus[p.id]?.status === 'invalid';
+}
 
 // Image attachment type
 export interface ImageAttachment {
@@ -40,7 +65,7 @@ interface SimpleChatInputProps {
   // Provider/Model selection
   provider?: Provider | null; // Current provider for model selection
   providers?: Provider[]; // All available providers for switching
-  onProviderChange?: (providerId: string) => void; // Called when provider is changed
+  onProviderChange?: (providerId: string, targetModel?: string) => void; // Called when provider is changed (with optional model to set atomically)
   selectedModel?: string; // Current selected model ID
   onModelChange?: (modelId: string) => void; // Called when model is changed
   // Permission modes
@@ -188,23 +213,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     onInputChange?.(inputValue);
   }, [inputValue, onInputChange]);
 
-  // Check if a provider is available:
-  // - Subscription type: must be verified with an account email
-  // - API type: must have key AND verification status must be 'valid' (or not yet verified)
-  const isProviderAvailable = (p: Provider): boolean => {
-    if (p.type === 'subscription') {
-      const verifyResult = providerVerifyStatus[p.id];
-      return verifyResult?.status === 'valid' && !!verifyResult?.accountEmail;
-    }
-    const hasKey = !!apiKeys[p.id];
-    if (!hasKey) return false;
-    // If verified and invalid, not available. If not verified yet or valid, available.
-    const verifyResult = providerVerifyStatus[p.id];
-    return verifyResult?.status !== 'invalid';
-  };
-
   // Ref for current provider availability — used in handleKeyDown without adding deps
-  const isCurrentProviderAvailable = provider ? isProviderAvailable(provider) : false;
+  const isCurrentProviderAvailable = provider ? isProviderAvailable(provider, apiKeys, providerVerifyStatus) : false;
   const isCurrentProviderAvailableRef = useRef(isCurrentProviderAvailable);
   isCurrentProviderAvailableRef.current = isCurrentProviderAvailable;
 
@@ -1491,7 +1501,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   }`}
                               >
                                 <span
-                                  className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm ring-0 transition-transform ${isEnabled ? 'translate-x-4' : 'translate-x-0.5'
+                                  className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-[var(--toggle-thumb)] shadow-sm ring-0 transition-transform ${isEnabled ? 'translate-x-4' : 'translate-x-0.5'
                                     }`}
                                 />
                               </button>
@@ -1566,7 +1576,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <ChevronUp className="h-3 w-3 shrink-0" />
                 </button>
                 {showModelMenu && (() => {
-                  const availableProviders = (providers ?? []).filter(p => isProviderAvailable(p));
+                  const availableProviders = (providers ?? []).filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
                   return (
                     <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
                       {availableProviders.length === 0 ? (
@@ -1587,8 +1597,16 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         availableProviders.map((p, idx) => (
                           <div key={p.id}>
                             {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
-                            <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                            <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                               {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
+                              {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
+                                <span className="group/warn relative">
+                                  <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
+                                  <div className="pointer-events-none absolute bottom-full left-0 z-50 mb-1 w-44 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-2.5 py-1.5 text-[11px] font-normal normal-case tracking-normal text-[var(--ink-muted)] opacity-0 shadow-lg transition-opacity group-hover/warn:opacity-100">
+                                    验证未通过，部分模型可能不可用
+                                  </div>
+                                </span>
+                              )}
                             </div>
                             {p.models.map(model => {
                               const isSelected = provider?.id === p.id && currentModelId === model.model;
@@ -1598,8 +1616,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    if (provider?.id !== p.id) onProviderChange?.(p.id);
-                                    onModelChange?.(model.model);
+                                    if (provider?.id !== p.id) {
+                                      // Atomic provider+model change to avoid useEffect race
+                                      onProviderChange?.(p.id, model.model);
+                                    } else {
+                                      onModelChange?.(model.model);
+                                    }
                                     setShowModelMenu(false);
                                   }}
                                   className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${

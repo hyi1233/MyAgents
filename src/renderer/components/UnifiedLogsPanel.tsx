@@ -279,7 +279,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                                     key={value}
                                     onClick={() => setLevelFilter(value)}
                                     className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${levelFilter === value
-                                        ? 'bg-[var(--ink)] text-[var(--paper)]'
+                                        ? 'bg-[var(--button-dark-bg)] text-[var(--button-primary-text)]'
                                         : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
                                         }`}
                                 >
