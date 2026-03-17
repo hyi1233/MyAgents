@@ -1177,8 +1177,7 @@ async fn create_bot_instance<R: Runtime>(
                     }
 
                     if text == "/help" {
-                        let _ = adapter_for_reply.send_message(
-                            &chat_id,
+                        let mut help = String::from(
                             "📖 可用命令\n\n\
                              /new — 开始新对话（清空当前上下文）\n\
                              /workspace — 查看当前工作区\n\
@@ -1190,10 +1189,20 @@ async fn create_bot_instance<R: Runtime>(
                              /mode — 查看当前权限模式\n\
                              /mode <模式> — 切换模式（plan / auto / full）\n\
                              /status — 查看会话状态\n\
-                             /help — 显示本帮助\n\n\
-                             💬 直接发送文字即可与 AI 对话。\n\
-                             🔒 工具审批：收到权限请求时，回复「允许」「始终允许」或「拒绝」。",
-                        ).await;
+                             /help — 显示本帮助",
+                        );
+                        // Append plugin commands if available
+                        if let AnyAdapter::Bridge(ref bridge) = *adapter_for_reply {
+                            let cmds = bridge.get_commands();
+                            if !cmds.is_empty() {
+                                help.push_str("\n\n📦 插件命令\n");
+                                for (name, desc) in cmds {
+                                    help.push_str(&format!("/{} — {}\n", name, if desc.is_empty() { "无描述" } else { desc.as_str() }));
+                                }
+                            }
+                        }
+                        help.push_str("\n\n💬 直接发送文字即可与 AI 对话。\n🔒 工具审批：收到权限请求时，回复「允许」「始终允许」或「拒绝」。");
+                        let _ = adapter_for_reply.send_message(&chat_id, &help).await;
                         continue;
                     }
 
@@ -1646,8 +1655,13 @@ async fn create_bot_instance<R: Runtime>(
                         }
 
                         // Trigger check: in Mention mode, non-triggered messages go to history buffer
+                        // Exception: plugin slash commands bypass mention gate (like built-in /help /model)
+                        let is_plugin_command = is_bridge_platform && matches!(
+                            adapter_for_reply.as_ref(),
+                            AnyAdapter::Bridge(bridge) if bridge.match_command(&text).is_some()
+                        );
                         let activation = group_activation_for_loop.read().await.clone();
-                        if activation == GroupActivation::Mention && !msg.is_mention {
+                        if activation == GroupActivation::Mention && !msg.is_mention && !is_plugin_command {
                             group_history_for_loop.lock().await.push(
                                 &session_key,
                                 GroupHistoryEntry {
@@ -2550,10 +2564,11 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         body["bridgePluginId"] = json!(bridge_plugin_id);
         body["bridgeEnabledToolGroups"] = json!(tool_groups);
         body["senderId"] = json!(msg.sender_id);
-        // ownerOnly check: sender is owner if in allowed_users (or no whitelist = open access)
+        // ownerOnly check: sender is owner only if explicitly in allowed_users.
+        // Fail-closed: no whitelist or empty whitelist = no owner (ownerOnly tools blocked).
         let is_owner = match allowed_users {
-            Some(users) => users.is_empty() || users.contains(&msg.sender_id),
-            None => true, // No whitelist info = trust sender
+            Some(users) if !users.is_empty() => users.contains(&msg.sender_id),
+            _ => false,
         };
         body["senderIsOwner"] = json!(is_owner);
         ulog_info!("[im-stream] Bridge context: port={}, plugin={}, groups={:?}", bridge_port, bridge_plugin_id, tool_groups);

@@ -135,8 +135,8 @@ export function createCompatApi(config: Record<string, unknown>) {
 
     // Command registration — capture for Rust IM layer routing
     registerCommand(cmd: Record<string, unknown>) {
-      const name = String(cmd.name || cmd.command || '');
-      if (!name) return;
+      const name = String(cmd.name || cmd.command || '').trim().replace(/^\//, '');
+      if (!name || /\s/.test(name)) return; // Reject empty or whitespace-containing names
       const description = String(cmd.description || cmd.help || '');
       const handler = (cmd.handler || cmd.execute) as CapturedCommand['execute'] | undefined;
       if (typeof handler === 'function') {

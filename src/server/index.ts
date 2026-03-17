@@ -6240,7 +6240,7 @@ async function main() {
                 pluginId: payload.bridgePluginId,
                 enabledToolGroups: payload.bridgeEnabledToolGroups || [],
                 senderId: payload.senderId,
-                isOwner: payload.senderIsOwner ?? true,
+                isOwner: payload.senderIsOwner ?? false,
               });
             }
           }

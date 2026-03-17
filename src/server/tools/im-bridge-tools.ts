@@ -83,7 +83,7 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
                 toolName: pluginTool.name,
                 args: params.args,
                 userId: bridgeToolsContext.senderId,
-                isOwner: bridgeToolsContext.isOwner ?? true,
+                isOwner: bridgeToolsContext.isOwner ?? false,
                 enabledGroups: bridgeToolsContext.enabledToolGroups,
               }),
             });
