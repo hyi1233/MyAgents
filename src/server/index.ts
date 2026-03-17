@@ -3945,43 +3945,55 @@ async function main() {
           if (server.type === 'stdio' && server.command) {
             const command = server.command;
 
-            // Preset MCP (isBuiltin: true) with npx → warmup with bundled bun
+            // Preset MCP (isBuiltin: true) with npx → warmup to download and cache package
             if (server.isBuiltin && command === 'npx') {
-              // On Windows, @playwright/mcp uses system npx (not bun x) due to Bun pipe
-              // transport bug — skip bun warmup and succeed immediately.
-              // See: oven-sh/bun#15679, oven-sh/bun#27977
-              const isPlaywrightOnWin = process.platform === 'win32' &&
-                (server.args || []).some((a: string) => a.includes('@playwright/mcp'));
-              if (isPlaywrightOnWin) {
-                console.log('[api/mcp/enable] Playwright on Windows: skipping bun warmup (uses system npx)');
-                return jsonResponse({ success: true });
-              }
-
-              const { getBundledRuntimePath, isBunRuntime } = await import('./utils/runtime');
-              const runtime = getBundledRuntimePath();
-
-              if (!isBunRuntime(runtime)) {
-                return jsonResponse({
-                  success: false,
-                  error: {
-                    type: 'runtime_error',
-                    message: '内置运行时不可用',
-                  }
-                });
-              }
-
-              // Warmup: run bun x <package> --help to download and cache
-              // MUST pin versions here too — otherwise warmup caches @latest but SDK uses pinned version
+              const { getBundledNodeDir, getBundledRuntimePath, isBunRuntime } = await import('./utils/runtime');
               const { pinMcpPackageVersions } = await import('./agent-session');
               const args = pinMcpPackageVersions(server.args || []);
-              console.log(`[api/mcp/enable] Warming up cache: ${runtime} x ${args.join(' ')}`);
 
               const { spawn } = await import('child_process');
               const { getShellEnv } = await import('./utils/shell');
+              const baseEnv = getShellEnv();
+
+              // Dual runtime: prefer bundled Node.js npx, fallback to bun x
+              const nodeDir = getBundledNodeDir();
+              let warmupCmd: string;
+              let warmupArgs: string[];
+
+              if (nodeDir) {
+                // Bundled Node.js: warmup with npx (uses same npm cache as actual execution)
+                const npxPath = process.platform === 'win32'
+                  ? join(nodeDir, 'npx.cmd')
+                  : join(nodeDir, 'npx');
+                warmupCmd = npxPath;
+                warmupArgs = ['-y', ...args, '--help'];
+
+                // Ensure bundled Node.js bin dir is in PATH for npx to find node
+                const pathKey = process.platform === 'win32' ? 'Path' : 'PATH';
+                const sep = process.platform === 'win32' ? ';' : ':';
+                baseEnv[pathKey] = nodeDir + sep + (baseEnv[pathKey] || '');
+
+                console.log(`[api/mcp/enable] Warming up with bundled npx: ${warmupArgs.join(' ')}`);
+              } else {
+                // Fallback: use bun x
+                const runtime = getBundledRuntimePath();
+                if (!isBunRuntime(runtime)) {
+                  return jsonResponse({
+                    success: false,
+                    error: {
+                      type: 'runtime_error',
+                      message: '内置运行时不可用（Node.js 和 Bun 均未找到）',
+                    }
+                  });
+                }
+                warmupCmd = runtime;
+                warmupArgs = ['x', ...args, '--help'];
+                console.log(`[api/mcp/enable] Warming up with bun x: ${warmupArgs.join(' ')}`);
+              }
 
               return new Promise<Response>((resolve) => {
-                const proc = spawn(runtime, ['x', ...args, '--help'], {
-                  env: getShellEnv(),
+                const proc = spawn(warmupCmd, warmupArgs, {
+                  env: baseEnv,
                   timeout: 120000, // 2 min timeout
                   stdio: ['ignore', 'pipe', 'pipe'],
                 });

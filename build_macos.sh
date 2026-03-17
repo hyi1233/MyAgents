@@ -277,6 +277,14 @@ echo -e "${GREEN}✓ 前端和服务端构建完成${NC}"
 echo ""
 
 # ========================================
+# 确保 Node.js 运行时已下载（MCP Server / 社区工具需要）
+# ========================================
+NODEJS_DIR="${PROJECT_DIR}/src-tauri/resources/nodejs"
+if [ ! -f "${NODEJS_DIR}/bin/node" ] && [ ! -f "${NODEJS_DIR}/node.exe" ]; then
+    echo -e "${YELLOW}Node.js 运行时未找到，正在下载...${NC}"
+    "${PROJECT_DIR}/scripts/download_nodejs.sh"
+fi
+
 # 签名 Bun 可执行文件 (重要：确保与应用使用相同签名)
 # ========================================
 echo -e "${BLUE}[6/7] 签名外部二进制文件...${NC}"

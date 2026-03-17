@@ -50,6 +50,8 @@ src-tauri/resources/server-dist.js
 src-tauri/resources/plugin-bridge-dist.js
 src-tauri/resources/claude-agent-sdk
 src-tauri/resources/agent-browser-cli
+src-tauri/resources/nodejs/*
+!src-tauri/resources/nodejs/.gitkeep
 src-tauri/resources/vcruntime140.dll
 src-tauri/resources/vcruntime140_1.dll
 src-tauri/nsis/Git-Installer.exe

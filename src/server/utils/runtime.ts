@@ -203,6 +203,64 @@ function findExistingPath(paths: string[]): string | null {
 }
 
 /**
+ * Get the directory containing the bundled Node.js distribution.
+ * Returns the directory that should be added to PATH so that `node`, `npm`, `npx`
+ * are all available. Returns null if bundled Node.js is not found.
+ *
+ * Directory structure:
+ * - macOS (prod):  Contents/Resources/nodejs/bin/  (contains node, npm, npx)
+ * - macOS (dev):   src-tauri/resources/nodejs/bin/
+ * - Windows (prod): <install_dir>/nodejs/           (contains node.exe, npm.cmd, npx.cmd)
+ * - Windows (dev):  src-tauri/resources/nodejs/
+ */
+export function getBundledNodeDir(): string | null {
+  const scriptDir = getScriptDir();
+
+  if (isWindows()) {
+    // Windows prod: nodejs/ is alongside server-dist.js
+    const winDir = resolve(scriptDir, 'nodejs');
+    if (existsSync(resolve(winDir, 'node.exe'))) {
+      return winDir;
+    }
+  } else {
+    // macOS prod: Contents/Resources/nodejs/bin/
+    // scriptDir = Contents/Resources, so nodejs/bin/ is a subdirectory
+    const macDir = resolve(scriptDir, 'nodejs', 'bin');
+    if (existsSync(resolve(macDir, 'node'))) {
+      return macDir;
+    }
+  }
+
+  // Development: walk up from scriptDir to find src-tauri/resources/nodejs/
+  let dir = scriptDir;
+  for (let i = 0; i < 6; i++) {
+    const devBinDir = resolve(dir, 'src-tauri', 'resources', 'nodejs', 'bin');
+    const devWinDir = resolve(dir, 'src-tauri', 'resources', 'nodejs');
+    if (!isWindows() && existsSync(resolve(devBinDir, 'node'))) {
+      return devBinDir;
+    }
+    if (isWindows() && existsSync(resolve(devWinDir, 'node.exe'))) {
+      return devWinDir;
+    }
+    dir = dirname(dir);
+  }
+
+  return null;
+}
+
+/**
+ * Get the absolute path to the bundled Node.js binary.
+ * Returns null if bundled Node.js is not found.
+ */
+export function getBundledNodePath(): string | null {
+  const nodeDir = getBundledNodeDir();
+  if (!nodeDir) return null;
+
+  const nodeBin = isWindows() ? resolve(nodeDir, 'node.exe') : resolve(nodeDir, 'node');
+  return existsSync(nodeBin) ? nodeBin : null;
+}
+
+/**
  * Check if a path is a bun executable (not just contains 'bun' in path).
  */
 export function isBunRuntime(runtimePath: string): boolean {

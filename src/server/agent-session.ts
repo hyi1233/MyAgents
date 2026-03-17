@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, symlinkSync, lstatSync, readFileSyn
 import { join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { getScriptDir, getBundledBunDir, getAgentBrowserCliPath } from './utils/runtime';
+import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
@@ -1068,24 +1068,35 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
       let command = server.command;
       let args = server.args || [];
 
-      // For npx commands: builtin MCP uses bundled bun, custom MCP uses system npx
+      // For npx commands: prefer bundled Node.js npx, fallback to bun x
       if (command === 'npx') {
         if (server.isBuiltin) {
-          // Builtin MCP: use bundled bun x (no Node.js dependency)
           // Pin @latest to known versions to avoid npm registry check on every startup
           args = pinMcpPackageVersions(args);
 
-          // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic import for runtime detection
-          const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
-          const runtime = getBundledRuntimePath();
+          // Dual runtime strategy: MCP servers are community npm packages designed for
+          // Node.js. Running them under Bun causes compatibility issues (Playwright pipe
+          // transport, axios adapter, postinstall scripts, etc.). Use bundled Node.js npx
+          // when available; fallback to bun x only if Node.js is not bundled.
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getBundledNodeDir: getNodeDir, getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
+          const nodeDir = getNodeDir();
 
-          if (isBunRuntime(runtime)) {
-            command = runtime;
-            args = ['x', ...args];
-            console.log(`[agent] MCP ${server.id}: Using bundled bun x`);
-          } else {
+          if (nodeDir) {
+            // Bundled Node.js available — use npx natively (all platforms unified)
             args = ['-y', ...args];
-            console.log(`[agent] MCP ${server.id}: Using npx (bun not available)`);
+            console.log(`[agent] MCP ${server.id}: Using bundled Node.js npx (${nodeDir})`);
+          } else {
+            // Fallback: no bundled Node.js — use bun x (legacy behavior)
+            const runtime = getBundledRuntimePath();
+            if (isBunRuntime(runtime)) {
+              command = runtime;
+              args = ['x', ...args];
+              console.log(`[agent] MCP ${server.id}: Using bundled bun x (Node.js not available)`);
+            } else {
+              args = ['-y', ...args];
+              console.log(`[agent] MCP ${server.id}: Using system npx`);
+            }
           }
         } else {
           // Custom MCP: use system npx with -y for auto-confirm
@@ -1899,10 +1910,10 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   const PATH_SEP = process.platform === 'win32' ? ';' : ':';
   const PATH_KEY = process.platform === 'win32' ? 'Path' : 'PATH';
 
-  // Detect bundled bun directory using shared utility from runtime.ts
-  // This ensures consistent path detection across the codebase (DRY principle)
+  // Detect bundled runtime directories using shared utility from runtime.ts
   const isWindows = process.platform === 'win32';
   const bundledBunDir = getBundledBunDir();
+  const bundledNodeDir = getBundledNodeDir();
 
   // Windows directory env vars — hoisted for reuse across essentialPaths + git-bash detection
   const winProgramFiles = isWindows ? (process.env.PROGRAMFILES || 'C:\\Program Files') : '';
@@ -1911,15 +1922,21 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
 
   if (isDebug) {
     console.log('[env] Script directory:', getScriptDir());
-    console.log(`[env] Checking bundled bun: ${bundledBunDir || 'NOT FOUND'} -> ${bundledBunDir ? 'EXISTS' : 'NOT FOUND'}`);
+    console.log(`[env] Bundled bun: ${bundledBunDir || 'NOT FOUND'}`);
+    console.log(`[env] Bundled Node.js: ${bundledNodeDir || 'NOT FOUND'}`);
   }
 
   // Build essential paths based on platform
   const essentialPaths: string[] = [];
 
-  // Bundled bun directory (highest priority)
+  // Bundled bun directory (highest priority — Sidecar/agent-browser need it)
   if (bundledBunDir) {
     essentialPaths.push(bundledBunDir);
+  }
+
+  // Bundled Node.js directory — MCP servers, AI bash `node`/`npm`/`npx` commands
+  if (bundledNodeDir) {
+    essentialPaths.push(bundledNodeDir);
   }
 
   // MyAgents bin directory — user-facing commands (agent-browser wrapper etc.)
