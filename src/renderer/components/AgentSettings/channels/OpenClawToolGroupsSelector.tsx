@@ -9,10 +9,10 @@ interface ToolGroup {
 }
 
 const FEISHU_TOOL_GROUPS: ToolGroup[] = [
-    { id: 'doc', name: '文档', description: '云文档创建/读取/更新', toolCount: 2, defaultEnabled: true },
-    { id: 'chat', name: '消息', description: '群聊信息/成员查询', toolCount: 1, defaultEnabled: true },
+    { id: 'doc', name: '文档', description: '云文档创建/读取/更新', toolCount: 6, defaultEnabled: true },
+    { id: 'chat', name: '消息', description: '群聊信息/成员查询', toolCount: 2, defaultEnabled: true },
     { id: 'wiki_drive', name: '知识库 & 云盘', description: '知识库/云盘文件管理', toolCount: 3, defaultEnabled: true },
-    { id: 'bitable', name: '多维表格', description: '表格/记录/字段 CRUD', toolCount: 8, defaultEnabled: true },
+    { id: 'bitable', name: '多维表格', description: '表格/记录/字段 CRUD', toolCount: 5, defaultEnabled: true },
     { id: 'perm', name: '权限管理', description: '文档权限设置（敏感操作）', toolCount: 1, defaultEnabled: false },
 ];
 

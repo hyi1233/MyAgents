@@ -14,20 +14,17 @@ export interface McpToolDefinition {
   parameters: Record<string, unknown>;
 }
 
-// ===== Tool group mapping (hardcoded for feishu plugin) =====
+// ===== Tool group resolution =====
+// Priority: tool.group (plugin-declared) > name-based heuristic > 'other'
 
-const TOOL_GROUPS: Record<string, string> = {
-  feishu_doc: 'doc',
-  feishu_app_scopes: 'doc',
-  feishu_chat: 'chat',
-  feishu_wiki: 'wiki_drive',
-  feishu_drive: 'wiki_drive',
-  feishu_perm: 'perm',
-};
-
-function getToolGroup(toolName: string): string {
+/** Feishu-specific fallback: derive group from tool name when plugin doesn't declare one. */
+function inferToolGroup(toolName: string): string {
   if (toolName.startsWith('feishu_bitable_')) return 'bitable';
-  return TOOL_GROUPS[toolName] || 'other';
+  if (toolName.startsWith('feishu_chat')) return 'chat';
+  if (toolName.startsWith('feishu_wiki') || toolName.startsWith('feishu_drive')) return 'wiki_drive';
+  if (toolName.startsWith('feishu_doc') || toolName.endsWith('_doc') || toolName === 'feishu_app_scopes') return 'doc';
+  if (toolName.startsWith('feishu_perm')) return 'perm';
+  return 'other';
 }
 
 // ===== Resolved tool cache =====
@@ -73,10 +70,12 @@ export function createMcpHandler(
             ? (tool.execute as ResolvedTool['execute'])
             : async () => ({ error: 'Tool has no execute method' });
 
+          // Use plugin-declared group if present, otherwise infer from tool name
+          const declaredGroup = typeof tool.group === 'string' ? tool.group : '';
           resolved.push({
             name,
             description,
-            group: getToolGroup(name),
+            group: declaredGroup || inferToolGroup(name),
             parameters,
             execute,
           });
