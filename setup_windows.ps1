@@ -28,8 +28,21 @@ try {
             }
         } catch { }
         Write-Host "MISSING" -ForegroundColor Red
-        Write-Host "    请安装: $InstallHint" -ForegroundColor Yellow
         return $false
+    }
+
+    function Install-WithWinget {
+        param($Name, $WingetId, $ExtraArgs)
+        Write-Host "  自动安装 $Name..." -ForegroundColor Cyan
+        $cmd = "winget install --id $WingetId -e --accept-source-agreements --accept-package-agreements"
+        if ($ExtraArgs) { $cmd += " $ExtraArgs" }
+        Invoke-Expression $cmd
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  $Name 安装失败，请手动安装: winget install $WingetId" -ForegroundColor Red
+            return $false
+        }
+        Write-Host "  $Name 安装完成" -ForegroundColor Green
+        return $true
     }
 
     function Get-BunBinary {
@@ -239,19 +252,84 @@ try {
     }
 
     # Main
-    Write-Host "Step 1/8: 检查依赖" -ForegroundColor Blue
-    $Missing = $false
+    Write-Host "Step 1/9: 检查并安装依赖" -ForegroundColor Blue
 
-    if (-not (Test-Dependency "Node.js" "node --version" "https://nodejs.org")) { $Missing = $true }
-    if (-not (Test-Dependency "npm" "npm --version" "with Node.js")) { $Missing = $true }
-    if (-not (Test-Dependency "Bun" "bun --version" "https://bun.sh")) { $Missing = $true }
-    if (-not (Test-Dependency "Rust" "rustc --version" "https://rustup.rs")) { $Missing = $true }
-    if (-not (Test-Dependency "Cargo" "cargo --version" "with Rust")) { $Missing = $true }
+    # Check winget availability for auto-install
+    $HasWinget = $false
+    try {
+        winget --version 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0 -or $?) { $HasWinget = $true }
+    } catch { }
+
+    $NeedRestart = $false
+
+    # Node.js (needed for typecheck/lint)
+    if (-not (Test-Dependency "Node.js" "node --version" "")) {
+        if ($HasWinget) {
+            Install-WithWinget "Node.js LTS" "OpenJS.NodeJS.LTS"
+            $NeedRestart = $true
+        } else {
+            Write-Host "    请安装: https://nodejs.org" -ForegroundColor Yellow
+        }
+    }
+
+    # Bun
+    if (-not (Test-Dependency "Bun" "bun --version" "")) {
+        if ($HasWinget) {
+            Install-WithWinget "Bun" "Oven-sh.Bun"
+            $NeedRestart = $true
+        } else {
+            Write-Host "    请安装: https://bun.sh" -ForegroundColor Yellow
+        }
+    }
+
+    # Rust + Cargo
+    if (-not (Test-Dependency "Rust" "rustc --version" "")) {
+        if ($HasWinget) {
+            Install-WithWinget "Rust (rustup)" "Rustlang.Rustup"
+            $NeedRestart = $true
+        } else {
+            Write-Host "    请安装: https://rustup.rs" -ForegroundColor Yellow
+        }
+    }
+
+    # MSVC Build Tools (required by Rust on Windows)
+    if (-not (Test-MSVC)) {
+        if ($HasWinget) {
+            Write-Host "  自动安装 Visual Studio Build Tools (C++ 工作负载)..." -ForegroundColor Cyan
+            winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "  MSVC 安装失败，请手动安装 Visual Studio Build Tools" -ForegroundColor Red
+            } else {
+                Write-Host "  MSVC Build Tools 安装完成" -ForegroundColor Green
+            }
+            $NeedRestart = $true
+        } else {
+            Write-Host "    请安装 Visual Studio Build Tools: https://visualstudio.microsoft.com/visual-cpp-build-tools/" -ForegroundColor Yellow
+        }
+    }
+
+    if ($NeedRestart) {
+        Write-Host "`n=========================================" -ForegroundColor Yellow
+        Write-Host "  依赖已安装，请关闭此窗口，打开新的 PowerShell 重新运行本脚本" -ForegroundColor Yellow
+        Write-Host "  (新安装的工具需要新终端才能生效)" -ForegroundColor Yellow
+        Write-Host "=========================================`n" -ForegroundColor Yellow
+        Write-Host "按回车键退出..." -ForegroundColor Cyan
+        Read-Host
+        exit 0
+    }
+
+    # Final check — all must be present now
+    $Missing = $false
+    if (-not (Test-Dependency "Node.js" "node --version" "")) { $Missing = $true }
+    if (-not (Test-Dependency "Bun" "bun --version" "")) { $Missing = $true }
+    if (-not (Test-Dependency "Rust" "rustc --version" "")) { $Missing = $true }
+    if (-not (Test-Dependency "Cargo" "cargo --version" "")) { $Missing = $true }
     if (-not (Test-MSVC)) { $Missing = $true }
 
     if ($Missing) {
-        Write-Host "`n请先安装缺失的依赖" -ForegroundColor Red
-        Write-Host "`n按回车键退出..." -ForegroundColor Yellow
+        Write-Host "`n仍有缺失依赖，请手动安装后重新运行" -ForegroundColor Red
+        Write-Host "按回车键退出..." -ForegroundColor Yellow
         Read-Host
         exit 1
     }
