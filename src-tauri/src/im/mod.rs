@@ -1191,13 +1191,14 @@ async fn create_bot_instance<R: Runtime>(
                              /status — 查看会话状态\n\
                              /help — 显示本帮助",
                         );
-                        // Append plugin commands if available
+                        // Append plugin commands if available (translate English descriptions to Chinese)
                         if let AnyAdapter::Bridge(ref bridge) = *adapter_for_reply {
                             let cmds = bridge.get_commands();
                             if !cmds.is_empty() {
                                 help.push_str("\n\n📦 插件命令\n");
                                 for (name, desc) in cmds {
-                                    help.push_str(&format!("/{} — {}\n", name, if desc.is_empty() { "无描述" } else { desc.as_str() }));
+                                    let cn_desc = translate_plugin_command_desc(name, desc);
+                                    help.push_str(&format!("/{} — {}\n", name, cn_desc));
                                 }
                             }
                         }
@@ -3122,6 +3123,21 @@ fn has_sentence_boundary(text: &str) -> bool {
         || trimmed.ends_with('?')
         || trimmed.ends_with(';')
         || trimmed.ends_with(':')
+}
+
+/// Translate plugin command descriptions to Chinese for /help display.
+/// Falls back to the original English description if no translation is available.
+fn translate_plugin_command_desc(name: &str, desc: &str) -> String {
+    // Match by command name for known OpenClaw plugin commands
+    match name {
+        "feishu_diagnose" => "运行飞书插件诊断，检查配置、连接和权限".to_string(),
+        "feishu_doctor" => "运行飞书插件诊断".to_string(),
+        "feishu_auth" | "feishu auth" => "批量授权飞书用户权限".to_string(),
+        "feishu" => "飞书插件命令（子命令：auth, doctor, start）".to_string(),
+        _ => {
+            if desc.is_empty() { "无描述".to_string() } else { desc.to_string() }
+        }
+    }
 }
 
 /// Extract `data:` payload from SSE event string.
