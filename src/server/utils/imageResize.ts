@@ -8,9 +8,10 @@ const Jimp = createJimp({
   plugins: defaultPlugins,
 });
 
-const MAX_DIMENSION = 1920;
-/** Max dimension for MCP tool result images (e.g. browser screenshots). Claude API hard limit is 8000px. */
-const MAX_TOOL_IMAGE_DIMENSION = 4096;
+/** Claude API recommends ≤1568px on both sides; larger images are auto-shrunk by the API, wasting bandwidth and TTFT. */
+const MAX_DIMENSION = 1568;
+/** Max dimension for MCP tool result images (e.g. browser screenshots). Aligned with API recommendation. */
+const MAX_TOOL_IMAGE_DIMENSION = 1568;
 
 type ImagePayload = { name: string; mimeType: string; data: string };
 
@@ -51,6 +52,102 @@ export async function resizeImageIfNeeded(img: ImagePayload): Promise<ImagePaylo
     // Unsupported format or processing failure → use original (don't block message)
     console.warn(`[image-resize] Failed to process ${img.name}, using original:`, err);
     return img;
+  }
+}
+
+/** Aspect-ratio threshold: images with longEdge/shortEdge >= this are treated as "super-long" and sliced. */
+const LONG_IMAGE_RATIO = 3;
+/** Maximum number of tiles when slicing a super-long image. */
+const MAX_TILES = 8;
+
+/**
+ * Process a user-uploaded image for the Claude API.
+ * - Normal images: resize inline (single decode) → returns 1-element array.
+ * - Super-long images (aspect ratio ≥ 3:1 and long edge > MAX_DIMENSION): slice into 1:2 tiles
+ *   so that text remains readable after scaling, then return multiple image payloads.
+ */
+export async function processImage(img: ImagePayload): Promise<ImagePayload[]> {
+  // Fast-reject: prevent OOM from extremely large user uploads (same guard as resizeToolImageContent)
+  if (img.data.length > MAX_BASE64_LENGTH) {
+    console.warn(
+      `[image-resize] User image too large (${(img.data.length / 1024 / 1024).toFixed(1)} MB base64), skipping`
+    );
+    return [img];
+  }
+
+  try {
+    const buffer = Buffer.from(img.data, 'base64');
+    const image = await Jimp.fromBuffer(buffer);
+    const { width, height } = image;
+
+    const shortEdge = Math.min(width, height);
+    const longEdge = Math.max(width, height);
+    const isVertical = height > width;
+
+    // GIF loses animation after processing → output as PNG; others keep original format
+    const outputMime = img.mimeType === 'image/gif' ? 'image/png' : img.mimeType;
+
+    // Non-super-long: resize in-place (avoids double decode vs calling resizeImageIfNeeded)
+    if (longEdge / shortEdge < LONG_IMAGE_RATIO || longEdge <= MAX_DIMENSION) {
+      if (width <= MAX_DIMENSION && height <= MAX_DIMENSION) {
+        return [img]; // No resize needed
+      }
+      image.scaleToFit({ w: MAX_DIMENSION, h: MAX_DIMENSION });
+      let outBuffer: Buffer;
+      if (outputMime === 'image/jpeg') {
+        outBuffer = await image.getBuffer('image/jpeg', { quality: 92 });
+      } else {
+        outBuffer = await image.getBuffer(outputMime as 'image/png' | 'image/webp' | 'image/bmp' | 'image/tiff');
+      }
+      console.log(`[image-resize] Resized ${img.name}: ${width}x${height} → ${image.width}x${image.height}`);
+      return [{ name: img.name, mimeType: outputMime, data: outBuffer.toString('base64') }];
+    }
+
+    // Super-long image — slice into 1:2 tiles along the long axis
+    const tileTarget = shortEdge * 2; // each tile's ideal length on the long axis
+    let tileCount = Math.ceil(longEdge / tileTarget);
+    tileCount = Math.min(tileCount, MAX_TILES);
+    const tileSize = Math.ceil(longEdge / tileCount);
+    // 10% overlap: only extend backward (earlier start) to get exactly ~10% between adjacent tiles
+    const overlap = Math.round(tileSize * 0.1);
+
+    const tiles: ImagePayload[] = [];
+    for (let i = 0; i < tileCount; i++) {
+      // Each tile starts `overlap` pixels earlier (except the first), ends at the natural boundary
+      const start = Math.max(0, i * tileSize - (i > 0 ? overlap : 0));
+      const end = Math.min(longEdge, (i + 1) * tileSize);
+
+      const cropX = isVertical ? 0 : start;
+      const cropY = isVertical ? start : 0;
+      const cropW = isVertical ? width : end - start;
+      const cropH = isVertical ? end - start : height;
+
+      const tile = image.clone().crop({ x: cropX, y: cropY, w: cropW, h: cropH });
+      tile.scaleToFit({ w: MAX_DIMENSION, h: MAX_DIMENSION });
+
+      let outBuffer: Buffer;
+      if (outputMime === 'image/jpeg') {
+        outBuffer = await tile.getBuffer('image/jpeg', { quality: 92 });
+      } else {
+        outBuffer = await tile.getBuffer(outputMime as 'image/png' | 'image/webp' | 'image/bmp' | 'image/tiff');
+      }
+
+      tiles.push({
+        name: `${img.name}_tile_${i + 1}`,
+        mimeType: outputMime,
+        data: outBuffer.toString('base64'),
+      });
+    }
+
+    console.log(
+      `[image-resize] Sliced ${img.name}: ${width}x${height} → ${tileCount} tiles (${isVertical ? 'vertical' : 'horizontal'})`
+    );
+    return tiles;
+  } catch (err) {
+    // Fallback: just resize as a single image
+    console.warn(`[image-resize] processImage failed for ${img.name}, falling back to resize:`, err);
+    const result = await resizeImageIfNeeded(img);
+    return [result];
   }
 }
 
@@ -110,6 +207,16 @@ export async function resizeToolImageContent(
       }
 
       image.scaleToFit({ w: MAX_TOOL_IMAGE_DIMENSION, h: MAX_TOOL_IMAGE_DIMENSION });
+
+      // Verify resize succeeded — guard against Jimp bugs where scaleToFit returns oversized result
+      if (image.width > MAX_TOOL_IMAGE_DIMENSION || image.height > MAX_TOOL_IMAGE_DIMENSION) {
+        console.warn(
+          `[image-resize] scaleToFit produced ${image.width}x${image.height}, still exceeds ${MAX_TOOL_IMAGE_DIMENSION}px limit — stripping image`
+        );
+        content[i] = { type: 'text', text: '[Image resize failed — stripped to prevent API error]' } as McpTextContent;
+        modified = true;
+        continue;
+      }
 
       const mimeType = ('mimeType' in block && typeof block.mimeType === 'string')
         ? block.mimeType

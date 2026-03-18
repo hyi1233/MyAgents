@@ -5,7 +5,7 @@ import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
-import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize';
+import { processImage, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
 import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
@@ -341,6 +341,8 @@ let imCallbackNulledDuringTurn = false;
 let currentGroupToolsDeny: string[] = [];
 // Flag: auto-reset session after image content pollutes conversation history
 let shouldResetSessionAfterError = false;
+// Reason for the auto-reset (used to skip auto-reset for desktop image errors)
+let shouldResetReason: 'image' | 'stale' | undefined;
 // Track text block indices for detecting text-type content_block_stop
 const imTextBlockIndices = new Set<number>();
 
@@ -3615,18 +3617,26 @@ export async function enqueueUserMessage(
   > = [];
 
   // Add images first so Claude can see them before the text query
-  // Images are resized server-side to stay within API limits (max 2000px → 1920px)
+  // Images are resized/sliced server-side to stay within API limits (≤1568px, long images → 1:2 tiles)
   if (hasImages) {
     for (const img of images) {
-      const processed = await resizeImageIfNeeded(img);
-      contentBlocks.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: processed.mimeType,
-          data: processed.data,
-        },
-      });
+      const tiles = await processImage(img);
+      if (tiles.length > 1) {
+        contentBlocks.push({
+          type: 'text',
+          text: `[The following ${tiles.length} images are consecutive tiles of the same long screenshot "${img.name}", arranged in reading order with slight overlap between adjacent tiles]`,
+        });
+      }
+      for (const tile of tiles) {
+        contentBlocks.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: tile.mimeType,
+            data: tile.data,
+          },
+        });
+      }
     }
   }
 
@@ -4973,8 +4983,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           const rawError = resultMessage.result || resultMessage.errors?.join('; ') || '';
           // Detect image content error — reset session to clear polluted history
           // (applies to both IM and desktop: prevents all subsequent messages from failing)
-          if (rawError.includes('unknown variant') && rawError.includes('image')) {
+          // Pattern 1: malformed image block (e.g., wrong content type)
+          // Pattern 2: oversized image (>8000px, from tools returning large screenshots)
+          // Known API error: "...image.source.base64.data: At least one of the image dimensions exceed max allowed size: 8000 pixels"
+          if (
+            (rawError.includes('unknown variant') && rawError.includes('image')) ||
+            (rawError.includes('image') && rawError.includes('exceed') && rawError.includes('max allowed size'))
+          ) {
             shouldResetSessionAfterError = true;
+            shouldResetReason = 'image';
           }
           // Detect stale session — SDK started (system_init received) but conversation
           // data is broken (e.g., IM Bot restart: old session_id restored from disk,
@@ -4985,6 +5002,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           // this covers Scenario B (SDK starts, returns is_error in result message).
           if (rawError.includes('No conversation found')) {
             shouldResetSessionAfterError = true;
+            shouldResetReason = 'stale';
           }
           if (imStreamCallback) {
             const errorText = localizeImError(rawError);
@@ -5109,11 +5127,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
         // Auto-reset session after unrecoverable errors (image content in history,
         // stale "No conversation found", etc.) — generates new session ID so next
-        // message starts fresh without trying --resume on broken conversation data
+        // message starts fresh without trying --resume on broken conversation data.
+        // Desktop sessions: skip auto-reset for image errors — let the frontend error
+        // banner guide the user to time-rewind (preserves conversation context).
+        // IM/cron sessions: always auto-reset (no UI to interact with).
         if (shouldResetSessionAfterError) {
           shouldResetSessionAfterError = false;
-          console.warn('[agent] Auto-resetting session due to unrecoverable conversation error');
-          resetSession().catch(e => console.error('[agent] Auto-reset failed:', e));
+          const isDesktopImageError = currentScenario.type === 'desktop' && shouldResetReason === 'image';
+          shouldResetReason = undefined;
+          if (!isDesktopImageError) {
+            console.warn('[agent] Auto-resetting session due to unrecoverable conversation error');
+            resetSession().catch(e => console.error('[agent] Auto-reset failed:', e));
+          } else {
+            console.warn('[agent] Desktop image error — skipping auto-reset, frontend will offer rewind');
+          }
         }
 
         // Deferred config restart: MCP/Agents changed during this turn but we didn't

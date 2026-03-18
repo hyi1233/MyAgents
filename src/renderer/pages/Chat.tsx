@@ -1480,6 +1480,29 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 <div className="flex-1">
                   <span className="font-semibold text-[var(--ink)]">Agent error: </span>
                   <span className="text-[var(--ink-muted)]">{agentError}</span>
+                  {/* Oversized image hint: detect API 400 about image dimensions and offer rewind.
+                      Pattern synced with backend (agent-session.ts shouldResetSessionAfterError).
+                      Known API error: "...image dimensions exceed max allowed size: 8000 pixels" */}
+                  {/image.*exceed.*max allowed size/i.test(agentError) && (() => {
+                    const msgs = messagesRef.current;
+                    let lastUserMsg = null;
+                    for (let i = msgs.length - 1; i >= 0; i--) {
+                      if (msgs[i].role === 'user') { lastUserMsg = msgs[i]; break; }
+                    }
+                    if (!lastUserMsg) return null;
+                    return (
+                      <div className="mt-1">
+                        <span className="text-[var(--ink-muted)]">工具截图超过模型处理限制，</span>
+                        <button
+                          type="button"
+                          onClick={() => { setAgentError(null); handleRewind(lastUserMsg!.id); }}
+                          className="text-[var(--accent)] underline underline-offset-2 hover:text-[var(--accent-hover)]"
+                        >
+                          点击时间回溯到之前
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
                 <button
                   type="button"
