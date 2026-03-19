@@ -210,8 +210,6 @@ const MessageList = memo(function MessageList({
         data={allMessages}
         computeItemKey={(_i, m) => m.id}
         followOutput={handleFollowOutput}
-        skipAnimationFrameInResizeObserver
-        increaseViewportBy={{ top: 1200, bottom: 800 }}
         atBottomThreshold={50}
         defaultItemHeight={200}
         className="h-full"
