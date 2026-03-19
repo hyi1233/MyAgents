@@ -28,11 +28,26 @@ function parseCronResult(result: string): { taskId: string; name?: string; sched
   return null;
 }
 
+/** Max chars to display for tool results in the UI.
+ *  Larger results (e.g., 16MB Read of a generated HTML file) would create
+ *  millions of DOM nodes, destroying virtualization performance.
+ *  This is display-only — the full result is still available to the AI. */
+const RESULT_DISPLAY_LIMIT = 2048;
+
+function clampResult(tool: ToolUseSimple): ToolUseSimple {
+  if (!tool.result || tool.result.length <= RESULT_DISPLAY_LIMIT) return tool;
+  return {
+    ...tool,
+    result: tool.result.slice(0, RESULT_DISPLAY_LIMIT) + `\n\n... [结果过长，已截断显示前 ${RESULT_DISPLAY_LIMIT} 字符，共 ${tool.result.length.toLocaleString()} 字符]`,
+  };
+}
+
 interface ToolUseProps {
   tool: ToolUseSimple;
 }
 
-export default function ToolUse({ tool }: ToolUseProps) {
+export default function ToolUse({ tool: rawTool }: ToolUseProps) {
+  const tool = clampResult(rawTool);
   // Route to tool-specific component based on tool name
   switch (tool.name) {
     case 'Bash':
