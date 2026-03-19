@@ -28,6 +28,8 @@ interface MessageListProps {
   virtuosoRef: React.RefObject<VirtuosoHandle | null>;
   onScrollerRef?: (el: HTMLElement | Window | null) => void;
   followEnabledRef: React.MutableRefObject<boolean | 'force'>;
+  /** Pass to Virtuoso's atBottomStateChange — manages follow state transitions */
+  handleAtBottomChange: (atBottom: boolean) => void;
   bottomPadding?: number;
   pendingPermission?: PermissionRequest | null;
   onPermissionDecision?: (decision: 'deny' | 'allow_once' | 'always_allow') => void;
@@ -97,6 +99,7 @@ const MessageList = memo(function MessageList({
   virtuosoRef,
   onScrollerRef,
   followEnabledRef,
+  handleAtBottomChange,
   bottomPadding: _bottomPadding,
   pendingPermission,
   onPermissionDecision,
@@ -166,6 +169,15 @@ const MessageList = memo(function MessageList({
     }
   }, [allMessages.length, sessionId, virtuosoRef, followEnabledRef]);
 
+  // ── Auto-scroll during streaming (content height grows without item count change) ──
+  // followOutput only fires on count change. During streaming, the last message keeps
+  // growing taller. autoscrollToBottom() handles this — it scrolls only if already at bottom.
+  useEffect(() => {
+    if (streamingMessage && followEnabledRef.current) {
+      virtuosoRef.current?.autoscrollToBottom();
+    }
+  }, [streamingMessage, followEnabledRef, virtuosoRef]);
+
   // Refs for stable renderItem
   const streamingMessageRef = useRef(streamingMessage);
   streamingMessageRef.current = streamingMessage;
@@ -209,6 +221,7 @@ const MessageList = memo(function MessageList({
         data={allMessages}
         computeItemKey={(_i, m) => m.id}
         followOutput={handleFollowOutput}
+        atBottomStateChange={handleAtBottomChange}
         atBottomThreshold={50}
         defaultItemHeight={200}
         className="h-full"

@@ -842,7 +842,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption on mount
   }, [joinedExistingSidecar]);
 
-  const { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll } = useVirtuosoScroll(isLoading, messages.length, sessionId);
+  const { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll, handleAtBottomChange } = useVirtuosoScroll(isLoading, messages.length, sessionId);
 
   // Capture virtuoso's internal scroller element for QueryNavigator
   const handleScrollerRef = useCallback((el: HTMLElement | Window | null) => {
@@ -1592,6 +1592,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               virtuosoRef={virtuosoRef}
               onScrollerRef={handleScrollerRef}
               followEnabledRef={followEnabledRef}
+              handleAtBottomChange={handleAtBottomChange}
               bottomPadding={140}
               pendingPermission={pendingPermission}
               onPermissionDecision={handlePermissionDecision}

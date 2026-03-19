@@ -1,12 +1,16 @@
 /**
  * useVirtuosoScroll — thin wrapper around react-virtuoso's scroll API.
  *
- * Replaces the 490-line useAutoScroll.ts:
- *  - followOutput:         managed by Virtuoso's built-in followOutput callback
- *  - scrollToBottom:       virtuosoRef.scrollToIndex({ index: 'LAST' }) + force-follow
- *  - pauseAutoScroll:      temporarily disables followOutput via ref
- *  - session switch:       Virtuoso remounts via key={sessionId}, initialTopMostItemIndex handles position
- *  - user scroll-up:       followOutput returns false when not at bottom (Virtuoso manages)
+ * Three-state follow model:
+ *  - `'force'`: always follow (after scrollToBottom, until confirmed at bottom)
+ *  - `true`:    follow when at bottom (normal streaming)
+ *  - `false`:   disabled (user scrolled up, or paused for rewind/retry)
+ *
+ * Transitions:
+ *  scrollToBottom() → 'force'
+ *  atBottomStateChange(true) + force → true  (confirmed at bottom, normal follow)
+ *  atBottomStateChange(false) + true → false  (user scrolled up, stop following)
+ *  pauseAutoScroll() → false (temporary, auto-restores to true)
  */
 
 import { useCallback, useEffect, useRef } from 'react';
@@ -14,23 +18,16 @@ import type { VirtuosoHandle } from 'react-virtuoso';
 
 export interface VirtuosoScrollControls {
     virtuosoRef: React.RefObject<VirtuosoHandle | null>;
-    /** Ref capturing virtuoso's internal scroll element — for QueryNavigator IntersectionObserver */
     scrollerRef: React.MutableRefObject<HTMLElement | null>;
-    /**
-     * Read by Virtuoso's followOutput callback.
-     * - `false`: auto-follow disabled (paused or user scrolled up)
-     * - `true`: follow only when already at bottom
-     * - `'force'`: force-follow even when not at bottom (after scrollToBottom)
-     */
     followEnabledRef: React.MutableRefObject<boolean | 'force'>;
-    /** Re-enable auto-follow and smooth-scroll to bottom (user sends message) */
     scrollToBottom: () => void;
-    /** Temporarily disable auto-follow (rewind/retry DOM changes) */
     pauseAutoScroll: (duration?: number) => void;
+    /** Pass to Virtuoso's atBottomStateChange — manages follow state transitions */
+    handleAtBottomChange: (atBottom: boolean) => void;
 }
 
 export function useVirtuosoScroll(
-    isLoading: boolean,
+    _isLoading: boolean,
     _messagesLength: number,
     _sessionId?: string | null,
 ): VirtuosoScrollControls {
@@ -39,22 +36,7 @@ export function useVirtuosoScroll(
     const followEnabledRef = useRef<boolean | 'force'>(true);
     const pauseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // ── Streaming starts: downgrade force-follow to normal follow ──
-    useEffect(() => {
-        if (isLoading) {
-            if (followEnabledRef.current === 'force') {
-                followEnabledRef.current = true;
-            }
-        }
-    }, [isLoading]);
-
-    // ── Public API ──
-
     const scrollToBottom = useCallback(() => {
-        // 'force' makes followOutput return 'smooth' regardless of isAtBottom.
-        // This handles the async gap: user clicks send → scrollToBottom fires →
-        // SSE replay appends user message later → followOutput must keep tracking
-        // even though Virtuoso doesn't yet consider us "at bottom".
         followEnabledRef.current = 'force';
         virtuosoRef.current?.scrollToIndex({ index: 'LAST', behavior: 'smooth' });
     }, []);
@@ -68,12 +50,25 @@ export function useVirtuosoScroll(
         }, duration);
     }, []);
 
-    // Cleanup
+    /** Called by Virtuoso when the list transitions between at-bottom and not-at-bottom */
+    const handleAtBottomChange = useCallback((atBottom: boolean) => {
+        if (atBottom && followEnabledRef.current === 'force') {
+            // Confirmed at bottom after scrollToBottom() — switch to normal follow
+            followEnabledRef.current = true;
+        }
+        if (!atBottom && followEnabledRef.current === true) {
+            // User scrolled away from bottom during normal follow — disable
+            followEnabledRef.current = false;
+        }
+        // Note: !atBottom + 'force' → stay in force (still scrolling to bottom)
+        // Note: !atBottom + false → already disabled, no change
+    }, []);
+
     useEffect(() => {
         return () => {
             if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
         };
     }, []);
 
-    return { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll };
+    return { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll, handleAtBottomChange };
 }
