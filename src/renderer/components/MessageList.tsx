@@ -10,21 +10,13 @@ import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { Message as MessageType } from '@/types/chat';
 
-/**
- * Format elapsed seconds to human-readable string
- */
 function formatElapsedTime(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-
-  if (hours > 0) {
-    return `${hours}小时${minutes}分钟${seconds}秒`;
-  } else if (minutes > 0) {
-    return `${minutes}分钟${seconds}秒`;
-  } else {
-    return `${seconds}秒`;
-  }
+  if (hours > 0) return `${hours}小时${minutes}分钟${seconds}秒`;
+  if (minutes > 0) return `${minutes}分钟${seconds}秒`;
+  return `${seconds}秒`;
 }
 
 interface MessageListProps {
@@ -32,13 +24,9 @@ interface MessageListProps {
   streamingMessage: MessageType | null;
   isLoading: boolean;
   isSessionLoading?: boolean;
-  /** Session ID — used as Virtuoso key to force remount on session switch (clean height cache) */
   sessionId?: string | null;
-  /** VirtuosoHandle ref — scroll API for session switch / send message */
   virtuosoRef: React.RefObject<VirtuosoHandle | null>;
-  /** Callback to capture virtuoso's internal scroll element (for QueryNavigator) */
   onScrollerRef?: (el: HTMLElement | Window | null) => void;
-  /** Read by followOutput — false=disabled, true=follow at bottom, 'force'=always follow */
   followEnabledRef: React.MutableRefObject<boolean | 'force'>;
   bottomPadding?: number;
   pendingPermission?: PermissionRequest | null;
@@ -56,7 +44,6 @@ interface MessageListProps {
   onFork?: (assistantMessageId: string) => void;
 }
 
-// Fun streaming status messages
 const STREAMING_MESSAGES = [
   '苦思冥想中…', '深思熟虑中…', '灵光一闪中…', '绞尽脑汁中…', '思绪飞速运转中…',
   '小脑袋瓜转啊转…', '神经元疯狂放电中…', '灵感小火花碰撞中…', '正在努力组织语言…',
@@ -64,116 +51,42 @@ const STREAMING_MESSAGES = [
   '递归思考中，请勿打扰…', '正在遍历可能性…', '加载智慧模块中…',
   '容我想想…', '稍等，马上就好…', '别急，好饭不怕晚…', '正在认真对待你的问题…',
 ];
-
 const SYSTEM_STATUS_MESSAGES: Record<string, string> = {
   compacting: '会话内容过长，智能总结中…',
   rewinding: '正在时间回溯中，请稍等…',
 };
-
 function getRandomStreamingMessage(): string {
   return STREAMING_MESSAGES[Math.floor(Math.random() * STREAMING_MESSAGES.length)];
 }
 
-/** StatusTimer — isolated component so 1s ticks don't trigger parent re-renders */
 const StatusTimer = memo(function StatusTimer({ message }: { message: string }) {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const startTimeRef = useRef(0);
-
   useEffect(() => {
     startTimeRef.current = Date.now();
-    const intervalId = setInterval(() => {
-      setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000));
-    }, 1000);
-    return () => clearInterval(intervalId);
+    const id = setInterval(() => setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000)), 1000);
+    return () => clearInterval(id);
   }, []);
-
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-[var(--ink-muted)]">
       <Loader2 className="h-3 w-3 animate-spin" />
-      <span>
-        {message}
-        {elapsedSeconds > 0 && ` (${formatElapsedTime(elapsedSeconds)})`}
-      </span>
+      <span>{message}{elapsedSeconds > 0 && ` (${formatElapsedTime(elapsedSeconds)})`}</span>
     </div>
   );
 });
 
-/** Check if a message contains an ExitPlanMode tool call */
 function hasExitPlanModeTool(message: MessageType): boolean {
   if (message.role !== 'assistant' || typeof message.content === 'string') return false;
   return message.content.some(
-    block => (block.type === 'tool_use' || block.type === 'server_tool_use')
-      && block.tool?.name === 'ExitPlanMode'
+    block => (block.type === 'tool_use' || block.type === 'server_tool_use') && block.tool?.name === 'ExitPlanMode'
   );
 }
 
-// ── Stable custom Virtuoso sub-components (defined outside to prevent re-creation) ──
-
-/** Scroller: the actual overflow:auto element */
-const VirtuosoScroller = React.forwardRef<HTMLDivElement, React.ComponentPropsWithRef<'div'>>(
-  function VirtuosoScroller(props, ref) {
-    const { style, ...rest } = props;
-    return (
-      <div
-        ref={ref}
-        {...rest}
-        style={{ ...style, overscrollBehavior: 'none' }}
-        className={`${rest.className || ''} px-3 py-3`}
-      />
-    );
-  }
-);
-
-/** List wrapper: centers content with max-width */
-const VirtuosoList = React.forwardRef<HTMLDivElement, React.ComponentPropsWithRef<'div'>>(
-  function VirtuosoList(props, ref) {
-    return <div ref={ref} {...props} className={`${props.className || ''} mx-auto max-w-3xl`} />;
-  }
-);
-
-/** Footer: prompts + status + bottom clearance — extracted as stable memo component */
-const VirtuosoFooter = memo(function VirtuosoFooter({
-  pendingPermission, onPermissionDecision,
-  pendingAskUserQuestion, onAskUserQuestionSubmit, onAskUserQuestionCancel,
-  showStatus, statusMessage, bottomPadding,
-}: {
-  pendingPermission?: PermissionRequest | null;
-  onPermissionDecision?: (decision: 'deny' | 'allow_once' | 'always_allow') => void;
-  pendingAskUserQuestion?: AskUserQuestionRequest | null;
-  onAskUserQuestionSubmit?: (requestId: string, answers: Record<string, string>) => void;
-  onAskUserQuestionCancel?: (requestId: string) => void;
-  showStatus: boolean;
-  statusMessage: string;
-  bottomPadding?: number;
-}) {
-  return (
-    <>
-      {pendingPermission && onPermissionDecision && (
-        <div className="mx-auto max-w-3xl py-2 px-1">
-          <PermissionPrompt
-            request={pendingPermission}
-            onDecision={(_requestId, decision) => onPermissionDecision(decision)}
-          />
-        </div>
-      )}
-      {pendingAskUserQuestion && onAskUserQuestionSubmit && onAskUserQuestionCancel && (
-        <div className="mx-auto max-w-3xl py-2 px-1">
-          <AskUserQuestionPrompt
-            request={pendingAskUserQuestion}
-            onSubmit={onAskUserQuestionSubmit}
-            onCancel={onAskUserQuestionCancel}
-          />
-        </div>
-      )}
-      {showStatus && (
-        <div className="mx-auto max-w-3xl">
-          <StatusTimer message={statusMessage} />
-        </div>
-      )}
-      {bottomPadding ? <div style={{ height: bottomPadding }} aria-hidden="true" /> : null}
-    </>
-  );
-});
+// ═══════════════════════════════════════════════════════════════════════
+// MINIMAL Virtuoso test — stripped all custom Scroller/List/Footer.
+// Goal: isolate whether the phantom-content bug is caused by our
+// customizations or by Virtuoso itself with our data/content.
+// ═══════════════════════════════════════════════════════════════════════
 
 const MessageList = memo(function MessageList({
   historyMessages,
@@ -184,7 +97,7 @@ const MessageList = memo(function MessageList({
   virtuosoRef,
   onScrollerRef,
   followEnabledRef,
-  bottomPadding,
+  bottomPadding: _bottomPadding,
   pendingPermission,
   onPermissionDecision,
   pendingAskUserQuestion,
@@ -199,43 +112,19 @@ const MessageList = memo(function MessageList({
   onRetry,
   onFork,
 }: MessageListProps) {
-  // ── Merged message array for Virtuoso ──
   const allMessages = useMemo(() =>
-    streamingMessage
-      ? [...historyMessages, streamingMessage]
-      : historyMessages,
+    streamingMessage ? [...historyMessages, streamingMessage] : historyMessages,
     [historyMessages, streamingMessage]
   );
 
-  // ── Scroll to bottom after session load ──
-  // initialTopMostItemIndex is unreliable with variable-height items (known react-virtuoso bug:
-  // issues #176, #132). Instead, we scroll to LAST after Virtuoso has mounted + measured items.
-  // The fadeIn animation (600ms opacity:0) hides this positioning. We also set force-follow so
-  // that SSE-replayed messages (which arrive AFTER this scroll) are tracked automatically.
-  const lastScrolledSessionRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (allMessages.length > 0 && sessionId && sessionId !== lastScrolledSessionRef.current) {
-      lastScrolledSessionRef.current = sessionId;
-      // Enable force-follow BEFORE scroll so SSE appends (count changes) are tracked
-      followEnabledRef.current = 'force';
-      // 300ms delay: Virtuoso needs time to render items and measure heights.
-      // With 20000px overscan, most items render in the first frame; 300ms ensures
-      // measurement is complete. fadeIn's 600ms window hides this entirely.
-      const timer = setTimeout(() => {
-        virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end' });
-      }, 300);
-      return () => clearTimeout(timer);
-    }
-  }, [allMessages.length, sessionId, virtuosoRef, followEnabledRef]);
-
-  // ── Streaming status ──
+  // Streaming status
   const streamingStatusMessage = useMemo(
     () => getRandomStreamingMessage(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only change when message count changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [historyMessages.length]
   );
 
-  // ── ExitPlanMode slot injection ──
+  // ExitPlanMode
   const exitPlanModeAnchorId = useMemo(() => {
     if (!pendingExitPlanMode) return null;
     if (streamingMessage && hasExitPlanModeTool(streamingMessage)) return streamingMessage.id;
@@ -244,46 +133,40 @@ const MessageList = memo(function MessageList({
     }
     return null;
   }, [pendingExitPlanMode, streamingMessage, historyMessages]);
-
   const exitPlanModeSlot = useMemo(() => {
     if (!pendingExitPlanMode || !onExitPlanModeApprove || !onExitPlanModeReject) return undefined;
     return (
       <div className="py-2">
-        <ExitPlanModePrompt
-          request={pendingExitPlanMode}
-          onApprove={onExitPlanModeApprove}
-          onReject={onExitPlanModeReject}
-        />
+        <ExitPlanModePrompt request={pendingExitPlanMode} onApprove={onExitPlanModeApprove} onReject={onExitPlanModeReject} />
       </div>
     );
   }, [pendingExitPlanMode, onExitPlanModeApprove, onExitPlanModeReject]);
 
-  // ── Status display ──
   const showStatus = isLoading || !!systemStatus;
-  const statusMessage = systemStatus
-    ? (SYSTEM_STATUS_MESSAGES[systemStatus] || systemStatus)
-    : streamingStatusMessage;
+  const statusMessage = systemStatus ? (SYSTEM_STATUS_MESSAGES[systemStatus] || systemStatus) : streamingStatusMessage;
 
-  // ── Fade-in animation on session load ──
+  // Fade-in
   const wasSessionLoadingRef = useRef(false);
   const [fadeIn, setFadeIn] = useState(false);
-
   useEffect(() => {
-    if (isSessionLoading) {
-      wasSessionLoadingRef.current = true;
-      setFadeIn(false);
-    } else if (wasSessionLoadingRef.current) {
-      wasSessionLoadingRef.current = false;
-      setFadeIn(true);
-    }
+    if (isSessionLoading) { wasSessionLoadingRef.current = true; setFadeIn(false); }
+    else if (wasSessionLoadingRef.current) { wasSessionLoadingRef.current = false; setFadeIn(true); }
   }, [isSessionLoading]);
 
-  const hasMessages = allMessages.length > 0;
+  // Scroll to bottom after load
+  const lastScrolledSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (allMessages.length > 0 && sessionId && sessionId !== lastScrolledSessionRef.current) {
+      lastScrolledSessionRef.current = sessionId;
+      followEnabledRef.current = 'force';
+      const timer = setTimeout(() => {
+        virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end' });
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [allMessages.length, sessionId, virtuosoRef, followEnabledRef]);
 
-  // ── Refs for stable renderItem — avoid re-creating itemContent on every streaming token ──
-  // Critical: if renderItem depends on `streamingMessage` directly, it invalidates on every
-  // token chunk, causing Virtuoso to re-render ALL visible items. Using refs lets the callback
-  // read the latest value at call-time without changing its reference identity.
+  // Refs for stable renderItem
   const streamingMessageRef = useRef(streamingMessage);
   streamingMessageRef.current = streamingMessage;
   const isLoadingRef = useRef(isLoading);
@@ -293,107 +176,15 @@ const MessageList = memo(function MessageList({
   const exitPlanModeSlotRef = useRef(exitPlanModeSlot);
   exitPlanModeSlotRef.current = exitPlanModeSlot;
 
-  // ── Virtuoso followOutput callback (reads ref at call-time) ──
-  // Three modes: false=disabled, true=follow when at bottom, 'force'=always follow
   const handleFollowOutput = useMemo(
     () => (isAtBottom: boolean) => {
       const mode = followEnabledRef.current;
       if (!mode) return false;
-      // 'force' mode: always follow (used after scrollToBottom to track async appends)
       if (mode === 'force') return 'smooth' as const;
       return isAtBottom ? 'smooth' as const : false;
     },
     [followEnabledRef]
   );
-
-  // ── Stable itemContent — reads streaming state from refs, never invalidates during streaming ──
-  // Not a React component — it's Virtuoso's itemContent render function (returns JSX but is not a component).
-  // Refs intentionally used to keep the callback stable during streaming (no dep on streamingMessage).
-  const allMessagesRef = useRef(allMessages);
-  allMessagesRef.current = allMessages;
-
-  // ── Diagnostic: track data length changes ──
-  const prevDataLenRef = useRef(0);
-  useEffect(() => {
-    if (allMessages.length !== prevDataLenRef.current) {
-      console.warn(`[Virtuoso:diag] data.length changed: ${prevDataLenRef.current} → ${allMessages.length}`);
-      prevDataLenRef.current = allMessages.length;
-    }
-  }, [allMessages.length]);
-
-  const renderItem = useMemo(
-    // eslint-disable-next-line react/display-name
-    () => (index: number, message: MessageType) => {
-      const dataLen = allMessagesRef.current.length;
-
-      // ── Diagnostic: out-of-bounds check ──
-      if (index >= dataLen) {
-        console.error(`[Virtuoso:diag] OUT OF BOUNDS: renderItem(${index}) but data.length=${dataLen}`);
-      }
-
-      // ── Diagnostic: verify Virtuoso passes the correct message for this index ──
-      const expected = allMessagesRef.current[index];
-      if (expected && message !== expected) {
-        console.error(
-          `[Virtuoso:diag] DATA MISMATCH at index ${index}: ` +
-          `received id=${message.id} but data[${index}].id=${expected.id}`
-        );
-      }
-
-      // ── Diagnostic: detect undefined message ──
-      if (!message) {
-        console.error(`[Virtuoso:diag] UNDEFINED MESSAGE at index ${index}, data.length=${dataLen}`);
-        return <div className="py-1 text-red-500">Error: undefined message at index {index}</div>;
-      }
-
-      const sm = streamingMessageRef.current;
-      const isStreamingMsg = !!sm && message === sm;
-      return (
-        <div className="py-1 overflow-hidden">
-          <Message
-            message={message}
-            isLoading={isStreamingMsg && isLoadingRef.current}
-            onRewind={onRewind}
-            onRetry={onRetry}
-            onFork={onFork}
-            exitPlanModeSlot={message.id === exitPlanModeAnchorIdRef.current ? exitPlanModeSlotRef.current : undefined}
-          />
-        </div>
-      );
-    },
-    [onRewind, onRetry, onFork]  // Only truly stable deps — refs handle the rest
-  );
-
-  // ── Stable computeItemKey — use message ID instead of index ──
-  const computeItemKey = useMemo(
-    () => (_index: number, message: MessageType) => message.id,
-    []
-  );
-
-  // ── Stable Footer component (wrapped in useMemo to prevent Virtuoso re-mount) ──
-  const FooterComponent = useMemo(() => {
-    return function Footer() {
-      return (
-        <VirtuosoFooter
-          pendingPermission={pendingPermission}
-          onPermissionDecision={onPermissionDecision}
-          pendingAskUserQuestion={pendingAskUserQuestion}
-          onAskUserQuestionSubmit={onAskUserQuestionSubmit}
-          onAskUserQuestionCancel={onAskUserQuestionCancel}
-          showStatus={showStatus}
-          statusMessage={statusMessage}
-          bottomPadding={bottomPadding}
-        />
-      );
-    };
-  }, [pendingPermission, onPermissionDecision, pendingAskUserQuestion, onAskUserQuestionSubmit, onAskUserQuestionCancel, showStatus, statusMessage, bottomPadding]);
-
-  // ── Stable components object ──
-  const components = useMemo(() => ({
-    Scroller: VirtuosoScroller,
-    List: VirtuosoList,
-    Footer: FooterComponent,
-  }), [FooterComponent]);
 
   return (
     <div
@@ -402,8 +193,7 @@ const MessageList = memo(function MessageList({
       style={fadeIn ? { animation: 'message-list-fade-in 600ms ease-out both' } : undefined}
       onAnimationEnd={() => setFadeIn(false)}
     >
-      {/* Loading spinner overlay */}
-      {isSessionLoading && !hasMessages && (
+      {isSessionLoading && allMessages.length === 0 && (
         <div className="absolute inset-0 z-10 flex items-center justify-center" style={{ paddingBottom: 140 }}>
           <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -412,37 +202,58 @@ const MessageList = memo(function MessageList({
         </div>
       )}
 
+      {/* ═══ MINIMAL Virtuoso — NO custom Scroller/List/Footer ═══ */}
       <Virtuoso
         key={sessionId || 'pending'}
         ref={virtuosoRef}
         scrollerRef={onScrollerRef}
         data={allMessages}
-        computeItemKey={computeItemKey}
+        computeItemKey={(_i, m) => m.id}
         followOutput={handleFollowOutput}
-        skipAnimationFrameInResizeObserver
         atBottomThreshold={50}
         defaultItemHeight={200}
-        increaseViewportBy={{ top: 800, bottom: 600 }}
-        minOverscanItemCount={4}
         className="h-full"
-        components={components}
-        itemContent={renderItem}
+        style={{ overscrollBehavior: 'none' }}
+        itemContent={(index, message) => {
+          const sm = streamingMessageRef.current;
+          const isStreamingMsg = !!sm && message === sm;
+          return (
+            <div className="mx-auto max-w-3xl px-3 py-1 overflow-hidden">
+              <Message
+                message={message}
+                isLoading={isStreamingMsg && isLoadingRef.current}
+                onRewind={onRewind}
+                onRetry={onRetry}
+                onFork={onFork}
+                exitPlanModeSlot={message.id === exitPlanModeAnchorIdRef.current ? exitPlanModeSlotRef.current : undefined}
+              />
+            </div>
+          );
+        }}
         totalListHeightChanged={(height) => {
-          console.warn(`[Virtuoso:diag] totalListHeight=${Math.round(height)}px, data.length=${allMessages.length}`);
+          console.warn(`[V:diag] totalH=${Math.round(height)} data=${allMessages.length}`);
         }}
         rangeChanged={(range) => {
-          console.debug(`[Virtuoso:diag] range: ${range.startIndex}-${range.endIndex} (${range.endIndex - range.startIndex + 1} items), data.length=${allMessages.length}`);
-        }}
-        isScrolling={(scrolling) => {
-          if (!scrolling) {
-            // Log scroll position when scrolling stops
-            const scroller = onScrollerRef ? (document.querySelector('[data-virtuoso-scroller]') || null) : null;
-            if (scroller && scroller instanceof HTMLElement) {
-              console.debug(`[Virtuoso:diag] scroll stopped: scrollTop=${Math.round(scroller.scrollTop)}, scrollHeight=${Math.round(scroller.scrollHeight)}, clientHeight=${Math.round(scroller.clientHeight)}`);
-            }
-          }
+          console.debug(`[V:diag] range=${range.startIndex}-${range.endIndex} (${range.endIndex - range.startIndex + 1}) data=${allMessages.length}`);
         }}
       />
+
+      {/* Footer OUTSIDE Virtuoso — avoids polluting its height calculation */}
+      <div className="pointer-events-none absolute bottom-0 left-0 right-0">
+        <div className="pointer-events-auto mx-auto max-w-3xl px-3">
+          {pendingPermission && onPermissionDecision && (
+            <div className="py-2">
+              <PermissionPrompt request={pendingPermission} onDecision={(_id, d) => onPermissionDecision(d)} />
+            </div>
+          )}
+          {pendingAskUserQuestion && onAskUserQuestionSubmit && onAskUserQuestionCancel && (
+            <div className="py-2">
+              <AskUserQuestionPrompt request={pendingAskUserQuestion} onSubmit={onAskUserQuestionSubmit} onCancel={onAskUserQuestionCancel} />
+            </div>
+          )}
+          {showStatus && <StatusTimer message={statusMessage} />}
+        </div>
+      </div>
     </div>
   );
 });
