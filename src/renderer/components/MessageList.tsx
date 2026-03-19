@@ -312,16 +312,38 @@ const MessageList = memo(function MessageList({
   const allMessagesRef = useRef(allMessages);
   allMessagesRef.current = allMessages;
 
+  // ── Diagnostic: track data length changes ──
+  const prevDataLenRef = useRef(0);
+  useEffect(() => {
+    if (allMessages.length !== prevDataLenRef.current) {
+      console.warn(`[Virtuoso:diag] data.length changed: ${prevDataLenRef.current} → ${allMessages.length}`);
+      prevDataLenRef.current = allMessages.length;
+    }
+  }, [allMessages.length]);
+
   const renderItem = useMemo(
     // eslint-disable-next-line react/display-name
     () => (index: number, message: MessageType) => {
+      const dataLen = allMessagesRef.current.length;
+
+      // ── Diagnostic: out-of-bounds check ──
+      if (index >= dataLen) {
+        console.error(`[Virtuoso:diag] OUT OF BOUNDS: renderItem(${index}) but data.length=${dataLen}`);
+      }
+
       // ── Diagnostic: verify Virtuoso passes the correct message for this index ──
       const expected = allMessagesRef.current[index];
       if (expected && message !== expected) {
         console.error(
-          `[Virtuoso] DATA MISMATCH at index ${index}: ` +
+          `[Virtuoso:diag] DATA MISMATCH at index ${index}: ` +
           `received id=${message.id} but data[${index}].id=${expected.id}`
         );
+      }
+
+      // ── Diagnostic: detect undefined message ──
+      if (!message) {
+        console.error(`[Virtuoso:diag] UNDEFINED MESSAGE at index ${index}, data.length=${dataLen}`);
+        return <div className="py-1 text-red-500">Error: undefined message at index {index}</div>;
       }
 
       const sm = streamingMessageRef.current;
@@ -405,6 +427,21 @@ const MessageList = memo(function MessageList({
         className="h-full"
         components={components}
         itemContent={renderItem}
+        totalListHeightChanged={(height) => {
+          console.warn(`[Virtuoso:diag] totalListHeight=${Math.round(height)}px, data.length=${allMessages.length}`);
+        }}
+        rangeChanged={(range) => {
+          console.debug(`[Virtuoso:diag] range: ${range.startIndex}-${range.endIndex} (${range.endIndex - range.startIndex + 1} items), data.length=${allMessages.length}`);
+        }}
+        isScrolling={(scrolling) => {
+          if (!scrolling) {
+            // Log scroll position when scrolling stops
+            const scroller = onScrollerRef ? (document.querySelector('[data-virtuoso-scroller]') || null) : null;
+            if (scroller && scroller instanceof HTMLElement) {
+              console.debug(`[Virtuoso:diag] scroll stopped: scrollTop=${Math.round(scroller.scrollTop)}, scrollHeight=${Math.round(scroller.scrollHeight)}, clientHeight=${Math.round(scroller.clientHeight)}`);
+            }
+          }
+        }}
       />
     </div>
   );
