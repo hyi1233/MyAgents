@@ -208,21 +208,25 @@ const MessageList = memo(function MessageList({
   );
 
   // ── Scroll to bottom after session load ──
-  // initialTopMostItemIndex is unreliable with variable-height items (Virtuoso can't calculate
-  // the exact scroll position without measuring). Instead, we scroll to LAST after Virtuoso has
-  // mounted and rendered. The fadeIn animation (600ms opacity:0) hides this correction.
+  // initialTopMostItemIndex is unreliable with variable-height items (known react-virtuoso bug:
+  // issues #176, #132). Instead, we scroll to LAST after Virtuoso has mounted + measured items.
+  // The fadeIn animation (600ms opacity:0) hides this positioning. We also set force-follow so
+  // that SSE-replayed messages (which arrive AFTER this scroll) are tracked automatically.
   const lastScrolledSessionRef = useRef<string | null>(null);
   useEffect(() => {
     if (allMessages.length > 0 && sessionId && sessionId !== lastScrolledSessionRef.current) {
       lastScrolledSessionRef.current = sessionId;
-      // 200ms delay: gives Virtuoso time to render and measure items from the top.
-      // The fadeIn animation (600ms opacity:0→1) hides this initial positioning.
+      // Enable force-follow BEFORE scroll so SSE appends (count changes) are tracked
+      followEnabledRef.current = 'force';
+      // 300ms delay: Virtuoso needs time to render items and measure heights.
+      // With 20000px overscan, most items render in the first frame; 300ms ensures
+      // measurement is complete. fadeIn's 600ms window hides this entirely.
       const timer = setTimeout(() => {
-        virtuosoRef.current?.scrollToIndex({ index: 'LAST' });
-      }, 200);
+        virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end' });
+      }, 300);
       return () => clearTimeout(timer);
     }
-  }, [allMessages.length, sessionId, virtuosoRef]);
+  }, [allMessages.length, sessionId, virtuosoRef, followEnabledRef]);
 
   // ── Streaming status ──
   const streamingStatusMessage = useMemo(
@@ -392,7 +396,9 @@ const MessageList = memo(function MessageList({
         scrollerRef={onScrollerRef}
         data={allMessages}
         computeItemKey={computeItemKey}
+        alignToBottom
         followOutput={handleFollowOutput}
+        skipAnimationFrameInResizeObserver
         atBottomThreshold={50}
         defaultItemHeight={300}
         increaseViewportBy={{ top: 20000, bottom: 2000 }}
