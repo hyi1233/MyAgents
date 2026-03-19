@@ -6322,6 +6322,9 @@ async function main() {
             const senderTag = payload.senderName ? `[from: ${payload.senderName}]\n` : '';
             parts.push(`${senderTag}${finalMessage}`);
             finalMessage = parts.join('\n\n');
+          } else if (payload.replyToBody) {
+            // Private/DM quoted reply — prepend context before message
+            finalMessage = `[引用回复]\n> ${payload.replyToBody.split('\n').join('\n> ')}\n\n${finalMessage}`;
           }
 
           // Set group tool deny list (v0.1.28): block dangerous tools in group context

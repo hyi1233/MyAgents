@@ -114,6 +114,9 @@ impl MessageCoalescer {
                 if batch.reply_to_body.is_none() {
                     batch.reply_to_body = msg.reply_to_body.clone();
                 }
+                if batch.group_system_prompt.is_none() {
+                    batch.group_system_prompt = msg.group_system_prompt.clone();
+                }
                 return ready; // Still waiting for more fragments
             }
 
