@@ -154,7 +154,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
         },
 
         createReplyDispatcherWithTyping(_params: Record<string, unknown>) {
-          return { dispatch: async () => {} };
+          return { dispatch: async () => ({ queuedFinal: 0, counts: {} }) };
         },
 
         /**
@@ -221,7 +221,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
 
           if (!text.trim()) {
             console.log('[compat-runtime] Empty message, skipping');
-            return;
+            return { queuedFinal: 0, counts: {} };
           }
 
           const t0 = Date.now();
@@ -257,6 +257,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           }
 
           // Do NOT call the deliver callback — AI reply comes back via /send-text
+          return { queuedFinal: 0, counts: {} };
         },
       },
 
