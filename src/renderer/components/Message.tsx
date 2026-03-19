@@ -206,7 +206,15 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
   }, []);
 
   if (message.role === 'user') {
-    const userContent = typeof message.content === 'string' ? message.content : '';
+    const rawUserContent = typeof message.content === 'string' ? message.content : '';
+    // Strip system injection tags (<system-reminder>, <HEARTBEAT>, <MEMORY_UPDATE>) that
+    // the heartbeat/cron system wraps around delivered content. These HTML-like tags trigger
+    // Markdown's HTML block mode, breaking \n rendering and Markdown syntax.
+    const userContent = rawUserContent
+      .replace(/<\/?system-reminder>/g, '')
+      .replace(/<\/?HEARTBEAT>/g, '')
+      .replace(/<\/?MEMORY_UPDATE>/g, '')
+      .trim();
     const hasAttachments = Boolean(message.attachments?.length);
     const attachmentItems =
       message.attachments?.map((attachment) => ({
