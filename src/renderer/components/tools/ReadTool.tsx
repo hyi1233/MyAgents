@@ -3,28 +3,6 @@ import type { ReadInput, ToolUseSimple } from '@/types/chat';
 import { CollapsibleTool } from './CollapsibleTool';
 import { ExpandableResult, FilePath, ToolHeader } from './utils';
 
-/** Try to extract file content from SDK JSON wrapper.
- *  Formats seen:
- *  - {"type":"text","file":{"filePath":"...","content":"..."}}
- *  - Plain text (cat -n output)
- */
-function extractFileContent(result: string): string {
-  const trimmed = result.trimStart();
-  if (trimmed.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed?.file?.content && typeof parsed.file.content === 'string') {
-        return parsed.file.content;
-      }
-      // Some variants use top-level content
-      if (parsed?.content && typeof parsed.content === 'string') {
-        return parsed.content;
-      }
-    } catch { /* not JSON, fall through */ }
-  }
-  return result;
-}
-
 interface ReadToolProps {
   tool: ToolUseSimple;
 }
@@ -57,11 +35,10 @@ export default function ReadTool({ tool }: ReadToolProps) {
     </div>
   );
 
-  const content = tool.result ? extractFileContent(tool.result) : null;
-
-  const expandedContent = content ? (
+  // ExpandableResult internally calls unwrapSdkResult() to extract file content from SDK JSON
+  const expandedContent = tool.result ? (
     <ExpandableResult
-      content={content}
+      content={tool.result}
       className="rounded bg-[var(--paper-inset)]/50 px-2 py-1 wrap-break-word text-[var(--ink-secondary)]"
     />
   ) : null;
