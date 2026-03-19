@@ -85,7 +85,7 @@ export function getProviderModels(provider: Provider): ModelEntity[] {
  * @param maxLength Maximum length before truncation (default 35)
  */
 export function getModelsDisplay(provider: Provider, maxLength = 35): string {
-  const models = provider.models?.map(m => m.modelName) ?? [];
+  const models = provider.models?.map(m => m.model) ?? [];
   const display = models.join(', ');
   return display.length > maxLength ? display.slice(0, maxLength - 3) + '...' : display;
 }
@@ -278,7 +278,7 @@ export interface ProxySettings {
  */
 export interface AppConfig {
   // Default settings for new projects
-  defaultProviderId: string;
+  defaultProviderId?: string;
   defaultPermissionMode: PermissionMode;
   // UI preferences
   theme: 'light' | 'dark' | 'system';
@@ -762,6 +762,45 @@ export const PRESET_MCP_SERVERS: McpServerDefinition[] = [
   },
 ];
 
+// ===== MCP OAuth 2.0 Types =====
+
+/**
+ * OAuth 2.0 configuration for an MCP server (user-provided or discovered)
+ */
+export interface McpOAuthConfig {
+  /** OAuth client ID (from server registration or manual entry) */
+  clientId: string;
+  /** OAuth client secret (optional, for confidential clients) */
+  clientSecret?: string;
+  /** Requested scopes (space-separated in protocol, stored as array) */
+  scopes?: string[];
+}
+
+/**
+ * Stored OAuth token for an MCP server
+ */
+export interface McpOAuthToken {
+  /** Access token */
+  accessToken: string;
+  /** Refresh token (if provided by server) */
+  refreshToken?: string;
+  /** Token type (usually "Bearer") */
+  tokenType: string;
+  /** Expiry timestamp (ms since epoch) */
+  expiresAt?: number;
+  /** Scopes granted */
+  scope?: string;
+  /** Server URL this token is for (token endpoint) */
+  serverUrl: string;
+  /** Client ID — needed for token refresh (RFC 6749 Section 6) */
+  clientId?: string;
+}
+
+/**
+ * OAuth status for display in the UI
+ */
+export type McpOAuthStatus = 'disconnected' | 'connecting' | 'connected' | 'expired' | 'error';
+
 /**
  * MCP discovery links
  */
@@ -799,7 +838,7 @@ export function getEffectiveModelAliases(
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
-  defaultProviderId: 'anthropic-sub',
+  defaultProviderId: undefined, // No default — resolved at runtime from first available provider
   defaultPermissionMode: 'auto',
   theme: 'system',
   minimizeToTray: true,   // 默认开启最小化到托盘

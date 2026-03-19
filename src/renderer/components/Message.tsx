@@ -1,5 +1,5 @@
 import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Copy, Check, Undo2, RotateCcw } from 'lucide-react';
+import { Copy, Check, Undo2, RotateCcw, GitBranch } from 'lucide-react';
 
 import { track } from '@/analytics';
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
@@ -26,6 +26,7 @@ interface MessageProps {
   isLoading?: boolean;
   onRewind?: (messageId: string) => void;
   onRetry?: (assistantMessageId: string) => void;
+  onFork?: (assistantMessageId: string) => void;
   /** Slot rendered after the BlockGroup containing ExitPlanMode tool */
   exitPlanModeSlot?: ReactNode;
 }
@@ -64,6 +65,9 @@ function areMessagesEqual(prev: MessageProps, next: MessageProps): boolean {
 
   // Metadata change -> must re-render
   if (prevMsg.metadata?.source !== nextMsg.metadata?.source) return false;
+
+  // sdkUuid change -> must re-render (fork button depends on sdkUuid presence)
+  if (prevMsg.sdkUuid !== nextMsg.sdkUuid) return false;
 
   // For streaming messages, check content changes
   if (typeof prevMsg.content === 'string' && typeof nextMsg.content === 'string') {
@@ -116,9 +120,10 @@ function extractAssistantText(content: MessageType['content']): string {
  * Action bar for assistant messages: copy + retry.
  * Always visible (not hover), left-aligned icon buttons.
  */
-function AssistantActions({ message, onRetry, className = '' }: {
+function AssistantActions({ message, onRetry, onFork, className = '' }: {
   message: MessageType;
   onRetry?: (id: string) => void;
+  onFork?: (id: string) => void;
   className?: string;
 }) {
   const [copied, setCopied] = useState(false);
@@ -156,6 +161,16 @@ function AssistantActions({ message, onRetry, className = '' }: {
           </button>
         </Tip>
       )}
+      {onFork && message.sdkUuid && (
+        <Tip label="分支">
+          <button type="button"
+            aria-label="分支"
+            onClick={() => onFork(message.id)}
+            className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+            <GitBranch className="size-3.5" />
+          </button>
+        </Tip>
+      )}
     </div>
   );
 }
@@ -164,7 +179,7 @@ function AssistantActions({ message, onRetry, className = '' }: {
  * Message component with memo optimization.
  * History messages won't re-render when streaming message updates.
  */
-const Message = memo(function Message({ message, isLoading = false, onRewind, onRetry, exitPlanModeSlot }: MessageProps) {
+const Message = memo(function Message({ message, isLoading = false, onRewind, onRetry, onFork, exitPlanModeSlot }: MessageProps) {
   const { openPreview } = useImagePreview();
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -191,7 +206,15 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
   }, []);
 
   if (message.role === 'user') {
-    const userContent = typeof message.content === 'string' ? message.content : '';
+    const rawUserContent = typeof message.content === 'string' ? message.content : '';
+    // Strip system injection tags (<system-reminder>, <HEARTBEAT>, <MEMORY_UPDATE>) that
+    // the heartbeat/cron system wraps around delivered content. These HTML-like tags trigger
+    // Markdown's HTML block mode, breaking \n rendering and Markdown syntax.
+    const userContent = rawUserContent
+      .replace(/<\/?system-reminder>/g, '')
+      .replace(/<\/?HEARTBEAT>/g, '')
+      .replace(/<\/?MEMORY_UPDATE>/g, '')
+      .trim();
     const hasAttachments = Boolean(message.attachments?.length);
     const attachmentItems =
       message.attachments?.map((attachment) => ({
@@ -301,7 +324,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
           <div className="text-[var(--ink)] select-text">
             <Markdown>{message.content}</Markdown>
           </div>
-          {actionsReady && <AssistantActions message={message} onRetry={onRetry} />}
+          {actionsReady && <AssistantActions message={message} onRetry={onRetry} onFork={onFork} />}
         </div>
       </div>
     );
@@ -409,7 +432,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
             })}
           </div>
         </article>
-        {actionsReady && <AssistantActions className="px-4" message={message} onRetry={onRetry} />}
+        {actionsReady && <AssistantActions className="px-4" message={message} onRetry={onRetry} onFork={onFork} />}
       </div>
     </div>
   );

@@ -16,7 +16,7 @@ import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
 import { useTabState, useTabActive } from '@/context/TabContext';
-import { useAutoScroll } from '@/hooks/useAutoScroll';
+import { useVirtuosoScroll } from '@/hooks/useVirtuosoScroll';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
@@ -33,6 +33,7 @@ import { type PermissionMode, type McpServerDefinition } from '@/config/types';
 import {
   getAllMcpServers,
   getEnabledMcpServerIds,
+  resolveProvider,
 } from '@/config/configService';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import type { InitialMessage } from '@/types/tab';
@@ -101,9 +102,11 @@ interface ChatProps {
   sessionTitle?: string;
   /** Called when user renames the session */
   onRenameSession?: (newTitle: string) => void;
+  /** Called when user forks session at a specific assistant message — App creates new tab */
+  onForkSession?: (newSessionId: string, agentDir: string, title: string) => void;
 }
 
-export default function Chat({ onBack, onNewSession, onSwitchSession, initialMessage, onInitialMessageConsumed, joinedExistingSidecar, onJoinedExistingSidecarHandled, sessionTitle, onRenameSession }: ChatProps) {
+export default function Chat({ onBack, onNewSession, onSwitchSession, initialMessage, onInitialMessageConsumed, joinedExistingSidecar, onJoinedExistingSidecarHandled, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
     tabId,
@@ -160,9 +163,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [selectedProviderId, setSelectedProviderId] = useState<string | undefined>(
     currentProject?.providerId ?? config.defaultProviderId ?? undefined
   );
-  const currentProvider = selectedProviderId
-    ? providers.find((p) => p.id === selectedProviderId)
-    : providers[0]; // Default to first provider
+  const currentProvider = resolveProvider(selectedProviderId, providers, apiKeys, providerVerifyStatus);
 
   // PERFORMANCE: Ref-stabilize object deps used in handleSendMessage
   // Prevents useCallback from creating new references when these objects change,
@@ -206,6 +207,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     attachments?: import('@/types/chat').MessageAttachment[];
   } | null>(null);
   const [rewindStatus, setRewindStatus] = useState<string | null>(null);
+
+  // Fork state
+  const [forkTarget, setForkTarget] = useState<string | null>(null); // assistant message ID
+
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
@@ -836,7 +841,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption on mount
   }, [joinedExistingSidecar]);
 
-  const { containerRef: messagesContainerRef, spacerRef, scrollToBottom, pauseAutoScroll } = useAutoScroll(isLoading, messages.length, sessionId);
+  const { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll, handleAtBottomChange } = useVirtuosoScroll();
+
+  // Capture virtuoso's internal scroller element for QueryNavigator
+  const handleScrollerRef = useCallback((el: HTMLElement | Window | null) => {
+    scrollerRef.current = el instanceof HTMLElement ? el : null;
+  }, [scrollerRef]);
 
   // Auto-focus input when Tab becomes active
   useEffect(() => {
@@ -1155,6 +1165,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     [handleForceExecuteQueued]
   );
 
+  // Navigate to a specific query message (used by QueryNavigator with virtuoso)
+  // Uses messagesRef to avoid invalidating the callback on every streaming token update
+  const handleNavigateToQuery = useCallback((messageId: string) => {
+    const index = messagesRef.current.findIndex(m => m.id === messageId);
+    if (index >= 0) {
+      pauseAutoScroll(2000);
+      virtuosoRef.current?.scrollToIndex({ index, behavior: 'smooth', align: 'start' });
+    }
+  }, [pauseAutoScroll, virtuosoRef]);
+
   // Stable callbacks for MessageList (extracted from inline arrows to enable memo)
   const handlePermissionDecision = useCallback((decision: 'deny' | 'allow_once' | 'always_allow') => {
     void respondPermission(decision);
@@ -1316,6 +1336,32 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       });
   }, [apiPost, setMessages, setIsLoading, pauseAutoScroll]); // all stable — refs handle the rest
 
+  // Fork = create a new independent session branch at a specific assistant message
+  const handleFork = useCallback((assistantMessageId: string) => {
+    setForkTarget(assistantMessageId);
+  }, []);
+
+  const handleForkConfirm = useCallback(() => {
+    if (!forkTarget) return;
+    const messageId = forkTarget;
+    setForkTarget(null);
+
+    track('session_fork', {});
+    apiPost('/sessions/fork', { messageId })
+      .then(res => {
+        const r = res as { success?: boolean; newSessionId?: string; agentDir?: string; title?: string; error?: string } | undefined;
+        if (r?.success && r.newSessionId && r.agentDir) {
+          onForkSession?.(r.newSessionId, r.agentDir, r.title || 'Fork');
+        } else {
+          toastRef.current.error('创建分支失败：' + (r?.error || '未知错误'));
+        }
+      })
+      .catch(err => {
+        console.error('[Chat] Fork failed:', err);
+        toastRef.current.error('创建分支失败');
+      });
+  }, [forkTarget, apiPost, onForkSession]);
+
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string) => {
     track('session_switch');
@@ -1474,12 +1520,35 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           )}
 
           {agentError && (
-            <div className="flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)]/80 px-4 py-2 text-[11px] text-[var(--ink)]">
+            <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)] px-4 py-2 text-[11px] text-[var(--ink)]">
               <div className="mx-auto flex max-w-3xl items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
                 <div className="flex-1">
                   <span className="font-semibold text-[var(--ink)]">Agent error: </span>
                   <span className="text-[var(--ink-muted)]">{agentError}</span>
+                  {/* Oversized image hint: detect API 400 about image dimensions and offer rewind.
+                      Pattern synced with backend (agent-session.ts shouldResetSessionAfterError).
+                      Known API error: "...image dimensions exceed max allowed size: 8000 pixels" */}
+                  {/image.*exceed.*max allowed size/i.test(agentError) && (() => {
+                    const msgs = messagesRef.current;
+                    let lastUserMsg = null;
+                    for (let i = msgs.length - 1; i >= 0; i--) {
+                      if (msgs[i].role === 'user') { lastUserMsg = msgs[i]; break; }
+                    }
+                    if (!lastUserMsg) return null;
+                    return (
+                      <div className="mt-1">
+                        <span className="text-[var(--ink-muted)]">工具截图超过模型处理限制，</span>
+                        <button
+                          type="button"
+                          onClick={() => { setAgentError(null); handleRewind(lastUserMsg!.id); }}
+                          className="text-[var(--accent)] underline underline-offset-2 hover:text-[var(--accent-hover)]"
+                        >
+                          点击时间回溯到之前
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
                 <button
                   type="button"
@@ -1503,8 +1572,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           <QueryNavigator
             historyMessages={historyMessages}
             streamingMessage={streamingMessage}
-            scrollContainerRef={messagesContainerRef}
+            scrollContainerRef={scrollerRef as React.RefObject<HTMLDivElement | null>}
             pauseAutoScroll={pauseAutoScroll}
+            onNavigateToQuery={handleNavigateToQuery}
           />
 
           {/* Message list with max-width */}
@@ -1517,9 +1587,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               streamingMessage={streamingMessage}
               isLoading={isLoading}
               isSessionLoading={isSessionLoading}
-              containerRef={messagesContainerRef}
-              spacerRef={spacerRef}
-              bottomPadding={140}
+              sessionId={sessionId}
+              virtuosoRef={virtuosoRef}
+              onScrollerRef={handleScrollerRef}
+              followEnabledRef={followEnabledRef}
+              handleAtBottomChange={handleAtBottomChange}
               pendingPermission={pendingPermission}
               onPermissionDecision={handlePermissionDecision}
               pendingAskUserQuestion={pendingAskUserQuestion}
@@ -1532,6 +1604,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               isStreaming={isLoading || sessionState === 'running'}
               onRewind={handleRewind}
               onRetry={handleRetry}
+              onFork={handleFork}
             />
 
             {/* Inline cron task card — shown in message flow after creating a "新开对话" task */}
@@ -1645,6 +1718,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           confirmVariant="danger"
           onConfirm={handleRewindConfirm}
           onCancel={() => setRewindTarget(null)}
+        />
+      )}
+
+      {/* Fork Session Confirm Dialog */}
+      {forkTarget && (
+        <ConfirmDialog
+          title="创建分支"
+          message="将从此处创建一个新的会话分支，在新标签页中打开。原会话不受影响。"
+          confirmText="创建分支"
+          cancelText="取消"
+          confirmVariant="primary"
+          onConfirm={handleForkConfirm}
+          onCancel={() => setForkTarget(null)}
         />
       )}
 

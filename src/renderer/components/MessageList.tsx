@@ -1,5 +1,7 @@
 import { Loader2 } from 'lucide-react';
-import { memo, useMemo, useState, useEffect, useRef, type CSSProperties, type RefObject } from 'react';
+import React, { memo, useMemo, useState, useEffect, useRef } from 'react';
+import { Virtuoso } from 'react-virtuoso';
+import type { VirtuosoHandle } from 'react-virtuoso';
 
 import Message from '@/components/Message';
 import { PermissionPrompt, type PermissionRequest } from '@/components/PermissionPrompt';
@@ -7,37 +9,26 @@ import { AskUserQuestionPrompt, type AskUserQuestionRequest } from '@/components
 import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { Message as MessageType } from '@/types/chat';
-import { IDLE_SPACER_HEIGHT } from '@/hooks/useAutoScroll';
 
-/**
- * Format elapsed seconds to human-readable string
- * - < 60s: "30秒"
- * - < 1h: "1分钟3秒"
- * - >= 1h: "1小时50分钟10秒"
- */
 function formatElapsedTime(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-
-  if (hours > 0) {
-    return `${hours}小时${minutes}分钟${seconds}秒`;
-  } else if (minutes > 0) {
-    return `${minutes}分钟${seconds}秒`;
-  } else {
-    return `${seconds}秒`;
-  }
+  if (hours > 0) return `${hours}小时${minutes}分钟${seconds}秒`;
+  if (minutes > 0) return `${minutes}分钟${seconds}秒`;
+  return `${seconds}秒`;
 }
 
 interface MessageListProps {
   historyMessages: MessageType[];
   streamingMessage: MessageType | null;
   isLoading: boolean;
-  isSessionLoading?: boolean;  // true while loadSession REST API is in-flight
-  containerRef: RefObject<HTMLDivElement | null>;
-  /** Ref for the bottom spacer — used by useAutoScroll for content-aware targeting */
-  spacerRef?: RefObject<HTMLDivElement | null>;
-  bottomPadding?: number;
+  isSessionLoading?: boolean;
+  sessionId?: string | null;
+  virtuosoRef: React.RefObject<VirtuosoHandle | null>;
+  onScrollerRef?: (el: HTMLElement | Window | null) => void;
+  followEnabledRef: React.MutableRefObject<boolean | 'force'>;
+  handleAtBottomChange: (atBottom: boolean) => void;
   pendingPermission?: PermissionRequest | null;
   onPermissionDecision?: (decision: 'deny' | 'allow_once' | 'always_allow') => void;
   pendingAskUserQuestion?: AskUserQuestionRequest | null;
@@ -46,103 +37,100 @@ interface MessageListProps {
   pendingExitPlanMode?: ExitPlanModeRequest | null;
   onExitPlanModeApprove?: () => void;
   onExitPlanModeReject?: () => void;
-  systemStatus?: string | null;  // SDK system status (e.g., 'compacting')
-  isStreaming?: boolean;          // AI 回复中（CSS 控制隐藏回溯按钮，不传给 Message）
+  systemStatus?: string | null;
+  isStreaming?: boolean;
   onRewind?: (messageId: string) => void;
   onRetry?: (assistantMessageId: string) => void;
+  onFork?: (assistantMessageId: string) => void;
 }
 
-// Enable CSS scroll anchoring for smoother streaming experience
-// overscroll-none completely prevents scroll chaining (works even without scrollbar)
-const containerClasses = 'flex-1 overflow-y-auto overscroll-none px-3 py-3 scroll-anchor-auto';
-
-// Fun streaming status messages - randomly picked for each AI response
 const STREAMING_MESSAGES = [
-  // 思考类
-  '苦思冥想中…',
-  '深思熟虑中…',
-  '灵光一闪中…',
-  '绞尽脑汁中…',
-  '思绪飞速运转中…',
-  // 拟人/可爱类
-  '小脑袋瓜转啊转…',
-  '神经元疯狂放电中…',
-  '灵感小火花碰撞中…',
-  '正在努力组织语言…',
-  // 比喻类
-  '在知识海洋里捞答案…',
-  '正在翻阅宇宙图书馆…',
-  '答案正在酝酿中…',
-  '灵感咖啡冲泡中…',
-  // 程序员幽默类
-  '递归思考中，请勿打扰…',
-  '正在遍历可能性…',
-  '加载智慧模块中…',
-  // 轻松俏皮类
-  '容我想想…',
-  '稍等，马上就好…',
-  '别急，好饭不怕晚…',
-  '正在认真对待你的问题…',
+  '苦思冥想中…', '深思熟虑中…', '灵光一闪中…', '绞尽脑汁中…', '思绪飞速运转中…',
+  '小脑袋瓜转啊转…', '神经元疯狂放电中…', '灵感小火花碰撞中…', '正在努力组织语言…',
+  '在知识海洋里捞答案…', '正在翻阅宇宙图书馆…', '答案正在酝酿中…', '灵感咖啡冲泡中…',
+  '递归思考中，请勿打扰…', '正在遍历可能性…', '加载智慧模块中…',
+  '容我想想…', '稍等，马上就好…', '别急，好饭不怕晚…', '正在认真对待你的问题…',
 ];
-
-// System status messages (fixed, not random)
 const SYSTEM_STATUS_MESSAGES: Record<string, string> = {
   compacting: '会话内容过长，智能总结中…',
   rewinding: '正在时间回溯中，请稍等…',
 };
-
 function getRandomStreamingMessage(): string {
   return STREAMING_MESSAGES[Math.floor(Math.random() * STREAMING_MESSAGES.length)];
 }
 
-/**
- * StatusTimer - isolated component for elapsed time counter.
- * Ticks every 1s via setInterval. Isolating it here prevents the
- * parent MessageList from re-rendering (and re-running messages.map())
- * on every tick.
- */
 const StatusTimer = memo(function StatusTimer({ message }: { message: string }) {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const startTimeRef = useRef(0);
-
   useEffect(() => {
     startTimeRef.current = Date.now();
-
-    const intervalId = setInterval(() => {
-      setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000));
-    }, 1000);
-
-    return () => clearInterval(intervalId);
+    const id = setInterval(() => setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000)), 1000);
+    return () => clearInterval(id);
   }, []);
-
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-[var(--ink-muted)]">
       <Loader2 className="h-3 w-3 animate-spin" />
-      <span>
-        {message}
-        {elapsedSeconds > 0 && ` (${formatElapsedTime(elapsedSeconds)})`}
-      </span>
+      <span>{message}{elapsedSeconds > 0 && ` (${formatElapsedTime(elapsedSeconds)})`}</span>
     </div>
   );
 });
 
-/** Check if a message contains an ExitPlanMode tool call */
 function hasExitPlanModeTool(message: MessageType): boolean {
   if (message.role !== 'assistant' || typeof message.content === 'string') return false;
   return message.content.some(
-    block => (block.type === 'tool_use' || block.type === 'server_tool_use')
-      && block.tool?.name === 'ExitPlanMode'
+    block => (block.type === 'tool_use' || block.type === 'server_tool_use') && block.tool?.name === 'ExitPlanMode'
   );
 }
+
+// ── Virtuoso Footer — memo'd component that reads dynamic values from refs ──
+// Must NOT be recreated on every render (inline arrow in `components` causes Virtuoso
+// to remount the footer, resetting StatusTimer and forcing extra remeasurement).
+const VirtuosoFooter = memo(function VirtuosoFooter({
+  pendingPermission, onPermissionDecision,
+  pendingAskUserQuestion, onAskUserQuestionSubmit, onAskUserQuestionCancel,
+  showStatus, statusMessage,
+}: {
+  pendingPermission?: PermissionRequest | null;
+  onPermissionDecision?: (decision: 'deny' | 'allow_once' | 'always_allow') => void;
+  pendingAskUserQuestion?: AskUserQuestionRequest | null;
+  onAskUserQuestionSubmit?: (requestId: string, answers: Record<string, string>) => void;
+  onAskUserQuestionCancel?: (requestId: string) => void;
+  showStatus: boolean;
+  statusMessage: string;
+}) {
+  return (
+    <div className="mx-auto max-w-3xl px-3">
+      {pendingPermission && onPermissionDecision && (
+        <div className="py-2">
+          <PermissionPrompt request={pendingPermission} onDecision={(_id, d) => onPermissionDecision(d)} />
+        </div>
+      )}
+      {pendingAskUserQuestion && onAskUserQuestionSubmit && onAskUserQuestionCancel && (
+        <div className="py-2">
+          <AskUserQuestionPrompt request={pendingAskUserQuestion} onSubmit={onAskUserQuestionSubmit} onCancel={onAskUserQuestionCancel} />
+        </div>
+      )}
+      {showStatus && <StatusTimer message={statusMessage} />}
+      <div style={{ height: 280 }} aria-hidden="true" />
+    </div>
+  );
+});
+
+// ── No custom Scroller/List components ──
+// Tested: custom Scroller (py-3 padding) and List (mx-auto max-w-3xl) break Virtuoso's
+// internal height tracking — scrollHeight diverges from totalListHeight by 12,000+ px,
+// causing phantom repeated content. Styling is applied inside itemContent instead.
 
 const MessageList = memo(function MessageList({
   historyMessages,
   streamingMessage,
   isLoading,
   isSessionLoading,
-  containerRef,
-  spacerRef,
-  bottomPadding,
+  sessionId,
+  virtuosoRef,
+  onScrollerRef,
+  followEnabledRef,
+  handleAtBottomChange,
   pendingPermission,
   onPermissionDecision,
   pendingAskUserQuestion,
@@ -155,154 +143,182 @@ const MessageList = memo(function MessageList({
   isStreaming,
   onRewind,
   onRetry,
+  onFork,
 }: MessageListProps) {
-  const containerStyle: CSSProperties | undefined =
-    bottomPadding ? { paddingBottom: bottomPadding } : undefined;
+  const allMessages = useMemo(() =>
+    streamingMessage ? [...historyMessages, streamingMessage] : historyMessages,
+    [historyMessages, streamingMessage]
+  );
 
-  // Keep the same random message during one streaming session
-  // Use historyMessages.length as a stable key - new message is picked when a new AI response starts
   const streamingStatusMessage = useMemo(
     () => getRandomStreamingMessage(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only change when message count changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [historyMessages.length]
   );
 
-  // Find the LAST message (history or streaming) containing ExitPlanMode tool.
-  // The card always renders right after this message, regardless of resolved state.
-  // Only the latest ExitPlanMode gets the card (avoids duplicates after reject → re-plan).
+  // ExitPlanMode
   const exitPlanModeAnchorId = useMemo(() => {
     if (!pendingExitPlanMode) return null;
-    // Check streaming message first (ExitPlanMode may still be streaming)
     if (streamingMessage && hasExitPlanModeTool(streamingMessage)) return streamingMessage.id;
-    // Then search history from the end
     for (let i = historyMessages.length - 1; i >= 0; i--) {
       if (hasExitPlanModeTool(historyMessages[i])) return historyMessages[i].id;
     }
     return null;
   }, [pendingExitPlanMode, streamingMessage, historyMessages]);
-
-  // Stable slot JSX for ExitPlanMode card — useMemo keeps reference stable
-  // so history messages won't re-render during streaming.
   const exitPlanModeSlot = useMemo(() => {
     if (!pendingExitPlanMode || !onExitPlanModeApprove || !onExitPlanModeReject) return undefined;
     return (
       <div className="py-2">
-        <ExitPlanModePrompt
-          request={pendingExitPlanMode}
-          onApprove={onExitPlanModeApprove}
-          onReject={onExitPlanModeReject}
-        />
+        <ExitPlanModePrompt request={pendingExitPlanMode} onApprove={onExitPlanModeApprove} onReject={onExitPlanModeReject} />
       </div>
     );
   }, [pendingExitPlanMode, onExitPlanModeApprove, onExitPlanModeReject]);
 
-  // Determine status display
   const showStatus = isLoading || !!systemStatus;
-  const statusMessage = systemStatus
-    ? (SYSTEM_STATUS_MESSAGES[systemStatus] || systemStatus)
-    : streamingStatusMessage;
+  const statusMessage = systemStatus ? (SYSTEM_STATUS_MESSAGES[systemStatus] || systemStatus) : streamingStatusMessage;
 
-  // Fade-in: track when session load completes so content appears with a smooth transition.
-  // When isSessionLoading drops to false, we set fadeIn=true synchronously in the same
-  // effect pass — no RAF indirection. animation-fill-mode:both applies the "from" keyframe
-  // (opacity:0) immediately, so there is no visible flash before the animation starts.
-  // The previous RAF approach caused a second render AFTER useAutoScroll's scrollToBottomInstant,
-  // which could reset scroll position on long sessions (255+ messages, scrollHeight 100k+ px).
+  // Fade-in
   const wasSessionLoadingRef = useRef(false);
   const [fadeIn, setFadeIn] = useState(false);
-
   useEffect(() => {
-    if (isSessionLoading) {
-      wasSessionLoadingRef.current = true;
-      setFadeIn(false);
-    } else if (wasSessionLoadingRef.current) {
-      wasSessionLoadingRef.current = false;
-      setFadeIn(true);
-    }
+    if (isSessionLoading) { wasSessionLoadingRef.current = true; setFadeIn(false); }
+    else if (wasSessionLoadingRef.current) { wasSessionLoadingRef.current = false; setFadeIn(true); }
   }, [isSessionLoading]);
 
-  const hasMessages = historyMessages.length > 0 || !!streamingMessage;
+  // Scroll to bottom after session load
+  const lastScrolledSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (allMessages.length > 0 && sessionId && sessionId !== lastScrolledSessionRef.current) {
+      lastScrolledSessionRef.current = sessionId;
+      followEnabledRef.current = 'force';
+      const timer = setTimeout(() => {
+        const ref = virtuosoRef.current;
+        if (!ref) return;
+        ref.scrollToIndex({ index: 'LAST', align: 'end' });
+        // Virtuoso may not render items at the new scroll position after programmatic
+        // scrollToIndex — it relies on scroll events to trigger visible-range recalculation.
+        // A second call in the next frame forces it to detect the position and render items.
+        requestAnimationFrame(() => {
+          ref.scrollToIndex({ index: 'LAST', align: 'end' });
+        });
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [allMessages.length, sessionId, virtuosoRef, followEnabledRef]);
+
+  // ── Auto-scroll during streaming — throttled to ~20fps via RAF ──
+  // followOutput only fires on count change. During streaming the last message keeps
+  // growing taller. autoscrollToBottom() handles this (scrolls only if already at bottom).
+  const scrollRafRef = useRef(0);
+  useEffect(() => {
+    if (streamingMessage && followEnabledRef.current) {
+      cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = requestAnimationFrame(() => {
+        virtuosoRef.current?.autoscrollToBottom();
+      });
+    }
+    return () => cancelAnimationFrame(scrollRafRef.current);
+  }, [streamingMessage, followEnabledRef, virtuosoRef]);
+
+  // ── Refs for stable callbacks — avoid recreating itemContent/Footer on every render ──
+  const streamingMessageRef = useRef(streamingMessage);
+  streamingMessageRef.current = streamingMessage;
+  const isLoadingRef = useRef(isLoading);
+  isLoadingRef.current = isLoading;
+  const exitPlanModeAnchorIdRef = useRef(exitPlanModeAnchorId);
+  exitPlanModeAnchorIdRef.current = exitPlanModeAnchorId;
+  const exitPlanModeSlotRef = useRef(exitPlanModeSlot);
+  exitPlanModeSlotRef.current = exitPlanModeSlot;
+  const onRewindRef = useRef(onRewind);
+  onRewindRef.current = onRewind;
+  const onRetryRef = useRef(onRetry);
+  onRetryRef.current = onRetry;
+  const onForkRef = useRef(onFork);
+  onForkRef.current = onFork;
+
+  const handleFollowOutput = useMemo(
+    () => (isAtBottom: boolean) => {
+      const mode = followEnabledRef.current;
+      if (!mode) return false;
+      if (mode === 'force') return 'smooth' as const;
+      return isAtBottom ? 'smooth' as const : false;
+    },
+    [followEnabledRef]
+  );
+
+  // ── Stable itemContent — reads ALL dynamic values from refs, never recreated ──
+  // eslint-disable-next-line react/display-name
+  const renderItem = useMemo(() => (index: number, message: MessageType) => {
+    const sm = streamingMessageRef.current;
+    const isStreamingMsg = !!sm && message === sm;
+    return (
+      <div className="mx-auto max-w-3xl px-3 py-1 overflow-hidden">
+        <Message
+          message={message}
+          isLoading={isStreamingMsg && isLoadingRef.current}
+          onRewind={onRewindRef.current}
+          onRetry={onRetryRef.current}
+          onFork={onForkRef.current}
+          exitPlanModeSlot={message.id === exitPlanModeAnchorIdRef.current ? exitPlanModeSlotRef.current : undefined}
+        />
+      </div>
+    );
+  }, []);
+
+  // ── Stable computeItemKey ──
+  const computeItemKey = useMemo(() => (_i: number, m: MessageType) => m.id, []);
+
+  // ── Stable Footer wrapper — useMemo keeps component identity stable for Virtuoso ──
+  const FooterComponent = useMemo(() => {
+    return function Footer() {
+      return (
+        <VirtuosoFooter
+          pendingPermission={pendingPermission}
+          onPermissionDecision={onPermissionDecision}
+          pendingAskUserQuestion={pendingAskUserQuestion}
+          onAskUserQuestionSubmit={onAskUserQuestionSubmit}
+          onAskUserQuestionCancel={onAskUserQuestionCancel}
+          showStatus={showStatus}
+          statusMessage={statusMessage}
+        />
+      );
+    };
+  }, [pendingPermission, onPermissionDecision, pendingAskUserQuestion, onAskUserQuestionSubmit, onAskUserQuestionCancel, showStatus, statusMessage]);
+
+  // ── Stable components object ──
+  const components = useMemo(() => ({ Footer: FooterComponent }), [FooterComponent]);
 
   return (
-    <div ref={containerRef} className={`relative ${containerClasses}`} style={containerStyle} data-streaming={isStreaming || undefined}>
-      {/* Centered loading spinner while session is loading */}
-      {isSessionLoading && !hasMessages && (
-        <div className="absolute inset-0 flex items-center justify-center" style={{ paddingBottom: 140 }}>
+    <div
+      className="relative flex-1"
+      data-streaming={isStreaming || undefined}
+      style={fadeIn ? { animation: 'message-list-fade-in 600ms ease-out both' } : undefined}
+      onAnimationEnd={() => setFadeIn(false)}
+    >
+      {isSessionLoading && allMessages.length === 0 && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center" style={{ paddingBottom: 140 }}>
           <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
             <Loader2 className="h-4 w-4 animate-spin" />
             <span>加载对话记录…</span>
           </div>
         </div>
       )}
-      <div
-        className="mx-auto max-w-3xl space-y-2"
-        style={fadeIn ? {
-          animation: 'message-list-fade-in 600ms ease-out both',
-        } : undefined}
-        onAnimationEnd={() => setFadeIn(false)}
-      >
-        {/* History messages — reference-stable during streaming, zero re-iteration */}
-        {historyMessages.map((message) => (
-          <Message
-            key={message.id}
-            message={message}
-            isLoading={false}
-            onRewind={onRewind}
-            onRetry={onRetry}
-            exitPlanModeSlot={message.id === exitPlanModeAnchorId ? exitPlanModeSlot : undefined}
-          />
-        ))}
-        {/* Streaming message — only this component re-renders during streaming */}
-        {streamingMessage && (
-          <Message
-            key={streamingMessage.id}
-            message={streamingMessage}
-            isLoading={isLoading}
-            onRewind={onRewind}
-            onRetry={onRetry}
-            exitPlanModeSlot={streamingMessage.id === exitPlanModeAnchorId ? exitPlanModeSlot : undefined}
-          />
-        )}
-        {/* Permission prompt inline after messages */}
-        {pendingPermission && onPermissionDecision && (
-          <div className="py-2">
-            <PermissionPrompt
-              request={pendingPermission}
-              onDecision={(_requestId, decision) => onPermissionDecision(decision)}
-            />
-          </div>
-        )}
-        {/* AskUserQuestion prompt inline after messages */}
-        {pendingAskUserQuestion && onAskUserQuestionSubmit && onAskUserQuestionCancel && (
-          <div className="py-2">
-            <AskUserQuestionPrompt
-              request={pendingAskUserQuestion}
-              onSubmit={onAskUserQuestionSubmit}
-              onCancel={onAskUserQuestionCancel}
-            />
-          </div>
-        )}
-        {/* Unified status indicator - rendered in isolated component to avoid
-            re-running messages.map() on every 1-second timer tick */}
-        {showStatus && <StatusTimer message={statusMessage} />}
-      </div>
-      {/* Dynamic bottom spacer — provides scroll room for content-aware targeting.
-          React sets minHeight to IDLE_SPACER_HEIGHT (80px) as the declarative baseline.
-          During loading, useAutoScroll's RAF loop INCREASES it via direct DOM manipulation.
-          When loading ends, a JS collapse animation smoothly shrinks it back to 80px,
-          pinning scroll to bottom or preserving position based on per-frame scroll check. */}
-      {(historyMessages.length > 0 || streamingMessage) && (
-        <div
-          ref={spacerRef}
-          style={{
-            minHeight: IDLE_SPACER_HEIGHT,
-            overflowAnchor: 'none',
-          }}
-          aria-hidden="true"
-        />
-      )}
-      {/* Scroll anchor - helps browser maintain scroll position during content changes */}
-      <div className="scroll-anchor h-px" aria-hidden="true" />
+
+      <Virtuoso
+        key={sessionId || 'pending'}
+        ref={virtuosoRef}
+        scrollerRef={onScrollerRef}
+        data={allMessages}
+        computeItemKey={computeItemKey}
+        followOutput={handleFollowOutput}
+        atBottomStateChange={handleAtBottomChange}
+        atBottomThreshold={50}
+        defaultItemHeight={200}
+        className="h-full"
+        style={{ overscrollBehavior: 'none' }}
+        components={components}
+        itemContent={renderItem}
+      />
     </div>
   );
 });

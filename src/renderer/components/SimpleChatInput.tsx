@@ -14,21 +14,9 @@ import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../sh
 import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
+import { isProviderAvailable } from '@/config/configService';
 
 // ===== Module-level pure helpers (extracted from render body) =====
-
-/** Check if a provider is available (can be selected and used) */
-function isProviderAvailable(
-  p: Provider,
-  apiKeys: Record<string, string>,
-  verifyStatus: Record<string, ProviderVerifyStatus>,
-): boolean {
-  if (p.type === 'subscription') {
-    const result = verifyStatus[p.id];
-    return result?.status === 'valid' && !!result?.accountEmail;
-  }
-  return !!apiKeys[p.id];
-}
 
 /** Check if a provider has a warning (key set but verification failed) */
 function isProviderWarning(
@@ -254,10 +242,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [showToolMenu, setShowToolMenu] = useState(false);
 
-  // Derive current model ID from prop or provider default
-  const currentModelId = selectedModel ?? provider?.primaryModel ?? 'claude-sonnet-4-6';
+  // Derive current model ID from prop or provider default — no hardcoded fallback
+  const currentModelId = selectedModel ?? provider?.primaryModel;
   // Get display name for current model
-  const currentModelName = provider ? getModelDisplayName(provider, currentModelId) : currentModelId;
+  const currentModelName = currentModelId
+    ? (provider ? getModelDisplayName(provider, currentModelId) : currentModelId)
+    : '选择模型';
 
   // @file search
   const [showFileSearch, setShowFileSearch] = useState(false);

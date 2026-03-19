@@ -39,7 +39,7 @@ export default memo(function SortableTabItem({
     } = useSortable({ id: tab.id });
 
     const style = {
-        transform: CSS.Transform.toString(transform),
+        transform: CSS.Translate.toString(transform),
         transition,
         zIndex: isDragging ? 100 : undefined,
         opacity: isDragging ? 0.8 : 1,

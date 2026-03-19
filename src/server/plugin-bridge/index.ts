@@ -18,6 +18,7 @@ import { createCompatApi, type CapturedPlugin, type CapturedTool } from './compa
 import { createCompatRuntime } from './compat-runtime';
 import { FeishuStreamingSession } from './streaming-adapter';
 import { createMcpHandler } from './mcp-handler';
+import { getPendingDispatch, resolvePendingDispatch, rejectPendingDispatch, clearAllPendingDispatches } from './pending-dispatch';
 import { parseArgs } from 'util';
 
 // Parse CLI arguments
@@ -354,7 +355,11 @@ const server = Bun.serve({
 
       try {
         const result = await capturedPlugin.sendText(chatId, text);
-        return Response.json({ ok: true, messageId: result?.messageId });
+        const messageId = result?.messageId;
+        if (!messageId) {
+          console.warn(`[plugin-bridge] sendText returned empty messageId for chatId=${chatId} — the platform API may have rejected the request. result:`, JSON.stringify(result));
+        }
+        return Response.json({ ok: true, messageId: messageId || undefined });
       } catch (err) {
         return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
       }
@@ -446,6 +451,16 @@ const server = Bun.serve({
         header?: { title: string; template?: string };
       };
 
+      // Protocol path: plugin's StreamingCardController will create its own card
+      // via onPartialReply — we just return a synthetic streamId for Rust to track
+      const pending = getPendingDispatch(body.chatId);
+      if (pending) {
+        const streamId = `pending_${++streamIdCounter}_${Date.now()}`;
+        console.log(`[plugin-bridge] /start-stream: using protocol dispatch for chatId=${body.chatId}, streamId=${streamId}`);
+        return Response.json({ ok: true, streamId, pendingDispatch: true });
+      }
+
+      // Fallback: no pending dispatch, use our FeishuStreamingSession
       if (!pluginConfig.appId || !pluginConfig.appSecret) {
         return Response.json({ ok: false, error: 'CardKit streaming requires appId and appSecret in plugin config' }, { status: 400 });
       }
@@ -492,12 +507,30 @@ const server = Bun.serve({
 
     if (path === '/stream-chunk' && req.method === 'POST') {
       const body = await req.json() as {
+        chatId?: string;
         streamId: string;
         content: string;
         sequence?: number;
         isThinking?: boolean;
       };
 
+      // Protocol path: route through plugin's own callbacks
+      const pending = body.chatId ? getPendingDispatch(body.chatId) : undefined;
+      if (pending) {
+        try {
+          if (body.isThinking) {
+            pending.callbacks.onReasoningStream?.({ text: body.content || '' });
+          } else {
+            pending.callbacks.onPartialReply?.({ text: body.content });
+          }
+          return Response.json({ ok: true });
+        } catch (err) {
+          console.error(`[plugin-bridge] /stream-chunk protocol callback error for chatId=${body.chatId}:`, err);
+          return Response.json({ ok: false, error: String(err) }, { status: 500 });
+        }
+      }
+
+      // Fallback: FeishuStreamingSession
       const session = streamingSessions.get(body.streamId);
       if (!session) {
         return Response.json({ ok: false, error: 'Stream not found' }, { status: 404 });
@@ -507,8 +540,6 @@ const server = Bun.serve({
       }
 
       try {
-        // Skip thinking/activity chunks — don't merge them into CardKit content
-        // The streaming card only shows actual response text
         if (body.isThinking) {
           return Response.json({ ok: true });
         }
@@ -520,8 +551,27 @@ const server = Bun.serve({
     }
 
     if (path === '/finalize-stream' && req.method === 'POST') {
-      const body = await req.json() as { streamId: string; finalContent?: string };
+      const body = await req.json() as { chatId?: string; streamId: string; finalContent?: string };
 
+      // Protocol path: deliver final text through plugin's dispatcher, then resolve pending dispatch
+      const pending = body.chatId ? getPendingDispatch(body.chatId) : undefined;
+      if (pending) {
+        try {
+          const finalText = body.finalContent || '';
+          // Always call sendFinalReply — it signals the plugin to close the streaming card
+          pending.callbacks.sendFinalReply({ text: finalText });
+          // Resolve the pending dispatch — dispatchReplyFromConfig will return,
+          // then withReplyDispatcher's finally block calls markComplete + waitForIdle
+          resolvePendingDispatch(body.chatId!, { queuedFinal: 1, counts: { final: 1 } });
+          return Response.json({ ok: true });
+        } catch (err) {
+          console.error(`[plugin-bridge] /finalize-stream protocol error:`, err);
+          rejectPendingDispatch(body.chatId!, err instanceof Error ? err : new Error(String(err)));
+          return Response.json({ ok: false, error: String(err) }, { status: 500 });
+        }
+      }
+
+      // Fallback: FeishuStreamingSession
       const session = streamingSessions.get(body.streamId);
       if (!session) {
         return Response.json({ ok: false, error: 'Stream not found' }, { status: 404 });
@@ -537,15 +587,22 @@ const server = Bun.serve({
     }
 
     if (path === '/abort-stream' && req.method === 'POST') {
-      const body = await req.json() as { streamId: string };
+      const body = await req.json() as { chatId?: string; streamId: string };
 
+      // Protocol path: reject pending dispatch — plugin's error handler shows abort card
+      const pending = body.chatId ? getPendingDispatch(body.chatId) : undefined;
+      if (pending) {
+        rejectPendingDispatch(body.chatId!, new Error('AI generation aborted'));
+        return Response.json({ ok: true });
+      }
+
+      // Fallback: FeishuStreamingSession
       const session = streamingSessions.get(body.streamId);
       if (!session) {
         return Response.json({ ok: false, error: 'Stream not found' }, { status: 404 });
       }
 
       try {
-        // Close with an abort marker so the card shows it was interrupted
         await session.close('[Aborted]');
         streamingSessions.delete(body.streamId);
         return Response.json({ ok: true });
@@ -634,6 +691,8 @@ const server = Bun.serve({
 
     if (path === '/stop' && req.method === 'POST') {
       console.log('[plugin-bridge] Received stop signal');
+      // Clean up pending protocol dispatches
+      clearAllPendingDispatches();
       // Close any active streaming sessions before shutdown
       for (const [id, session] of streamingSessions) {
         try {

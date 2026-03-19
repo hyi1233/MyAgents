@@ -25,33 +25,45 @@ export interface SubscriptionStatus {
 }
 
 // Error message parser for subscription verification
-function parseSubscriptionError(errorText: string): string {
-  if (errorText.includes('authentication') || errorText.includes('login') || errorText.includes('/login')) {
-    return '登录已过期，请重新登录 (claude --login)';
-  } else if (errorText.includes('forbidden') || errorText.includes('403')) {
-    return '登录已过期，请重新登录 (claude --login)';
-  } else if (errorText.includes('rate limit') || errorText.includes('429')) {
-    return '请求频率限制，请稍后再试';
-  } else if (errorText.includes('network') || errorText.includes('connect')) {
-    return '网络连接失败';
+function parseSubscriptionError(errorText: string, originalText?: string): VerifyError {
+  const raw = (originalText ?? errorText).slice(0, 300) || undefined;
+  const lower = errorText.toLowerCase();
+  if (lower.includes('authentication') || lower.includes('login') || lower.includes('/login')) {
+    return { error: '登录已过期，请重新登录 (claude --login)', detail: raw };
+  } else if (lower.includes('forbidden') || lower.includes('403')) {
+    return { error: '登录已过期，请重新登录 (claude --login)', detail: raw };
+  } else if (lower.includes('rate limit') || lower.includes('429')) {
+    return { error: '请求频率限制，请稍后再试', detail: raw };
+  } else if (lower.includes('network') || lower.includes('connect')) {
+    return { error: '网络连接失败', detail: raw };
   }
-  return errorText.slice(0, 100) || '验证失败';
+  return { error: errorText.slice(0, 100) || '验证失败', detail: raw };
+}
+
+// Structured error result with human-friendly summary + raw detail for diagnosis
+interface VerifyError {
+  error: string;
+  detail?: string;
 }
 
 // Error message parser for provider API key verification
-function parseProviderError(errorText: string): string {
-  if (errorText.includes('authentication') || errorText.includes('unauthorized') || errorText.includes('401')) {
-    return 'API Key 无效或已过期';
-  } else if (errorText.includes('forbidden') || errorText.includes('403')) {
-    return '访问被拒绝，请检查 API Key 权限';
-  } else if (errorText.includes('rate limit') || errorText.includes('429')) {
-    return '请求频率限制，请稍后再试';
-  } else if (errorText.includes('network') || errorText.includes('connect') || errorText.includes('ECONNREFUSED')) {
-    return '网络连接失败，请检查 Base URL';
-  } else if (errorText.includes('not found') || errorText.includes('404')) {
-    return '模型不存在或 API 地址错误';
+// Returns { error (human-friendly), detail (raw) } so the frontend can show both.
+// `errorText` may be lowercased by caller; `originalText` preserves original casing for detail.
+function parseProviderError(errorText: string, originalText?: string): VerifyError {
+  const raw = (originalText ?? errorText).slice(0, 300) || undefined;
+  const lower = errorText.toLowerCase();
+  if (lower.includes('authentication') || lower.includes('unauthorized') || lower.includes('401')) {
+    return { error: 'API Key 无效或已过期', detail: raw };
+  } else if (lower.includes('forbidden') || lower.includes('403')) {
+    return { error: '访问被拒绝，请检查 API Key 权限', detail: raw };
+  } else if (lower.includes('rate limit') || lower.includes('429')) {
+    return { error: '请求频率限制，请稍后再试', detail: raw };
+  } else if (lower.includes('network') || lower.includes('connect') || lower.includes('econnrefused')) {
+    return { error: '网络连接失败，请检查 Base URL', detail: raw };
+  } else if (lower.includes('not found') || lower.includes('404')) {
+    return { error: '模型不存在或 API 地址错误', detail: raw };
   }
-  return errorText.slice(0, 100) || '验证失败';
+  return { error: errorText.slice(0, 100) || '验证失败', detail: raw };
 }
 
 /**
@@ -64,13 +76,17 @@ async function verifyViaSdk(
     model?: string;
     sessionId: string;
     logPrefix: string;
-    parseError: (text: string) => string;
+    parseError: (text: string, originalText?: string) => VerifyError;
     settingSources: ('user' | 'project')[];
   },
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; detail?: string }> {
   const TIMEOUT_MS = 30000;
   const startTime = Date.now();
   const stderrMessages: string[] = [];
+  // Collect the first real API error seen during the verify window.
+  // If the SDK retries internally (e.g. 429) and our timeout fires first,
+  // we use this instead of the generic "验证超时" message.
+  let firstAuthError: VerifyError | undefined;
   const { logPrefix, parseError } = opts;
 
   try {
@@ -113,8 +129,14 @@ async function verifyViaSdk(
       },
     });
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const timeoutPromise = new Promise<{ success: false; error: string }>((resolve) => {
+    const timeoutPromise = new Promise<{ success: false; error: string; detail?: string }>((resolve) => {
       timeoutId = setTimeout(() => {
+        // Priority: real API error collected during retries > stderr > generic timeout
+        if (firstAuthError) {
+          console.log(`[${logPrefix}] timeout but have auth error collected, using it`);
+          resolve({ success: false, error: firstAuthError.error, detail: firstAuthError.detail });
+          return;
+        }
         const stderrHint = stderrMessages.length > 0
           ? ` (stderr: ${stderrMessages.join('; ').slice(0, 200)})`
           : '';
@@ -122,7 +144,7 @@ async function verifyViaSdk(
       }, TIMEOUT_MS);
     });
 
-    const verifyPromise = (async (): Promise<{ success: boolean; error?: string }> => {
+    const verifyPromise = (async (): Promise<{ success: boolean; error?: string; detail?: string }> => {
       for await (const message of testQuery) {
         if (message.type === 'system') continue;
 
@@ -148,7 +170,11 @@ async function verifyViaSdk(
           if (assistantMsg.error) {
             const errorDetail = assistantMsg.message?.content?.[0]?.text ?? assistantMsg.error;
             console.error(`[${logPrefix}] auth error: ${errorDetail}`);
-            return { success: false, error: parseError(errorDetail.toLowerCase()) };
+            const parsed = parseError(errorDetail.toLowerCase(), errorDetail);
+            // Store the first auth error so the timeout handler can use it
+            // if the SDK keeps retrying and our timeout fires first.
+            if (!firstAuthError) firstAuthError = parsed;
+            return { success: false, ...parsed };
           }
           const elapsed = Date.now() - startTime;
           console.log(`[${logPrefix}] verification successful (${elapsed}ms)`);
@@ -172,10 +198,11 @@ async function verifyViaSdk(
             ? errorsArray.join('; ')
             : resultMsg.subtype || '验证失败';
           console.error(`[${logPrefix}] error: ${errorText} (subtype: ${resultMsg.subtype})`);
+          const parsed = parseError(errorText);
           const stderrHint = stderrMessages.length > 0
             ? ` (详情: ${stderrMessages.join('; ').slice(0, 100)})`
             : '';
-          return { success: false, error: parseError(errorText) + stderrHint };
+          return { success: false, error: parsed.error + stderrHint, detail: parsed.detail };
         }
       }
 
@@ -193,10 +220,11 @@ async function verifyViaSdk(
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error(`[${logPrefix}] SDK exception: ${errorMsg}`);
+    const parsed = parseError(errorMsg);
     const stderrHint = stderrMessages.length > 0
       ? ` (详情: ${stderrMessages.join('; ').slice(0, 200)})`
       : '';
-    return { success: false, error: parseError(errorMsg) + stderrHint };
+    return { success: false, error: parsed.error + stderrHint, detail: parsed.detail };
   }
 }
 
@@ -212,7 +240,7 @@ export async function verifyProviderViaSdk(
   apiProtocol?: 'anthropic' | 'openai',
   maxOutputTokens?: number,
   upstreamFormat?: 'chat_completions' | 'responses',
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; detail?: string }> {
   console.log(`[provider/verify] Starting SDK verification for ${baseUrl}, model=${model ?? 'default'}, authType=${authType}, apiProtocol=${apiProtocol ?? 'anthropic'}, maxOutputTokens=${maxOutputTokens ?? 'none'}`);
   const env = buildClaudeSessionEnv({
     baseUrl,
@@ -273,7 +301,7 @@ export function checkAnthropicSubscription(): SubscriptionStatus {
  * Verify Anthropic subscription by sending a test request via SDK.
  * Uses the same SDK path as normal chat requests.
  */
-export async function verifySubscription(): Promise<{ success: boolean; error?: string }> {
+export async function verifySubscription(): Promise<{ success: boolean; error?: string; detail?: string }> {
   console.log('[subscription/verify] Starting SDK verification...');
   const env = buildClaudeSessionEnv(); // No provider override = default Anthropic auth
   return verifyViaSdk(env, {

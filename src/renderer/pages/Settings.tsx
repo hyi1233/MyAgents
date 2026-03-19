@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Download, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Square, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, ChevronDown, Download, FolderOpen, KeyRound, Link, Loader2, Plus, RefreshCw, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
@@ -6,7 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { homeDir, join } from '@tauri-apps/api/path';
 
 import { track } from '@/analytics';
-import { apiGetJson, apiPostJson } from '@/api/apiFetch';
+import { apiFetch, apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
 import CustomSelect from '@/components/CustomSelect';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
@@ -34,7 +34,6 @@ import {
     PROXY_DEFAULTS,
     isValidProxyHost,
     getPresetMcpServer,
-    type ProviderVerifyStatus,
 } from '@/config/types';
 import {
     getAllMcpServers,
@@ -46,6 +45,7 @@ import {
     getMcpServerArgs,
     getMcpServerEnv,
     atomicModifyConfig,
+    isProviderAvailable,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
 import { useAutostart } from '@/hooks/useAutostart';
@@ -94,19 +94,7 @@ interface CustomProviderForm {
     upstreamFormat: 'chat_completions' | 'responses';  // 上游 API 格式
 }
 
-/** Check if a provider is usable (duplicated from BugReportOverlay — only 2 call sites) */
-function isProviderAvailable(
-    provider: Provider,
-    apiKeys: Record<string, string>,
-    verifyStatus: Record<string, ProviderVerifyStatus>,
-): boolean {
-    if (provider.type === 'subscription') {
-        const status = verifyStatus[provider.id];
-        return status?.status === 'valid' && !!status.accountEmail;
-    }
-    // Validation status is informational, not gatekeeping — having a key is enough
-    return !!apiKeys[provider.id];
-}
+// isProviderAvailable imported from configService (shared across Chat, Launcher, Settings, SimpleChatInput)
 
 const EMPTY_CUSTOM_FORM: CustomProviderForm = {
     name: '',
@@ -207,7 +195,7 @@ const ModelTagList = React.memo(function ModelTagList({
                                 : 'bg-[var(--paper-inset)]'
                         }`}
                     >
-                        <span>{model.modelName}</span>
+                        <span>{model.model}</span>
                         {isPresetModel ? (
                             <span className="text-[10px] text-[var(--ink-muted)]">预设</span>
                         ) : (
@@ -340,7 +328,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
     // UI-only loading state (not persisted)
     const [verifyLoading, setVerifyLoading] = useState<Record<string, boolean>>({});
-    const [verifyError, setVerifyError] = useState<Record<string, string>>({});
+    const [verifyError, setVerifyError] = useState<Record<string, { error: string; detail?: string }>>({});
+    const [errorDetailOpenId, setErrorDetailOpenId] = useState<string | null>(null);
 
     // Dev-only: Logs panel
     const [showLogs, setShowLogs] = useState(false);
@@ -602,6 +591,10 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     const [mcpJsonInput, setMcpJsonInput] = useState('');
     const [mcpJsonError, setMcpJsonError] = useState('');
 
+    // OAuth state for MCP servers
+    const [mcpOAuthStatus, setMcpOAuthStatus] = useState<Record<string, 'disconnected' | 'connecting' | 'connected' | 'expired' | 'error'>>({});
+    const [mcpOAuthConnecting, setMcpOAuthConnecting] = useState<string | null>(null);
+
     const [mcpForm, setMcpForm] = useState<{
         id: string;
         name: string;
@@ -614,6 +607,13 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         newEnvKey: string;
         headers: Record<string, string>;
         newHeaderKey: string;
+        newHeaderValue: string;
+        // OAuth fields
+        oauthClientId: string;
+        oauthClientSecret: string;
+        oauthScopes: string;
+        oauthAuthUrl: string;
+        oauthTokenUrl: string;
     }>({
         id: '',
         name: '',
@@ -626,7 +626,15 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         newEnvKey: '',
         headers: {},
         newHeaderKey: '',
+        newHeaderValue: '',
+        oauthClientId: '',
+        oauthClientSecret: '',
+        oauthScopes: '',
+        oauthAuthUrl: '',
+        oauthTokenUrl: '',
     });
+    const [mcpHeadersExpanded, setMcpHeadersExpanded] = useState(false);
+    const [mcpOAuthExpanded, setMcpOAuthExpanded] = useState(false);
 
     // Check which MCP servers need configuration (missing required fields)
     const checkMcpConfigStatus = async (servers: McpServerDefinition[]) => {
@@ -764,8 +772,11 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         setMcpJsonError('');
         setMcpForm({
             id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
-            env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
+            env: {}, newEnvKey: '', headers: {}, newHeaderKey: '', newHeaderValue: '',
+            oauthClientId: '', oauthClientSecret: '', oauthScopes: '', oauthAuthUrl: '', oauthTokenUrl: '',
         });
+        setMcpHeadersExpanded(false);
+        setMcpOAuthExpanded(false);
     };
 
     // Edit builtin MCP server settings (extra args + env)
@@ -1049,6 +1060,84 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         }
     };
 
+    // OAuth: start OAuth flow for an MCP server
+    const handleMcpOAuthConnect = async (serverId: string, serverUrl: string) => {
+        if (!mcpForm.oauthClientId) {
+            toast.error('请填写 Client ID');
+            return;
+        }
+        setMcpOAuthConnecting(serverId);
+        try {
+            const result = await apiPostJson<{ success: boolean; authUrl?: string; error?: string }>('/api/mcp/oauth/start', {
+                serverId,
+                serverUrl: serverUrl || mcpForm.url,
+                clientId: mcpForm.oauthClientId,
+                clientSecret: mcpForm.oauthClientSecret || undefined,
+                scopes: mcpForm.oauthScopes ? mcpForm.oauthScopes.split(/[\s,]+/).filter(Boolean) : undefined,
+                authorizationUrl: mcpForm.oauthAuthUrl || undefined,
+                tokenUrl: mcpForm.oauthTokenUrl || undefined,
+            });
+            if (result.success && result.authUrl) {
+                // Open browser for authorization
+                const { openExternal } = await import('@/utils/openExternal');
+                await openExternal(result.authUrl);
+                toast.success('已在浏览器中打开授权页面，请完成授权');
+                setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'connecting' }));
+                // Poll for token status — use functional state update to avoid stale closure
+                const pollInterval = setInterval(async () => {
+                    try {
+                        const status = await apiGetJson<{ success: boolean; status: string }>(`/api/mcp/oauth/status/${encodeURIComponent(serverId)}`);
+                        if (status.success && status.status === 'connected') {
+                            clearInterval(pollInterval);
+                            setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'connected' }));
+                            setMcpOAuthConnecting(null);
+                            toast.success('OAuth 授权成功');
+                        } else if (status.success && status.status === 'disconnected') {
+                            // Flow was cancelled or failed — check via functional update
+                            setMcpOAuthConnecting(prev => {
+                                if (prev === serverId) {
+                                    clearInterval(pollInterval);
+                                    setMcpOAuthStatus(p => ({ ...p, [serverId]: 'disconnected' }));
+                                    return null;
+                                }
+                                return prev;
+                            });
+                        }
+                    } catch { /* ignore poll errors */ }
+                }, 2000);
+                // Stop polling after 5 minutes
+                setTimeout(() => {
+                    clearInterval(pollInterval);
+                    setMcpOAuthConnecting(null);
+                }, 5 * 60 * 1000);
+            } else {
+                toast.error(result.error || 'OAuth 启动失败');
+                setMcpOAuthConnecting(null);
+            }
+        } catch (err) {
+            toast.error(`OAuth 错误: ${err instanceof Error ? err.message : String(err)}`);
+            setMcpOAuthConnecting(null);
+        }
+    };
+
+    // OAuth: disconnect (revoke token)
+    const handleMcpOAuthDisconnect = async (serverId: string) => {
+        try {
+            const response = await apiFetch('/api/mcp/oauth/token', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ serverId }),
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'disconnected' }));
+            toast.success('OAuth 连接已断开');
+        } catch {
+            toast.error('断开 OAuth 失败');
+        }
+    };
+
     // Edit custom MCP server - populate form and open modal
     const handleEditMcp = (server: McpServerDefinition) => {
         setMcpForm({
@@ -1063,7 +1152,30 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             newEnvKey: '',
             headers: server.headers ? { ...server.headers } : {},
             newHeaderKey: '',
+            newHeaderValue: '',
+            oauthClientId: '',
+            oauthClientSecret: '',
+            oauthScopes: '',
+            oauthAuthUrl: '',
+            oauthTokenUrl: '',
         });
+        // Auto-expand sections if they have existing data
+        const hasHeaders = server.headers && Object.keys(server.headers).length > 0;
+        setMcpHeadersExpanded(!!hasHeaders);
+        setMcpOAuthExpanded(false);
+        // Fetch OAuth status for this server
+        if (server.type === 'sse' || server.type === 'http') {
+            apiGetJson<{ success: boolean; status: string }>(`/api/mcp/oauth/status/${encodeURIComponent(server.id)}`)
+                .then(res => {
+                    if (res.success) {
+                        setMcpOAuthStatus(prev => ({ ...prev, [server.id]: res.status as 'connected' | 'disconnected' | 'expired' }));
+                        // Auto-expand OAuth section if connected/expired
+                        if (res.status === 'connected' || res.status === 'expired') {
+                            setMcpOAuthExpanded(true);
+                        }
+                    }
+                }).catch(() => { /* ignore */ });
+        }
         setEditingMcpId(server.id);
         setShowMcpForm(true);
     };
@@ -1286,7 +1398,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             }
 
             try {
-                const result = await apiPostJson<{ success: boolean; error?: string }>('/api/subscription/verify', {});
+                const result = await apiPostJson<{ success: boolean; error?: string; detail?: string }>('/api/subscription/verify', {});
                 const newStatus = result.success ? 'valid' : 'invalid';
 
                 if (result.success) {
@@ -1296,10 +1408,14 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 // Don't cache failures - they will be retried next time
 
                 if (isMounted) {
+                    // Include detail for diagnosis if available and different from error
+                    const errorMsg = result.error && result.detail && result.detail !== result.error
+                        ? `${result.error} (${result.detail.slice(0, 100)})`
+                        : result.error;
                     setSubscriptionStatus((prev: SubscriptionStatus | null) => prev ? {
                         ...prev,
                         verifyStatus: newStatus,
-                        verifyError: result.error
+                        verifyError: errorMsg
                     } : prev);
                 }
             } catch (err) {
@@ -1410,10 +1526,10 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         console.log('[verifyProvider] apiKey:', apiKey.slice(0, 10) + '...');
 
         setVerifyLoading((prev) => ({ ...prev, [provider.id]: true }));
-        setVerifyError((prev) => ({ ...prev, [provider.id]: '' }));
+        setVerifyError((prev) => { const next = { ...prev }; delete next[provider.id]; return next; });
 
         try {
-            const result = await apiPostJson<{ success: boolean; error?: string; debug?: unknown }>('/api/provider/verify', {
+            const result = await apiPostJson<{ success: boolean; error?: string; detail?: string }>('/api/provider/verify', {
                 baseUrl: provider.config.baseUrl,
                 apiKey,
                 model: provider.primaryModel,
@@ -1436,9 +1552,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 await saveProviderVerifyStatus(provider.id, 'valid');
             } else {
                 await saveProviderVerifyStatus(provider.id, 'invalid');
-                // Extract error message and show as toast
                 const errorMsg = result.error || '验证失败';
-                setVerifyError((prev) => ({ ...prev, [provider.id]: errorMsg }));
+                setVerifyError((prev) => ({ ...prev, [provider.id]: { error: errorMsg, detail: result.detail } }));
                 toastRef.current.error(`${provider.name}: ${errorMsg}`);
             }
         } catch (err) {
@@ -1448,10 +1563,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             console.error('[verifyProvider] Exception:', err);
             await saveProviderVerifyStatus(provider.id, 'invalid');
             const errorMsg = err instanceof Error ? err.message : '验证失败';
-            setVerifyError((prev) => ({
-                ...prev,
-                [provider.id]: errorMsg
-            }));
+            setVerifyError((prev) => ({ ...prev, [provider.id]: { error: errorMsg } }));
             toastRef.current.error(`${provider.name}: ${errorMsg}`);
         } finally {
             // Only clear loading if this is still the latest generation
@@ -1470,6 +1582,10 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             clearTimeout(verifyTimeoutRef.current[provider.id]);
         }
 
+        // Clear stale error and popover immediately on any key change
+        setVerifyError((prev) => { const next = { ...prev }; delete next[provider.id]; return next; });
+        if (errorDetailOpenId === provider.id) setErrorDetailOpenId(null);
+
         // Clear verification status when key changes - will re-verify
         if (key) {
             // Debounce verification
@@ -1477,7 +1593,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 verifyProvider(provider, key);
             }, 500);
         }
-    }, [saveApiKey, verifyProvider]);
+    }, [saveApiKey, verifyProvider, errorDetailOpenId]);
 
     // Cleanup timeouts on unmount
     useEffect(() => {
@@ -1776,12 +1892,31 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         return () => clearTimeout(timer);
     }, []); // Only run on mount - refs handle the latest values
 
-    // Render verification status indicator
+    // Error detail popover ref (state is declared near verifyError)
+    const errorDetailPopoverRef = useRef<HTMLDivElement>(null);
+
+    // Close error detail popover on outside click or when the error is cleared
+    useEffect(() => {
+        if (!errorDetailOpenId) return;
+        // If the error for the open popover has been cleared, close the popover
+        if (!verifyError[errorDetailOpenId]) {
+            setErrorDetailOpenId(null);
+            return;
+        }
+        const handleClick = (e: MouseEvent) => {
+            if (errorDetailPopoverRef.current && !errorDetailPopoverRef.current.contains(e.target as Node)) {
+                setErrorDetailOpenId(null);
+            }
+        };
+        document.addEventListener('mousedown', handleClick);
+        return () => document.removeEventListener('mousedown', handleClick);
+    }, [errorDetailOpenId, verifyError]);
+
+    // Render verification status indicator (icon row)
     const renderVerifyStatus = (provider: Provider) => {
         const isLoading = verifyLoading[provider.id];
         const cached = providerVerifyStatus[provider.id];
         const verifyStatus = cached?.status; // 'valid' | 'invalid' | undefined
-        const error = verifyError[provider.id];
         const hasKey = !!apiKeys[provider.id];
 
         if (!hasKey) {
@@ -1801,10 +1936,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     </div>
                 )}
                 {!isLoading && verifyStatus === 'invalid' && (
-                    <div
-                        className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--error-bg)]"
-                        title={error || '验证失败'}
-                    >
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--error-bg)]">
                         <AlertCircle className="h-4 w-4 text-[var(--error)]" />
                     </div>
                 )}
@@ -1824,6 +1956,41 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     >
                         <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
                     </button>
+                )}
+            </div>
+        );
+    };
+
+    // Render inline error line below the API key input row
+    const renderVerifyError = (provider: Provider) => {
+        const errObj = verifyError[provider.id];
+        if (!errObj) return null;
+
+        return (
+            <div className="flex items-start gap-1.5 pt-1.5 text-xs text-[var(--error)]">
+                <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                <span className="min-w-0 break-words">{errObj.error}</span>
+                {errObj.detail && errObj.detail !== errObj.error && (
+                    <div className="relative shrink-0">
+                        <button
+                            type="button"
+                            onClick={() => setErrorDetailOpenId(
+                                errorDetailOpenId === provider.id ? null : provider.id
+                            )}
+                            className="whitespace-nowrap text-[var(--ink-muted)] underline decoration-dotted transition-colors hover:text-[var(--ink)]"
+                        >
+                            详情
+                        </button>
+                        {errorDetailOpenId === provider.id && (
+                            <div
+                                ref={errorDetailPopoverRef}
+                                className="absolute right-0 top-6 z-50 w-80 max-w-[90vw] rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-3 shadow-lg"
+                            >
+                                <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-[var(--ink-muted)]">错误详情</p>
+                                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] text-[var(--ink-secondary)]">{errObj.detail}</pre>
+                            </div>
+                        )}
+                    </div>
                 )}
             </div>
         );
@@ -2009,18 +2176,21 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                                     {/* API Key input */}
                                     {provider.type === 'api' && (
-                                        <div className="flex items-center gap-2">
-                                            <div className="relative flex-1">
-                                                <KeyRound className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--ink-muted)]" />
-                                                <input
-                                                    type="password"
-                                                    placeholder="输入 API Key"
-                                                    value={apiKeys[provider.id] || ''}
-                                                    onChange={(e) => handleSaveApiKey(provider, e.target.value)}
-                                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] py-2.5 pl-10 pr-4 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] transition-colors focus:border-[var(--focus-border)] focus:outline-none"
-                                                />
+                                        <div>
+                                            <div className="flex items-center gap-2">
+                                                <div className="relative flex-1">
+                                                    <KeyRound className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--ink-muted)]" />
+                                                    <input
+                                                        type="password"
+                                                        placeholder="输入 API Key"
+                                                        value={apiKeys[provider.id] || ''}
+                                                        onChange={(e) => handleSaveApiKey(provider, e.target.value)}
+                                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] py-2.5 pl-10 pr-4 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                    />
+                                                </div>
+                                                {renderVerifyStatus(provider)}
                                             </div>
-                                            {renderVerifyStatus(provider)}
+                                            {renderVerifyError(provider)}
                                         </div>
                                     )}
 
@@ -3924,78 +4094,200 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             </p>
                                         </div>
 
-                                        {/* HTTP Headers */}
-                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-4">
-                                            <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
-                                                <span>🔑</span> 请求头 <span className="font-mono text-[var(--ink-muted)]">headers</span>（可选）
-                                            </label>
+                                        {/* HTTP Headers — collapsible */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)]">
+                                            <button
+                                                type="button"
+                                                onClick={() => setMcpHeadersExpanded(v => !v)}
+                                                className="flex w-full items-center justify-between p-4 text-sm font-medium text-[var(--ink)]"
+                                            >
+                                                <span className="flex items-center gap-2">
+                                                    <KeyRound className="h-4 w-4" /> 请求头 <span className="font-mono text-[var(--ink-muted)]">headers</span>
+                                                    {Object.keys(mcpForm.headers).length > 0 && (
+                                                        <span className="rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-xs text-[var(--accent)]">{Object.keys(mcpForm.headers).length}</span>
+                                                    )}
+                                                </span>
+                                                <ChevronDown className={`h-4 w-4 text-[var(--ink-muted)] transition-transform ${mcpHeadersExpanded ? '' : '-rotate-90'}`} />
+                                            </button>
+                                            {mcpHeadersExpanded && (
+                                                <div className="border-t border-[var(--line)] px-4 pb-4 pt-3">
+                                                    {/* Existing headers — key:value inline */}
+                                                    {Object.entries(mcpForm.headers).map(([key, value]) => (
+                                                        <div key={key} className="mb-2 flex items-center gap-2">
+                                                            <input
+                                                                type="text"
+                                                                value={key}
+                                                                readOnly
+                                                                className="w-[140px] shrink-0 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm font-mono text-[var(--success)] focus:outline-none"
+                                                            />
+                                                            <input
+                                                                type="text"
+                                                                value={value}
+                                                                onChange={(e) => setMcpForm((p) => ({
+                                                                    ...p,
+                                                                    headers: { ...p.headers, [key]: e.target.value }
+                                                                }))}
+                                                                placeholder="值"
+                                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                            />
+                                                            <button
+                                                                onClick={() => {
+                                                                    const newHeaders = { ...mcpForm.headers };
+                                                                    delete newHeaders[key];
+                                                                    setMcpForm((p) => ({ ...p, headers: newHeaders }));
+                                                                }}
+                                                                className="rounded-lg p-2 text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                                            >
+                                                                <Trash2 className="h-4 w-4" />
+                                                            </button>
+                                                        </div>
+                                                    ))}
 
-                                            {/* Existing headers */}
-                                            {Object.entries(mcpForm.headers).map(([key, value]) => (
-                                                <div key={key} className="mb-2 flex items-center gap-2">
-                                                    <span className="min-w-[100px] text-xs font-mono text-[var(--success)]">{key}</span>
-                                                    <input
-                                                        type="text"
-                                                        value={value}
-                                                        onChange={(e) => setMcpForm((p) => ({
-                                                            ...p,
-                                                            headers: { ...p.headers, [key]: e.target.value }
-                                                        }))}
-                                                        placeholder="值"
-                                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
-                                                    />
-                                                    <button
-                                                        onClick={() => {
-                                                            const newHeaders = { ...mcpForm.headers };
-                                                            delete newHeaders[key];
-                                                            setMcpForm((p) => ({ ...p, headers: newHeaders }));
-                                                        }}
-                                                        className="rounded-lg p-2 text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
-                                                    >
-                                                        <Trash2 className="h-4 w-4" />
-                                                    </button>
+                                                    {/* Add new header — key + value inline */}
+                                                    <div className="flex items-center gap-2">
+                                                        <input
+                                                            type="text"
+                                                            value={mcpForm.newHeaderKey}
+                                                            onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderKey: e.target.value }))}
+                                                            placeholder="名称"
+                                                            className="w-[140px] shrink-0 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                        />
+                                                        <input
+                                                            type="text"
+                                                            value={mcpForm.newHeaderValue}
+                                                            onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderValue: e.target.value }))}
+                                                            placeholder="值"
+                                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                            onKeyDown={(e) => {
+                                                                if (e.key === 'Enter') {
+                                                                    e.preventDefault();
+                                                                    if (mcpForm.newHeaderKey) {
+                                                                        setMcpForm((p) => ({
+                                                                            ...p,
+                                                                            headers: { ...p.headers, [p.newHeaderKey]: p.newHeaderValue },
+                                                                            newHeaderKey: '',
+                                                                            newHeaderValue: '',
+                                                                        }));
+                                                                    }
+                                                                }
+                                                            }}
+                                                        />
+                                                        <button
+                                                            onClick={() => {
+                                                                if (mcpForm.newHeaderKey) {
+                                                                    setMcpForm((p) => ({
+                                                                        ...p,
+                                                                        headers: { ...p.headers, [p.newHeaderKey]: p.newHeaderValue },
+                                                                        newHeaderKey: '',
+                                                                        newHeaderValue: '',
+                                                                    }));
+                                                                }
+                                                            }}
+                                                            disabled={!mcpForm.newHeaderKey}
+                                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
+                                                        >
+                                                            <Plus className="h-4 w-4" />
+                                                        </button>
+                                                    </div>
+                                                    <p className="mt-2 text-xs text-[var(--ink-muted)]">用于认证的 HTTP 请求头，如 Authorization: Bearer token</p>
                                                 </div>
-                                            ))}
+                                            )}
+                                        </div>
 
-                                            {/* Add new header */}
-                                            <div className="flex items-center gap-2">
+                                        {/* OAuth 2.0 Section — collapsible */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)]">
+                                            <button
+                                                type="button"
+                                                onClick={() => setMcpOAuthExpanded(v => !v)}
+                                                className="flex w-full items-center justify-between p-4 text-sm font-medium text-[var(--ink)]"
+                                            >
+                                                <span className="flex items-center gap-2">
+                                                    <Link className="h-4 w-4" /> OAuth 2.0 授权
+                                                </span>
+                                                <span className="flex items-center gap-2">
+                                                    {mcpOAuthStatus[mcpForm.id] === 'connected' && (
+                                                        <span className="flex items-center gap-1 rounded-full bg-[var(--success)]/10 px-2 py-0.5 text-xs text-[var(--success)]">
+                                                            <Check className="h-3 w-3" /> 已连接
+                                                        </span>
+                                                    )}
+                                                    {mcpOAuthStatus[mcpForm.id] === 'expired' && (
+                                                        <span className="flex items-center gap-1 rounded-full bg-[var(--warning)]/10 px-2 py-0.5 text-xs text-[var(--warning)]">
+                                                            <AlertCircle className="h-3 w-3" /> 已过期
+                                                        </span>
+                                                    )}
+                                                    <ChevronDown className={`h-4 w-4 text-[var(--ink-muted)] transition-transform ${mcpOAuthExpanded ? '' : '-rotate-90'}`} />
+                                                </span>
+                                            </button>
+                                            {mcpOAuthExpanded && (
+                                            <div className="border-t border-[var(--line)] px-4 pb-4 pt-3">
+                                            <p className="mb-3 text-xs text-[var(--ink-muted)]">
+                                                部分 MCP 服务器需要 OAuth 2.0 授权（如 Google、GitHub 等）。填写 Client ID 后点击连接即可自动完成授权流程。
+                                            </p>
+
+                                            <div className="space-y-2">
                                                 <input
                                                     type="text"
-                                                    value={mcpForm.newHeaderKey}
-                                                    onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderKey: e.target.value }))}
-                                                    placeholder="头名称（如 Authorization）"
-                                                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
-                                                    onKeyDown={(e) => {
-                                                        if (e.key === 'Enter') {
-                                                            e.preventDefault();
-                                                            if (mcpForm.newHeaderKey) {
-                                                                setMcpForm((p) => ({
-                                                                    ...p,
-                                                                    headers: { ...p.headers, [p.newHeaderKey]: '' },
-                                                                    newHeaderKey: ''
-                                                                }));
-                                                            }
-                                                        }
-                                                    }}
+                                                    value={mcpForm.oauthClientId}
+                                                    onChange={(e) => setMcpForm(p => ({ ...p, oauthClientId: e.target.value }))}
+                                                    placeholder="Client ID *"
+                                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                 />
-                                                <button
-                                                    onClick={() => {
-                                                        if (mcpForm.newHeaderKey) {
-                                                            setMcpForm((p) => ({
-                                                                ...p,
-                                                                headers: { ...p.headers, [p.newHeaderKey]: '' },
-                                                                newHeaderKey: ''
-                                                            }));
-                                                        }
-                                                    }}
-                                                    disabled={!mcpForm.newHeaderKey}
-                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
-                                                >
-                                                    <Plus className="h-4 w-4" />
-                                                    添加
-                                                </button>
+                                                <input
+                                                    type="password"
+                                                    value={mcpForm.oauthClientSecret}
+                                                    onChange={(e) => setMcpForm(p => ({ ...p, oauthClientSecret: e.target.value }))}
+                                                    placeholder="Client Secret（可选）"
+                                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                />
+                                                <input
+                                                    type="text"
+                                                    value={mcpForm.oauthScopes}
+                                                    onChange={(e) => setMcpForm(p => ({ ...p, oauthScopes: e.target.value }))}
+                                                    placeholder="Scopes（空格分隔，如 read write）"
+                                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                />
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <input
+                                                        type="url"
+                                                        value={mcpForm.oauthAuthUrl}
+                                                        onChange={(e) => setMcpForm(p => ({ ...p, oauthAuthUrl: e.target.value }))}
+                                                        placeholder="Authorization URL（留空自动发现）"
+                                                        className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                    />
+                                                    <input
+                                                        type="url"
+                                                        value={mcpForm.oauthTokenUrl}
+                                                        onChange={(e) => setMcpForm(p => ({ ...p, oauthTokenUrl: e.target.value }))}
+                                                        placeholder="Token URL（留空自动发现）"
+                                                        className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                    />
+                                                </div>
                                             </div>
-                                            <p className="mt-2 text-xs text-[var(--ink-muted)]">用于认证的 HTTP 请求头，如 Bearer Token</p>
+
+                                            <div className="mt-3 flex items-center gap-2">
+                                                {mcpOAuthStatus[mcpForm.id] === 'connected' ? (
+                                                    <button
+                                                        onClick={() => handleMcpOAuthDisconnect(mcpForm.id)}
+                                                        className="flex items-center gap-1.5 rounded-lg border border-[var(--error)] px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                                    >
+                                                        <Unlink className="h-4 w-4" /> 断开连接
+                                                    </button>
+                                                ) : (
+                                                    <button
+                                                        onClick={() => handleMcpOAuthConnect(mcpForm.id, mcpForm.url)}
+                                                        disabled={!mcpForm.oauthClientId || mcpOAuthConnecting === mcpForm.id}
+                                                        className="flex items-center gap-1.5 rounded-lg border border-[var(--accent)] px-3 py-2 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/10 disabled:opacity-50"
+                                                    >
+                                                        {mcpOAuthConnecting === mcpForm.id ? (
+                                                            <><Loader2 className="h-4 w-4 animate-spin" /> 等待授权...</>
+                                                        ) : (
+                                                            <><Link className="h-4 w-4" /> 连接</>
+                                                        )}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                        )}
                                         </div>
                                     </>
                                 )}

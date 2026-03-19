@@ -1,7 +1,7 @@
 import type { ReadInput, ToolUseSimple } from '@/types/chat';
 
 import { CollapsibleTool } from './CollapsibleTool';
-import { FilePath, ToolHeader } from './utils';
+import { ExpandableResult, FilePath, ToolHeader } from './utils';
 
 interface ReadToolProps {
   tool: ToolUseSimple;
@@ -35,12 +35,13 @@ export default function ReadTool({ tool }: ReadToolProps) {
     </div>
   );
 
-  const expandedContent =
-    tool.result ?
-      <pre className="max-h-72 overflow-x-auto rounded bg-[var(--paper-inset)]/50 px-2 py-1 font-mono text-sm wrap-break-word whitespace-pre-wrap text-[var(--ink-secondary)]">
-        {tool.result}
-      </pre>
-    : null;
+  // ExpandableResult internally calls unwrapSdkResult() to extract file content from SDK JSON
+  const expandedContent = tool.result ? (
+    <ExpandableResult
+      content={tool.result}
+      className="rounded bg-[var(--paper-inset)]/50 px-2 py-1 wrap-break-word text-[var(--ink-secondary)]"
+    />
+  ) : null;
 
   return <CollapsibleTool collapsedContent={collapsedContent} expandedContent={expandedContent} />;
 }

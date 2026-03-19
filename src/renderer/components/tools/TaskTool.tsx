@@ -3,6 +3,7 @@ import type { AgentInput, BackgroundTaskStats, SubagentToolCall, ToolUseSimple, 
 
 import Markdown from '@/components/Markdown';
 import { formatDuration } from '@/components/tools/toolBadgeConfig';
+import { ExpandableResult } from '@/components/tools/utils';
 import { useTabApiOptional } from '@/context/TabContext';
 import { useBackgroundTaskPolling } from '@/hooks/useBackgroundTaskPolling';
 import { getBackgroundTaskStatus, isTerminalStatus, BACKGROUND_TASK_STATUS_EVENT, type BackgroundTaskTerminalStatus } from '@/utils/backgroundTaskStatus';
@@ -421,9 +422,10 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
       {call.result && (
         <div className="mt-1">
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]">结果</div>
-          <pre className="max-h-48 overflow-y-auto rounded-md bg-[var(--paper-inset)]/50 p-2 font-mono text-[10px] text-[var(--ink-secondary)] whitespace-pre-wrap">
-            {call.result}
-          </pre>
+          <ExpandableResult
+            content={call.result}
+            className="rounded-md bg-[var(--paper-inset)]/50 p-2 text-[10px] text-[var(--ink-secondary)]"
+          />
         </div>
       )}
     </div>

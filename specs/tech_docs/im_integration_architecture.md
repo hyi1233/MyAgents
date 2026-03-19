@@ -2,7 +2,7 @@
 
 > **文档状态**：实现完成，基于代码实际情况更新
 >
-> **更新日期**：2026-03-08
+> **更新日期**：2026-03-19
 >
 > **前置调研**：
 > - [OpenClaw IM 通道集成架构研究](../prd/research_openclaw_im_integration.md)
@@ -473,15 +473,53 @@ SessionRouter → Sidecar(AI)    社区 IM 平台 (QQ/Matrix/…)
 #### 消息流
 
 **入站**（社区平台 → AI）：
-1. 社区插件收到消息 → 调 `dispatchReply`
-2. compat-runtime 拦截 → 提取 ctx（SenderId, Body, ChatType 等）
-3. POST `/api/im-bridge/message` → Rust management API
-4. Rust 查 `BRIDGE_SENDERS` registry → `mpsc::Sender<ImMessage>` → 标准消息处理循环
-5. SessionRouter → ensure_sidecar → AI Sidecar → SSE 流式回复
+1. 社区插件收到消息 → 调 `withReplyDispatcher({ run })` 或 `dispatchReplyFromConfig()`
+2. compat-runtime 拦截 → 提取 ctx 字段 → POST `/api/im-bridge/message` → Rust
+3. Rust 查 `BRIDGE_SENDERS` registry → `mpsc::Sender<ImMessage>` → 标准消息处理循环
+4. SessionRouter → ensure_sidecar → AI Sidecar → SSE 流式回复
 
 **出站**（AI → 社区平台）：
 1. Rust `BridgeAdapter::send_message()` → POST `/send-text` 到 Bridge 进程
 2. Bridge 调用插件的 deliver 回调 → 社区平台 API
+
+#### Dispatch 返回值约定
+
+OpenClaw 插件对 dispatch 函数的返回值做 `{ queuedFinal, counts }` 解构。**所有** dispatch 相关函数 MUST 返回此结构，否则插件崩溃：
+
+| 函数 | 返回 |
+|------|------|
+| `withReplyDispatcher({ run })` | `{ queuedFinal: 0, counts: {} }` |
+| `dispatchReplyFromConfig(params)` | 透传 `dispatchReplyWithBufferedBlockDispatcher` 的返回值 |
+| `dispatchReplyWithBufferedBlockDispatcher(params)` | `{ queuedFinal: 0, counts: {} }`（包括 empty text 提前返回路径） |
+| `createReplyDispatcherWithTyping()` 的 `dispatch` 回调 | `{ queuedFinal: 0, counts: {} }` |
+
+#### ctx 字段提取映射
+
+compat-runtime 从 OpenClaw 插件的 dispatch context 中提取以下字段，转发到 Rust：
+
+| 插件 ctx 字段 | compat-runtime 变量 | Rust BridgeMessagePayload | 用途 |
+|---|---|---|---|
+| `BodyForAgent` / `Body` | `text` | `text` | 消息正文（BodyForAgent 含插件预处理的群聊历史） |
+| `SenderId` | `senderId` | `sender_id` | 发送者 ID |
+| `SenderName` | `senderName` | `sender_name` | 发送者名称 |
+| `ChatType` | `chatType` | `chat_type` | `"group"` 或 `"direct"` |
+| `From` | `chatId`（去除 `feishu:` 前缀） | `chat_id` | 会话 ID |
+| `MessageSid` | `messageId` | `message_id` | 消息 ID |
+| `WasMentioned` / `IsMention` | `isMention` | `is_mention` | 是否 @机器人 |
+| `GroupSubject` / `GroupName` | `groupName` | `group_name` | 群名称（人类可读） |
+| `MessageThreadId` | `threadId` | `thread_id` | 线程/话题 ID |
+| `ReplyToBody` | `replyToBody` | `reply_to_body` | 引用回复原文 |
+| `GroupSystemPrompt` | `groupSystemPrompt` | `group_system_prompt` | 群聊自定义系统提示 |
+
+**isMention 默认值逻辑**：
+
+```typescript
+// compat-runtime.ts — 与 Rust management_api.rs 保持一致
+const isMention = ctx.WasMentioned ?? ctx.IsMention ?? (chatType !== 'group');
+// 私聊 → true（消息直达 bot），群聊 → false（需插件明确标记）
+```
+
+OpenClaw 飞书插件通过 `mentionedBot(ctx.mentions)` 检测 @mention，结果写入 `ctx.WasMentioned`。若插件未设置此字段，群消息默认 `false`——配合 `GroupActivation::Mention` 策略，未 @bot 的消息会被缓冲到群历史而非触发 AI。
 
 #### 插件生命周期
 
@@ -507,6 +545,70 @@ SessionRouter → Sidecar(AI)    社区 IM 平台 (QQ/Matrix/…)
   → is_plugin_in_use() 安全检查
   → rm -rf plugin 目录
 ```
+
+### 2.14 群聊处理
+
+#### 群激活策略
+
+| 模式 | 行为 | 配置 |
+|------|------|------|
+| `GroupActivation::Mention` | 仅 @bot / `/ask` 触发 AI，其他消息缓冲到群历史 | 默认 |
+| `GroupActivation::Always` | 所有消息都触发 AI，AI 可回复 `<NO_REPLY>` 跳过 | 需显式配置 |
+
+#### 群名解析（3 级 fallback）
+
+```rust
+// mod.rs — group_name 解析链
+let group_name = group_permissions     // 1. 用户在 UI 配置的群名
+    .find(|g| g.group_id == msg.chat_id)
+    .map(|g| g.group_name.clone())
+    .or_else(|| msg.hint_group_name.clone())  // 2. Bridge 插件传来的群名
+    .unwrap_or_else(|| msg.chat_id.clone());  // 3. 原始 chat_id
+```
+
+#### 群聊 AI Prompt 模板
+
+Rust 构建 `GroupStreamContext` 后，Sidecar `/api/im/chat` 端点组装最终 prompt：
+
+```
+[群聊信息]                                              ← 仅 isFirstGroupTurn
+你正在「{groupName}」{groupPlatform}群聊中。
+你的回复会自动发送到群里，直接回复即可。
+群内不同人的消息会以 [from: 名字] 标注发送者。
+你会收到群里的所有消息。如果你认为不需要回复…            ← 仅 GroupActivation::Always
+
+[群聊指令]                                              ← groupSystemPrompt（来自插件配置）
+{groupSystemPrompt}
+
+{pendingHistory}                                        ← 积攒的未触发群消息
+
+[引用回复]                                              ← replyToBody（引用回复上下文）
+> {quoted original text}
+
+[from: {senderName}]                                    ← 发送者标记
+{message text}
+```
+
+**私聊引用回复**：非群聊时 `replyToBody` 也会注入（`[引用回复]\n> ...` 前置于消息）。
+
+#### 群工具禁用
+
+群聊默认禁用危险工具：`['Bash', 'Edit', 'Write']`。可通过 `groupToolsDeny` 配置覆盖（空数组 = 全部允许）。
+
+#### ImMessage 群聊相关字段
+
+```rust
+pub struct ImMessage {
+    // ... 基础字段（chat_id, text, sender_id 等） ...
+    pub is_mention: bool,                    // @bot 检测结果
+    pub reply_to_bot: bool,                  // 回复 bot 消息检测
+    pub hint_group_name: Option<String>,     // Bridge 插件提供的群名 hint
+    pub reply_to_body: Option<String>,       // 引用回复原文（Bridge 插件）
+    pub group_system_prompt: Option<String>, // 群聊自定义系统提示（Bridge 插件）
+}
+```
+
+这 3 个 Option 字段由 Bridge 插件透传，原生适配器（Telegram/Feishu/Dingtalk）设为 `None`。`BufferedMessage` 序列化时同步携带（`#[serde(default)]`），崩溃恢复后不丢失。
 
 ---
 
@@ -845,10 +947,12 @@ src/renderer/
 src/server/plugin-bridge/
 ├── index.ts                   # Bridge 入口：CLI args 解析、插件加载、HTTP server
 ├── compat-api.ts              # OpenClaw API shim（registerChannel 捕获）
-├── compat-runtime.ts          # channelRuntime mock（dispatchReply 拦截 → Rust）
-└── plugin-sdk-shim/           # openclaw/plugin-sdk import shim
-    ├── package.json
-    └── index.js               # emptyPluginConfigSchema + config helpers
+├── compat-runtime.ts          # channelRuntime mock（dispatchReply 拦截 → Rust，ctx 字段提取）
+├── streaming-adapter.ts       # 流式卡片适配（start-stream/stream-chunk/finalize-stream）
+├── mcp-handler.ts             # Bridge 插件 MCP 工具暴露
+└── sdk-shim/
+    └── plugin-sdk/
+        └── feishu.js          # openclaw/plugin-sdk/feishu 的 ~44 符号 shim
 ```
 
 ### 共享类型
@@ -890,13 +994,24 @@ src/shared/types/im.ts         # ImBotConfig, ImBotStatus, ImPlatform, Installed
 
 ### 9.1 多端 Session 共享
 
-当前每个 Bot 的 Session 独立于 Desktop Tab。未来可实现 Desktop 打开 IM Session、双端同步等能力。
+当前每个 Bot 的 Session 独立于 Desktop Tab。已可通过 Desktop 打开 IM Session（跳转到已有 Sidecar），但完整双端同步尚未实现。
 
 ### 9.2 Bot Token 加密存储
 
 当前 Token 明文存储在 `config.json`（与 Provider API Key 一致）。后续应统一迁移到 OS Keychain。
 
-### 9.3 更多 IM 平台
+### 9.3 Bridge 插件功能补全
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| 消息分发 | ✅ 已修复 | dispatch 返回 `{ queuedFinal, counts }` |
+| 群聊 isMention | ✅ 已修复 | 按 chatType 区分默认值 |
+| 群名/引用回复/群系统提示 | ✅ 已透传 | 全链路闭环 |
+| 群内 @mention 主动检测 | ⏳ 依赖插件 | Bridge 依赖插件设置 `WasMentioned`，无独立检测 |
+| 附件/图片转发 | ⏳ 待实现 | compat-runtime 提取但 Rust `ImMessage.attachments` 为空 |
+| 消息去重（Bridge） | ✅ feishu.js shim | `createDedupeCache` + Rust 层 72h dedup |
+
+### 9.4 更多 IM 平台
 
 `ImAdapter` trait 已定义（Telegram、飞书、钉钉已实现），可扩展 Slack、Discord 等平台，复用 Session Router 和消息处理循环。
 

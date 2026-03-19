@@ -607,6 +607,19 @@ struct BridgeMessagePayload {
     #[allow(dead_code)]
     group_id: Option<String>,
     is_mention: Option<bool>,
+    /// Human-readable group name from plugin (e.g. GroupSubject in OpenClaw Feishu)
+    #[serde(default)]
+    group_name: Option<String>,
+    /// Thread ID for threaded replies (MessageThreadId in OpenClaw)
+    #[serde(default)]
+    #[allow(dead_code)]
+    thread_id: Option<String>,
+    /// Quoted reply text content (ReplyToBody in OpenClaw)
+    #[serde(default)]
+    reply_to_body: Option<String>,
+    /// Group-level custom system prompt from plugin config
+    #[serde(default)]
+    group_system_prompt: Option<String>,
 }
 
 async fn handle_bridge_message(
@@ -652,6 +665,8 @@ async fn handle_bridge_message(
     } else {
         ImSourceType::Private
     };
+    // Default: private=true (directed at bot), group=false (only if explicitly flagged)
+    let is_mention = payload.is_mention.unwrap_or(source_type == ImSourceType::Private);
 
     let msg = ImMessage {
         chat_id: payload.chat_id,
@@ -664,8 +679,11 @@ async fn handle_bridge_message(
         timestamp: chrono::Utc::now(),
         attachments: Vec::new(),
         media_group_id: None,
-        is_mention: payload.is_mention.unwrap_or(true),
+        is_mention,
         reply_to_bot: false,
+        hint_group_name: payload.group_name,
+        reply_to_body: payload.reply_to_body,
+        group_system_prompt: payload.group_system_prompt,
     };
 
     match sender.send(msg).await {

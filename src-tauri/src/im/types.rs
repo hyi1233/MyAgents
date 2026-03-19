@@ -231,6 +231,12 @@ pub struct ImMessage {
     pub is_mention: bool,
     /// Whether this is specifically a reply to bot's message
     pub reply_to_bot: bool,
+    /// Human-readable group name hint (from Bridge plugins; native adapters resolve via API)
+    pub hint_group_name: Option<String>,
+    /// Quoted reply body (for threaded replies from Bridge plugins)
+    pub reply_to_body: Option<String>,
+    /// Group-level custom system prompt (from Bridge plugin config)
+    pub group_system_prompt: Option<String>,
 }
 
 impl ImMessage {
@@ -436,6 +442,15 @@ pub struct BufferedMessage {
     /// Whether this is specifically a reply to bot's message
     #[serde(default)]
     pub reply_to_bot: bool,
+    /// Human-readable group name hint (from Bridge plugins; native adapters resolve via API)
+    #[serde(default)]
+    pub hint_group_name: Option<String>,
+    /// Quoted reply body (for threaded replies from Bridge plugins)
+    #[serde(default)]
+    pub reply_to_body: Option<String>,
+    /// Group-level custom system prompt (from Bridge plugin config)
+    #[serde(default)]
+    pub group_system_prompt: Option<String>,
 }
 
 impl BufferedMessage {
@@ -453,6 +468,9 @@ impl BufferedMessage {
             retry_count: 0,
             is_mention: msg.is_mention,
             reply_to_bot: msg.reply_to_bot,
+            hint_group_name: msg.hint_group_name.clone(),
+            reply_to_body: msg.reply_to_body.clone(),
+            group_system_prompt: msg.group_system_prompt.clone(),
         }
     }
 
@@ -474,6 +492,9 @@ impl BufferedMessage {
             media_group_id: None,
             is_mention: self.is_mention,
             reply_to_bot: self.reply_to_bot,
+            hint_group_name: self.hint_group_name.clone(),
+            reply_to_body: self.reply_to_body.clone(),
+            group_system_prompt: self.group_system_prompt.clone(),
         }
     }
 }

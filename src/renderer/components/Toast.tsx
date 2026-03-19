@@ -22,6 +22,7 @@ interface ToastContextValue {
 const ToastContext = createContext<ToastContextValue | null>(null);
 
 const DEFAULT_TOAST_DURATION = 3000; // 3 seconds
+const ERROR_TOAST_DURATION = 5000; // 5 seconds — errors need more reading time
 
 const typeConfig = {
     success: {
@@ -97,7 +98,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     }, [removeToast]);
 
     const success = useCallback((message: string, duration?: number) => showToast(message, 'success', duration), [showToast]);
-    const error = useCallback((message: string, duration?: number) => showToast(message, 'error', duration), [showToast]);
+    const error = useCallback((message: string, duration?: number) => showToast(message, 'error', duration ?? ERROR_TOAST_DURATION), [showToast]);
     const warning = useCallback((message: string, duration?: number) => showToast(message, 'warning', duration), [showToast]);
     const info = useCallback((message: string, duration?: number) => showToast(message, 'info', duration), [showToast]);
 

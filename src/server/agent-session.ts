@@ -5,12 +5,14 @@ import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
-import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize';
+import { processImage, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
 import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
 import { getImBridgeToolsContext, getImBridgeToolServer } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
+import { startSocksBridge, stopSocksBridge, isSocksBridgeRunning } from './utils/socks-bridge';
+import { getOAuthToken } from './mcp-oauth';
 // Side-effect imports: each registers itself in the builtin MCP registry
 import './tools/gemini-image-tool';
 import './tools/edge-tts-tool';
@@ -28,6 +30,9 @@ import { trackServer } from './analytics';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
+
+// Shared NO_PROXY value — comprehensive list of localhost addresses to bypass proxy
+const PROXY_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
 
 // Max length for individual string values in SDK message logs.
 // Base64 images can be several MB; truncate to keep logs readable.
@@ -341,6 +346,8 @@ let imCallbackNulledDuringTurn = false;
 let currentGroupToolsDeny: string[] = [];
 // Flag: auto-reset session after image content pollutes conversation history
 let shouldResetSessionAfterError = false;
+// Reason for the auto-reset (used to skip auto-reset for desktop image errors)
+let shouldResetReason: 'image' | 'stale' | undefined;
 // Track text block indices for detecting text-type content_block_stop
 const imTextBlockIndices = new Set<number>();
 
@@ -633,7 +640,13 @@ let currentAgentDefinitions: Record<string, AgentDefinition> | null = null;
  * Mutates process.env so that subsequent SDK subprocess spawns inherit the new proxy.
  * Triggers session restart (abort + resume + pre-warm) identical to MCP config changes,
  * but only when the effective proxy URL actually changed.
+ *
+ * SOCKS5 handling: Bun/Node.js `fetch()` doesn't support `socks5://` in HTTP_PROXY env vars.
+ * When SOCKS5 is configured, we start a local HTTP-to-SOCKS5 bridge and set HTTP_PROXY to
+ * the bridge's HTTP URL. The bridge transparently tunnels traffic through SOCKS5.
  */
+let proxyConfigGeneration = 0; // Guards against stale async SOCKS5 callbacks
+
 export function setProxyConfig(proxySettings: {
   enabled: boolean;
   protocol?: string;
@@ -641,36 +654,84 @@ export function setProxyConfig(proxySettings: {
   port?: number;
 } | null): void {
   const PROXY_VARS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'];
-  const NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
+
+  // Bump generation to invalidate in-flight SOCKS5 bridge callbacks
+  const generation = ++proxyConfigGeneration;
 
   // Compute the new effective proxy URL for change detection
   const oldProxyUrl = process.env.HTTP_PROXY || '';
-  const newProxyUrl = proxySettings?.enabled
+  const rawProxyUrl = proxySettings?.enabled
     ? `${proxySettings.protocol || 'http'}://${proxySettings.host || '127.0.0.1'}:${proxySettings.port || 7890}`
     : '';
-  const proxyChanged = oldProxyUrl !== newProxyUrl;
+  const isSocks5 = proxySettings?.protocol === 'socks5';
 
   if (proxySettings?.enabled) {
-    process.env.HTTP_PROXY = newProxyUrl;
-    process.env.HTTPS_PROXY = newProxyUrl;
-    process.env.http_proxy = newProxyUrl;
-    process.env.https_proxy = newProxyUrl;
-    process.env.NO_PROXY = NO_PROXY_VAL;
-    process.env.no_proxy = NO_PROXY_VAL;
-    delete process.env.ALL_PROXY;
-    delete process.env.all_proxy;
-    console.log(`[agent] Proxy hot-reloaded: ${newProxyUrl}`);
+    if (isSocks5) {
+      // SOCKS5: start bridge asynchronously, set env vars after bridge is ready
+      const host = proxySettings.host || '127.0.0.1';
+      const port = proxySettings.port || 7890;
+      startSocksBridge(host, port).then((bridgePort) => {
+        // Discard if a newer config change has occurred while bridge was starting
+        if (generation !== proxyConfigGeneration) {
+          console.log('[agent] SOCKS5 bridge callback discarded (superseded by newer config)');
+          return;
+        }
+        const bridgeUrl = `http://127.0.0.1:${bridgePort}`;
+        if (oldProxyUrl === bridgeUrl) {
+          console.log('[agent] SOCKS5 bridge URL unchanged, skipping restart');
+          return;
+        }
+        applyProxyEnvVars(bridgeUrl, PROXY_NO_PROXY_VAL);
+        console.log(`[agent] SOCKS5 proxy hot-reloaded: ${rawProxyUrl} → bridge ${bridgeUrl}`);
+        triggerProxyRestart();
+      }).catch((err) => {
+        if (generation !== proxyConfigGeneration) return;
+        console.error(`[agent] Failed to start SOCKS5 bridge: ${err.message}. Falling back to direct socks5:// URL.`);
+        applyProxyEnvVars(rawProxyUrl, PROXY_NO_PROXY_VAL);
+        triggerProxyRestart();
+      });
+      // Return early — env vars will be set when bridge is ready
+      return;
+    }
+
+    // HTTP/HTTPS: stop bridge if running, set env vars directly
+    if (isSocksBridgeRunning()) {
+      stopSocksBridge().catch(() => { /* ignore */ });
+    }
+    applyProxyEnvVars(rawProxyUrl, PROXY_NO_PROXY_VAL);
+    console.log(`[agent] Proxy hot-reloaded: ${rawProxyUrl}`);
   } else {
+    // Disabled: stop bridge, clear env vars
+    if (isSocksBridgeRunning()) {
+      stopSocksBridge().catch(() => { /* ignore */ });
+    }
     for (const v of PROXY_VARS) delete process.env[v];
     console.log('[agent] Proxy cleared (direct connection)');
   }
 
-  if (!proxyChanged) {
+  const newProxyUrl = process.env.HTTP_PROXY || '';
+  if (oldProxyUrl === newProxyUrl) {
     if (isDebugMode) console.log('[agent] Proxy config unchanged, skipping session restart');
     return;
   }
 
-  // Same pattern as setMcpServers: abort+resume running session, then pre-warm
+  triggerProxyRestart();
+}
+
+/** Apply proxy env vars to process.env */
+function applyProxyEnvVars(proxyUrl: string, noProxyVal: string): void {
+  process.env.HTTP_PROXY = proxyUrl;
+  process.env.HTTPS_PROXY = proxyUrl;
+  process.env.http_proxy = proxyUrl;
+  process.env.https_proxy = proxyUrl;
+  process.env.NO_PROXY = noProxyVal;
+  process.env.no_proxy = noProxyVal;
+  delete process.env.ALL_PROXY;
+  delete process.env.all_proxy;
+}
+
+/** Restart session after proxy change (same pattern as MCP config changes) */
+function triggerProxyRestart(): void {
   if (querySession) {
     if (isProcessing && !isPreWarming) {
       console.log('[agent] Proxy changed, deferring restart (active turn)');
@@ -683,6 +744,29 @@ export function setProxyConfig(proxySettings: {
   preWarmFailCount = 0;
   if (!isProcessing || isPreWarming) {
     schedulePreWarm();
+  }
+}
+
+/**
+ * Initialize SOCKS5 bridge from inherited environment variables at Sidecar startup.
+ * Rust may have set HTTP_PROXY=socks5://... — detect and bridge it before first pre-warm.
+ */
+export async function initSocksBridgeFromEnv(): Promise<void> {
+  const proxyUrl = process.env.HTTP_PROXY || process.env.HTTPS_PROXY || '';
+  if (!proxyUrl.startsWith('socks5://')) return;
+
+  try {
+    const url = new URL(proxyUrl);
+    const host = url.hostname || '127.0.0.1';
+    const port = parseInt(url.port) || 1080;
+
+    const bridgePort = await startSocksBridge(host, port);
+    const bridgeUrl = `http://127.0.0.1:${bridgePort}`;
+    applyProxyEnvVars(bridgeUrl, PROXY_NO_PROXY_VAL);
+    console.log(`[agent] SOCKS5 bridge initialized at startup: ${proxyUrl} → ${bridgeUrl}`);
+  } catch (err) {
+    console.error(`[agent] Failed to initialize SOCKS5 bridge from env: ${err instanceof Error ? err.message : err}`);
+    // Leave the original socks5:// URL in place — it will fail but at least error messages are clear
   }
 }
 
@@ -1153,10 +1237,25 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
       if (server.env) {
         resolvedUrl = resolvedUrl.replace(/\{\{(\w+)\}\}/g, (_, key) => server.env?.[key] ?? '');
       }
+
+      // Inject OAuth token as Authorization header if available and not expired
+      const headers = { ...server.headers };
+      const oauthToken = getOAuthToken(server.id);
+      if (oauthToken && !headers['Authorization'] && !headers['authorization']) {
+        // Check expiry with 60s buffer — skip injection if token is expired
+        const isExpired = oauthToken.expiresAt && oauthToken.expiresAt < Date.now() + 60000;
+        if (!isExpired) {
+          headers['Authorization'] = `${oauthToken.tokenType || 'Bearer'} ${oauthToken.accessToken}`;
+          console.log(`[agent] MCP ${server.id}: Injecting OAuth token (expires: ${oauthToken.expiresAt ? new Date(oauthToken.expiresAt).toISOString() : 'never'})`);
+        } else {
+          console.warn(`[agent] MCP ${server.id}: OAuth token expired, skipping injection`);
+        }
+      }
+
       result[server.id] = {
         type: server.type,
         url: resolvedUrl,
-        headers: server.headers,
+        headers,
       };
       // Log URL with API key masked for security
       const maskedUrl = resolvedUrl.replace(/([?&]\w*[Kk]ey=)[^&]+/g, '$1***');
@@ -3615,18 +3714,36 @@ export async function enqueueUserMessage(
   > = [];
 
   // Add images first so Claude can see them before the text query
-  // Images are resized server-side to stay within API limits (max 2000px → 1920px)
+  // Images are resized/sliced server-side to stay within API limits (≤1568px, long images → 1:2 tiles)
   if (hasImages) {
     for (const img of images) {
-      const processed = await resizeImageIfNeeded(img);
-      contentBlocks.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: processed.mimeType,
-          data: processed.data,
-        },
-      });
+      let tiles: Awaited<ReturnType<typeof processImage>>;
+      try {
+        tiles = await processImage(img);
+      } catch (err) {
+        // Image too large or processing failed — notify user and inform Claude
+        const errMsg = err instanceof Error ? err.message : 'Image processing failed';
+        console.warn(`[agent] processImage error for ${img.name}: ${errMsg}`);
+        broadcast('chat:message-error', `图片 "${img.name}" 处理失败：${errMsg}`);
+        contentBlocks.push({ type: 'text', text: `[Image "${img.name}" omitted: ${errMsg}]` });
+        continue;
+      }
+      if (tiles.length > 1) {
+        contentBlocks.push({
+          type: 'text',
+          text: `[The following ${tiles.length} images are consecutive tiles of the same long screenshot "${img.name}", arranged in reading order with slight overlap between adjacent tiles]`,
+        });
+      }
+      for (const tile of tiles) {
+        contentBlocks.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: tile.mimeType,
+            data: tile.data,
+          },
+        });
+      }
     }
   }
 
@@ -3968,6 +4085,74 @@ export async function rewindSession(userMessageId: string): Promise<{
   }
 }
 
+/**
+ * Fork session: create a new independent session branching from a specific assistant message.
+ * Non-destructive — the current session remains untouched.
+ * The new session uses SDK's forkSession option on first startup.
+ */
+export function forkSession(assistantMessageId: string): {
+  success: boolean;
+  newSessionId?: string;
+  agentDir?: string;
+  title?: string;
+  error?: string;
+} {
+  // 1. Find target assistant message
+  const targetIndex = messages.findIndex(m => m.id === assistantMessageId && m.role === 'assistant');
+  if (targetIndex < 0) return { success: false, error: 'Assistant message not found' };
+  const targetMsg = messages[targetIndex];
+  if (!targetMsg.sdkUuid) return { success: false, error: 'Message has no SDK UUID (cannot fork)' };
+
+  // 2. Get current session info for the fork source
+  const sourceSessionId = sessionId; // unifiedSession: id === SDK session ID
+  const currentAgentDir = agentDir;
+  const sourceMeta = getSessionMetadata(sourceSessionId);
+  const sourceTitle = sourceMeta?.title || 'Chat';
+
+  try {
+    // 3. Create new session metadata with forkFrom
+    const newSession = createSessionMetadata(currentAgentDir);
+    newSession.title = `🌿 ${sourceTitle}`;
+    newSession.titleSource = 'auto';
+    newSession.forkFrom = {
+      sourceSessionId,
+      messageUuid: targetMsg.sdkUuid,
+    };
+
+    // 4. Copy messages up to and including the fork point (same mapping as persistMessagesToStorage)
+    const forkedMessages: SessionMessage[] = messages.slice(0, targetIndex + 1).map(m => ({
+      id: m.id,
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : JSON.stringify(stripPlaywrightResults(m.content)),
+      timestamp: m.timestamp,
+      sdkUuid: m.sdkUuid,
+      attachments: m.attachments?.map(att => ({
+        id: att.id,
+        name: att.name,
+        mimeType: att.mimeType,
+        path: att.relativePath ?? '',
+      })),
+      metadata: m.metadata,
+    }));
+
+    // 5. Persist new session
+    saveSessionMetadata(newSession);
+    saveSessionMessages(newSession.id, forkedMessages);
+
+    console.log(`[agent] forked session ${sourceSessionId} → ${newSession.id} at message ${assistantMessageId} (sdkUuid: ${targetMsg.sdkUuid}), ${forkedMessages.length} messages copied`);
+
+    return {
+      success: true,
+      newSessionId: newSession.id,
+      agentDir: currentAgentDir,
+      title: newSession.title,
+    };
+  } catch (err) {
+    console.error('[agent] forkSession failed:', err);
+    return { success: false, error: err instanceof Error ? err.message : 'Fork failed' };
+  }
+}
+
 async function startStreamingSession(preWarm = false): Promise<void> {
   if (sessionTerminationPromise) {
     await sessionTerminationPromise;
@@ -4046,8 +4231,26 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const rewindResumeAt = pendingResumeSessionAt;
     if (rewindResumeAt) pendingResumeSessionAt = undefined;
 
+    // Fork detection: if this session was created via fork, override resume/sessionId
+    // to use SDK's forkSession option (load source history + branch to new session).
+    // Consumed once — forkFrom is cleared from metadata after use.
+    let forkMode = false;
+    let forkResumeAt: string | undefined;
+    const forkMeta = getSessionMetadata(sessionId);
+    if (forkMeta?.forkFrom) {
+      const { sourceSessionId, messageUuid } = forkMeta.forkFrom;
+      console.log(`[agent] fork mode: resuming from ${sourceSessionId}, fork at ${messageUuid}, new session ${sessionId}`);
+      resumeFrom = sourceSessionId;
+      effectiveSdkSessionId = sessionId;
+      forkMode = true;
+      forkResumeAt = messageUuid;
+      // Clear forkFrom so subsequent restarts resume normally
+      delete forkMeta.forkFrom;
+      saveSessionMetadata(forkMeta);
+    }
+
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
-    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}`);
+    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}${forkMode ? `, FORK mode (resumeAt: ${forkResumeAt})` : ''}`);
 
     const promptGen = messageGenerator();
 
@@ -4249,9 +4452,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // sessionId 和 resume 互斥（SDK 约束）
     // 新 session：传 effectiveSdkSessionId 让 SDK 使用有效 UUID
     // Resume：传 resume 恢复对话上下文
-    const sessionOption = resumeFrom
-      ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
-      : { sessionId: effectiveSdkSessionId };
+    // Fork：resume + forkSession + sessionId + resumeSessionAt（三者组合）
+    const sessionOption = forkMode
+      ? { resume: resumeFrom!, forkSession: true, sessionId: effectiveSdkSessionId, ...(forkResumeAt ? { resumeSessionAt: forkResumeAt } : {}) }
+      : resumeFrom
+        ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
+        : { sessionId: effectiveSdkSessionId };
 
     try {
       querySession = query({
@@ -4973,8 +5179,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           const rawError = resultMessage.result || resultMessage.errors?.join('; ') || '';
           // Detect image content error — reset session to clear polluted history
           // (applies to both IM and desktop: prevents all subsequent messages from failing)
-          if (rawError.includes('unknown variant') && rawError.includes('image')) {
+          // Pattern 1: malformed image block (e.g., wrong content type)
+          // Pattern 2: oversized image (>8000px, from tools returning large screenshots)
+          // Known API error: "...image.source.base64.data: At least one of the image dimensions exceed max allowed size: 8000 pixels"
+          if (
+            (rawError.includes('unknown variant') && rawError.includes('image')) ||
+            (rawError.includes('image') && rawError.includes('exceed') && rawError.includes('max allowed size'))
+          ) {
             shouldResetSessionAfterError = true;
+            shouldResetReason = 'image';
           }
           // Detect stale session — SDK started (system_init received) but conversation
           // data is broken (e.g., IM Bot restart: old session_id restored from disk,
@@ -4985,6 +5198,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           // this covers Scenario B (SDK starts, returns is_error in result message).
           if (rawError.includes('No conversation found')) {
             shouldResetSessionAfterError = true;
+            shouldResetReason = 'stale';
           }
           if (imStreamCallback) {
             const errorText = localizeImError(rawError);
@@ -5109,11 +5323,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
         // Auto-reset session after unrecoverable errors (image content in history,
         // stale "No conversation found", etc.) — generates new session ID so next
-        // message starts fresh without trying --resume on broken conversation data
+        // message starts fresh without trying --resume on broken conversation data.
+        // Desktop sessions: skip auto-reset for image errors — let the frontend error
+        // banner guide the user to time-rewind (preserves conversation context).
+        // IM/cron sessions: always auto-reset (no UI to interact with).
         if (shouldResetSessionAfterError) {
           shouldResetSessionAfterError = false;
-          console.warn('[agent] Auto-resetting session due to unrecoverable conversation error');
-          resetSession().catch(e => console.error('[agent] Auto-reset failed:', e));
+          const isDesktopImageError = currentScenario.type === 'desktop' && shouldResetReason === 'image';
+          shouldResetReason = undefined;
+          if (!isDesktopImageError) {
+            console.warn('[agent] Auto-resetting session due to unrecoverable conversation error');
+            resetSession().catch(e => console.error('[agent] Auto-reset failed:', e));
+          } else {
+            console.warn('[agent] Desktop image error — skipping auto-reset, frontend will offer rewind');
+          }
         }
 
         // Deferred config restart: MCP/Agents changed during this turn but we didn't

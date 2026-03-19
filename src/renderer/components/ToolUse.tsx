@@ -28,12 +28,38 @@ function parseCronResult(result: string): { taskId: string; name?: string; sched
   return null;
 }
 
+/** Max chars to display for tool results in the UI.
+ *  Larger results (e.g., 16MB Read of a generated HTML file) would create
+ *  millions of DOM nodes, destroying virtualization performance.
+ *  This is display-only — the full result is still available to the AI.
+ *
+ *  JSON results (starting with { or [) get a higher limit because
+ *  specialized components (TaskTool, WebSearchTool, etc.) parse them
+ *  into rich UI — clamping too early would corrupt the JSON. */
+const TEXT_DISPLAY_LIMIT = 50_000;
+const JSON_DISPLAY_LIMIT = 200_000;
+
+function clampResult(tool: ToolUseSimple): ToolUseSimple {
+  if (!tool.result) return tool;
+  const trimmed = tool.result.trimStart();
+  const isJson = trimmed.startsWith('{') || trimmed.startsWith('[');
+  const limit = isJson ? JSON_DISPLAY_LIMIT : TEXT_DISPLAY_LIMIT;
+  if (tool.result.length <= limit) return tool;
+  return {
+    ...tool,
+    result: tool.result.slice(0, limit) + `\n\n... [结果过长，已截断显示前 ${limit.toLocaleString()} 字符，共 ${tool.result.length.toLocaleString()} 字符]`,
+  };
+}
+
 interface ToolUseProps {
   tool: ToolUseSimple;
 }
 
-export default function ToolUse({ tool }: ToolUseProps) {
-  // Route to tool-specific component based on tool name
+export default function ToolUse({ tool: rawTool }: ToolUseProps) {
+  // Clamp large results for display — but only for general text rendering.
+  // Specialized components (cron card, WebSearch, TaskTool, etc.) parse structured
+  // JSON from result — clamping would corrupt the JSON and break rich UI.
+  const tool = clampResult(rawTool);
   switch (tool.name) {
     case 'Bash':
       return <BashTool tool={tool} />;

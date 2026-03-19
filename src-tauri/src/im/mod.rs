@@ -1817,12 +1817,13 @@ async fn create_bot_instance<R: Runtime>(
                             };
                             let activation = task_group_activation.read().await.clone();
                             let tools_deny = task_group_tools_deny.read().await.clone();
-                            // Get group name from group_permissions config
+                            // Get group name: 1) group_permissions config, 2) Bridge hint, 3) chat_id fallback
                             let group_name = {
                                 let perms = task_group_permissions.read().await;
                                 perms.iter()
                                     .find(|g| g.group_id == msg.chat_id)
                                     .map(|g| g.group_name.clone())
+                                    .or_else(|| msg.hint_group_name.clone())
                                     .unwrap_or_else(|| msg.chat_id.clone())
                             };
                             Some(GroupStreamContext {
@@ -2281,8 +2282,6 @@ async fn create_bot_instance<R: Runtime>(
         let hb_peer_locks = Arc::clone(&peer_locks);
         let hb_agent_id = agent_id.clone().unwrap_or_else(|| bot_id.to_string());
         let hb_workspace = default_workspace_str.clone();
-        let hb_permission_mode = Arc::clone(&permission_mode);
-
         let handle = tokio::spawn(async move {
             runner.run_loop(
                 hb_shutdown_rx,
@@ -2294,7 +2293,6 @@ async fn create_bot_instance<R: Runtime>(
                 hb_peer_locks,
                 hb_agent_id,
                 hb_workspace,
-                hb_permission_mode,
             ).await;
         });
 
@@ -2557,6 +2555,18 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         }
         if !gc.tools_deny.is_empty() {
             body["groupToolsDeny"] = json!(gc.tools_deny);
+        }
+    }
+    // Quoted reply body (from Bridge plugins, e.g. threaded reply in Feishu)
+    if let Some(ref rtb) = msg.reply_to_body {
+        if !rtb.is_empty() {
+            body["replyToBody"] = json!(rtb);
+        }
+    }
+    // Group system prompt from Bridge plugin config
+    if let Some(ref gsp) = msg.group_system_prompt {
+        if !gsp.is_empty() {
+            body["groupSystemPrompt"] = json!(gsp);
         }
     }
     // Bridge plugin context — pass bridge port + tool groups to sidecar
@@ -3676,13 +3686,12 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                 let mau_sidecar_mgr = Arc::clone(&*sidecar_manager);
                 let mau_app_handle = app_handle.clone();
                 // Clone agent-level AI config Arcs from AgentInstance
-                let (mau_model, mau_provider_env, mau_permission_mode, mau_mcp_json) = {
+                let (mau_model, mau_provider_env, mau_mcp_json) = {
                     let agents_guard = agent_state.lock().await;
                     if let Some(inst) = agents_guard.get(&agent_config.id) {
                         (
                             Arc::clone(&inst.current_model),
                             Arc::clone(&inst.current_provider_env),
-                            Arc::clone(&inst.permission_mode),
                             Arc::clone(&inst.mcp_servers_json),
                         )
                     } else {
@@ -3690,7 +3699,6 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                         (
                             Arc::new(RwLock::new(agent_config.model.clone())),
                             Arc::new(RwLock::new(None)),
-                            Arc::new(RwLock::new(agent_config.permission_mode.clone())),
                             Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
                         )
                     }
@@ -3756,7 +3764,6 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                 &mau_workspace,
                                 &mau_config_for_loop,
                                 &mau_running_for_loop,
-                                &mau_permission_mode,
                                 &mau_sidecar_mgr,
                                 &mau_app_handle,
                                 &mau_model,
@@ -4624,22 +4631,63 @@ pub async fn cmd_remove_im_bot_config(
 // ===== Group Permission Commands (v0.1.28) =====
 // Pattern: extract Arc clones under the ManagedImBots lock, drop the lock,
 // then do I/O (disk persist, network send) to avoid blocking other Tauri commands.
+//
+// v0.1.41+: Channels may live in ManagedAgents instead of ManagedImBots.
+// Helper resolves from both containers.
+
+/// Resolve group-related Arcs from either ManagedImBots (legacy) or ManagedAgents (v0.1.41+).
+/// Returns (group_permissions, group_history, adapter, platform_str) or "Bot not running" error.
+async fn resolve_group_context(
+    im_state: &ManagedImBots,
+    agent_state: &ManagedAgents,
+    bot_id: &str,
+) -> Result<(
+    Arc<tokio::sync::RwLock<Vec<GroupPermission>>>,
+    Arc<Mutex<GroupHistoryBuffer>>,
+    Arc<AnyAdapter>,
+    String,
+), String> {
+    // 1. Check ManagedAgents first (new Agent architecture)
+    {
+        let agents = agent_state.lock().await;
+        for (_agent_id, agent) in agents.iter() {
+            if let Some(ch) = agent.channels.get(bot_id) {
+                let inst = &ch.bot_instance;
+                return Ok((
+                    Arc::clone(&inst.group_permissions),
+                    Arc::clone(&inst.group_history),
+                    Arc::clone(&inst.adapter),
+                    inst.platform.to_string(),
+                ));
+            }
+        }
+    }
+    // 2. Fallback: legacy ManagedImBots
+    {
+        let bots = im_state.lock().await;
+        let inst = bots.get(bot_id).ok_or_else(|| "Bot not running".to_string())?;
+        Ok((
+            Arc::clone(&inst.group_permissions),
+            Arc::clone(&inst.group_history),
+            Arc::clone(&inst.adapter),
+            inst.platform.to_string(),
+        ))
+    }
+}
 
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_approve_group(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
+    agentState: tauri::State<'_, ManagedAgents>,
     botId: String,
     groupId: String,
 ) -> Result<(), String> {
     use adapter::ImAdapter;
 
-    let (group_perms, adapter) = {
-        let bots = imState.lock().await;
-        let inst = bots.get(&botId).ok_or_else(|| "Bot not running".to_string())?;
-        (Arc::clone(&inst.group_permissions), Arc::clone(&inst.adapter))
-    }; // ManagedImBots lock released here
+    let (group_perms, _group_history, adapter, _platform) =
+        resolve_group_context(&imState, &agentState, &botId).await?;
 
     // Update permission status to Approved
     {
@@ -4677,14 +4725,12 @@ pub async fn cmd_approve_group(
 pub async fn cmd_reject_group(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
+    agentState: tauri::State<'_, ManagedAgents>,
     botId: String,
     groupId: String,
 ) -> Result<(), String> {
-    let (group_perms, group_history, platform) = {
-        let bots = imState.lock().await;
-        let inst = bots.get(&botId).ok_or_else(|| "Bot not running".to_string())?;
-        (Arc::clone(&inst.group_permissions), Arc::clone(&inst.group_history), inst.platform.clone())
-    }; // ManagedImBots lock released here
+    let (group_perms, group_history, _adapter, platform) =
+        resolve_group_context(&imState, &agentState, &botId).await?;
 
     // Remove pending permission
     {
@@ -4718,14 +4764,12 @@ pub async fn cmd_reject_group(
 pub async fn cmd_remove_group(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
+    agentState: tauri::State<'_, ManagedAgents>,
     botId: String,
     groupId: String,
 ) -> Result<(), String> {
-    let (group_perms, group_history, platform) = {
-        let bots = imState.lock().await;
-        let inst = bots.get(&botId).ok_or_else(|| "Bot not running".to_string())?;
-        (Arc::clone(&inst.group_permissions), Arc::clone(&inst.group_history), inst.platform.clone())
-    }; // ManagedImBots lock released here
+    let (group_perms, group_history, _adapter, platform) =
+        resolve_group_context(&imState, &agentState, &botId).await?;
 
     // Remove approved permission
     {

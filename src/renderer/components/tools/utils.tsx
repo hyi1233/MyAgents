@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement } from 'react';
+import { cloneElement, isValidElement, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import type { ToolUseSimple } from '@/types/chat';
@@ -117,6 +117,100 @@ export function InlineCode({ children }: { children: ReactNode }) {
     <MonoText className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5">
       {children}
     </MonoText>
+  );
+}
+
+/**
+ * Unwrap SDK tool result JSON wrappers into displayable plain text.
+ *
+ * The SDK wraps tool results in JSON with metadata:
+ *   Bash:  {"stdout":"...","stderr":"...","interrupted":false}
+ *   Read:  {"type":"text","file":{"filePath":"...","content":"..."}}
+ *   Grep:  {"mode":"content","numFiles":0,"filenames":[],"content":"1142:function..."}
+ *   Glob:  {"mode":"files_with_matches","filenames":["a.ts","b.ts"],"content":"a.ts\nb.ts"}
+ *
+ * This extracts the meaningful text and unescapes \n so it renders properly.
+ * Falls back to the original string if it's not recognized JSON.
+ */
+export function unwrapSdkResult(result: string): string {
+  const trimmed = result.trimStart();
+  if (!trimmed.startsWith('{')) return result;
+  try {
+    const parsed = JSON.parse(trimmed);
+
+    // Bash format: {"stdout":"...","stderr":"..."}
+    if ('stdout' in parsed && typeof parsed.stdout === 'string') {
+      let output = parsed.stdout;
+      if (parsed.stderr && typeof parsed.stderr === 'string') {
+        output += (output ? '\n\n' : '') + '[stderr]\n' + parsed.stderr;
+      }
+      return output || '(no output)';
+    }
+
+    // Read format: {"type":"text","file":{"filePath":"...","content":"..."}}
+    if (parsed.type === 'text' && parsed.file?.content && typeof parsed.file.content === 'string') {
+      return parsed.file.content;
+    }
+
+    // Grep/Glob format: {"mode":"...","content":"..."}
+    if ('content' in parsed && typeof parsed.content === 'string') {
+      return parsed.content;
+    }
+
+    // Unknown JSON — return as-is (let specialized components handle it)
+    return result;
+  } catch {
+    return result;
+  }
+}
+
+/**
+ * Expandable result container with max-h-96 + gradient fade + "展开全部" button.
+ * Used by tool components to wrap long <pre> output.
+ */
+interface ExpandableResultProps {
+  content: string;
+  className?: string;
+  /** Additional wrapper className (e.g. for terminal-style bg) */
+  wrapperClassName?: string;
+  /** Gradient fade color — must match the actual background for smooth fade.
+   *  Defaults to paper-inset; BashTool passes code-bg or error-bg. */
+  gradientFrom?: string;
+}
+
+export function ExpandableResult({ content: rawContent, className = '', wrapperClassName = '', gradientFrom = 'from-[var(--paper-inset)]' }: ExpandableResultProps) {
+  // Auto-unwrap SDK JSON wrappers so all tools display clean text
+  const content = unwrapSdkResult(rawContent);
+  const [isResultExpanded, setIsResultExpanded] = useState(false);
+  const resultRef = useRef<HTMLPreElement>(null);
+  const [isOverflowing, setIsOverflowing] = useState(false);
+
+  useEffect(() => {
+    if (resultRef.current) {
+      setIsOverflowing(resultRef.current.scrollHeight > resultRef.current.clientHeight);
+    }
+  }, [content]);
+
+  return (
+    <div className={`relative ${wrapperClassName}`}>
+      <pre
+        ref={resultRef}
+        className={`overflow-x-auto font-mono text-sm whitespace-pre-wrap select-text ${isResultExpanded ? '' : 'max-h-96'} overflow-hidden ${className}`}
+      >
+        {content}
+      </pre>
+      {isOverflowing && !isResultExpanded && (
+        <div className={`absolute bottom-0 left-0 right-0 flex justify-center bg-gradient-to-t ${gradientFrom} to-transparent pb-2 pt-8`}>
+          <button
+            type="button"
+            onClick={() => setIsResultExpanded(true)}
+            className="rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1 text-xs text-[var(--ink-muted)] shadow-sm hover:text-[var(--ink-secondary)] transition-colors"
+          >
+            展开全部
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
