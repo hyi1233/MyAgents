@@ -55,6 +55,8 @@ const JSON_EVENTS = new Set([
     'queue:started',   // Queued message started executing
     'queue:cancelled', // Queued message cancelled
     'chat:message-sdk-uuid', // SDK UUID assignment for user/assistant messages (fork button, rewind)
+    'config:changed', // Admin CLI modified app config — triggers frontend refresh
+    'chat:api-retry', // SDK API retry status (v0.2.77+) — rate limit / transient error retrying
 ]);
 
 // Event types that can be JSON or plain string

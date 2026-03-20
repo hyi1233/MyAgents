@@ -675,6 +675,19 @@ export default function TabProvider({
                 break;
             }
 
+            case 'chat:api-retry': {
+                // SDK is retrying API call (rate limit or transient error)
+                // null payload = retry resolved, streaming resumed — clear status
+                const payload = data as { attempt?: number; maxRetries?: number; delayMs?: number } | null;
+                if (payload) {
+                    const retryKey = `api_retry:${payload.attempt ?? 1}:${payload.maxRetries ?? '?'}`;
+                    setSystemStatus(retryKey);
+                } else {
+                    setSystemStatus(null);
+                }
+                break;
+            }
+
             case 'chat:message-chunk': {
                 // Skip stale chunks if user started a new session
                 // (old stream may still be sending events before fully disconnecting)
@@ -1267,13 +1280,14 @@ export default function TabProvider({
 
             case 'ask-user-question:request': {
                 // Agent is asking user structured questions
-                const payload = data as { requestId: string; questions: AskUserQuestion[] } | null;
+                const payload = data as { requestId: string; questions: AskUserQuestion[]; previewFormat?: 'html' | 'markdown' } | null;
                 console.log(`[TabProvider] ask-user-question:request received:`, payload);
                 if (payload?.requestId && payload.questions?.length > 0) {
                     console.log(`[TabProvider] Setting pendingAskUserQuestion with ${payload.questions.length} questions`);
                     setPendingAskUserQuestion({
                         requestId: payload.requestId,
                         questions: payload.questions,
+                        previewFormat: payload.previewFormat,
                     });
                     // Send system notification if user is not focused on the app
                     notifyAskUserQuestion();
@@ -1460,6 +1474,13 @@ export default function TabProvider({
                     console.log(`[TabProvider] queue:cancelled queueId=${payload.queueId}`);
                     setQueuedMessages(prev => prev.filter(q => q.queueId !== payload.queueId));
                 }
+                break;
+            }
+
+            case 'config:changed': {
+                // Admin CLI modified config — notify global ConfigProvider to refresh
+                console.log('[TabProvider] config:changed via Admin CLI', data);
+                window.dispatchEvent(new CustomEvent('myagents:config-changed', { detail: data }));
                 break;
             }
 

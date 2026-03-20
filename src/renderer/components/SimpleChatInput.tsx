@@ -1634,12 +1634,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
               {/* Button states: system task (disabled send) → stopping (disabled spinner) → AI responding (stop) → normal (send) */}
               {systemStatus ? (
-                // System task running (e.g., compacting) - not interruptible
+                // System task running (e.g., compacting, api_retry) - not interruptible
                 <button
                   type="button"
                   disabled
                   className="rounded-lg bg-[var(--ink-muted)]/15 p-2 text-[var(--ink-muted)]/60"
-                  title="正在执行系统任务，请稍等"
+                  title={systemStatus.startsWith('api_retry:') ? 'API 请求重试中，请稍等' : '正在执行系统任务，请稍等'}
                 >
                   <Send className="h-4 w-4" />
                 </button>

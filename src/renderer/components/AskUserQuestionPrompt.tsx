@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { MessageCircleQuestion, ChevronLeft, ChevronRight, X, Check } from 'lucide-react';
+import { MessageCircleQuestion, ChevronLeft, ChevronRight, X, Check, Eye } from 'lucide-react';
 
 // Import shared types
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
@@ -7,6 +7,24 @@ export type { AskUserQuestion, AskUserQuestionOption, AskUserQuestionRequest } f
 
 // Special marker for custom input answer (UUID-like to avoid collision with option labels)
 const CUSTOM_INPUT_MARKER = '__CUSTOM_INPUT_7f3d8a2e__';
+
+/**
+ * Sanitize HTML preview content from SDK to prevent XSS.
+ * Strips script/iframe/object tags and dangerous event handlers.
+ * The content originates from AI model output — not directly user-controlled,
+ * but in Tauri WebView, XSS can access invoke() commands.
+ */
+function sanitizePreviewHtml(html: string): string {
+    return html
+        // Remove script, iframe, object, embed, form tags and their content
+        .replace(/<\s*(script|iframe|object|embed|form)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+        // Remove self-closing dangerous tags
+        .replace(/<\s*(script|iframe|object|embed)\b[^>]*\/?>/gi, '')
+        // Remove event handler attributes (on*)
+        .replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        // Remove javascript: URLs
+        .replace(/\b(href|src|action)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*')/gi, '');
+}
 
 interface AskUserQuestionPromptProps {
     request: AskUserQuestionRequest;
@@ -177,6 +195,13 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
 
     const isCustomSelected = currentAnswer.includes(CUSTOM_INPUT_MARKER);
 
+    // Track which option's preview is expanded: "questionIndex:optionLabel"
+    // Encoding question index in key ensures auto-reset when switching questions
+    const [expandedPreviewKey, setExpandedPreviewKey] = useState<string | null>(null);
+    const expandedPreview = expandedPreviewKey?.startsWith(`${currentIndex}:`)
+        ? expandedPreviewKey.slice(`${currentIndex}:`.length)
+        : null;
+
     // Guard against empty questions array - render fallback after all hooks
     if (!currentQuestion) {
         console.error('[AskUserQuestionPrompt] No questions provided');
@@ -212,41 +237,88 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                 <div className="p-4 space-y-2">
                     {currentQuestion.options.map((option) => {
                         const isSelected = currentAnswer.includes(option.label);
+                        const hasPreview = !!option.preview;
+                        const isPreviewExpanded = expandedPreview === option.label;
                         return (
-                            <button
-                                key={option.label}
-                                onClick={() => handleOptionSelect(option.label)}
-                                disabled={isSubmitting}
-                                aria-pressed={isSelected}
-                                className={`w-full text-left px-4 py-3 rounded-lg border transition-all
-                                    ${isSelected
-                                        ? 'border-[var(--accent)] bg-[var(--accent)]/5 ring-1 ring-[var(--accent)]/20'
-                                        : 'border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-inset)]'
-                                    }
-                                    disabled:opacity-50 disabled:cursor-not-allowed`}
-                            >
-                                <div className="flex items-start gap-3">
-                                    <div className={`mt-0.5 flex-shrink-0 size-5 border-2 flex items-center justify-center
-                                        ${currentQuestion.multiSelect ? 'rounded-md' : 'rounded-full'}
+                            <div key={option.label}>
+                                <button
+                                    onClick={() => handleOptionSelect(option.label)}
+                                    disabled={isSubmitting}
+                                    aria-pressed={isSelected}
+                                    className={`w-full text-left px-4 py-3 rounded-lg border transition-all
                                         ${isSelected
-                                            ? 'border-[var(--accent)] bg-[var(--accent)]'
-                                            : 'border-[var(--line)]'
-                                        }`}
-                                    >
-                                        {isSelected && <Check className="size-3 text-white" />}
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                        <div className={`text-sm font-medium ${isSelected ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
-                                            {option.label}
+                                            ? 'border-[var(--accent)] bg-[var(--accent)]/5 ring-1 ring-[var(--accent)]/20'
+                                            : 'border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-inset)]'
+                                        }
+                                        disabled:opacity-50 disabled:cursor-not-allowed`}
+                                >
+                                    <div className="flex items-start gap-3">
+                                        <div className={`mt-0.5 flex-shrink-0 size-5 border-2 flex items-center justify-center
+                                            ${currentQuestion.multiSelect ? 'rounded-md' : 'rounded-full'}
+                                            ${isSelected
+                                                ? 'border-[var(--accent)] bg-[var(--accent)]'
+                                                : 'border-[var(--line)]'
+                                            }`}
+                                        >
+                                            {isSelected && <Check className="size-3 text-white" />}
                                         </div>
-                                        {option.description && (
-                                            <div className="text-xs text-[var(--ink-muted)] mt-0.5">
-                                                {option.description}
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2">
+                                                <div className={`text-sm font-medium ${isSelected ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
+                                                    {option.label}
+                                                </div>
+                                                {hasPreview && (
+                                                    <span
+                                                        role="button"
+                                                        tabIndex={0}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setExpandedPreviewKey(isPreviewExpanded ? null : `${currentIndex}:${option.label}`);
+                                                        }}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter' || e.key === ' ') {
+                                                                e.stopPropagation();
+                                                                e.preventDefault();
+                                                                setExpandedPreviewKey(isPreviewExpanded ? null : `${currentIndex}:${option.label}`);
+                                                            }
+                                                        }}
+                                                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded
+                                                            transition-colors cursor-pointer select-none
+                                                            ${isPreviewExpanded
+                                                                ? 'text-[var(--accent)] bg-[var(--accent)]/10'
+                                                                : 'text-[var(--ink-muted)] hover:text-[var(--ink)] hover:bg-[var(--paper-inset)]'
+                                                            }`}
+                                                        title="预览"
+                                                    >
+                                                        <Eye className="size-3" />
+                                                    </span>
+                                                )}
                                             </div>
-                                        )}
+                                            {option.description && (
+                                                <div className="text-xs text-[var(--ink-muted)] mt-0.5">
+                                                    {option.description}
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
-                                </div>
-                            </button>
+                                </button>
+                                {/* Inline preview panel (HTML content from SDK) */}
+                                {isPreviewExpanded && option.preview && (
+                                    <div className="mt-1 ml-8 rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-inset)] overflow-hidden">
+                                        <div
+                                            className="p-3 text-xs text-[var(--ink)] overflow-auto max-h-64
+                                                [&_pre]:bg-[var(--paper)] [&_pre]:rounded [&_pre]:p-2 [&_pre]:overflow-x-auto [&_pre]:text-[11px]
+                                                [&_code]:font-mono [&_code]:text-[11px]
+                                                [&_p]:my-1 [&_ul]:ml-4 [&_ol]:ml-4 [&_li]:my-0.5"
+                                            dangerouslySetInnerHTML={{
+                                                __html: request.previewFormat === 'html'
+                                                    ? sanitizePreviewHtml(option.preview)
+                                                    : option.preview.replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+                                            }}
+                                        />
+                                    </div>
+                                )}
+                            </div>
                         );
                     })}
 

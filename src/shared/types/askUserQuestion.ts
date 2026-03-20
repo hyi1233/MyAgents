@@ -6,6 +6,8 @@
 export interface AskUserQuestionOption {
   label: string;
   description: string;
+  /** Optional preview content rendered when this option is focused (HTML or Markdown) */
+  preview?: string;
 }
 
 export interface AskUserQuestion {
@@ -27,4 +29,6 @@ export interface AskUserQuestionInput {
 export interface AskUserQuestionRequest {
   requestId: string;
   questions: AskUserQuestion[];
+  /** Content format for option previews: 'html' or 'markdown' */
+  previewFormat?: 'html' | 'markdown';
 }

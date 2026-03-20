@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { join, resolve, sep } from 'path';
 import { createRequire } from 'module';
-import { query, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { processImage, resizeToolImageContent } from './utils/imageResize';
@@ -328,6 +328,7 @@ let pendingConfigRestart = false;
 let sessionTerminationPromise: Promise<void> | null = null;
 let isInterruptingResponse = false;
 let isStreamingMessage = false;
+let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
 const streamIndexToToolId: Map<number, string> = new Map();
 const toolResultIndexToId: Map<number, string> = new Map();
@@ -1415,6 +1416,9 @@ async function handleAskUserQuestion(
   broadcast('ask-user-question:request', {
     requestId,
     questions: questionInput.questions,
+    // SDK v0.2.69+: options may contain `preview` field (HTML or Markdown)
+    // Our toolConfig sets previewFormat: 'html', so previews are HTML fragments
+    previewFormat: 'html',
   });
 
   // Wait for user response or abort
@@ -1815,7 +1819,7 @@ export function getPendingInteractiveRequests(): Array<{
   for (const [requestId, q] of pendingAskUserQuestions) {
     result.push({
       type: 'ask-user-question:request',
-      data: { requestId, questions: q.input.questions },
+      data: { requestId, questions: q.input.questions, previewFormat: 'html' },
     });
   }
   for (const [requestId, p] of pendingExitPlanMode) {
@@ -2142,6 +2146,11 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
       // cliPath = .../agent-browser/bin/agent-browser.js → HOME = .../agent-browser/
       env.AGENT_BROWSER_HOME = resolve(abCliPath, '..', '..');
     }
+  }
+
+  // Self-Config CLI: expose sidecar port so the `myagents` CLI can call back
+  if (sidecarPort > 0) {
+    env.MYAGENTS_PORT = String(sidecarPort);
   }
 
   // Windows: Set CLAUDE_CODE_GIT_BASH_PATH so SDK finds git-bash directly
@@ -3850,6 +3859,29 @@ export function isSessionActive(): boolean {
 }
 
 /**
+ * Read historical session messages from SDK's persisted session files.
+ * Works without an active Sidecar — reads directly from .claude/ session files.
+ *
+ * @param sdkSessionId - The SDK session ID (from session metadata's sdkSessionId)
+ * @param dir - Optional project directory to search in
+ * @param limit - Maximum number of messages to return
+ * @param offset - Number of messages to skip from the start
+ */
+export async function getHistoricalSessionMessages(
+  sdkSessionId: string,
+  dir?: string,
+  limit?: number,
+  offset?: number,
+): Promise<Array<{ type: string; uuid: string; session_id: string; message: unknown }>> {
+  const messages = await sdkGetSessionMessages(sdkSessionId, {
+    ...(dir ? { dir } : {}),
+    ...(limit !== undefined ? { limit } : {}),
+    ...(offset !== undefined ? { offset } : {}),
+  });
+  return messages;
+}
+
+/**
  * Wait for the current session to become idle
  * Returns true if idle, false if timeout
  * @param timeoutMs Maximum time to wait in milliseconds (default: 10 minutes)
@@ -4350,6 +4382,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       },
       cwd: agentDir,
       includePartialMessages: true,
+      // AskUserQuestion preview: request HTML format so frontend can render rich previews
+      // (markdown/code snippets, visual comparisons) when AI presents options to the user
+      toolConfig: {
+        askUserQuestion: { previewFormat: 'html' as const },
+      },
       mcpServers: buildSdkMcpServers(),
       // Sub-agents: inject custom agent definitions if configured
       // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
@@ -4682,6 +4719,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             outputFile: taskMsg.output_file,
           });
         }
+
+        // Handle API retry events (v0.2.77+) — show retry status to user
+        // SDK emits these when the Anthropic API returns rate_limit or transient errors
+        // and the SDK is automatically retrying. Without handling, user sees "stuck" behavior.
+        // Field names match SDKAPIRetryMessage type: attempt, max_retries, retry_delay_ms
+        const retryMsg = sdkMessage as { subtype?: string; attempt?: number; max_retries?: number; retry_delay_ms?: number; error?: unknown };
+        if (retryMsg.subtype === 'api_retry') {
+          isApiRetrying = true;
+          console.log(`[agent] API retry: attempt=${retryMsg.attempt}/${retryMsg.max_retries}, delay=${retryMsg.retry_delay_ms}ms`);
+          broadcast('chat:api-retry', {
+            attempt: retryMsg.attempt,
+            maxRetries: retryMsg.max_retries,
+            delayMs: retryMsg.retry_delay_ms,
+          });
+        }
       }
 
       const agentError = extractAgentError(sdkMessage);
@@ -4693,6 +4745,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       }
 
       if (sdkMessage.type === 'stream_event') {
+        // Clear api_retry status when streaming resumes after a successful retry
+        if (isApiRetrying) {
+          isApiRetrying = false;
+          broadcast('chat:api-retry', null);
+        }
         const streamEvent = sdkMessage.event;
         if (streamEvent.type === 'content_block_delta') {
           if (streamEvent.delta.type === 'text_delta') {

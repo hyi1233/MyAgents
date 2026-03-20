@@ -55,6 +55,19 @@ const SYSTEM_STATUS_MESSAGES: Record<string, string> = {
   compacting: '会话内容过长，智能总结中…',
   rewinding: '正在时间回溯中，请稍等…',
 };
+
+/** Resolve dynamic system status keys (e.g., api_retry:2:5 → human-readable) */
+function resolveSystemStatus(status: string): string {
+  if (SYSTEM_STATUS_MESSAGES[status]) return SYSTEM_STATUS_MESSAGES[status];
+  // API retry: "api_retry:{attempt}:{maxAttempts}"
+  if (status.startsWith('api_retry:')) {
+    const parts = status.split(':');
+    const attempt = parts[1] || '1';
+    const max = parts[2] || '?';
+    return `API 请求重试中（第 ${attempt}/${max} 次）…`;
+  }
+  return status;
+}
 function getRandomStreamingMessage(): string {
   return STREAMING_MESSAGES[Math.floor(Math.random() * STREAMING_MESSAGES.length)];
 }
@@ -175,7 +188,7 @@ const MessageList = memo(function MessageList({
   }, [pendingExitPlanMode, onExitPlanModeApprove, onExitPlanModeReject]);
 
   const showStatus = isLoading || !!systemStatus;
-  const statusMessage = systemStatus ? (SYSTEM_STATUS_MESSAGES[systemStatus] || systemStatus) : streamingStatusMessage;
+  const statusMessage = systemStatus ? resolveSystemStatus(systemStatus) : streamingStatusMessage;
 
   // Fade-in
   const wasSessionLoadingRef = useRef(false);
