@@ -985,26 +985,17 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
             { format!("{}:{}", node_dir_for_path, system_path) }
         };
 
-        // npm init -y
-        let node_for_init = node_bin.clone();
-        let cli_str_init = npm_cli_str.clone();
-        let base_for_init = base_dir.clone();
-        let path_for_init = augmented_path.clone();
-        let init_output = tokio::task::spawn_blocking(move || {
-            let mut cmd = crate::process_cmd::new(&node_for_init);
-            cmd.args([cli_str_init.as_str(), "init", "-y"])
-                .current_dir(&base_for_init)
-                .env("PATH", &path_for_init);
-            apply_proxy_env(&mut cmd);
-            cmd.output()
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking: {}", e))?
-        .map_err(|e| format!("npm init failed: {}", e))?;
-
-        if !init_output.status.success() {
-            let stderr = String::from_utf8_lossy(&init_output.stderr);
-            return Err(format!("npm init failed: {}", stderr));
+        // Write package.json directly instead of calling `npm init -y`.
+        // Avoids invoking npm for a trivial file creation — npm's internal dependencies
+        // (minizlib/minipass) can break on Windows due to MAX_PATH copy issues.
+        let pkg_json = base_dir.join("package.json");
+        if !pkg_json.exists() {
+            let content = format!(
+                "{{\"name\":\"{}\",\"version\":\"1.0.0\",\"private\":true}}",
+                plugin_id
+            );
+            tokio::fs::write(&pkg_json, content).await
+                .map_err(|e| format!("Failed to write package.json: {}", e))?;
         }
 
         // npm install <package>
@@ -1037,22 +1028,15 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
 
         ulog_warn!("[bridge] Using Bun fallback for plugin install (Node.js not bundled)");
 
-        let bun_for_init = bun_path.clone();
-        let base_for_init = base_dir.clone();
-        let init_output = tokio::task::spawn_blocking(move || {
-            let mut cmd = crate::process_cmd::new(&bun_for_init);
-            cmd.args(["init", "-y"])
-                .current_dir(&base_for_init);
-            apply_proxy_env(&mut cmd);
-            cmd.output()
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking: {}", e))?
-        .map_err(|e| format!("bun init failed: {}", e))?;
-
-        if !init_output.status.success() {
-            let stderr = String::from_utf8_lossy(&init_output.stderr);
-            return Err(format!("bun init failed: {}", stderr));
+        // Write package.json directly (same as Node.js path above)
+        let pkg_json = base_dir.join("package.json");
+        if !pkg_json.exists() {
+            let content = format!(
+                "{{\"name\":\"{}\",\"version\":\"1.0.0\",\"private\":true}}",
+                plugin_id
+            );
+            tokio::fs::write(&pkg_json, content).await
+                .map_err(|e| format!("Failed to write package.json: {}", e))?;
         }
 
         let bun_for_add = bun_path;

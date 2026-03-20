@@ -166,13 +166,23 @@ try {
             if (Test-Path $NodeDir) { Remove-Item -Recurse -Force $NodeDir }
             New-Item -ItemType Directory -Path $NodeDir -Force | Out-Null
 
+            # Copy top-level files
             Copy-Item -Path (Join-Path $ExtractedDir "node.exe") -Destination $NodeDir -Force
             Copy-Item -Path (Join-Path $ExtractedDir "npm.cmd") -Destination $NodeDir -Force
             Copy-Item -Path (Join-Path $ExtractedDir "npx.cmd") -Destination $NodeDir -Force
             Copy-Item -Path (Join-Path $ExtractedDir "npm") -Destination $NodeDir -Force
             Copy-Item -Path (Join-Path $ExtractedDir "npx") -Destination $NodeDir -Force
-            if (Test-Path (Join-Path $ExtractedDir "node_modules")) {
-                Copy-Item -Path (Join-Path $ExtractedDir "node_modules") -Destination $NodeDir -Recurse -Force
+            # Use robocopy for node_modules to handle deep paths beyond MAX_PATH (260 chars).
+            # PowerShell's Copy-Item -Recurse silently skips files with long paths, corrupting
+            # npm's internal dependencies (minizlib/minipass → "Class extends undefined" error).
+            $SrcModules = Join-Path $ExtractedDir "node_modules"
+            $DstModules = Join-Path $NodeDir "node_modules"
+            if (Test-Path $SrcModules) {
+                & robocopy $SrcModules $DstModules /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+                # robocopy returns 0-7 for success, 8+ for errors
+                if ($LASTEXITCODE -ge 8) {
+                    throw "robocopy failed with exit code $LASTEXITCODE"
+                }
             }
 
             # Remove corepack (not needed)

@@ -170,13 +170,19 @@ try {
             $ExtractedDir = Join-Path $TempDir "node-v$NodeVersion-win-x64"
             if (Test-Path $NodeDir) { Remove-Item -Recurse -Force $NodeDir }
             New-Item -ItemType Directory -Path $NodeDir -Force | Out-Null
+            # Copy top-level files
             Copy-Item (Join-Path $ExtractedDir "node.exe") $NodeDir -Force
             Copy-Item (Join-Path $ExtractedDir "npm.cmd") $NodeDir -Force
             Copy-Item (Join-Path $ExtractedDir "npx.cmd") $NodeDir -Force
             Copy-Item (Join-Path $ExtractedDir "npm") $NodeDir -Force
             Copy-Item (Join-Path $ExtractedDir "npx") $NodeDir -Force
-            if (Test-Path (Join-Path $ExtractedDir "node_modules")) {
-                Copy-Item (Join-Path $ExtractedDir "node_modules") $NodeDir -Recurse -Force
+            # Use robocopy for node_modules — Copy-Item -Recurse silently skips
+            # files beyond MAX_PATH (260 chars), corrupting npm's minizlib/minipass
+            $SrcMod = Join-Path $ExtractedDir "node_modules"
+            $DstMod = Join-Path $NodeDir "node_modules"
+            if (Test-Path $SrcMod) {
+                & robocopy $SrcMod $DstMod /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+                if ($LASTEXITCODE -ge 8) { throw "robocopy failed: exit $LASTEXITCODE" }
             }
             if (Test-Path $TempZip) { Remove-Item -Force $TempZip }
             if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
