@@ -665,9 +665,12 @@ fn find_bridge_script<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Op
     // Production: bundled JS in resources
     #[cfg(not(debug_assertions))]
     {
+        use crate::sidecar::normalize_external_path;
         if let Ok(resource_dir) = app_handle.path().resource_dir() {
             let bundled: PathBuf = resource_dir.join("plugin-bridge-dist.js");
             if bundled.exists() {
+                // Normalize \\?\ prefix — Bun hangs on extended-length paths
+                let bundled = normalize_external_path(bundled);
                 ulog_info!("[bridge] Using bundled bridge script: {:?}", bundled);
                 return Some(bundled);
             }
@@ -849,6 +852,8 @@ fn apply_proxy_env(cmd: &mut std::process::Command) {
 /// - Windows prod: <install_dir>/nodejs/node.exe + node_modules/npm/bin/npm-cli.js
 /// - Windows dev:  src-tauri/resources/nodejs/node.exe + node_modules/npm/bin/npm-cli.js
 fn find_bundled_node_npm<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Option<(PathBuf, PathBuf)> {
+    use crate::sidecar::normalize_external_path;
+
     let check = |nodejs_dir: &Path| -> Option<(PathBuf, PathBuf)> {
         #[cfg(target_os = "windows")]
         let node_bin = nodejs_dir.join("node.exe");
@@ -863,6 +868,10 @@ fn find_bundled_node_npm<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) ->
         let npm_cli = nodejs_dir.join("lib").join("node_modules").join("npm").join("bin").join("npm-cli.js");
 
         if node_bin.exists() && npm_cli.exists() {
+            // On Windows, strip \\?\ extended-length prefix that Tauri's resource_dir() produces.
+            // Node.js/npm cannot handle it (causes "EISDIR: lstat 'C:'" error).
+            let node_bin = normalize_external_path(node_bin);
+            let npm_cli = normalize_external_path(npm_cli);
             ulog_info!("[bridge] Bundled Node.js found: node={:?}, npm-cli={:?}", node_bin, npm_cli);
             Some((node_bin, npm_cli))
         } else {
