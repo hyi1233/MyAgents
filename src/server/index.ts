@@ -742,23 +742,10 @@ function isValidAgentDir(dir: string): { valid: boolean; reason?: string } {
     }
   }
 
-  // On Windows, any drive letter path is valid (users commonly put projects on D:, E:, G:, etc.)
-  // On Unix, must be under a reasonable parent (not bare root /)
-  if (process.platform === 'win32') {
-    // Windows: allow any drive letter path that's not a forbidden system dir (already checked above)
-    // Just reject bare drive roots like "C:\" or "D:\" (too broad)
-    if (resolved.match(/^[A-Z]:\\?$/i)) {
-      return { valid: false, reason: 'Cannot use drive root as workspace' };
-    }
-  } else {
-    // Unix: must be under home, /tmp, /Users, or /home
-    const allowedParents = [homeDir, '/tmp', '/Users', '/home'];
-    const isUnderAllowed = allowedParents.some(
-      parent => parent && (resolved === parent || resolved.startsWith(parent + sep))
-    );
-    if (!isUnderAllowed) {
-      return { valid: false, reason: 'Path must be under user directory' };
-    }
+  // Reject filesystem roots as workspace (too broad, not a real project)
+  // Windows: "C:\", "D:\" etc.  Unix: "/"
+  if (resolved === '/' || resolved.match(/^[A-Z]:\\?$/i)) {
+    return { valid: false, reason: 'Cannot use filesystem root as workspace' };
   }
 
   return { valid: true };
