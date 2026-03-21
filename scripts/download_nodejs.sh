@@ -147,7 +147,8 @@ download_macos() {
 
     # Check if already downloaded
     if check_existing "$node_bin"; then
-        log_ok "macOS ${arch}: Already at v${NODE_VERSION}"
+        log_ok "macOS ${arch}: Already at v${NODE_VERSION}, checking npm..."
+        upgrade_npm "${RESOURCES_DIR}/lib/node_modules" "${RESOURCES_DIR}/bin/node"
         return 0
     fi
 
