@@ -92,15 +92,11 @@ export default function HeartbeatConfigCard({
         if (!workspacePath) return;
         setPreviewLoading(true);
         try {
-            const { readTextFile } = await import('@tauri-apps/plugin-fs');
+            const { invoke } = await import('@tauri-apps/api/core');
             const sep = workspacePath.includes('\\') ? '\\' : '/';
             const filePath = `${workspacePath}${sep}HEARTBEAT.md`;
-            let content = '';
-            try {
-                content = await readTextFile(filePath);
-            } catch {
-                // File doesn't exist yet — open with empty content so user can create it
-            }
+            // Use Rust command to bypass Tauri fs scope (which only covers ~/.myagents)
+            const content: string = await invoke('cmd_read_workspace_file', { path: filePath }) ?? '';
             setPreviewFile({ name: 'HEARTBEAT.md', content, size: new TextEncoder().encode(content).length, path: filePath });
         } catch (e) {
             console.warn('[HeartbeatConfigCard] Failed to open HEARTBEAT.md:', e);
@@ -109,11 +105,11 @@ export default function HeartbeatConfigCard({
         }
     }, [workspacePath]);
 
-    // Direct file save via Tauri fs — enables editing even outside Tab context
+    // Direct file save via Rust command — bypasses Tauri fs scope (which only covers ~/.myagents)
     const handleDirectSave = useCallback(async (content: string) => {
         if (!previewFile) return;
-        const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-        await writeTextFile(previewFile.path, content);
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('cmd_write_workspace_file', { path: previewFile.path, content });
     }, [previewFile]);
 
     // Reveal file in system file manager via Tauri shell

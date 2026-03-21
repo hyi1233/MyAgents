@@ -4525,6 +4525,10 @@ async fn update_bot_config_internal<R: Runtime>(
                 if let Some(ref config_arc) = inst.heartbeat_config {
                     if let Ok(hb) = serde_json::from_str::<types::HeartbeatConfig>(hcj) {
                         *config_arc.write().await = hb;
+                        // Wake heartbeat runner to pick up new interval immediately
+                        if let Some(ref tx) = inst.heartbeat_wake_tx {
+                            let _ = tx.try_send(types::WakeReason::Interval);
+                        }
                     }
                 }
             }
@@ -5557,6 +5561,12 @@ pub async fn cmd_update_agent_config(
             if let Ok(hb_config) = serde_json::from_str::<types::HeartbeatConfig>(hb_json) {
                 if let Some(ref hb_arc) = agent.heartbeat_config {
                     *hb_arc.write().await = hb_config;
+                }
+                // Wake the heartbeat runner so it picks up the new interval immediately
+                // (otherwise it stays blocked on the old interval.tick())
+                // Use try_send (non-async) to avoid holding the agents mutex across an await point
+                if let Some(ref tx) = agent.heartbeat_wake_tx {
+                    let _ = tx.try_send(types::WakeReason::Interval);
                 }
             }
         }
