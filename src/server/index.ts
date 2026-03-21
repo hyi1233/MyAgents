@@ -29,8 +29,8 @@ import {
 } from './tools/cron-tools';
 import { setImCronContext } from './tools/im-cron-tool';
 import {
-  handleMcpList, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv,
-  handleModelList, handleModelSetKey, handleModelSetDefault,
+  handleMcpList, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
+  handleModelList, handleModelSetKey, handleModelSetDefault, handleModelVerify,
   handleAgentList, handleAgentEnable, handleAgentDisable, handleAgentSet,
   handleAgentChannelList, handleAgentChannelAdd, handleAgentChannelRemove,
   handleConfigGet, handleConfigSet, handleStatus, handleReload, handleHelp,
@@ -924,11 +924,13 @@ function routeAdminApi(pathname: string, payload: Record<string, unknown>): Reco
   if (route === 'mcp/enable') return handleMcpEnable(payload as Parameters<typeof handleMcpEnable>[0]);
   if (route === 'mcp/disable') return handleMcpDisable(payload as Parameters<typeof handleMcpDisable>[0]);
   if (route === 'mcp/env') return handleMcpEnv(payload as Parameters<typeof handleMcpEnv>[0]);
+  if (route === 'mcp/test') return handleMcpTest(payload as Parameters<typeof handleMcpTest>[0]);
 
   // Model commands
   if (route === 'model/list') return handleModelList();
   if (route === 'model/set-key') return handleModelSetKey(payload as Parameters<typeof handleModelSetKey>[0]);
   if (route === 'model/set-default') return handleModelSetDefault(payload as Parameters<typeof handleModelSetDefault>[0]);
+  if (route === 'model/verify') return handleModelVerify(payload as Parameters<typeof handleModelVerify>[0]);
 
   // Agent commands
   if (route === 'agent/list') return handleAgentList();
@@ -4409,9 +4411,9 @@ async function main() {
       // ============= ADMIN API (Self-Config CLI) =============
       if (pathname.startsWith('/api/admin/') && request.method === 'POST') {
         try {
-          const payload = pathname === '/api/admin/status' || pathname === '/api/admin/reload'
+          const payload = pathname === '/api/admin/status'
             ? {}
-            : await request.json() as Record<string, unknown>;
+            : await request.json().catch(() => ({})) as Record<string, unknown>;
 
           const result = routeAdminApi(pathname, payload);
           return jsonResponse(result, result.success ? 200 : 400);

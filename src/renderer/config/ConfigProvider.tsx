@@ -275,6 +275,22 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         };
     }, []);
 
+    // ============= Listen for Admin CLI config changes (via SSE → window event) =============
+
+    useEffect(() => {
+        const handler = () => {
+            if (!isMountedRef.current) return;
+            loadAppConfig().then(latest => {
+                normalizeAgents(latest);
+                if (isMountedRef.current) setConfig(latest);
+            }).catch(err => {
+                console.error('[ConfigProvider] Failed to refresh config after admin CLI change:', err);
+            });
+        };
+        window.addEventListener('myagents:config-changed', handler);
+        return () => window.removeEventListener('myagents:config-changed', handler);
+    }, []);
+
     // ============= Actions =============
 
     const updateConfig = useCallback(async (updates: Partial<AppConfig>) => {
