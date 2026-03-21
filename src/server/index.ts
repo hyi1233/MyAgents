@@ -30,7 +30,7 @@ import {
 import { setImCronContext } from './tools/im-cron-tool';
 import {
   handleMcpList, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
-  handleModelList, handleModelSetKey, handleModelSetDefault, handleModelVerify,
+  handleModelList, handleModelAdd, handleModelRemove, handleModelSetKey, handleModelSetDefault, handleModelVerify,
   handleAgentList, handleAgentEnable, handleAgentDisable, handleAgentSet,
   handleAgentChannelList, handleAgentChannelAdd, handleAgentChannelRemove,
   handleConfigGet, handleConfigSet, handleStatus, handleReload, handleHelp,
@@ -913,7 +913,7 @@ function jsonResponse(body: unknown, status = 200): Response {
  * Route /api/admin/* requests to the appropriate handler.
  * Keeps the route matching logic clean and separated from business logic (in admin-api.ts).
  */
-function routeAdminApi(pathname: string, payload: Record<string, unknown>): Record<string, unknown> {
+async function routeAdminApi(pathname: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
   // Strip the prefix for matching
   const route = pathname.replace('/api/admin/', '');
 
@@ -924,13 +924,15 @@ function routeAdminApi(pathname: string, payload: Record<string, unknown>): Reco
   if (route === 'mcp/enable') return handleMcpEnable(payload as Parameters<typeof handleMcpEnable>[0]);
   if (route === 'mcp/disable') return handleMcpDisable(payload as Parameters<typeof handleMcpDisable>[0]);
   if (route === 'mcp/env') return handleMcpEnv(payload as Parameters<typeof handleMcpEnv>[0]);
-  if (route === 'mcp/test') return handleMcpTest(payload as Parameters<typeof handleMcpTest>[0]);
+  if (route === 'mcp/test') return await handleMcpTest(payload as Parameters<typeof handleMcpTest>[0]);
 
   // Model commands
   if (route === 'model/list') return handleModelList();
+  if (route === 'model/add') return handleModelAdd(payload as Parameters<typeof handleModelAdd>[0]);
+  if (route === 'model/remove') return handleModelRemove(payload as Parameters<typeof handleModelRemove>[0]);
   if (route === 'model/set-key') return handleModelSetKey(payload as Parameters<typeof handleModelSetKey>[0]);
   if (route === 'model/set-default') return handleModelSetDefault(payload as Parameters<typeof handleModelSetDefault>[0]);
-  if (route === 'model/verify') return handleModelVerify(payload as Parameters<typeof handleModelVerify>[0]);
+  if (route === 'model/verify') return await handleModelVerify(payload as Parameters<typeof handleModelVerify>[0]);
 
   // Agent commands
   if (route === 'agent/list') return handleAgentList();
@@ -4415,7 +4417,7 @@ async function main() {
             ? {}
             : await request.json().catch(() => ({})) as Record<string, unknown>;
 
-          const result = routeAdminApi(pathname, payload);
+          const result = await routeAdminApi(pathname, payload);
           return jsonResponse(result, result.success ? 200 : 400);
         } catch (error) {
           console.error(`[admin] ${pathname} error:`, error);
@@ -6798,17 +6800,21 @@ description: >
 
           const {
             enqueueUserMessage, waitForSessionIdle, getMessages,
+            getSessionModel, getSessionProviderEnv,
           } = await import('./agent-session');
 
           // Inject heartbeat prompt as user message (wrapped in <system-reminder><HEARTBEAT> tags)
           // System prompt is already permanently injected at IM session creation (/api/im/chat)
           // Heartbeat is unattended — bypass all permissions so tool use doesn't block.
+          // CRITICAL: Pass current model + providerEnv to avoid triggering provider-switch logic.
+          // Without this, undefined providerEnv triggers switchingToSubscription in enqueueUserMessage,
+          // which resets the session to Anthropic subscription and causes "Not logged in" errors.
           await enqueueUserMessage(
             enrichedPrompt,
             [],
             'fullAgency',
-            undefined,
-            undefined,
+            getSessionModel(),
+            getSessionProviderEnv(),
             {
               source: payload.source as 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group',
               sourceId: payload.sourceId,
@@ -6893,11 +6899,12 @@ description: >
 
           const prompt = `<system-reminder>\n<MEMORY_UPDATE>\n${promptContent}\n\nCurrent time: ${now}\n\n完成所有记忆维护操作后（包括文件读写和 git 操作），仅回复 MEMORY_UPDATE_OK，不要输出其他内容。\n</MEMORY_UPDATE>\n</system-reminder>`;
 
-          const { enqueueUserMessage, waitForSessionIdle } = await import('./agent-session');
+          const { enqueueUserMessage, waitForSessionIdle, getSessionModel, getSessionProviderEnv } = await import('./agent-session');
 
           // Inject as user message — memory update is unattended, bypass all permissions
           // so Bash/file tools (git commit, file writes) don't block waiting for approval.
-          await enqueueUserMessage(prompt, [], 'fullAgency');
+          // Pass current model + providerEnv to avoid triggering provider-switch logic.
+          await enqueueUserMessage(prompt, [], 'fullAgency', getSessionModel(), getSessionProviderEnv());
 
           // Wait synchronously for AI completion (60 min timeout — same as background tasks).
           // Memory update can be slow for large sessions: loading 100K+ token context,
