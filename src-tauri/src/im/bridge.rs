@@ -1039,7 +1039,36 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
 
         if !add_output.status.success() {
             let stderr = String::from_utf8_lossy(&add_output.stderr);
-            return Err(format!("npm install {} failed: {}", npm_spec, stderr));
+            let stderr_str = stderr.to_string();
+            // npm failed — fallback to Bun instead of giving up.
+            // Common on Windows where Node.js v24 has CJS/ESM resolution bugs
+            // that crash npm's internal minipass-sized/minipass dependencies.
+            ulog_warn!("[bridge] npm install failed, falling back to Bun: {}", stderr_str.lines().next().unwrap_or(&stderr_str));
+            use crate::sidecar::find_bun_executable_pub;
+            if let Some(bun_path) = find_bun_executable_pub(app_handle) {
+                ulog_info!("[bridge] Bun fallback: installing {} via bun add", npm_spec);
+                let bun_for_fb = bun_path;
+                let base_for_fb = base_dir.clone();
+                let spec_for_fb = npm_spec.to_string();
+                let fb_output = tokio::task::spawn_blocking(move || {
+                    let mut cmd = crate::process_cmd::new(&bun_for_fb);
+                    cmd.args(["add", spec_for_fb.as_str()])
+                        .current_dir(&base_for_fb);
+                    apply_proxy_env(&mut cmd);
+                    cmd.output()
+                })
+                .await
+                .map_err(|e| format!("spawn_blocking: {}", e))?
+                .map_err(|e| format!("bun add failed: {}", e))?;
+
+                if !fb_output.status.success() {
+                    let bun_stderr = String::from_utf8_lossy(&fb_output.stderr);
+                    return Err(format!("npm install {} failed: {}\nbun fallback also failed: {}", npm_spec, stderr_str, bun_stderr));
+                }
+                ulog_info!("[bridge] Bun fallback succeeded for {}", npm_spec);
+            } else {
+                return Err(format!("npm install {} failed: {}", npm_spec, stderr_str));
+            }
         }
     } else {
         // Fallback: use Bun if bundled Node.js is not available (pre-v0.1.44 builds)
