@@ -153,47 +153,62 @@ function getSystemBunPaths(): string[] {
 /**
  * Get system node paths (user-installed).
  */
-function getSystemNodePaths(): string[] {
+/**
+ * Get system Node.js directories where node/npm/npx are co-located.
+ * Single source of truth — node, npm, npx share the same directories.
+ */
+function getSystemNodeDirs(): string[] {
   if (isWindows()) {
     const programFiles = process.env.PROGRAMFILES;
-    const paths: string[] = [];
-    if (programFiles) {
-      paths.push(resolve(programFiles, 'nodejs', 'node.exe'));
-    }
-    return paths;
+    const programFilesX86 = process.env['PROGRAMFILES(X86)'];
+    const localAppData = process.env.LOCALAPPDATA;
+    const dirs: string[] = [];
+    // Standard Node.js installer
+    if (programFiles) dirs.push(resolve(programFiles, 'nodejs'));
+    if (programFilesX86) dirs.push(resolve(programFilesX86, 'nodejs'));
+    // nvm-windows: symlinks active version to NVM_SYMLINK (default: Program Files\nodejs)
+    const nvmSymlink = process.env.NVM_SYMLINK;
+    if (nvmSymlink) dirs.push(nvmSymlink);
+    // Volta: shims live in %LOCALAPPDATA%\Volta\bin
+    if (localAppData) dirs.push(resolve(localAppData, 'Volta', 'bin'));
+    // fnm: session-specific path via env var
+    const fnmPath = process.env.FNM_MULTISHELL_PATH;
+    if (fnmPath) dirs.push(fnmPath);
+    return dirs;
   }
 
+  const home = process.env.HOME || '';
   return [
-    '/opt/homebrew/bin/node',
-    '/usr/local/bin/node',
-    '/usr/bin/node',
+    '/opt/homebrew/bin',      // macOS Homebrew (Apple Silicon)
+    '/usr/local/bin',         // macOS Homebrew (Intel) / Linux manual install
+    '/usr/bin',               // Linux apt/yum
+    ...(home ? [
+      `${home}/.volta/bin`,   // Volta
+      `${home}/.nvm/current/bin`,  // nvm
+      `${home}/.fnm/current/bin`,  // fnm
+    ] : []),
   ];
 }
 
-/**
- * Get system npm paths (user-installed).
- */
-function getSystemNpmPaths(): string[] {
-  if (isWindows()) {
-    const programFiles = process.env.PROGRAMFILES;
-    const paths: string[] = [];
-    if (programFiles) {
-      paths.push(resolve(programFiles, 'nodejs', 'npm.cmd'));
-    }
-    return paths;
-  }
+function getSystemNodePaths(): string[] {
+  const exe = isWindows() ? 'node.exe' : 'node';
+  return getSystemNodeDirs().map(d => resolve(d, exe));
+}
 
-  return [
-    '/opt/homebrew/bin/npm',
-    '/usr/local/bin/npm',
-    '/usr/bin/npm',
-  ];
+function getSystemNpmPaths(): string[] {
+  const exe = isWindows() ? 'npm.cmd' : 'npm';
+  return getSystemNodeDirs().map(d => resolve(d, exe));
+}
+
+export function getSystemNpxPaths(): string[] {
+  const exe = isWindows() ? 'npx.cmd' : 'npx';
+  return getSystemNodeDirs().map(d => resolve(d, exe));
 }
 
 /**
  * Find the first existing path from a list.
  */
-function findExistingPath(paths: string[]): string | null {
+export function findExistingPath(paths: string[]): string | null {
   for (const p of paths) {
     if (existsSync(p)) {
       return p;

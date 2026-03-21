@@ -1057,11 +1057,52 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         ulog_warn!("[bridge] Bundled Node.js/npm not found, skipping npm install");
     }
 
-    // --- Bun fallback: if npm failed or unavailable ---
+    // --- System npm fallback: if bundled npm failed or unavailable ---
+    if !npm_succeeded {
+        // Try system-installed npm (user's own Node.js installation)
+        if let Ok(system_npm) = which::which("npm") {
+            ulog_warn!("[bridge] Trying system npm: {:?}", system_npm);
+            let sys_npm = system_npm;
+            let base_for_sys = base_dir.clone();
+            let spec_for_sys = npm_spec.to_string();
+            let sys_result = tokio::task::spawn_blocking(move || {
+                let mut cmd = crate::process_cmd::new(&sys_npm);
+                // Same safeguards as bundled npm: --omit=peer avoids 400+ openclaw transitive deps,
+                // --no-experimental-require-module fixes Node.js v24 CJS/ESM crash on Windows.
+                cmd.args(["install", spec_for_sys.as_str(), "--omit=peer"])
+                    .current_dir(&base_for_sys)
+                    .env("NODE_OPTIONS", "--no-experimental-require-module");
+                apply_proxy_env(&mut cmd);
+                cmd.output()
+            }).await;
+
+            match sys_result {
+                Ok(Ok(output)) if output.status.success() => {
+                    ulog_info!("[bridge] System npm install {} succeeded", npm_spec);
+                    npm_succeeded = true;
+                }
+                Ok(Ok(output)) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    ulog_error!("[bridge] System npm install {} failed: {}", npm_spec, stderr.trim());
+                }
+                Ok(Err(e)) => {
+                    ulog_error!("[bridge] System npm spawn failed: {}", e);
+                }
+                Err(e) => {
+                    ulog_error!("[bridge] System npm spawn_blocking failed: {}", e);
+                }
+            }
+        } else {
+            ulog_info!("[bridge] System npm not found in PATH, skipping");
+        }
+    }
+
+    // --- Bun fallback: if both bundled and system npm failed ---
     if !npm_succeeded {
         use crate::sidecar::find_bun_executable_pub;
+        // find_bun_executable_pub searches bundled bun first, then system bun (PATH, ~/.bun, etc.)
         let bun_path = find_bun_executable_pub(app_handle)
-            .ok_or_else(|| format!("Plugin install failed: npm unavailable and Bun not found"))?;
+            .ok_or_else(|| format!("Plugin install failed: no npm (bundled/system) and no Bun found. Please install Node.js or Bun."))?;
 
         ulog_warn!("[bridge] Falling back to Bun for plugin install: {}", npm_spec);
 
@@ -1082,7 +1123,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         if !add_output.status.success() {
             let stderr = String::from_utf8_lossy(&add_output.stderr);
             ulog_error!("[bridge] Bun fallback also failed for {}: {}", npm_spec, stderr.trim());
-            return Err(format!("Plugin install failed (both npm and bun): {}", stderr));
+            return Err(format!("Plugin install failed (npm + bun all failed). Please install Node.js or Bun.\nLast error: {}", stderr));
         }
         ulog_info!("[bridge] Bun fallback install {} succeeded", npm_spec);
     }

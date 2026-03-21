@@ -1169,7 +1169,7 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
       let command = server.command;
       let args = server.args || [];
 
-      // For npx commands: prefer bundled Node.js npx, fallback to bun x
+      // For npx commands: prefer bundled Node.js npx → system npx → bun x
       if (command === 'npx') {
         if (server.isBuiltin) {
           // Pin @latest to known versions to avoid npm registry check on every startup
@@ -1177,26 +1177,39 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
 
           // Dual runtime strategy: MCP servers are community npm packages designed for
           // Node.js. Running them under Bun causes compatibility issues (Playwright pipe
-          // transport, axios adapter, postinstall scripts, etc.). Use bundled Node.js npx
-          // when available; fallback to bun x only if Node.js is not bundled.
+          // transport, axios adapter, postinstall scripts, etc.).
+          // Priority: bundled Node.js npx → system npx → bun x
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getBundledNodeDir: getNodeDir, getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
+          const { getBundledNodeDir: getNodeDir, getBundledRuntimePath, isBunRuntime, getSystemNpxPaths, findExistingPath } = require('./utils/runtime');
           const nodeDir = getNodeDir();
 
           if (nodeDir) {
-            // Bundled Node.js available — use npx natively (all platforms unified)
+            // 1. Bundled Node.js available — use npx natively
             args = ['-y', ...args];
             console.log(`[agent] MCP ${server.id}: Using bundled Node.js npx (${nodeDir})`);
           } else {
-            // Fallback: no bundled Node.js — use bun x (legacy behavior)
-            const runtime = getBundledRuntimePath();
-            if (isBunRuntime(runtime)) {
-              command = runtime;
-              args = ['x', ...args];
-              console.log(`[agent] MCP ${server.id}: Using bundled bun x (Node.js not available)`);
-            } else {
+            // 2. Try system npx (user-installed Node.js)
+            const systemNpx = findExistingPath(getSystemNpxPaths());
+            if (systemNpx) {
+              command = systemNpx;
               args = ['-y', ...args];
-              console.log(`[agent] MCP ${server.id}: Using system npx`);
+              console.log(`[agent] MCP ${server.id}: Bundled Node.js not found, using system npx (${systemNpx})`);
+            } else {
+              // 3. Last resort: bun x or derive npx from system node
+              const runtime = getBundledRuntimePath();
+              if (isBunRuntime(runtime)) {
+                command = runtime;
+                args = ['x', ...args];
+                console.log(`[agent] MCP ${server.id}: No Node.js found (bundled or system), falling back to bun x`);
+              } else {
+                // getBundledRuntimePath found a system node — derive npx from same dir
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { dirname: pathDirname, resolve: pathResolve } = require('path');
+                const npxSibling = pathResolve(pathDirname(runtime), process.platform === 'win32' ? 'npx.cmd' : 'npx');
+                command = npxSibling;
+                args = ['-y', ...args];
+                console.log(`[agent] MCP ${server.id}: Derived npx from system node: ${npxSibling}`);
+              }
             }
           }
         } else {
