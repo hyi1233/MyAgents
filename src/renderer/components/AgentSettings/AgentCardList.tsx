@@ -8,6 +8,7 @@ import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { HeartPulse } from 'lucide-react';
 import WorkspaceIcon from '../launcher/WorkspaceIcon';
 import { DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
+import { findPromotedByPlatform } from '../ImSettings/promotedPlugins';
 
 interface AgentCardListProps {
   onSelectAgent: (agentId: string, workspacePath: string) => void;
@@ -20,7 +21,10 @@ const PLATFORM_LABELS: Record<string, string> = {
 };
 
 function getPlatformBadge(type: string): string {
-  if (type.startsWith('openclaw:')) return type.slice('openclaw:'.length);
+  if (type.startsWith('openclaw:')) {
+    const promoted = findPromotedByPlatform(type);
+    return promoted?.name || type.slice('openclaw:'.length);
+  }
   return PLATFORM_LABELS[type] || type;
 }
 

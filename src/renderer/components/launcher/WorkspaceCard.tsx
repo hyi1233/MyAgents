@@ -14,15 +14,19 @@ import type { AgentStatusData } from '@/hooks/useAgentStatuses';
 import { getFolderName } from '@/types/tab';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import WorkspaceIcon from './WorkspaceIcon';
+import { findPromotedByPlatform } from '../ImSettings/promotedPlugins';
 
 // ─── Proactive status helpers ─────────────────────────────────────
 
 type ProactiveState = 'basic' | 'pending' | 'active' | 'paused' | 'error';
 
-const CH_LABEL: Record<string, string> = { telegram: 'Telegram', feishu: '飞书', dingtalk: '钉钉', qqbot: 'QQ', 'openclaw-lark': '飞书' };
+const CH_LABEL: Record<string, string> = { telegram: 'Telegram', feishu: '飞书', dingtalk: '钉钉' };
 function chLabel(t: string) {
-    const key = t.startsWith('openclaw:') ? t.slice(9) : t;
-    return CH_LABEL[key] || key;
+    if (t.startsWith('openclaw:')) {
+        const promoted = findPromotedByPlatform(t);
+        return promoted?.name || t.slice(9);
+    }
+    return CH_LABEL[t] || t;
 }
 
 function deriveState(p: Project, a?: AgentConfig, s?: AgentStatusData): ProactiveState {
