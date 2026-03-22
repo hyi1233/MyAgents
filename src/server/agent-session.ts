@@ -2021,8 +2021,20 @@ export function resolveClaudeCodeCli(): string {
   console.warn(`[sdk] Bundled SDK not found at ${bundledPath} (cwd=${cwd}), falling back to require.resolve`);
 
   // Development: resolve from node_modules
+  // SDK 0.2.80+ has `exports` in package.json that does NOT export `./cli.js`,
+  // so require.resolve('@anthropic-ai/claude-agent-sdk/cli.js') fails with
+  // ERR_PACKAGE_PATH_NOT_EXPORTED. Instead, resolve the package root via the
+  // main export, then derive cli.js from the package directory.
   try {
-    const cliPath = requireModule.resolve('@anthropic-ai/claude-agent-sdk/cli.js');
+    const sdkMain = requireModule.resolve('@anthropic-ai/claude-agent-sdk');
+    // dirname(sdkMain) gives us the package root — assumes main export is in root dir.
+    // This is the standard Node.js ecosystem pattern for exports-locked packages.
+    const { dirname } = require('path') as typeof import('path');
+    const sdkDir = dirname(sdkMain);
+    const cliPath = join(sdkDir, 'cli.js');
+    if (!existsSync(cliPath)) {
+      throw new Error(`cli.js not found at ${cliPath} (resolved SDK root: ${sdkDir})`);
+    }
     if (cliPath.includes('app.asar')) {
       const unpackedPath = cliPath.replace('app.asar', 'app.asar.unpacked');
       if (existsSync(unpackedPath)) {
