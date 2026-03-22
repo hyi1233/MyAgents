@@ -20,11 +20,15 @@ import { findPromotedByPlatform } from '../ImSettings/promotedPlugins';
 
 type ProactiveState = 'basic' | 'pending' | 'active' | 'paused' | 'error';
 
-const CH_LABEL: Record<string, string> = { telegram: 'Telegram', feishu: '飞书', dingtalk: '钉钉' };
+const CH_LABEL: Record<string, string> = {
+    telegram: 'Telegram', feishu: '飞书', dingtalk: '钉钉',
+    // OpenClaw plugins — concise labels matching PLATFORM_DISPLAY_NAMES in taskCenterUtils.ts
+    qqbot: 'QQ', 'openclaw-lark': '飞书', 'openclaw-weixin': '微信',
+};
 function chLabel(t: string) {
     if (t.startsWith('openclaw:')) {
-        const promoted = findPromotedByPlatform(t);
-        return promoted?.name || t.slice(9);
+        const pluginId = t.slice(9);
+        return CH_LABEL[pluginId] ?? findPromotedByPlatform(t)?.name ?? pluginId;
     }
     return CH_LABEL[t] || t;
 }
