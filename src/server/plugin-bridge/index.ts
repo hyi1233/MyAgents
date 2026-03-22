@@ -715,7 +715,24 @@ const server = Bun.serve({
       try {
         const body = await req.json().catch(() => ({})) as Record<string, unknown>;
         const result = await (loginWithQrStart as (params: Record<string, unknown>) => Promise<Record<string, unknown>>)(body);
-        return Response.json({ ok: true, ...result });
+        // If qrDataUrl is an HTTP URL (not a data URI), download and convert to base64.
+        // Tauri WebView CSP blocks external <img src="https://...">, so we must inline it.
+        // WhatsApp plugin returns data:image/png;base64,... natively; WeChat returns https:// URL.
+        let qrDataUrl = result.qrDataUrl as string | undefined;
+        if (qrDataUrl && /^https?:\/\//i.test(qrDataUrl)) {
+          try {
+            const imgResp = await fetch(qrDataUrl);
+            if (imgResp.ok) {
+              const buf = await imgResp.arrayBuffer();
+              const contentType = imgResp.headers.get('content-type') || 'image/png';
+              const base64 = Buffer.from(buf).toString('base64');
+              qrDataUrl = `data:${contentType};base64,${base64}`;
+            }
+          } catch (e) {
+            console.warn('[plugin-bridge] Failed to download QR image, using original URL:', e);
+          }
+        }
+        return Response.json({ ok: true, ...result, qrDataUrl });
       } catch (err) {
         return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
       }
