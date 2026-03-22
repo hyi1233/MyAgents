@@ -44,6 +44,7 @@ pub struct HeartbeatRunner {
     bot_label: String, // e.g. "feishu_mino" or "@mino115_bot" for log identification
     config: Arc<RwLock<HeartbeatConfig>>,
     last_push_text: Arc<Mutex<Option<String>>>,
+    last_error_text: Arc<Mutex<Option<String>>>, // Last error from heartbeat for user notification
     http_client: reqwest::Client,
     executing: Arc<Mutex<bool>>,
     // Hot-reloadable config refs — needed to sync AI config when waking up an idle-collected sidecar
@@ -73,6 +74,7 @@ impl HeartbeatRunner {
             bot_label,
             config: Arc::clone(&config),
             last_push_text: Arc::new(Mutex::new(None)),
+            last_error_text: Arc::new(Mutex::new(None)),
             http_client: crate::local_http::json_client(Duration::from_secs(330)), // 5.5 min (heartbeat timeout is 5 min)
             executing: Arc::new(Mutex::new(false)),
             current_model,
@@ -111,6 +113,10 @@ impl HeartbeatRunner {
             initial_interval.as_secs() / 60
         );
 
+        let mut consecutive_errors: u32 = 0;
+        let mut pause_notified = false;
+        const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+
         loop {
             // Check if interval needs updating
             {
@@ -123,7 +129,65 @@ impl HeartbeatRunner {
                     );
                     interval = tokio::time::interval(desired);
                     interval.tick().await; // skip immediate tick
+                    // Config changed — reset error counter to give the new config a chance
+                    consecutive_errors = 0;
+                    pause_notified = false;
                 }
+            }
+
+            // Back off: if too many consecutive errors, skip this cycle to stop
+            // injecting heartbeat prompts into a broken session (e.g. context overflow)
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                ulog_warn!(
+                    "[heartbeat] {} consecutive errors for {}, pausing until config change or success",
+                    consecutive_errors, self.bot_label
+                );
+
+                // Notify user via IM on first pause (not on every skipped tick)
+                if !pause_notified {
+                    pause_notified = true;
+                    let notify_target = {
+                        let rg = router.lock().await;
+                        rg.find_any_peer_session()
+                    };
+                    if let Some((_session_key, _source, source_id)) = notify_target {
+                        let error_detail = self.last_error_text.lock().await.take()
+                            .map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d });
+                        let msg = if let Some(detail) = error_detail {
+                            format!(
+                                "[MyAgents] {} 心跳连续 {} 次失败，已暂停。\n\n错误: {}\n\n请在客户端重启该 Channel 或开始新对话以恢复。",
+                                self.bot_label, MAX_CONSECUTIVE_ERRORS, detail
+                            )
+                        } else {
+                            format!(
+                                "[MyAgents] {} 心跳连续 {} 次失败，已暂停。请在客户端重启该 Channel 或开始新对话以恢复。",
+                                self.bot_label, MAX_CONSECUTIVE_ERRORS
+                            )
+                        };
+                        if let Err(e) = adapter.send_message(&source_id, &msg).await {
+                            ulog_warn!("[heartbeat] Failed to send pause notification: {}", e);
+                        }
+                    }
+                }
+
+                // Wait for either shutdown, wake signal (config change), or next interval
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() { break; }
+                    }
+                    Some(_) = wake_rx.recv() => {
+                        // Config change or external wake — reset and retry
+                        consecutive_errors = 0;
+                        pause_notified = false;
+                        ulog_info!("[heartbeat] {} resuming after wake signal", self.bot_label);
+                        interval.reset();
+                    }
+                    _ = interval.tick() => {
+                        // Still paused — skip this tick
+                        continue;
+                    }
+                }
+                continue;
             }
 
             tokio::select! {
@@ -134,7 +198,7 @@ impl HeartbeatRunner {
                     }
                 }
                 _ = interval.tick() => {
-                    self.run_once(
+                    let ok = self.run_once(
                         WakeReason::Interval,
                         &router,
                         &sidecar_manager,
@@ -144,6 +208,7 @@ impl HeartbeatRunner {
                         &agent_id,
                         &workspace_path,
                     ).await;
+                    if ok { consecutive_errors = 0; } else { consecutive_errors += 1; }
                 }
                 Some(reason) = wake_rx.recv() => {
                     // Coalesce: drain any additional wake signals within 250ms window
@@ -158,7 +223,7 @@ impl HeartbeatRunner {
                         .max_by_key(|r| if r.is_high_priority() { 1 } else { 0 })
                         .unwrap_or(WakeReason::Interval);
 
-                    self.run_once(
+                    let ok = self.run_once(
                         best_reason,
                         &router,
                         &sidecar_manager,
@@ -168,6 +233,7 @@ impl HeartbeatRunner {
                         &agent_id,
                         &workspace_path,
                     ).await;
+                    if ok { consecutive_errors = 0; } else { consecutive_errors += 1; }
 
                     // Reset interval timer after wake to avoid rapid fire
                     interval.reset();
@@ -179,6 +245,7 @@ impl HeartbeatRunner {
     }
 
     /// Execute a single heartbeat cycle.
+    /// Returns `true` if the heartbeat was successful (AI responded), `false` on error/skip.
     /// Uses the same ensure_sidecar flow as user messages — if the sidecar was
     /// idle-collected, it will be automatically restarted.
     ///
@@ -196,7 +263,7 @@ impl HeartbeatRunner {
         peer_locks: &PeerLocks,
         agent_id: &str,
         workspace_path: &str,
-    ) {
+    ) -> bool {
         let config = self.config.read().await.clone();
         let is_high_priority = reason.is_high_priority();
 
@@ -204,7 +271,7 @@ impl HeartbeatRunner {
         // sends delegated wakes to per-channel runners that have enabled=false)
         if !config.enabled && !is_high_priority {
             ulog_debug!("[heartbeat] Skipped: disabled");
-            return;
+            return true; // Gate skip is not a failure
         }
 
         // Gate 2: Active hours (high-priority wakes skip this)
@@ -212,7 +279,7 @@ impl HeartbeatRunner {
             if let Some(ref active_hours) = config.active_hours {
                 if !is_in_active_hours(active_hours) {
                     ulog_debug!("[heartbeat] Skipped: outside active hours");
-                    return;
+                    return true; // Gate skip is not a failure
                 }
             }
         }
@@ -231,7 +298,7 @@ impl HeartbeatRunner {
                 drop(executing);
                 if start.elapsed() > Duration::from_secs(60) {
                     ulog_warn!("[heartbeat] High-priority wake timed out waiting for concurrent execution");
-                    return;
+                    return false;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
@@ -239,7 +306,7 @@ impl HeartbeatRunner {
             let mut executing = self.executing.lock().await;
             if *executing {
                 ulog_debug!("[heartbeat] Skipped: previous heartbeat still executing");
-                return;
+                return true; // Gate skip is not a failure
             }
             *executing = true;
         }
@@ -255,7 +322,7 @@ impl HeartbeatRunner {
                     // No peer sessions at all — no one has ever talked to this bot
                     ulog_debug!("[heartbeat] No peer sessions for {}, skipping", self.bot_label);
                     *self.executing.lock().await = false;
-                    return;
+                    return true; // No peers is not a failure
                 }
             }
         };
@@ -284,7 +351,7 @@ impl HeartbeatRunner {
                 Err(e) => {
                     ulog_warn!("[heartbeat] Failed to ensure sidecar for {}: {}", self.bot_label, e);
                     *self.executing.lock().await = false;
-                    return;
+                    return false;
                 }
             }
         };
@@ -348,8 +415,9 @@ impl HeartbeatRunner {
                     Ok(t) => t,
                     Err(e) => {
                         ulog_warn!("[heartbeat] Failed to read response body: {} (status={})", e, status_code);
+                        *self.last_error_text.lock().await = Some(format!("HTTP read error: {}", e));
                         *self.executing.lock().await = false;
-                        return;
+                        return false;
                     }
                 };
                 match serde_json::from_str::<HeartbeatResponse>(&body_text) {
@@ -358,22 +426,25 @@ impl HeartbeatRunner {
                         // Log truncated body for debugging (cap at 300 chars)
                         let preview = if body_text.len() > 300 { &body_text[..300] } else { &body_text };
                         ulog_warn!("[heartbeat] Failed to parse response: {} (status={}, body={})", e, status_code, preview);
+                        *self.last_error_text.lock().await = Some(format!("Response parse error (status={})", status_code));
                         *self.executing.lock().await = false;
-                        return;
+                        return false;
                     }
                 }
             }
             Err(e) => {
                 ulog_warn!("[heartbeat] HTTP call failed: {}", e);
+                *self.last_error_text.lock().await = Some(format!("HTTP call failed: {}", e));
                 *self.executing.lock().await = false;
-                return;
+                return false;
             }
         };
 
         // Handle response (still under peer_lock — IM message send is safe)
-        match result.status.as_str() {
+        let success = match result.status.as_str() {
             "silent" => {
                 ulog_debug!("[heartbeat] AI responded HEARTBEAT_OK (silent)");
+                true
             }
             "content" => {
                 if let Some(text) = &result.text {
@@ -389,35 +460,43 @@ impl HeartbeatRunner {
                         *last_push = Some(text.clone());
                     }
                 }
+                true
             }
             "error" => {
                 ulog_warn!("[heartbeat] Heartbeat returned error: {:?}", result.text);
+                *self.last_error_text.lock().await = result.text.clone();
+                false
             }
             other => {
                 ulog_warn!("[heartbeat] Unknown status: {}", other);
+                false
             }
-        }
+        };
 
         // Release executing flag (peer_lock is dropped automatically when _peer_guard goes out of scope)
         *self.executing.lock().await = false;
 
         // Memory auto-update check (v0.1.43)
         // Lightweight check after heartbeat — spawns independent task if conditions met
-        super::memory_update::check_and_spawn(
-            agent_id,
-            workspace_path,
-            &self.memory_update_config,
-            &self.memory_update_running,
-            sidecar_manager,
-            app_handle,
-            &self.current_model,
-            &self.current_provider_env,
-            &self.mcp_servers_json,
-            {
-                let cfg = self.config.read().await;
-                cfg.active_hours.as_ref().map(|ah| ah.timezone.clone())
-            }.as_deref(),
-        ).await;
+        if success {
+            super::memory_update::check_and_spawn(
+                agent_id,
+                workspace_path,
+                &self.memory_update_config,
+                &self.memory_update_running,
+                sidecar_manager,
+                app_handle,
+                &self.current_model,
+                &self.current_provider_env,
+                &self.mcp_servers_json,
+                {
+                    let cfg = self.config.read().await;
+                    cfg.active_hours.as_ref().map(|ah| ah.timezone.clone())
+                }.as_deref(),
+            ).await;
+        }
+
+        success
     }
 }
 

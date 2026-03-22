@@ -6801,6 +6801,7 @@ description: >
           const {
             enqueueUserMessage, waitForSessionIdle, getMessages,
             getSessionModel, getSessionProviderEnv,
+            getAndClearLastAgentError,
           } = await import('./agent-session');
 
           // Inject heartbeat prompt as user message (wrapped in <system-reminder><HEARTBEAT> tags)
@@ -6809,6 +6810,7 @@ description: >
           // CRITICAL: Pass current model + providerEnv to avoid triggering provider-switch logic.
           // Without this, undefined providerEnv triggers switchingToSubscription in enqueueUserMessage,
           // which resets the session to Anthropic subscription and causes "Not logged in" errors.
+          getAndClearLastAgentError(); // Clear stale errors from prior turns before injecting heartbeat
           await enqueueUserMessage(
             enrichedPrompt,
             [],
@@ -6846,6 +6848,13 @@ description: >
               .filter((b: { type: string }) => b.type === 'text')
               .map((b: { type: string; text?: string }) => b.text || '')
               .join('\n');
+          }
+
+          // Guard: message was enqueued but assistant response is empty → AI failed to respond
+          // (SDK wraps API errors as synthetic assistant messages with empty content in messages[])
+          if (!text.trim()) {
+            const agentErr = getAndClearLastAgentError();
+            return jsonResponse({ status: 'error', text: agentErr || 'AI did not respond' });
           }
 
           // Check HEARTBEAT_OK

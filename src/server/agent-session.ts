@@ -3110,6 +3110,16 @@ export function getMessages(): MessageWire[] {
   return messages;
 }
 
+// Last agent error — captured from SDK error events for heartbeat error reporting.
+// Set by the SDK message handler, consumed (cleared) by the heartbeat endpoint.
+let lastAgentError: string | null = null;
+
+export function getAndClearLastAgentError(): string | null {
+  const err = lastAgentError;
+  lastAgentError = null;
+  return err;
+}
+
 /**
  * Internal: Clear all message-related state
  * Used by both resetSession() and initializeAgent()
@@ -3351,6 +3361,36 @@ export async function initializeAgent(
   // Initialize logger for new session (lazy file creation)
   initLogger(sessionId);
   console.log(`[agent] init dir=${agentDir} initialPrompt=${hasInitialPrompt ? 'yes' : 'no'} sessionId=${sessionId} resume=${sessionRegistered}`);
+
+  // Self-resolve workspace config from disk (MCP/provider/model).
+  // Eliminates dependency on pre-serialized snapshots (providerEnvJson, mcpServersJson)
+  // that can fail to save or go stale. IM Bot sessions work correctly without the
+  // frontend having been opened first. For desktop Tabs, the frontend's /api/mcp/set
+  // and per-message providerEnv will override these values.
+  // Skip for Global Sidecar (no workspace-specific config).
+  if (!preWarmDisabled) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { resolveWorkspaceConfig } = require('./utils/admin-config');
+      const resolved = resolveWorkspaceConfig(agentDir);
+      if (currentMcpServers === null && resolved.mcpServers.length > 0) {
+        currentMcpServers = resolved.mcpServers;
+        console.log(`[agent] self-resolved ${resolved.mcpServers.length} MCP server(s): ${resolved.mcpServers.map((s: { id: string }) => s.id).join(', ')}`);
+      }
+      if (!currentProviderEnv && resolved.providerEnv) {
+        currentProviderEnv = resolved.providerEnv;
+        console.log(`[agent] self-resolved provider: ${resolved.providerEnv.baseUrl ?? 'anthropic'}`);
+      }
+      if (!currentModel && resolved.model) {
+        currentModel = resolved.model;
+        console.log(`[agent] self-resolved model: ${resolved.model}`);
+      }
+    } catch (error) {
+      // Self-resolution failure is non-fatal — fall back to external sync (Rust sync_ai_config)
+      console.warn('[agent] self-resolution failed, falling back to external sync:', error);
+    }
+  }
+
   if (hasInitialPrompt) {
     void enqueueUserMessage(initialPrompt!.trim());
   } else {
@@ -4793,6 +4833,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
       const agentError = extractAgentError(sdkMessage);
       if (agentError) {
+        lastAgentError = agentError;
         broadcast('chat:agent-error', { message: agentError });
       }
       if (shouldAbortSession) {
