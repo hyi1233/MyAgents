@@ -2176,6 +2176,11 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   // MyAgents manages its own telemetry; these external connections add startup latency
   // and can timeout in restricted network environments (e.g. China).
   env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+  // Disable SDK built-in cron tools (CronCreate/CronDelete/CronList).
+  // MyAgents has its own persistent cron system (im-cron MCP tool → Rust CronTaskManager)
+  // that survives session restarts, supports IM delivery, and uses wall-clock scheduling.
+  // The SDK's cron is session-scoped/in-memory, would conflict and confuse users.
+  env.CLAUDE_CODE_DISABLE_CRON = '1';
   // DO NOT set CLAUDE_CONFIG_DIR here — it would change the Keychain service name
   // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
   // into project .claude/skills/ by syncProjectUserConfig() instead.
