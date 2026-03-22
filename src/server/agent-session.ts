@@ -4294,10 +4294,13 @@ export function forkSession(assistantMessageId: string): {
   const targetMsg = messageSource[targetIndex];
   if (!targetMsg.sdkUuid) return { success: false, error: 'Message has no SDK UUID (cannot fork)' };
 
-  // UUID validity check: only enforce when session is active and UUIDs are tracked.
-  // When messages come from storage (session not running), currentSessionUuids is empty
-  // but the UUID is valid because it was persisted from a previous SDK session.
-  if (currentSessionUuids.size > 0 && !currentSessionUuids.has(targetMsg.sdkUuid)) {
+  // UUID validity check: only enforce for STORAGE-loaded messages (messageSource !== messages).
+  // In-memory messages are trusted — their UUIDs were assigned during this process's lifetime.
+  // After rewind, currentSessionUuids is cleared (new SDK session), but pre-rewind messages
+  // remain in memory with valid UUIDs (SDK's resumeSessionAt preserves earlier history).
+  // Storage-loaded messages may come from a different SDK session, so enforce UUID freshness.
+  const isFromStorage = messageSource !== messages;
+  if (isFromStorage && currentSessionUuids.size > 0 && !currentSessionUuids.has(targetMsg.sdkUuid)) {
     return { success: false, error: 'SDK UUID 已过期（当前 SDK session 不包含此消息），请重新发送后再 fork' };
   }
 
