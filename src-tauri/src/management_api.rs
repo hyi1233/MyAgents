@@ -3,7 +3,7 @@
 // Only accessible from 127.0.0.1 (Bun Sidecar processes)
 
 use axum::{
-    extract::Query,
+    extract::{DefaultBodyLimit, Query},
     routing::{get, post},
     Json, Router,
 };
@@ -77,7 +77,10 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/im/channels", get(list_im_channels_handler))
         .route("/api/im/wake", post(wake_bot_handler))
         .route("/api/im/send-media", post(send_media_handler))
-        .route("/api/im-bridge/message", post(handle_bridge_message));
+        .route("/api/im-bridge/message", post(handle_bridge_message))
+        // Bridge messages carry base64-encoded media attachments (images/files).
+        // Default axum 2MB limit is too small — raise to 50MB for this API.
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024));
 
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -672,6 +675,21 @@ async fn send_media_handler(
 
 // ===== Bridge Message handler (OpenClaw Channel Plugin → Rust) =====
 
+/// Media attachment from Plugin Bridge (base64-encoded).
+/// Classified by the Bridge shim based on MIME type:
+///   - "image" → ImAttachmentType::Image (Claude Vision API)
+///   - "file"  → ImAttachmentType::File (save to workspace + @path reference)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeAttachment {
+    file_name: String,
+    mime_type: String,
+    /// base64-encoded file content
+    data: String,
+    /// "image" | "file"
+    attachment_type: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BridgeMessagePayload {
@@ -699,13 +717,16 @@ struct BridgeMessagePayload {
     /// Group-level custom system prompt from plugin config
     #[serde(default)]
     group_system_prompt: Option<String>,
+    /// Media attachments from OpenClaw plugin (images, files, voice, video)
+    #[serde(default)]
+    attachments: Vec<BridgeAttachment>,
 }
 
 async fn handle_bridge_message(
     Json(payload): Json<BridgeMessagePayload>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     use crate::im::bridge;
-    use crate::im::types::{ImMessage, ImPlatform, ImSourceType};
+    use crate::im::types::{ImAttachment, ImAttachmentType, ImMessage, ImPlatform, ImSourceType};
 
     // Validate plugin_id: reject empty, path separators, and colons.
     // Note: built-in platform names ("feishu" etc.) are allowed because OpenClaw plugins
@@ -747,6 +768,41 @@ async fn handle_bridge_message(
     // Default: private=true (directed at bot), group=false (only if explicitly flagged)
     let is_mention = payload.is_mention.unwrap_or(source_type == ImSourceType::Private);
 
+    // Decode base64 media attachments from Bridge
+    let mut im_attachments: Vec<ImAttachment> = Vec::new();
+    for att in &payload.attachments {
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(&att.data) {
+            Ok(data) => {
+                let attachment_type = if att.attachment_type == "image" {
+                    ImAttachmentType::Image
+                } else {
+                    ImAttachmentType::File
+                };
+                crate::ulog_info!(
+                    "[im-bridge] Decoded {} attachment: {} ({}, {} bytes)",
+                    att.attachment_type,
+                    att.file_name,
+                    att.mime_type,
+                    data.len()
+                );
+                im_attachments.push(ImAttachment {
+                    file_name: att.file_name.clone(),
+                    mime_type: att.mime_type.clone(),
+                    data,
+                    attachment_type,
+                });
+            }
+            Err(e) => {
+                crate::ulog_error!(
+                    "[im-bridge] Failed to decode base64 for {}: {}",
+                    att.file_name,
+                    e
+                );
+            }
+        }
+    }
+
     let msg = ImMessage {
         chat_id: payload.chat_id,
         message_id: payload.message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
@@ -756,7 +812,7 @@ async fn handle_bridge_message(
         source_type,
         platform: ImPlatform::OpenClaw(plugin_id),
         timestamp: chrono::Utc::now(),
-        attachments: Vec::new(),
+        attachments: im_attachments,
         media_group_id: None,
         is_mention,
         reply_to_bot: false,
