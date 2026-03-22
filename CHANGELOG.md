@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - 路径穿越防护、原型污染防护、CLI flag 泄漏修复
 
+### Hotfix
+- **微信 Bot 回复丢失**：stub dispatcher 空函数被误判为真实协议回调 + mid-turn injection 时 imCallbackNulledDuringTurn 未重置导致 SSE 事件被过滤（Windows 特有时序触发）
+- **Channel 崩溃后无法重启**：Bridge 进程死亡后 channel 条目未从 HashMap 移除，dedup 检查误判为 "already running"，Error/Stopped 状态现允许重启
+- **微信向导多余 BIND 口令**：QR 登录插件不再显示 BindCodePanel，替换为"扫码即可使用"提示
+- **Channel 详情页已绑定用户为空**：QR 登录 dmPolicy=open 不需要白名单，UI 对齐
+
 ---
 
 ## [0.1.46] - 2026-03-20
