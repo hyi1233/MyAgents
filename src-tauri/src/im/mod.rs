@@ -1134,7 +1134,9 @@ async fn create_bot_instance<R: Runtime>(
                             }
 
                             let reply = format!("✅ 绑定成功！你好 {}，现在可以直接和我聊天了。", display);
-                            let _ = adapter_for_reply.send_message(&chat_id, &reply).await;
+                            if let Err(e) = adapter_for_reply.send_message(&chat_id, &reply).await {
+                                ulog_warn!("[im-cmd] send_message (bind success) failed: {}", e);
+                            }
 
                             // Emit Tauri events so frontend can update UI
                             let _ = app_clone.emit(
@@ -1150,17 +1152,19 @@ async fn create_bot_instance<R: Runtime>(
                                 serde_json::json!({ "botId": bot_id_for_loop }),
                             );
                         } else {
-                            let _ = adapter_for_reply.send_message(
+                            if let Err(e) = adapter_for_reply.send_message(
                                 &chat_id,
                                 "❌ 绑定码无效或已过期，请在 MyAgents 设置中重新获取二维码。",
-                            ).await;
+                            ).await {
+                                ulog_warn!("[im-cmd] send_message (bind invalid) failed: {}", e);
+                            }
                         }
                         continue;
                     }
 
                     // Handle plain /start (first-time interaction, not a bind)
                     if text == "/start" {
-                        let _ = adapter_for_reply.send_message(
+                        if let Err(e) = adapter_for_reply.send_message(
                             &chat_id,
                             "👋 你好！我是 MyAgents Bot。\n\n\
                              可用命令：\n\
@@ -1172,7 +1176,9 @@ async fn create_bot_instance<R: Runtime>(
                              /mode — 切换权限模式\n\
                              /status — 查看状态\n\n\
                              直接发消息即可开始对话。",
-                        ).await;
+                        ).await {
+                            ulog_warn!("[im-cmd] send_message (/start) failed: {}", e);
+                        }
                         continue;
                     }
 
@@ -1203,7 +1209,9 @@ async fn create_bot_instance<R: Runtime>(
                             }
                         }
                         help.push_str("\n\n💬 直接发送文字即可与 AI 对话。\n🔒 工具审批：收到权限请求时，回复「允许」「始终允许」或「拒绝」。");
-                        let _ = adapter_for_reply.send_message(&chat_id, &help).await;
+                        if let Err(e) = adapter_for_reply.send_message(&chat_id, &help).await {
+                            ulog_warn!("[im-cmd] send_message (/help) failed: {}", e);
+                        }
                         continue;
                     }
 
@@ -1227,10 +1235,14 @@ async fn create_bot_instance<R: Runtime>(
                         match result {
                             Ok(new_id) => {
                                 let reply = format!("✅ 已创建新对话 ({})", &new_id[..8.min(new_id.len())]);
-                                let _ = adapter_for_reply.send_message(&chat_id, &reply).await;
+                                if let Err(e) = adapter_for_reply.send_message(&chat_id, &reply).await {
+                                    ulog_warn!("[im-cmd] send_message (/new success) failed: {}", e);
+                                }
                             }
                             Err(e) => {
-                                let _ = adapter_for_reply.send_message(&chat_id, &format!("❌ 创建失败: {}", e)).await;
+                                if let Err(e2) = adapter_for_reply.send_message(&chat_id, &format!("❌ 创建失败: {}", e)).await {
+                                    ulog_warn!("[im-cmd] send_message (/new error) failed: {}", e2);
+                                }
                             }
                         }
                         continue;
@@ -1274,7 +1286,9 @@ async fn create_bot_instance<R: Runtime>(
                             }
                         };
                         adapter_for_reply.ack_clear(&chat_id, &message_id).await;
-                        let _ = adapter_for_reply.send_message(&chat_id, &reply).await;
+                        if let Err(e) = adapter_for_reply.send_message(&chat_id, &reply).await {
+                            ulog_warn!("[im-cmd] send_message (/workspace) failed: {}", e);
+                        }
                         continue;
                     }
 
@@ -1294,7 +1308,9 @@ async fn create_bot_instance<R: Runtime>(
                             ),
                         };
                         adapter_for_reply.ack_clear(&chat_id, &message_id).await;
-                        let _ = adapter_for_reply.send_message(&chat_id, &reply).await;
+                        if let Err(e) = adapter_for_reply.send_message(&chat_id, &reply).await {
+                            ulog_warn!("[im-cmd] send_message (/status) failed: {}", e);
+                        }
                         continue;
                     }
 
@@ -1340,7 +1356,9 @@ async fn create_bot_instance<R: Runtime>(
                                     "📊 当前模型: {}\n\n提示: 可直接输入模型 ID 切换\n用法: /model <模型ID>",
                                     display,
                                 );
-                                let _ = adapter_for_reply.send_message(&chat_id, &help).await;
+                                if let Err(e) = adapter_for_reply.send_message(&chat_id, &help).await {
+                                    ulog_warn!("[im-cmd] send_message (/model help) failed: {}", e);
+                                }
                             } else {
                                 let mut menu = format!("📊 当前模型: {}\n\n可用模型:\n", display);
                                 for (i, m) in models.iter().enumerate() {
@@ -1349,7 +1367,9 @@ async fn create_bot_instance<R: Runtime>(
                                     menu.push_str(&format!("{}. {} ({})\n", i + 1, model_name, model_id));
                                 }
                                 menu.push_str("\n用法: /model <序号或模型ID>");
-                                let _ = adapter_for_reply.send_message(&chat_id, &menu).await;
+                                if let Err(e) = adapter_for_reply.send_message(&chat_id, &menu).await {
+                                    ulog_warn!("[im-cmd] send_message (/model list) failed: {}", e);
+                                }
                             }
                         } else {
                             // Resolve target model: by index (1-based) or by model ID
@@ -1379,10 +1399,12 @@ async fn create_bot_instance<R: Runtime>(
                                         drop(router);
                                         ulog_info!("[im] /model: set to {} (session={})", id, s.session_key);
                                     }
-                                    let _ = adapter_for_reply.send_message(
+                                    if let Err(e) = adapter_for_reply.send_message(
                                         &chat_id,
                                         &format!("✅ 模型已切换为: {}", id),
-                                    ).await;
+                                    ).await {
+                                        ulog_warn!("[im-cmd] send_message (/model switch) failed: {}", e);
+                                    }
 
                                     // Persist to config.json + notify frontend
                                     let bid = bot_id_for_loop.clone();
@@ -1401,10 +1423,12 @@ async fn create_bot_instance<R: Runtime>(
                                     }));
                                 }
                                 None => {
-                                    let _ = adapter_for_reply.send_message(
+                                    if let Err(e) = adapter_for_reply.send_message(
                                         &chat_id,
                                         "❌ 无效的序号，请使用 /model 查看可用列表",
-                                    ).await;
+                                    ).await {
+                                        ulog_warn!("[im-cmd] send_message (/model invalid) failed: {}", e);
+                                    }
                                 }
                             }
                         }
@@ -1448,7 +1472,9 @@ async fn create_bot_instance<R: Runtime>(
                             }
                             menu.push_str("\n用法: /provider <序号或ID>");
 
-                            let _ = adapter_for_reply.send_message(&chat_id, &menu).await;
+                            if let Err(e) = adapter_for_reply.send_message(&chat_id, &menu).await {
+                                ulog_warn!("[im-cmd] send_message (/provider list) failed: {}", e);
+                            }
                         } else {
                             // Switch provider by index (1-based) or ID
                             let target = if let Ok(idx) = arg.parse::<usize>() {
@@ -1490,10 +1516,12 @@ async fn create_bot_instance<R: Runtime>(
                                         None
                                     };
 
-                                    let _ = adapter_for_reply.send_message(
+                                    if let Err(e) = adapter_for_reply.send_message(
                                         &chat_id,
                                         &format!("✅ 已切换供应商: {}\n模型: {}", name, primary_model),
-                                    ).await;
+                                    ).await {
+                                        ulog_warn!("[im-cmd] send_message (/provider switch) failed: {}", e);
+                                    }
 
                                     // Persist to config.json + notify frontend
                                     let bid = bot_id_for_loop.clone();
@@ -1513,10 +1541,12 @@ async fn create_bot_instance<R: Runtime>(
                                     }));
                                 }
                                 None => {
-                                    let _ = adapter_for_reply.send_message(
+                                    if let Err(e) = adapter_for_reply.send_message(
                                         &chat_id,
                                         "❌ 未找到该供应商，请使用 /provider 查看可用列表",
-                                    ).await;
+                                    ).await {
+                                        ulog_warn!("[im-cmd] send_message (/provider not found) failed: {}", e);
+                                    }
                                 }
                             }
                         }
@@ -1535,7 +1565,7 @@ async fn create_bot_instance<R: Runtime>(
                                 "fullAgency" => "🚀 全自主模式 (fullAgency) — 所有操作自动执行",
                                 _ => "❓ 未知模式",
                             };
-                            let _ = adapter_for_reply.send_message(
+                            if let Err(e) = adapter_for_reply.send_message(
                                 &chat_id,
                                 &format!(
                                     "🔐 当前权限模式\n\n{}\n\n\
@@ -1546,17 +1576,21 @@ async fn create_bot_instance<R: Runtime>(
                                      用法: /mode <模式>",
                                     display,
                                 ),
-                            ).await;
+                            ).await {
+                                ulog_warn!("[im-cmd] send_message (/mode display) failed: {}", e);
+                            }
                         } else {
                             let new_mode = match arg.as_str() {
                                 "plan" => "plan",
                                 "auto" => "auto",
                                 "full" | "fullagency" => "fullAgency",
                                 _ => {
-                                    let _ = adapter_for_reply.send_message(
+                                    if let Err(e) = adapter_for_reply.send_message(
                                         &chat_id,
                                         "❌ 无效模式，可选: plan / auto / full",
-                                    ).await;
+                                    ).await {
+                                        ulog_warn!("[im-cmd] send_message (/mode invalid) failed: {}", e);
+                                    }
                                     continue;
                                 }
                             };
@@ -1569,10 +1603,12 @@ async fn create_bot_instance<R: Runtime>(
                                 _ => unreachable!(),
                             };
                             ulog_info!("[im] /mode: switched to {} (session={})", new_mode, session_key);
-                            let _ = adapter_for_reply.send_message(
+                            if let Err(e) = adapter_for_reply.send_message(
                                 &chat_id,
                                 &format!("✅ 权限模式已切换\n\n{}", display),
-                            ).await;
+                            ).await {
+                                ulog_warn!("[im-cmd] send_message (/mode switch) failed: {}", e);
+                            }
 
                             // Persist to config.json + notify frontend
                             let bid = bot_id_for_loop.clone();
@@ -2107,7 +2143,9 @@ async fn create_bot_instance<R: Runtime>(
                                 "👋 你好！我是 {}。\n群聊授权申请已发送至管理员，授权后即可使用。\n已绑定的用户可直接 @我 提问。",
                                 bot_name,
                             );
-                            let _ = adapter_for_reply.send_message(&chat_id, &prompt_msg).await;
+                            if let Err(e) = adapter_for_reply.send_message(&chat_id, &prompt_msg).await {
+                                ulog_warn!("[im-cmd] send_message (group auth prompt) failed: {}", e);
+                            }
                             // Emit Tauri events
                             let _ = app_clone.emit("im:group-permission-changed", json!({
                                 "botId": bot_id_for_loop,
@@ -2720,7 +2758,9 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                     if final_text.trim().is_empty() {
                         // Delete orphaned draft if one was created
                         if let Some(ref did) = draft_id {
-                            let _ = adapter.delete_message(chat_id, did).await;
+                            if let Err(e) = adapter.delete_message(chat_id, did).await {
+                                ulog_warn!("[im-stream] delete_message (empty block draft) failed: {}", e);
+                            }
                         }
                     } else {
                         finalize_block(adapter, chat_id, draft_id.clone(), &final_text).await;
@@ -2738,10 +2778,14 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                         // Group "always" mode: AI decided not to reply (NO_REPLY)
                         // Clean up draft/placeholder without sending anything
                         if let Some(ref did) = draft_id {
-                            let _ = adapter.delete_message(chat_id, did).await;
+                            if let Err(e) = adapter.delete_message(chat_id, did).await {
+                                ulog_warn!("[im-stream] delete_message (silent draft) failed: {}", e);
+                            }
                         }
                         if let Some(ref pid) = placeholder_id {
-                            let _ = adapter.delete_message(chat_id, pid).await;
+                            if let Err(e) = adapter.delete_message(chat_id, pid).await {
+                                ulog_warn!("[im-stream] delete_message (silent placeholder) failed: {}", e);
+                            }
                         }
                         return Ok(session_id);
                     }
@@ -2751,7 +2795,9 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                         finalize_block(adapter, chat_id, draft_id.clone(), &block_text).await;
                         any_text_sent = true;
                     } else if let Some(ref did) = draft_id {
-                        let _ = adapter.delete_message(chat_id, did).await;
+                        if let Err(e) = adapter.delete_message(chat_id, did).await {
+                            ulog_warn!("[im-stream] delete_message (complete empty draft) failed: {}", e);
+                        }
                     }
                     if !any_text_sent {
                         // Edit placeholder in-place (avoids Feishu "recall" notification).
@@ -2759,11 +2805,17 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                         // (e.g., DingTalk without AI Card).
                         if let Some(ref pid) = placeholder_id {
                             if adapter.edit_message(chat_id, pid, "(No response)").await.is_err() {
-                                let _ = adapter.delete_message(chat_id, pid).await;
-                                let _ = adapter.send_message(chat_id, "(No response)").await;
+                                if let Err(e) = adapter.delete_message(chat_id, pid).await {
+                                    ulog_warn!("[im-stream] delete_message (no-response placeholder) failed: {}", e);
+                                }
+                                if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
+                                    ulog_warn!("[im-stream] send_message (no response fallback) failed: {}", e);
+                                }
                             }
                         } else {
-                            let _ = adapter.send_message(chat_id, "(No response)").await;
+                            if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
+                                ulog_warn!("[im-stream] send_message (no response) failed: {}", e);
+                            }
                         }
                     }
                     return Ok(session_id);
@@ -2812,10 +2864,14 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                         .unwrap_or("Unknown error");
                     // Delete current draft and placeholder if they exist
                     if let Some(ref did) = draft_id {
-                        let _ = adapter.delete_message(chat_id, did).await;
+                        if let Err(e) = adapter.delete_message(chat_id, did).await {
+                            ulog_warn!("[im-stream] delete_message (error draft) failed: {}", e);
+                        }
                     }
                     if let Some(ref pid) = placeholder_id {
-                        let _ = adapter.delete_message(chat_id, pid).await;
+                        if let Err(e) = adapter.delete_message(chat_id, pid).await {
+                            ulog_warn!("[im-stream] delete_message (error placeholder) failed: {}", e);
+                        }
                     }
                     // Don't send_message here — outer handler will do it
                     return Err(RouteError::Response(500, error.to_string()));
@@ -2830,18 +2886,26 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         finalize_block(adapter, chat_id, draft_id.clone(), &block_text).await;
         any_text_sent = true;
     } else if let Some(ref did) = draft_id {
-        let _ = adapter.delete_message(chat_id, did).await;
+        if let Err(e) = adapter.delete_message(chat_id, did).await {
+            ulog_warn!("[im-stream] delete_message (disconnect draft) failed: {}", e);
+        }
     }
     if !any_text_sent {
         // Edit placeholder in-place (avoids Feishu "recall" notification).
         // Fall back to delete+send on platforms where edit is unsupported.
         if let Some(ref pid) = placeholder_id {
             if adapter.edit_message(chat_id, pid, "(No response)").await.is_err() {
-                let _ = adapter.delete_message(chat_id, pid).await;
-                let _ = adapter.send_message(chat_id, "(No response)").await;
+                if let Err(e) = adapter.delete_message(chat_id, pid).await {
+                    ulog_warn!("[im-stream] delete_message (disconnect no-response placeholder) failed: {}", e);
+                }
+                if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
+                    ulog_warn!("[im-stream] send_message (disconnect no response fallback) failed: {}", e);
+                }
             }
         } else {
-            let _ = adapter.send_message(chat_id, "(No response)").await;
+            if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
+                ulog_warn!("[im-stream] send_message (disconnect no response) failed: {}", e);
+            }
         }
     }
     Ok(session_id)
@@ -2926,7 +2990,9 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
                     // If we have an active stream, send a thinking indicator.
                     if let Some(ref sid) = stream_id {
                         sequence += 1;
-                        let _ = adapter.stream_chunk(chat_id, sid, "", sequence, true).await;
+                        if let Err(e) = adapter.stream_chunk(chat_id, sid, "", sequence, true).await {
+                            ulog_warn!("[im-stream] stream_chunk (activity indicator) failed: {}", e);
+                        }
                     }
                 }
                 "block-end" => {
@@ -2944,12 +3010,16 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
                             any_text_sent = true;
                         } else {
                             // No stream was started (very fast response) → send directly
-                            let _ = adapter.send_message(chat_id, &final_text).await;
+                            if let Err(e) = adapter.send_message(chat_id, &final_text).await {
+                                ulog_warn!("[im-stream] send_message (streaming block-end direct) failed: {}", e);
+                            }
                             any_text_sent = true;
                         }
                     } else if let Some(ref sid) = stream_id {
                         // Whitespace-only block — abort the stream
-                        let _ = adapter.abort_stream(chat_id, sid).await;
+                        if let Err(e) = adapter.abort_stream(chat_id, sid).await {
+                            ulog_warn!("[im-stream] abort_stream (empty block) failed: {}", e);
+                        }
                     }
 
                     // Reset for next block
@@ -2964,7 +3034,9 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
                     if silent {
                         // Group "always" mode: AI decided not to reply
                         if let Some(ref sid) = stream_id {
-                            let _ = adapter.abort_stream(chat_id, sid).await;
+                            if let Err(e) = adapter.abort_stream(chat_id, sid).await {
+                                ulog_warn!("[im-stream] abort_stream (silent) failed: {}", e);
+                            }
                         }
                         return Ok(session_id);
                     }
@@ -2977,15 +3049,21 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
                             }
                             any_text_sent = true;
                         } else {
-                            let _ = adapter.send_message(chat_id, &block_text).await;
+                            if let Err(e) = adapter.send_message(chat_id, &block_text).await {
+                                ulog_warn!("[im-stream] send_message (streaming complete flush) failed: {}", e);
+                            }
                             any_text_sent = true;
                         }
                     } else if let Some(ref sid) = stream_id {
-                        let _ = adapter.abort_stream(chat_id, sid).await;
+                        if let Err(e) = adapter.abort_stream(chat_id, sid).await {
+                            ulog_warn!("[im-stream] abort_stream (complete empty) failed: {}", e);
+                        }
                     }
 
                     if !any_text_sent {
-                        let _ = adapter.send_message(chat_id, "(No response)").await;
+                        if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
+                            ulog_warn!("[im-stream] send_message (streaming no response) failed: {}", e);
+                        }
                     }
                     return Ok(session_id);
                 }
@@ -3024,7 +3102,9 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
                     let error = json_val["error"].as_str().unwrap_or("Unknown error");
                     // Abort any active stream
                     if let Some(ref sid) = stream_id {
-                        let _ = adapter.abort_stream(chat_id, sid).await;
+                        if let Err(e) = adapter.abort_stream(chat_id, sid).await {
+                            ulog_warn!("[im-stream] abort_stream (error) failed: {}", e);
+                        }
                     }
                     return Err(RouteError::Response(500, error.to_string()));
                 }
@@ -3036,17 +3116,25 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
     // Stream disconnected unexpectedly
     if !block_text.trim().is_empty() {
         if let Some(ref sid) = stream_id {
-            let _ = adapter.finalize_stream(chat_id, sid, &block_text).await;
+            if let Err(e) = adapter.finalize_stream(chat_id, sid, &block_text).await {
+                ulog_warn!("[im-stream] finalize_stream (disconnect) failed: {}", e);
+            }
             any_text_sent = true;
         } else {
-            let _ = adapter.send_message(chat_id, &block_text).await;
+            if let Err(e) = adapter.send_message(chat_id, &block_text).await {
+                ulog_warn!("[im-stream] send_message (streaming disconnect flush) failed: {}", e);
+            }
             any_text_sent = true;
         }
     } else if let Some(ref sid) = stream_id {
-        let _ = adapter.abort_stream(chat_id, sid).await;
+        if let Err(e) = adapter.abort_stream(chat_id, sid).await {
+            ulog_warn!("[im-stream] abort_stream (disconnect) failed: {}", e);
+        }
     }
     if !any_text_sent {
-        let _ = adapter.send_message(chat_id, "(No response)").await;
+        if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
+            ulog_warn!("[im-stream] send_message (streaming disconnect no response) failed: {}", e);
+        }
     }
     Ok(session_id)
 }
@@ -3070,9 +3158,13 @@ async fn finalize_block<A: adapter::ImStreamAdapter>(
         // Draft mode: delete draft (no-op for draft: IDs) + send permanent message.
         // `sendMessageDraft` cannot be "committed" — only `sendMessage` creates a real message.
         if let Some(ref did) = draft_id {
-            let _ = adapter.delete_message(chat_id, did).await;
+            if let Err(e) = adapter.delete_message(chat_id, did).await {
+                ulog_warn!("[im-stream] delete_message (draft finalize) failed: {}", e);
+            }
         }
-        let _ = adapter.send_message(chat_id, text).await;
+        if let Err(e) = adapter.send_message(chat_id, text).await {
+            ulog_warn!("[im-stream] send_message (draft finalize) failed: {}", e);
+        }
     } else {
         // Standard mode: edit-in-place or delete+send
         let max_len = adapter.max_message_length();
@@ -3080,16 +3172,24 @@ async fn finalize_block<A: adapter::ImStreamAdapter>(
             if text.len() <= max_len {
                 if let Err(e) = adapter.finalize_message(chat_id, did, text).await {
                     ulog_warn!("[im] Finalize edit failed: {}, sending as new message", e);
-                    let _ = adapter.send_message(chat_id, text).await;
+                    if let Err(e2) = adapter.send_message(chat_id, text).await {
+                        ulog_warn!("[im-stream] send_message (finalize fallback) failed: {}", e2);
+                    }
                 }
             } else {
                 // Too long for edit: delete draft → send_message (auto-splits)
-                let _ = adapter.delete_message(chat_id, did).await;
-                let _ = adapter.send_message(chat_id, text).await;
+                if let Err(e) = adapter.delete_message(chat_id, did).await {
+                    ulog_warn!("[im-stream] delete_message (too-long draft) failed: {}", e);
+                }
+                if let Err(e) = adapter.send_message(chat_id, text).await {
+                    ulog_warn!("[im-stream] send_message (too-long split) failed: {}", e);
+                }
             }
         } else {
             // No draft created (very fast response) → send directly
-            let _ = adapter.send_message(chat_id, text).await;
+            if let Err(e) = adapter.send_message(chat_id, text).await {
+                ulog_warn!("[im-stream] send_message (no-draft direct) failed: {}", e);
+            }
         }
     }
 }
@@ -4052,6 +4152,232 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
 }
 
 
+/// Monitor agent channels and auto-restart dead ones (Error/Stopped).
+/// Periodically scans all agent channels, restarts dead ones using the same
+/// dedup + create_bot_instance pattern as schedule_agent_auto_start.
+pub async fn monitor_agent_channels(
+    app_handle: AppHandle,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    const CHECK_INTERVAL_SECS: u64 = 30;
+    const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+    const BACKOFF_BASE_SECS: u64 = 30;
+    const MAX_BACKOFF_SECS: u64 = 300;
+
+    // Initial delay: let auto-start finish first
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    ulog_info!("[agent-monitor] Agent channel health monitor started");
+
+    // Track per-channel: consecutive failures + next retry timestamp.
+    // failure_counts keys persist across cycles even if the channel is removed from
+    // agent_state during a failed restart — this prevents orphaned channels from
+    // being lost to monitoring.
+    let mut failure_counts: HashMap<String, u32> = HashMap::new();
+    let mut next_retry: HashMap<String, tokio::time::Instant> = HashMap::new();
+    // Orphaned channels: (channel_id → agent_id) for channels removed from agent_state
+    // during a failed restart. Merged into dead_channels on each cycle so they get retried.
+    let mut orphaned: HashMap<String, String> = HashMap::new();
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+        if shutdown.load(Relaxed) {
+            break;
+        }
+
+        use tauri::Manager;
+        let agent_state = app_handle.state::<ManagedAgents>();
+        let sidecar_manager = app_handle.state::<ManagedSidecarManager>();
+
+        // Phase 1: Find dead channels — snapshot health refs under lock, check outside
+        let channel_health_refs: Vec<(String, String, Arc<crate::im::health::HealthManager>)> = {
+            let agents_guard = agent_state.lock().await;
+            let mut refs = Vec::new();
+            for (agent_id, agent) in agents_guard.iter() {
+                for (channel_id, channel) in agent.channels.iter() {
+                    refs.push((
+                        agent_id.clone(),
+                        channel_id.clone(),
+                        Arc::clone(&channel.bot_instance.health),
+                    ));
+                }
+            }
+            refs
+            // lock dropped here
+        };
+
+        let mut dead_channels: Vec<(String, String)> = Vec::new();
+        for (agent_id, channel_id, health) in &channel_health_refs {
+            let state = health.get_state().await;
+            if matches!(state.status, types::ImStatus::Error | types::ImStatus::Stopped) {
+                dead_channels.push((agent_id.clone(), channel_id.clone()));
+            }
+        }
+
+        // Merge orphaned channels (failed restart last cycle, no longer in agent_state)
+        for (channel_id, agent_id) in &orphaned {
+            if !dead_channels.iter().any(|(_, cid)| cid == channel_id) {
+                dead_channels.push((agent_id.clone(), channel_id.clone()));
+            }
+        }
+
+        if dead_channels.is_empty() {
+            failure_counts.clear();
+            next_retry.clear();
+            continue;
+        }
+
+        // Phase 2: Read configs from disk for restart
+        let agent_configs = read_agent_configs_from_disk();
+        if agent_configs.is_empty() {
+            continue;
+        }
+
+        let now = tokio::time::Instant::now();
+
+        for (agent_id, channel_id) in &dead_channels {
+            if shutdown.load(Relaxed) {
+                break;
+            }
+
+            let count = failure_counts.entry(channel_id.clone()).or_insert(0);
+            if *count >= MAX_CONSECUTIVE_FAILURES {
+                continue;
+            }
+
+            // Skip if backoff hasn't elapsed yet (non-blocking)
+            if let Some(&retry_at) = next_retry.get(channel_id) {
+                if now < retry_at {
+                    continue;
+                }
+            }
+
+            // Find matching config from disk
+            let agent_cfg = match agent_configs.iter().find(|a| a.id == *agent_id) {
+                Some(c) => c,
+                None => continue,
+            };
+            if !agent_cfg.enabled {
+                continue;
+            }
+            let channel_cfg = match agent_cfg.channels.iter().find(|c| c.id == *channel_id) {
+                Some(c) => c,
+                None => continue,
+            };
+            if !channel_cfg.enabled {
+                continue;
+            }
+
+            let mut im_config = channel_cfg.to_im_config(agent_cfg);
+            im_config.heartbeat_config = Some(types::HeartbeatConfig {
+                enabled: false,
+                ..types::HeartbeatConfig::default()
+            });
+
+            // Remove dead channel — shut down old instance properly first
+            let old_instance: Option<ImBotInstance> = {
+                let mut agents_guard = agent_state.lock().await;
+                if let Some(agent) = agents_guard.get_mut(agent_id) {
+                    agent.channels.remove(channel_id).map(|ch| ch.bot_instance)
+                } else {
+                    None
+                }
+            };
+            if let Some(instance) = old_instance {
+                let _ = shutdown_bot_instance(instance, &sidecar_manager, channel_id).await;
+            }
+
+            ulog_info!(
+                "[agent-monitor] Auto-restarting channel {} of agent {}",
+                channel_id,
+                agent_id
+            );
+
+            match create_bot_instance(
+                &app_handle,
+                &sidecar_manager,
+                channel_id.clone(),
+                im_config,
+                Some(agent_id.clone()),
+            )
+            .await
+            {
+                Ok((bot_instance, _status)) => {
+                    failure_counts.remove(channel_id);
+                    next_retry.remove(channel_id);
+                    orphaned.remove(channel_id);
+
+                    // Re-insert into agent state
+                    let mut agents_guard = agent_state.lock().await;
+                    if let Some(agent) = agents_guard.get_mut(agent_id) {
+                        let link = AgentChannelLink {
+                            channel_id: channel_id.clone(),
+                            agent_id: agent_id.clone(),
+                            last_active_channel: Arc::clone(&agent.last_active_channel),
+                        };
+                        *bot_instance.agent_link.write().await = Some(link);
+
+                        agent.channels.insert(
+                            channel_id.clone(),
+                            ChannelInstance {
+                                channel_id: channel_id.clone(),
+                                bot_instance,
+                            },
+                        );
+                    }
+                    drop(agents_guard);
+
+                    ulog_info!(
+                        "[agent-monitor] Channel {} restarted successfully",
+                        channel_id
+                    );
+                    let _ = app_handle.emit(
+                        "agent:status-changed",
+                        serde_json::json!({
+                            "agentId": agent_id,
+                            "event": "channel_auto_restarted",
+                            "channelId": channel_id,
+                        }),
+                    );
+                }
+                Err(e) => {
+                    *count += 1;
+                    // Track as orphaned so next cycle retries even though
+                    // the channel was removed from agent_state
+                    orphaned.insert(channel_id.clone(), agent_id.clone());
+                    // Schedule next retry with exponential backoff
+                    let backoff = std::cmp::min(
+                        BACKOFF_BASE_SECS.saturating_mul(2u64.saturating_pow(*count - 1)),
+                        MAX_BACKOFF_SECS,
+                    );
+                    next_retry.insert(
+                        channel_id.clone(),
+                        now + Duration::from_secs(backoff),
+                    );
+                    ulog_error!(
+                        "[agent-monitor] Failed to restart channel {} (attempt {}, next retry in {}s): {}",
+                        channel_id,
+                        count,
+                        backoff,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Clean up: remove entries for channels that recovered or were manually stopped
+        // Keep entries that are in orphaned (awaiting retry) or in dead_channels
+        let tracked: std::collections::HashSet<String> = dead_channels
+            .iter()
+            .map(|(_, cid)| cid.clone())
+            .chain(orphaned.keys().cloned())
+            .collect();
+        failure_counts.retain(|cid, _| tracked.contains(cid));
+        next_retry.retain(|cid, _| tracked.contains(cid));
+    }
+}
+
 // ===== Tauri Commands =====
 
 #[deprecated(note = "Use cmd_start_agent_channel instead")]
@@ -4862,7 +5188,9 @@ pub async fn cmd_approve_group(
     }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
 
     // Send confirmation message to group (lock-free)
-    let _ = adapter.send_message(&groupId, "✅ 群聊已授权！所有成员现在可以 @我 提问互动。").await;
+    if let Err(e) = adapter.send_message(&groupId, "✅ 群聊已授权！所有成员现在可以 @我 提问互动。").await {
+        ulog_warn!("[im-cmd] send_message (group approved) failed: {}", e);
+    }
 
     let _ = app_handle.emit("im:group-permission-changed", json!({ "botId": botId, "event": "approved" }));
     let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));

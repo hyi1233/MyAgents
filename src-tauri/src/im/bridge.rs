@@ -301,6 +301,7 @@ impl ImAdapter for BridgeAdapter {
 
 
     async fn send_message(&self, chat_id: &str, text: &str) -> AdapterResult<()> {
+        ulog_info!("[bridge:{}] send_message: chatId={}, textLen={}", self.plugin_id, chat_id, text.len());
         let body = json!({
             "chatId": chat_id,
             "text": text,
@@ -310,11 +311,15 @@ impl ImAdapter for BridgeAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Bridge send-text failed: {}", e))?;
+            .map_err(|e| {
+                ulog_warn!("[bridge:{}] send_message request failed: {}", self.plugin_id, e);
+                format!("Bridge send-text failed: {}", e)
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            ulog_warn!("[bridge:{}] send_message returned {}: {}", self.plugin_id, status, text);
             return Err(format!("Bridge send-text returned {}: {}", status, text));
         }
         Ok(())
@@ -343,6 +348,7 @@ impl ImStreamAdapter for BridgeAdapter {
         chat_id: &str,
         text: &str,
     ) -> AdapterResult<Option<String>> {
+        ulog_info!("[bridge:{}] send_message_returning_id: chatId={}, textLen={}", self.plugin_id, chat_id, text.len());
         let body = json!({
             "chatId": chat_id,
             "text": text,
@@ -352,16 +358,22 @@ impl ImStreamAdapter for BridgeAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Bridge send-text failed: {}", e))?;
+            .map_err(|e| {
+                ulog_warn!("[bridge:{}] send_message_returning_id request failed: {}", self.plugin_id, e);
+                format!("Bridge send-text failed: {}", e)
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            ulog_warn!("[bridge:{}] send_message_returning_id returned {}: {}", self.plugin_id, status, text);
             return Err(format!("Bridge send-text returned {}: {}", status, text));
         }
 
         let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
-        Ok(resp_body["messageId"].as_str().map(|s| s.to_string()))
+        let msg_id = resp_body["messageId"].as_str().map(|s| s.to_string());
+        ulog_info!("[bridge:{}] send_message_returning_id ok: messageId={:?}", self.plugin_id, msg_id);
+        Ok(msg_id)
     }
 
     async fn edit_message(
@@ -370,6 +382,7 @@ impl ImStreamAdapter for BridgeAdapter {
         message_id: &str,
         text: &str,
     ) -> AdapterResult<()> {
+        ulog_info!("[bridge:{}] edit_message: chatId={}, messageId={}, textLen={}", self.plugin_id, chat_id, message_id, text.len());
         let body = json!({
             "chatId": chat_id,
             "messageId": message_id,
@@ -380,11 +393,15 @@ impl ImStreamAdapter for BridgeAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Bridge edit-message failed: {}", e))?;
+            .map_err(|e| {
+                ulog_warn!("[bridge:{}] edit_message request failed: {}", self.plugin_id, e);
+                format!("Bridge edit-message failed: {}", e)
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            ulog_warn!("[bridge:{}] edit_message returned {}: {}", self.plugin_id, status, text);
             return Err(format!("Bridge edit-message returned {}: {}", status, text));
         }
         Ok(())
@@ -395,6 +412,7 @@ impl ImStreamAdapter for BridgeAdapter {
         chat_id: &str,
         message_id: &str,
     ) -> AdapterResult<()> {
+        ulog_info!("[bridge:{}] delete_message: chatId={}, messageId={}", self.plugin_id, chat_id, message_id);
         let body = json!({
             "chatId": chat_id,
             "messageId": message_id,
@@ -404,11 +422,15 @@ impl ImStreamAdapter for BridgeAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Bridge delete-message failed: {}", e))?;
+            .map_err(|e| {
+                ulog_warn!("[bridge:{}] delete_message request failed: {}", self.plugin_id, e);
+                format!("Bridge delete-message failed: {}", e)
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            ulog_warn!("[bridge:{}] delete_message returned {}: {}", self.plugin_id, status, text);
             return Err(format!("Bridge delete-message returned {}: {}", status, text));
         }
         Ok(())

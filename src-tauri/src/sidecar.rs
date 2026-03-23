@@ -1974,6 +1974,161 @@ pub async fn monitor_global_sidecar(
     }
 }
 
+/// Monitor all session sidecars and auto-restart dead ones that still have owners.
+/// Mirrors the `monitor_global_sidecar()` pattern with backoff tracking.
+pub async fn monitor_session_sidecars(
+    app_handle: AppHandle,
+    manager: ManagedSidecarManager,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    const CHECK_INTERVAL_SECS: u64 = 15;
+    const MAX_RESTART_FAILURES: u32 = 5;
+
+    // Initial delay: let app fully start before monitoring
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    ulog_info!("[sidecar] Session sidecar health monitor started");
+
+    // Recovery queue: preserves workspace + owners across failed restarts.
+    // When ensure_session_sidecar fails, the dead entry is gone from sidecars
+    // but we keep it here so the next cycle can retry.
+    struct RecoveryEntry {
+        workspace: std::path::PathBuf,
+        owners: Vec<SidecarOwner>,
+        failures: u32,
+    }
+    let mut recovery: HashMap<String, RecoveryEntry> = HashMap::new();
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+        if shutdown.load(Relaxed) {
+            break;
+        }
+
+        // Phase 1: Scan sidecars for newly dead sessions, merge into recovery queue
+        {
+            let mut guard = match manager.lock() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            for (sid, sc) in guard.sidecars.iter_mut() {
+                if !sc.is_running() && !sc.owners.is_empty() && !recovery.contains_key(sid) {
+                    recovery.insert(sid.clone(), RecoveryEntry {
+                        workspace: sc.workspace_path.clone(),
+                        owners: sc.owners.iter().cloned().collect(),
+                        failures: 0,
+                    });
+                }
+            }
+        }
+
+        // Remove entries that recovered on their own (now healthy in sidecars)
+        recovery.retain(|sid, _| {
+            manager
+                .lock()
+                .map(|mut g| {
+                    g.sidecars
+                        .get_mut(sid)
+                        .map(|sc| !sc.is_running())
+                        .unwrap_or(true) // not in sidecars → keep in recovery
+                })
+                .unwrap_or(true)
+        });
+
+        if recovery.is_empty() {
+            continue;
+        }
+
+        // Phase 2: Attempt restart for each entry in recovery queue
+        let session_ids: Vec<String> = recovery.keys().cloned().collect();
+        for session_id in session_ids {
+            if shutdown.load(Relaxed) {
+                break;
+            }
+
+            let entry = recovery.get(&session_id).unwrap();
+            if entry.failures >= MAX_RESTART_FAILURES {
+                continue;
+            }
+
+            // Remove dead entry from sidecars if still present (re-verify under lock)
+            {
+                let mut guard = match manager.lock() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                if let Some(sc) = guard.sidecars.get_mut(&session_id) {
+                    if sc.is_running() {
+                        // Recovered on its own — remove from recovery
+                        recovery.remove(&session_id);
+                        continue;
+                    }
+                }
+                guard.sidecars.remove(&session_id);
+            }
+
+            let first_owner = entry.owners[0].clone();
+            let workspace = entry.workspace.clone();
+            let owners_snapshot = entry.owners.clone();
+            let mgr = manager.clone();
+            let app = app_handle.clone();
+            let sid = session_id.clone();
+
+            match tokio::task::spawn_blocking(move || {
+                ensure_session_sidecar(&app, &mgr, &sid, &workspace, first_owner)
+            })
+            .await
+            {
+                Ok(Ok(result)) => {
+                    if owners_snapshot.len() > 1 {
+                        if let Ok(mut guard) = manager.lock() {
+                            if let Some(sc) = guard.sidecars.get_mut(&session_id) {
+                                for owner in owners_snapshot.iter().skip(1) {
+                                    sc.add_owner(owner.clone());
+                                }
+                            }
+                        }
+                    }
+                    recovery.remove(&session_id);
+                    ulog_info!(
+                        "[sidecar] Session {} auto-restarted on port {}",
+                        session_id,
+                        result.port
+                    );
+                    let _ = app_handle.emit(
+                        "session-sidecar:restarted",
+                        serde_json::json!({
+                            "sessionId": session_id,
+                            "port": result.port,
+                        }),
+                    );
+                }
+                Ok(Err(e)) => {
+                    if let Some(entry) = recovery.get_mut(&session_id) {
+                        entry.failures += 1;
+                    }
+                    ulog_error!(
+                        "[sidecar] Failed to auto-restart session {}: {}",
+                        session_id,
+                        e
+                    );
+                }
+                Err(e) => {
+                    if let Some(entry) = recovery.get_mut(&session_id) {
+                        entry.failures += 1;
+                    }
+                    ulog_error!(
+                        "[sidecar] spawn_blocking failed for session {}: {}",
+                        session_id,
+                        e
+                    );
+                }
+            }
+        }
+    }
+}
+
 // ============= Session-Centric Sidecar API (v0.1.11) =============
 
 /// Result returned from ensure_session_sidecar

@@ -52,6 +52,7 @@ pub fn run() {
     let sidecar_state_for_exit = sidecar_state.clone();
     let sidecar_state_for_tray_exit = sidecar_state.clone();
     let sidecar_state_for_monitor = sidecar_state.clone();
+    let sidecar_state_for_session_monitor = sidecar_state.clone();
 
     let im_state_for_management = im_bot_state.clone();
     let agent_state_for_management = agent_state.clone();
@@ -72,6 +73,8 @@ pub fn run() {
     let cleanup_done_for_exit = cleanup_done.clone();
     let cleanup_done_for_tray_exit = cleanup_done.clone();
     let cleanup_done_for_monitor = cleanup_done.clone();
+    let cleanup_done_for_session_monitor = cleanup_done.clone();
+    let cleanup_done_for_agent_monitor = cleanup_done.clone();
 
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
@@ -311,6 +314,27 @@ pub fn run() {
                 ).await;
             });
             log::info!("[App] Global sidecar health monitor spawned");
+
+            // Start Session Sidecar health monitor (20s initial delay)
+            let app_handle_for_session_monitor = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                sidecar::monitor_session_sidecars(
+                    app_handle_for_session_monitor,
+                    sidecar_state_for_session_monitor,
+                    cleanup_done_for_session_monitor,
+                ).await;
+            });
+            ulog_info!("[App] Session sidecar health monitor spawned");
+
+            // Start Agent Channel health monitor (15s initial delay)
+            let app_handle_for_agent_monitor = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                im::monitor_agent_channels(
+                    app_handle_for_agent_monitor,
+                    cleanup_done_for_agent_monitor,
+                ).await;
+            });
+            ulog_info!("[App] Agent channel health monitor spawned");
 
             // Start background update check (5 second delay to let app initialize)
             log::info!("[App] Setup complete, spawning background update check task...");
