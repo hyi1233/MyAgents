@@ -236,7 +236,7 @@ async function loadPlugin() {
   if (!capturedPlugin.sendText && typeof outbound?.sendText === 'function') {
     const outboundSendText = outbound.sendText as (params: Record<string, unknown>) => Promise<{ messageId?: string; error?: Error }>;
     capturedPlugin.sendText = async (chatId: string, text: string) => {
-      const result = await outboundSendText({ to: chatId, text, accountId: account.accountId || 'default', cfg: openclawCfg });
+      const result = await outboundSendText({ to: chatId, text, accountId: currentAccount.accountId || 'default', cfg: openclawCfg });
       if (result?.error) throw result.error;
       return { messageId: result?.messageId };
     };
@@ -245,7 +245,7 @@ async function loadPlugin() {
   if (!capturedPlugin.sendMedia && typeof outbound?.sendMedia === 'function') {
     const outboundSendMedia = outbound.sendMedia as (params: Record<string, unknown>) => Promise<{ messageId?: string; error?: Error }>;
     capturedPlugin.sendMedia = async (params: Record<string, unknown>) => {
-      const result = await outboundSendMedia({ ...params, accountId: account.accountId || 'default', cfg: openclawCfg });
+      const result = await outboundSendMedia({ ...params, accountId: currentAccount.accountId || 'default', cfg: openclawCfg });
       if (result?.error) throw result.error;
       return { messageId: result?.messageId };
     };
