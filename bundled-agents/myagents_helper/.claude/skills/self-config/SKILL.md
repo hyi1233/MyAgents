@@ -59,21 +59,25 @@ description: >-
 
 MyAgents 基于 Claude Agent SDK，底层是 Anthropic Messages API。接入第三方 API 时，协议选择的优先级是：
 
-1. **Anthropic 协议（最优先）** — 如果文档提到 "Claude Code"、"Anthropic 兼容"、`ANTHROPIC_BASE_URL` 环境变量，或者 URL 路径中包含 `/anthropic`，说明该服务商原生支持 Anthropic 协议。这是最佳选择，性能最好、兼容性最强。
-2. **OpenAI 兼容协议（兜底）** — 如果服务商只提供 OpenAI 兼容 API（`/v1/chat/completions`），使用 `--protocol openai`。这会通过内置的协议桥接层转换请求格式。
+1. **Anthropic 协议（最优先）** — 这是 MyAgents 的原生协议，性能最好、功能完整、兼容性最强。没有协议转换开销，所有 SDK 能力（工具调用、流式、Extended Thinking 等）都能正常使用。
+2. **OpenAI 兼容协议（兜底）** — 如果服务商只提供 OpenAI 兼容 API（`/v1/chat/completions`），使用 `--protocol openai`。这会通过内置的协议桥接层转换请求格式，部分高级功能可能受限。
 
 #### 从文档提取配置的方法
 
-当用户给你一份 API 服务商的文档时：
+当用户给你一份 API 服务商的文档时，**始终先寻找 Anthropic 协议的接入方式**。
 
-**寻找 Anthropic 协议线索（优先）：**
-- 搜索关键词：`Claude Code`、`Anthropic`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`/anthropic`
+关键洞察：大多数支持 Anthropic 协议的服务商，会在文档里以「接入 Claude Code」或「Claude Code 配置」的形式来呈现。这些板块本质上就是在描述 Anthropic 协议的接入参数——MyAgents 和 Claude Code 共享同一个 SDK，所以 Claude Code 的接入方式就是我们最原生的接入方式。
+
+**第一步：寻找 Anthropic / Claude Code 接入板块（优先）**
+- 在文档中搜索：`Claude Code`、`Anthropic`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`/anthropic`
+- 常见的文档标题模式：「接入 Claude Code」「Anthropic API 兼容」「Claude Code 配置指南」
 - 如果找到，提取：
   - `ANTHROPIC_BASE_URL` 的值 → `--base-url`
   - 认证方式（Bearer Token 还是 API Key）→ `--auth-type`（多数为 `auth_token`）
   - 模型名称列表 → `--models`
+- 即使文档同时提供了 OpenAI 兼容方式，只要有 Anthropic 方式就优先用 Anthropic
 
-**寻找 OpenAI 协议线索（兜底）：**
+**第二步：如果确实没有 Anthropic 支持，再找 OpenAI 兼容（兜底）**
 - 搜索关键词：`OpenAI 兼容`、`/v1/chat/completions`、`chat completions`
 - 如果找到，提取：
   - API base URL → `--base-url`（通常以 `/v1` 结尾或需要去掉 `/chat/completions`）
