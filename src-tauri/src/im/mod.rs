@@ -506,7 +506,14 @@ async fn shutdown_bot_instance(
     // Wait for auxiliary tasks
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.approval_handle).await;
     if let Some(hb) = instance.heartbeat_handle {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), hb).await;
+        // IMPORTANT: abort() the heartbeat task, don't just timeout-wait for it.
+        // The heartbeat may be holding the router lock while blocked in ensure_sidecar
+        // (which can take up to 5 minutes for TCP health checks). If we only timeout-wait,
+        // the task continues running in the background holding the lock, and our later
+        // router.lock().await calls (active_sessions, release_all) deadlock until it finishes.
+        // abort() cancels the task at the next .await point, releasing any held locks.
+        hb.abort();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), hb).await;
     }
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.health_handle).await;
 
@@ -3171,12 +3178,7 @@ async fn finalize_block<A: adapter::ImStreamAdapter>(
         if let Some(ref did) = draft_id {
             if text.len() <= max_len {
                 if let Err(e) = adapter.finalize_message(chat_id, did, text).await {
-                    ulog_warn!("[im] Finalize edit failed: {}, delete+resend", e);
-                    // Delete the original message to avoid duplication (platforms
-                    // that don't support edit likely sent a real message, not a draft)
-                    if let Err(e2) = adapter.delete_message(chat_id, did).await {
-                        ulog_warn!("[im-stream] delete_message (edit fallback) failed: {}", e2);
-                    }
+                    ulog_warn!("[im] Finalize edit failed: {}, sending as new message", e);
                     if let Err(e2) = adapter.send_message(chat_id, text).await {
                         ulog_warn!("[im-stream] send_message (finalize fallback) failed: {}", e2);
                     }

@@ -402,7 +402,9 @@ impl ImStreamAdapter for BridgeAdapter {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             ulog_warn!("[bridge:{}] edit_message returned {}: {}", self.plugin_id, status, text);
-            return Err(format!("Bridge edit-message returned {}: {}", status, text));
+            // Prefix with "status:<code>:" for structured matching in finalize_message.
+            // This avoids fragile substring matching on the error body.
+            return Err(format!("status:{}:Bridge edit-message returned {}: {}", status.as_u16(), status, text));
         }
         Ok(())
     }
@@ -533,7 +535,19 @@ impl ImStreamAdapter for BridgeAdapter {
         message_id: &str,
         text: &str,
     ) -> super::adapter::AdapterResult<()> {
-        self.edit_message(chat_id, message_id, text).await
+        // For Bridge plugins, finalize = try edit-in-place.
+        // If the plugin doesn't support edit (501 Not Implemented), that's OK —
+        // the message was already sent via send_message_returning_id, so we just
+        // log and return Ok. Returning Err here would trigger the caller's fallback
+        // which re-sends the same message, causing duplicates.
+        match self.edit_message(chat_id, message_id, text).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.starts_with("status:501:") || e.starts_with("status:405:") => {
+                ulog_info!("[bridge:{}] finalize: edit not supported, message already sent — skipping", self.plugin_id);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn use_draft_streaming(&self) -> bool {

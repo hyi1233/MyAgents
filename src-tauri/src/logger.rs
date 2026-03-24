@@ -173,6 +173,11 @@ pub fn init_app_handle(app: AppHandle) {
     }
 }
 
+/// Retrieve the global AppHandle (returns None if not yet initialized).
+pub fn get_app_handle() -> Option<&'static AppHandle> {
+    GLOBAL_APP_HANDLE.get()
+}
+
 /// Log via the global AppHandle — writes to stdout, unified log file, and frontend.
 /// Falls back to stdout-only if called before init_app_handle().
 pub fn unified_log(level: LogLevel, message: String) {

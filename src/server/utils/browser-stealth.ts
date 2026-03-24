@@ -1,9 +1,13 @@
 /**
- * Agent-browser anti-detection defaults & profile persistence.
+ * Agent-browser anti-detection defaults.
  *
  * Generates ~/.agent-browser/config.json (agent-browser's default config path)
- * with headed mode, realistic UA, persistent profile directory, and anti-detection
- * Chrome flags. No env var needed — agent-browser reads this path automatically.
+ * with headed mode, realistic UA, and anti-detection Chrome flags.
+ * No env var needed — agent-browser reads this path automatically.
+ *
+ * Profile field is intentionally omitted so each agent-browser invocation uses
+ * a temporary profile, allowing concurrent use across multiple sessions without
+ * Chromium SingletonLock conflicts.
  *
  * User override: remove the `_managed_by` field from the JSON file — MyAgents
  * will stop overwriting it.
@@ -156,7 +160,6 @@ export function ensureBrowserStealthConfig(): void {
     } catch { /* corrupt file, overwrite */ }
   }
 
-  const profileDir = join(homeDir, '.playwright-mcp-profile');
   const locale = detectSystemLocale();
 
   // Build Chrome launch args for anti-detection.
@@ -183,10 +186,11 @@ export function ensureBrowserStealthConfig(): void {
     '--hide-crash-restore-bubble',
   ].join('\n');
 
+  // Profile field intentionally omitted — each invocation uses a temp profile,
+  // enabling concurrent browser use across multiple sessions (no SingletonLock).
   const config = {
     _managed_by: 'myagents',
     headed: true,
-    profile: profileDir,
     userAgent: buildRealisticUserAgent(),
     args,
   };

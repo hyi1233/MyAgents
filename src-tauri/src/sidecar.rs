@@ -99,6 +99,10 @@ pub const GLOBAL_SIDECAR_ID: &str = "__global__";
 // This marker is added to all sidecar commands for reliable process identification
 const SIDECAR_MARKER: &str = "--myagents-sidecar";
 
+// Port file for CLI discovery — written when Global Sidecar starts,
+// read by `cli.rs` to know which port to connect to.
+const PORT_FILE_NAME: &str = "sidecar.port";
+
 // ===== Crashed Bun Tracking =====
 // When a bundled bun crashes with STATUS_ACCESS_VIOLATION (0xC0000005, typically AVX2
 // incompatibility in VMs), mark it as crashed so subsequent attempts fall through to system bun.
@@ -135,6 +139,28 @@ fn maybe_mark_crashed_bun(status: &std::process::ExitStatus, bun_path: &std::pat
     }
 }
 
+// ===== Port File for CLI Discovery =====
+
+/// Write the Global Sidecar port to ~/.myagents/sidecar.port so the CLI can discover it.
+fn write_global_port_file(port: u16) {
+    if let Some(home) = dirs::home_dir() {
+        let port_file = home.join(".myagents").join(PORT_FILE_NAME);
+        if let Err(e) = std::fs::write(&port_file, port.to_string()) {
+            log::warn!("[sidecar] Failed to write port file {:?}: {}", port_file, e);
+        } else {
+            log::info!("[sidecar] Wrote CLI port file: {:?} = {}", port_file, port);
+        }
+    }
+}
+
+/// Remove the port file (called on app exit / sidecar shutdown).
+fn remove_global_port_file() {
+    if let Some(home) = dirs::home_dir() {
+        let port_file = home.join(".myagents").join(PORT_FILE_NAME);
+        let _ = std::fs::remove_file(&port_file);
+    }
+}
+
 // ===== Proxy Configuration =====
 // Default values (must match TypeScript PROXY_DEFAULTS in types.ts)
 // Proxy configuration is now managed by the shared proxy_config module
@@ -151,6 +177,9 @@ fn maybe_mark_crashed_bun(status: &std::process::ExitStatus, bun_path: &std::pat
 pub fn cleanup_stale_sidecars() {
     // Use eprintln! because this runs before tauri_plugin_log is initialized
     eprintln!("[sidecar] Cleaning up stale sidecar processes...");
+
+    // Remove stale port file from previous crashed instance
+    remove_global_port_file();
 
     #[cfg(unix)]
     {
@@ -590,6 +619,8 @@ impl SidecarManager {
         self.sidecars.clear(); // Session-centric Sidecars (Drop kills processes)
         self.instances.clear(); // Global Sidecar (Drop kills process)
         self.session_activations.clear();
+        // Remove port file so CLI knows the sidecar is down
+        remove_global_port_file();
     }
 
     // ============= Session Activation Methods =============
@@ -1847,7 +1878,10 @@ pub fn start_global_sidecar<R: Runtime>(
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
 ) -> Result<u16, String> {
-    start_tab_sidecar(app_handle, manager, GLOBAL_SIDECAR_ID, None)
+    let port = start_tab_sidecar(app_handle, manager, GLOBAL_SIDECAR_ID, None)?;
+    // Write port file so the CLI can discover the running sidecar
+    write_global_port_file(port);
+    Ok(port)
 }
 
 /// Check Global Sidecar status.

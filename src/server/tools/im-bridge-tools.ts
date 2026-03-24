@@ -78,7 +78,10 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
     };
 
     if (!data.ok || !data.tools || data.tools.length === 0) {
-      console.warn('[im-bridge-tools] No tools available from Bridge');
+      // Not an error — some plugins (e.g. WeChat) don't provide MCP tools.
+      // Use console.log instead of console.warn to avoid misleading [ERROR] in unified log
+      // (Bun stderr capture marks all console.warn output as ERROR level).
+      console.log('[im-bridge-tools] No tools available from Bridge (plugin may not provide tools, this is normal)');
       dynamicServer = null;
       return;
     }

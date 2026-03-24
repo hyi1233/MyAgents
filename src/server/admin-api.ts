@@ -32,6 +32,46 @@ import { setMcpServers, getMcpServers, getAgentState } from './agent-session';
 import { broadcast } from './sse';
 
 // ---------------------------------------------------------------------------
+// Management API forwarding (Bun Sidecar → Rust)
+// ---------------------------------------------------------------------------
+
+const MGMT_PORT = process.env.MYAGENTS_MANAGEMENT_PORT;
+
+async function managementApi(
+  path: string,
+  method: 'GET' | 'POST' = 'GET',
+  body?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!MGMT_PORT) {
+    return { ok: false, error: 'Management API not available (app may still be starting)' };
+  }
+  const url = `http://127.0.0.1:${MGMT_PORT}${path}`;
+  const options: RequestInit = {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+  };
+  if (body && method === 'POST') {
+    options.body = JSON.stringify(body);
+  }
+  try {
+    const resp = await fetch(url, options);
+    return resp.json() as Promise<Record<string, unknown>>;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Management API unreachable: ${msg}` };
+  }
+}
+
+/** Convert Management API response ({ ok, ... }) to Admin API response ({ success, data, error }) */
+function wrapMgmtResponse(mgmt: Record<string, unknown>): AdminResponse {
+  if (mgmt.ok) {
+    const { ok: _ok, ...rest } = mgmt;
+    return { success: true, data: rest };
+  }
+  return { success: false, error: String(mgmt.error ?? 'Unknown error') };
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -825,6 +865,32 @@ Options for 'channel add':
 Commands:
   get <key>               Read a config value
   set <key> <value>       Set a config value`,
+
+  cron: `myagents cron — Manage scheduled tasks
+
+Commands:
+  list                     List all cron tasks
+  add                      Create a new cron task
+  start <id>               Start a stopped task
+  stop <id>                Stop a running task
+  remove <id>              Delete a task
+  update <id>              Update task fields
+  runs <id>                View execution history
+  status                   Show cron task summary
+
+Options for 'add':
+  --name         Task name
+  --prompt       AI prompt (required)
+  --schedule     Cron expression (e.g. "*/30 * * * *")
+  --every        Interval in minutes (alternative to --schedule)
+  --workspace    Workspace path (required)`,
+
+  plugin: `myagents plugin — Manage OpenClaw channel plugins
+
+Commands:
+  list                     List installed plugins
+  install <npm-spec>       Install a plugin from npm
+  remove <plugin-id>       Uninstall a plugin`,
 };
 
 export function handleHelp(payload: { path?: string[] }): AdminResponse {
@@ -838,10 +904,113 @@ export function handleHelp(payload: { path?: string[] }): AdminResponse {
   return {
     success: true,
     data: {
-      text: `Available command groups: mcp, model, agent, config, status, reload
+      text: `Available command groups: mcp, model, agent, config, cron, plugin, status, reload
 Use "myagents <group> --help" for details on a specific group.`,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Version
+// ---------------------------------------------------------------------------
+
+export function handleVersion(): AdminResponse {
+  // npm_package_version is set by npm/bun when launched via npm scripts;
+  // MYAGENTS_VERSION can be injected by the build system as a fallback.
+  const version = process.env.npm_package_version
+    ?? process.env.MYAGENTS_VERSION
+    ?? '0.1.51';
+  return { success: true, data: { version } };
+}
+
+// ---------------------------------------------------------------------------
+// Cron Task forwarding (Admin API → Management API)
+// ---------------------------------------------------------------------------
+
+export async function handleCronList(payload: { workspacePath?: string }): Promise<AdminResponse> {
+  const qs = payload.workspacePath ? `?workspacePath=${encodeURIComponent(payload.workspacePath)}` : '';
+  const resp = await managementApi(`/api/cron/list${qs}`);
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).tasks ?? [] };
+  }
+  return { success: false, error: String(resp.error ?? 'Failed to list cron tasks') };
+}
+
+export async function handleCronCreate(payload: Record<string, unknown>): Promise<AdminResponse> {
+  const resp = await managementApi('/api/cron/create', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleCronStop(payload: { taskId: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/cron/stop', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleCronStart(payload: { taskId: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/cron/run', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleCronDelete(payload: { taskId: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/cron/delete', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleCronUpdate(payload: { taskId: string; patch: Record<string, unknown> }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/cron/update', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleCronRuns(payload: { taskId: string; limit?: number }): Promise<AdminResponse> {
+  const qs = `?taskId=${encodeURIComponent(payload.taskId)}${payload.limit ? `&limit=${payload.limit}` : ''}`;
+  const resp = await managementApi(`/api/cron/runs${qs}`);
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).runs ?? [] };
+  }
+  return { success: false, error: String(resp.error ?? 'Failed to get cron runs') };
+}
+
+export async function handleCronStatus(payload: { workspacePath?: string }): Promise<AdminResponse> {
+  const qs = payload.workspacePath ? `?workspacePath=${encodeURIComponent(payload.workspacePath)}` : '';
+  const resp = await managementApi(`/api/cron/status${qs}`);
+  return wrapMgmtResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// Plugin forwarding (Admin API → Management API)
+// ---------------------------------------------------------------------------
+
+export async function handlePluginList(): Promise<AdminResponse> {
+  const resp = await managementApi('/api/plugin/list');
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).plugins ?? [] };
+  }
+  return { success: false, error: String(resp.error ?? 'Failed to list plugins') };
+}
+
+export async function handlePluginInstall(payload: { npmSpec: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/plugin/install', 'POST', payload);
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).plugin, hint: 'Plugin installed successfully.' };
+  }
+  return { success: false, error: String(resp.error ?? 'Failed to install plugin') };
+}
+
+export async function handlePluginUninstall(payload: { pluginId: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/plugin/uninstall', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// Agent runtime status forwarding (Admin API → Management API)
+// ---------------------------------------------------------------------------
+
+export async function handleAgentRuntimeStatus(): Promise<AdminResponse> {
+  const resp = await managementApi('/api/agent/runtime-status');
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).agents ?? {} };
+  }
+  return { success: false, error: String(resp.error ?? 'Failed to get agent runtime status') };
 }
 
 // ---------------------------------------------------------------------------

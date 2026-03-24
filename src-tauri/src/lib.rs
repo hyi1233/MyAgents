@@ -1,6 +1,7 @@
 // MyAgents Tauri Application
 // Main entry point with sidecar lifecycle management
 
+pub mod cli;
 mod commands;
 pub mod cron_task;
 pub mod im;
@@ -35,11 +36,22 @@ use std::sync::atomic::AtomicBool;
 use tauri::{Emitter, Listener, Manager};
 use tauri_plugin_autostart::MacosLauncher;
 
+/// Check if CLI arguments indicate CLI mode (delegates to cli module).
+pub fn is_cli_mode(args: &[String]) -> bool {
+    cli::is_cli_mode(args)
+}
+
+/// Run in CLI mode — forward args to the Bun CLI script and return exit code.
+pub fn run_cli(args: &[String]) -> i32 {
+    cli::run(args)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // IMPORTANT: Clean up stale sidecar processes from previous app instances
-    // This prevents "No available port found" errors caused by orphaned processes
-    cleanup_stale_sidecars();
+    // NOTE: cleanup_stale_sidecars() was moved into .setup() callback below.
+    // This ensures it only runs for the PRIMARY app instance, not when a second
+    // instance is launched (which would kill the running app's sidecar processes).
+    // The single-instance plugin exits the second process before .setup() is called.
 
     // Create managed sidecar state (now supports multiple instances)
     let sidecar_state = create_sidecar_state();
@@ -56,6 +68,7 @@ pub fn run() {
 
     let im_state_for_management = im_bot_state.clone();
     let agent_state_for_management = agent_state.clone();
+    let sidecar_state_for_management = sidecar_state.clone();
     let im_state_for_window = im_bot_state.clone();
     let im_state_for_exit = im_bot_state.clone();
     let im_state_for_tray_exit = im_bot_state.clone();
@@ -214,6 +227,13 @@ pub fn run() {
             commands::cmd_open_file,
         ])
         .setup(|app| {
+            // IMPORTANT: Clean up stale sidecar processes from previous app instances.
+            // This prevents "No available port found" errors caused by orphaned processes.
+            // Placed here (inside .setup()) instead of before Builder so it only runs
+            // for the primary instance. The single-instance plugin exits duplicate
+            // processes before .setup() is called, preventing accidental kills.
+            cleanup_stale_sidecars();
+
             // Initialize logging for all builds
             // Debug builds: DEBUG level for verbose output including third-party crates
             // Production builds: INFO level for important events only
@@ -274,9 +294,10 @@ pub fn run() {
                 }
             }
 
-            // Inject IM/Agent state into management API (for /api/im/wake endpoint)
+            // Inject IM/Agent/Sidecar state into management API (for /api/im/wake endpoint etc.)
             management_api::set_im_bots_state(im_state_for_management);
             management_api::set_agent_state(agent_state_for_management);
+            management_api::set_sidecar_state(sidecar_state_for_management);
 
             // Start management API (internal HTTP server for Bun→Rust IPC)
             tauri::async_runtime::spawn(async move {

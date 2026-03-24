@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.51] - 2026-03-24
+
+### Added
+- **MCP OAuth 规范完整实现**：零配置授权 + Token 生命周期管理（发现、注册、PKCE 授权、刷新、撤销），支持 OAuth 2.1 保护的远程 MCP Server
+- **浏览器并发隔离**：Playwright isolated 模式 + storage-state 持久化，多 Session 独立 cookie/登录态
+- **CLI 模式**：Tauri 二进制支持 CLI 参数（`myagents --help/status/mcp/model/cron/plugin`），修复 Issue #43 所有子命令无输出
+- **Admin API 完整性补齐**：定时任务（cron）8 个路由、OpenClaw 插件管理 3 个路由、Agent 运行时状态、版本信息——CLI 管理通道与 GUI 对等覆盖
+- **SDK shim 全面补齐**：openclaw plugin-sdk 从 5 个 → 16 个 shim 模块，覆盖 lark 插件新版所有依赖
+- **浏览器模式选择器**：Playwright 设置面板支持 isolated/persistent 模式切换 + cookie 管理 UI
+
+### Improved
+- **Helper 小助理元认知升级**：CLAUDE.md 新增管理通道架构图、CLI 能力域表格、配置修改用 CLI 原则；self-config/support skill 触发优化
+- **插件安装 UI**：Bot 图标安装时保持稳定（半透明 + 叠加 spinner），不再整个替换为 loading
+
+### Fixed
+- **微信 Bot 短消息重复发送**：Bridge finalize_message 对 501 Not Implemented 的 fallback 重发问题，改为结构化 status code 匹配
+- **插件 restart 卡住 3 分钟**：heartbeat 持 router 锁调 ensure_sidecar 阻塞 shutdown，改为 abort() 立即释放锁
+- **飞书插件启动失败**：SDK shim 缺 channel-status + tool-send 等模块 + exports 白名单未注册
+- **飞书群聊历史丢失**：reply-history shim 的 buildPendingHistoryContextFromMap 未正确委托，recordPendingHistoryEntry 未读 params.entry
+- **Intel Mac Node.js 架构不匹配**：构建脚本按目标架构下载对应 Node.js
+- **MCP OAuth 安全修复**：TOCTOU 竞态、dead code、缓存一致性、并行刷新 token
+- **bridge-tools 误报 ERROR**：微信等不提供 MCP 工具的插件，日志从 warn 降为 log
+- **ADMIN_AGENT_VERSION 未 bump**：新增禁止规则——修改 helper 后必须 bump 版本
+
+---
+
 ## [0.1.50] - 2026-03-23
 
 ### Added

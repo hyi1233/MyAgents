@@ -34,6 +34,10 @@ import {
   handleAgentList, handleAgentEnable, handleAgentDisable, handleAgentSet,
   handleAgentChannelList, handleAgentChannelAdd, handleAgentChannelRemove,
   handleConfigGet, handleConfigSet, handleStatus, handleReload, handleHelp,
+  handleVersion,
+  handleCronList, handleCronCreate, handleCronStop, handleCronStart, handleCronDelete, handleCronUpdate, handleCronRuns, handleCronStatus,
+  handlePluginList, handlePluginInstall, handlePluginUninstall,
+  handleAgentRuntimeStatus,
 } from './admin-api';
 import { setImMediaContext } from './tools/im-media-tool';
 import { setImBridgeToolsContext } from './tools/im-bridge-tools';
@@ -468,6 +472,89 @@ function cleanupStalePlaywrightProfile(): void {
   } catch (err) {
     // Non-critical — don't block startup
     console.warn('[startup] Playwright profile cleanup failed:', err);
+  }
+}
+
+/**
+ * One-time migration: extract cookies from Chromium profile (~/.playwright-mcp-profile/)
+ * into Playwright storage-state JSON (~/.myagents/browser-storage-state.json).
+ *
+ * Runs when the old profile exists but the new storage-state file does not.
+ * This preserves login state when upgrading from persistent-profile to isolated mode.
+ *
+ * Only cookies are migrated (from SQLite). localStorage lives in LevelDB and is
+ * too complex to extract statically — ~90% of login state is cookie-based anyway.
+ */
+function migrateProfileToStorageState(): void {
+  try {
+    const home = getHomeDirOrNull();
+    if (!home) return;
+
+    const profileDir = join(home, '.playwright-mcp-profile');
+    const myagentsDir = join(home, '.myagents');
+    const storageStatePath = join(myagentsDir, 'browser-storage-state.json');
+
+    // Only migrate once: old profile exists AND new file does not
+    if (!existsSync(profileDir) || existsSync(storageStatePath)) return;
+
+    const cookiesDbPath = join(profileDir, 'Default', 'Cookies');
+    if (!existsSync(cookiesDbPath)) {
+      console.log('[migration] No Cookies DB found in profile, skipping migration');
+      return;
+    }
+
+    // Use bun:sqlite to read Chromium's Cookies SQLite database
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { Database } = require('bun:sqlite');
+    const db = new Database(cookiesDbPath, { readonly: true });
+
+    const sameSiteMap: Record<number, string> = { 0: 'None', 1: 'Lax', 2: 'Strict' };
+
+    // Chrome epoch: microseconds since 1601-01-01 00:00:00 UTC
+    // Unix epoch conversion: subtract 11644473600 seconds, divide by 1000000
+    const CHROME_EPOCH_OFFSET = 11644473600;
+
+    // Filter out cookies with empty value — on macOS/Windows, Chromium encrypts cookie
+    // values (stored in encrypted_value column, decrypted via OS keychain). The plaintext
+    // `value` column is empty for these. We can only migrate unencrypted cookies.
+    const rows = db.query(
+      `SELECT host_key, name, value, path, expires_utc, is_httponly, is_secure, samesite
+       FROM cookies
+       WHERE length(name) > 0 AND length(value) > 0`
+    ).all() as Array<{
+      host_key: string; name: string; value: string; path: string;
+      expires_utc: number; is_httponly: number; is_secure: number; samesite: number;
+    }>;
+
+    db.close();
+
+    if (rows.length === 0) {
+      console.log('[migration] Cookies DB is empty, skipping migration');
+      return;
+    }
+
+    const cookies = rows.map(row => ({
+      name: row.name,
+      value: row.value,
+      domain: row.host_key,
+      path: row.path || '/',
+      expires: row.expires_utc > 0
+        ? Math.floor(row.expires_utc / 1000000) - CHROME_EPOCH_OFFSET
+        : -1,
+      httpOnly: !!row.is_httponly,
+      secure: !!row.is_secure,
+      sameSite: sameSiteMap[row.samesite] ?? 'None',
+    }));
+
+    const storageState = { cookies, origins: [] as Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }> };
+
+    mkdirSync(myagentsDir, { recursive: true });
+    writeFileSync(storageStatePath, JSON.stringify(storageState, null, 2));
+    console.log(`[migration] Migrated ${cookies.length} cookies from Chrome profile to ${storageStatePath}`);
+    console.log('[migration] Old profile at ~/.playwright-mcp-profile/ can be safely deleted');
+  } catch (err) {
+    // Non-critical — don't block startup
+    console.warn('[migration] Profile-to-storage-state migration failed:', err);
   }
 }
 
@@ -943,6 +1030,24 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'agent/channel/add') return handleAgentChannelAdd(payload as Parameters<typeof handleAgentChannelAdd>[0]);
   if (route === 'agent/channel/remove') return handleAgentChannelRemove(payload as Parameters<typeof handleAgentChannelRemove>[0]);
 
+  // Agent runtime status
+  if (route === 'agent/runtime-status') return await handleAgentRuntimeStatus();
+
+  // Cron task commands
+  if (route === 'cron/list') return await handleCronList(payload as Parameters<typeof handleCronList>[0]);
+  if (route === 'cron/add') return await handleCronCreate(payload);
+  if (route === 'cron/start') return await handleCronStart(payload as Parameters<typeof handleCronStart>[0]);
+  if (route === 'cron/stop') return await handleCronStop(payload as Parameters<typeof handleCronStop>[0]);
+  if (route === 'cron/remove') return await handleCronDelete(payload as Parameters<typeof handleCronDelete>[0]);
+  if (route === 'cron/update') return await handleCronUpdate(payload as Parameters<typeof handleCronUpdate>[0]);
+  if (route === 'cron/runs') return await handleCronRuns(payload as Parameters<typeof handleCronRuns>[0]);
+  if (route === 'cron/status') return await handleCronStatus(payload as Parameters<typeof handleCronStatus>[0]);
+
+  // Plugin commands
+  if (route === 'plugin/list') return await handlePluginList();
+  if (route === 'plugin/install') return await handlePluginInstall(payload as Parameters<typeof handlePluginInstall>[0]);
+  if (route === 'plugin/remove') return await handlePluginUninstall(payload as Parameters<typeof handlePluginUninstall>[0]);
+
   // Config commands
   if (route === 'config/get') return handleConfigGet(payload as Parameters<typeof handleConfigGet>[0]);
   if (route === 'config/set') return handleConfigSet(payload as Parameters<typeof handleConfigSet>[0]);
@@ -950,6 +1055,7 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   // System commands
   if (route === 'status') return handleStatus();
   if (route === 'reload') return handleReload(payload.workspacePath as string | undefined);
+  if (route === 'version') return handleVersion();
   if (route === 'help') return handleHelp(payload as Parameters<typeof handleHelp>[0]);
 
   return { success: false, error: `Unknown admin route: ${pathname}` };
@@ -1153,6 +1259,10 @@ async function main() {
   // Recovery: clean up stale Playwright MCP profile locks left by v0.1.30 bug
   // (node→bun shim in global PATH caused Chrome CDP WebSocket timeout)
   cleanupStalePlaywrightProfile();
+
+  // One-time migration: extract cookies from old Chromium profile to storage-state JSON
+  // (v0.1.51: switched from persistent profile to isolated mode for browser concurrency)
+  migrateProfileToStorageState();
 
   // Seed bundled skills to ~/.myagents/skills/ on first launch
   seedBundledSkills();
@@ -4327,42 +4437,63 @@ async function main() {
 
       // ============= MCP OAuth API =============
 
-      // POST /api/mcp/oauth/start - Start OAuth flow for an MCP server
+      // POST /api/mcp/oauth/discover - Probe MCP server for OAuth requirements
+      if (pathname === '/api/mcp/oauth/discover' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { serverId: string; mcpUrl: string; forceRefresh?: boolean };
+          if (!payload.serverId || !payload.mcpUrl) {
+            return jsonResponse({ success: false, error: 'Missing serverId or mcpUrl' }, 400);
+          }
+          const { probeOAuthRequirement } = await import('./mcp-oauth');
+          const result = await probeOAuthRequirement(payload.serverId, payload.mcpUrl, payload.forceRefresh);
+          return jsonResponse({ success: true, ...result });
+        } catch (error) {
+          console.error('[api/mcp/oauth/discover] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Discovery failed' }, 500);
+        }
+      }
+
+      // POST /api/mcp/oauth/start - Start OAuth flow (auto or manual mode)
       if (pathname === '/api/mcp/oauth/start' && request.method === 'POST') {
         try {
           const payload = await request.json() as {
             serverId: string;
             serverUrl: string;
-            clientId: string;
+            // Manual mode fields (all optional — omit for auto mode)
+            clientId?: string;
             clientSecret?: string;
             scopes?: string[];
+            callbackPort?: number;
             authorizationUrl?: string;
             tokenUrl?: string;
           };
 
-          if (!payload.serverId || !payload.serverUrl || !payload.clientId) {
-            return jsonResponse({ success: false, error: 'Missing serverId, serverUrl, or clientId' }, 400);
+          if (!payload.serverId || !payload.serverUrl) {
+            return jsonResponse({ success: false, error: 'Missing serverId or serverUrl' }, 400);
           }
 
-          const { startOAuthFlow } = await import('./mcp-oauth');
-          const manualMetadata = (payload.authorizationUrl && payload.tokenUrl)
-            ? { authorizationUrl: payload.authorizationUrl, tokenUrl: payload.tokenUrl }
-            : undefined;
+          const { authorizeServer } = await import('./mcp-oauth');
+          const manualConfig = payload.clientId ? {
+            clientId: payload.clientId,
+            clientSecret: payload.clientSecret,
+            scopes: payload.scopes,
+            callbackPort: payload.callbackPort,
+            authorizationUrl: payload.authorizationUrl,
+            tokenUrl: payload.tokenUrl,
+          } : undefined;
 
-          const { authUrl, waitForToken } = await startOAuthFlow(
+          const { authUrl, waitForCompletion } = await authorizeServer(
             payload.serverId,
             payload.serverUrl,
-            { clientId: payload.clientId, clientSecret: payload.clientSecret, scopes: payload.scopes },
-            manualMetadata,
+            manualConfig,
           );
 
-          // Don't await the token — return the auth URL immediately
-          // The token will be stored when the callback is received
-          waitForToken.then((token) => {
-            if (token) {
-              console.log(`[api/mcp/oauth] Token obtained for ${payload.serverId}`);
+          // Don't await completion — return the auth URL immediately
+          waitForCompletion.then((success) => {
+            if (success) {
+              console.log(`[api/mcp/oauth] Authorization completed for ${payload.serverId}`);
             } else {
-              console.warn(`[api/mcp/oauth] OAuth flow failed or was cancelled for ${payload.serverId}`);
+              console.warn(`[api/mcp/oauth] Authorization failed or cancelled for ${payload.serverId}`);
             }
           });
 
@@ -4376,19 +4507,18 @@ async function main() {
         }
       }
 
-      // GET /api/mcp/oauth/status - Get OAuth status for an MCP server
+      // GET /api/mcp/oauth/status/:serverId - Get OAuth status
       if (pathname.startsWith('/api/mcp/oauth/status/') && request.method === 'GET') {
         try {
           const serverId = decodeURIComponent(pathname.slice('/api/mcp/oauth/status/'.length));
-          const { getOAuthStatus, getOAuthToken } = await import('./mcp-oauth');
-          const status = getOAuthStatus(serverId);
-          const token = getOAuthToken(serverId);
+          const { getOAuthStatus } = await import('./mcp-oauth');
+          const result = getOAuthStatus(serverId);
           return jsonResponse({
             success: true,
-            status,
-            hasToken: !!token,
-            expiresAt: token?.expiresAt,
-            scope: token?.scope,
+            status: result.status,
+            hasToken: result.status === 'connected' || result.status === 'expired',
+            expiresAt: result.expiresAt,
+            scope: result.scope,
           });
         } catch (error) {
           console.error('[api/mcp/oauth/status] Error:', error);
@@ -4396,25 +4526,25 @@ async function main() {
         }
       }
 
-      // POST /api/mcp/oauth/refresh - Refresh OAuth token for an MCP server
+      // POST /api/mcp/oauth/refresh - Manually refresh OAuth token
       if (pathname === '/api/mcp/oauth/refresh' && request.method === 'POST') {
         try {
           const payload = await request.json() as { serverId: string };
-          const { refreshOAuthToken } = await import('./mcp-oauth');
-          const token = await refreshOAuthToken(payload.serverId);
-          return jsonResponse({ success: !!token, refreshed: !!token });
+          const { manualRefreshToken } = await import('./mcp-oauth');
+          const refreshed = await manualRefreshToken(payload.serverId);
+          return jsonResponse({ success: refreshed, refreshed });
         } catch (error) {
           console.error('[api/mcp/oauth/refresh] Error:', error);
           return jsonResponse({ success: false, error: String(error) }, 500);
         }
       }
 
-      // DELETE /api/mcp/oauth/token - Revoke/delete OAuth token for an MCP server
+      // DELETE /api/mcp/oauth/token - Revoke OAuth authorization
       if (pathname === '/api/mcp/oauth/token' && request.method === 'DELETE') {
         try {
           const payload = await request.json() as { serverId: string };
-          const { revokeOAuthToken } = await import('./mcp-oauth');
-          revokeOAuthToken(payload.serverId);
+          const { revokeAuthorization } = await import('./mcp-oauth');
+          await revokeAuthorization(payload.serverId);
           return jsonResponse({ success: true });
         } catch (error) {
           console.error('[api/mcp/oauth/token] Error:', error);

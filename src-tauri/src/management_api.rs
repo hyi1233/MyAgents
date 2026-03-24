@@ -16,6 +16,7 @@ use crate::cron_task::{
 };
 use crate::im::{self, ManagedImBots, ManagedAgents};
 use crate::im::adapter::ImStreamAdapter;
+use crate::im::bridge;
 use crate::im::types::MediaType;
 
 /// Global management API port (set once at startup)
@@ -50,6 +51,19 @@ fn get_agents() -> Option<&'static ManagedAgents> {
     AGENT_STATE.get()
 }
 
+/// Global Sidecar manager state (set once at startup)
+static SIDECAR_STATE: OnceLock<crate::sidecar::ManagedSidecarManager> = OnceLock::new();
+
+/// Set the SidecarManager state for the management API (called once at startup)
+pub fn set_sidecar_state(state: crate::sidecar::ManagedSidecarManager) {
+    let _ = SIDECAR_STATE.set(state);
+}
+
+#[allow(dead_code)]
+fn get_sidecar_state() -> Option<&'static crate::sidecar::ManagedSidecarManager> {
+    SIDECAR_STATE.get()
+}
+
 /// Start the internal management API server on a random port
 /// Returns the port number for injection into Sidecar env vars
 pub async fn start_management_api() -> Result<u16, String> {
@@ -78,6 +92,11 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/im/wake", post(wake_bot_handler))
         .route("/api/im/send-media", post(send_media_handler))
         .route("/api/im-bridge/message", post(handle_bridge_message))
+        .route("/api/cron/stop", post(stop_cron_handler))
+        .route("/api/plugin/list", get(list_plugins_handler))
+        .route("/api/plugin/install", post(install_plugin_handler))
+        .route("/api/plugin/uninstall", post(uninstall_plugin_handler))
+        .route("/api/agent/runtime-status", get(agent_runtime_status_handler))
         // Bridge messages carry base64-encoded media attachments (images/files).
         // Default axum 2MB limit is too small — raise to 50MB for this API.
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024));
@@ -129,11 +148,8 @@ struct ListCronQuery {
     workspace_path: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ListCronResponse {
-    tasks: Vec<CronTaskSummary>,
-}
+// ListCronResponse removed — list_cron_handler now returns serde_json::Value
+// with explicit { "ok": true, "tasks": [...] } for Admin API forwarding compatibility.
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -257,7 +273,7 @@ async fn create_cron_handler(
 
 async fn list_cron_handler(
     Query(query): Query<ListCronQuery>,
-) -> Json<ListCronResponse> {
+) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();
 
     let tasks = if let Some(bot_id) = &query.source_bot_id {
@@ -269,7 +285,7 @@ async fn list_cron_handler(
     };
 
     let summaries: Vec<CronTaskSummary> = tasks.into_iter().map(CronTaskSummary::from).collect();
-    Json(ListCronResponse { tasks: summaries })
+    Json(serde_json::json!({ "ok": true, "tasks": summaries }))
 }
 
 async fn update_cron_handler(
@@ -671,6 +687,133 @@ async fn send_media_handler(
             }))
         }
     }
+}
+
+// ===== Cron Stop handler =====
+
+async fn stop_cron_handler(Json(req): Json<TaskIdRequest>) -> Json<ApiResponse> {
+    let manager = cron_task::get_cron_task_manager();
+    match manager.stop_task(&req.task_id, Some("Stopped via admin CLI".to_string())).await {
+        Ok(_) => Json(ApiResponse { ok: true, error: None }),
+        Err(e) => Json(ApiResponse { ok: false, error: Some(e) }),
+    }
+}
+
+// ===== Plugin Management handlers =====
+
+async fn list_plugins_handler() -> Json<serde_json::Value> {
+    match bridge::list_openclaw_plugins().await {
+        Ok(plugins) => Json(serde_json::json!({ "ok": true, "plugins": plugins })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallPluginRequest {
+    npm_spec: String,
+}
+
+async fn install_plugin_handler(Json(req): Json<InstallPluginRequest>) -> Json<serde_json::Value> {
+    // install_openclaw_plugin requires AppHandle, but Management API doesn't have it.
+    // Use the global app handle from logger module.
+    let app_handle = match crate::logger::get_app_handle() {
+        Some(h) => h,
+        None => return Json(serde_json::json!({ "ok": false, "error": "App not initialized" })),
+    };
+    match bridge::install_openclaw_plugin(app_handle, &req.npm_spec).await {
+        Ok(metadata) => Json(serde_json::json!({ "ok": true, "plugin": metadata })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UninstallPluginRequest {
+    plugin_id: String,
+}
+
+async fn uninstall_plugin_handler(Json(req): Json<UninstallPluginRequest>) -> Json<serde_json::Value> {
+    match bridge::uninstall_openclaw_plugin(&req.plugin_id).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+// ===== Agent Runtime Status handler =====
+
+async fn agent_runtime_status_handler() -> Json<serde_json::Value> {
+    let agents = match get_agents() {
+        Some(a) => a,
+        None => return Json(serde_json::json!({ "ok": true, "agents": {} })),
+    };
+
+    let agents_guard = agents.lock().await;
+
+    // Snapshot data under lock, then drop lock before awaiting health states
+    struct AgentSnapshot {
+        agent_id: String,
+        agent_name: String,
+        enabled: bool,
+        channels: Vec<ChannelRuntimeSnapshot>,
+    }
+    struct ChannelRuntimeSnapshot {
+        channel_id: String,
+        platform_str: String,
+        health: std::sync::Arc<im::health::HealthManager>,
+    }
+
+    let mut snapshots: Vec<AgentSnapshot> = Vec::new();
+    for (agent_id, agent) in agents_guard.iter() {
+        let mut ch_snapshots = Vec::new();
+        for (ch_id, ch) in &agent.channels {
+            let platform_str = serde_json::to_value(&ch.bot_instance.platform)
+                .and_then(|v| serde_json::from_value::<String>(v))
+                .unwrap_or_else(|_| "unknown".to_string());
+            ch_snapshots.push(ChannelRuntimeSnapshot {
+                channel_id: ch_id.clone(),
+                platform_str,
+                health: std::sync::Arc::clone(&ch.bot_instance.health),
+            });
+        }
+        snapshots.push(AgentSnapshot {
+            agent_id: agent_id.clone(),
+            agent_name: agent.config.name.clone(),
+            enabled: agent.config.enabled,
+            channels: ch_snapshots,
+        });
+    }
+    drop(agents_guard);
+
+    // Now resolve health states without holding the lock
+    let mut result = serde_json::Map::new();
+    for snap in snapshots {
+        let mut channels = Vec::new();
+        for ch in &snap.channels {
+            let health_state = ch.health.get_state().await;
+            let status_str = serde_json::to_value(&health_state.status)
+                .and_then(|v| serde_json::from_value::<String>(v))
+                .unwrap_or_else(|_| "unknown".to_string());
+            channels.push(serde_json::json!({
+                "channelId": ch.channel_id,
+                "channelType": ch.platform_str,
+                "status": status_str,
+                "uptimeSeconds": health_state.uptime_seconds,
+                "lastMessageAt": health_state.last_message_at,
+                "errorMessage": health_state.error_message,
+                "activeSessions": health_state.active_sessions.len(),
+                "restartCount": health_state.restart_count,
+            }));
+        }
+        result.insert(snap.agent_id.clone(), serde_json::json!({
+            "agentId": snap.agent_id,
+            "agentName": snap.agent_name,
+            "enabled": snap.enabled,
+            "channels": channels,
+        }));
+    }
+
+    Json(serde_json::json!({ "ok": true, "agents": result }))
 }
 
 // ===== Bridge Message handler (OpenClaw Channel Plugin → Rust) =====

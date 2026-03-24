@@ -12,7 +12,7 @@ import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
 import { getImBridgeToolsContext, getImBridgeToolServer } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
 import { startSocksBridge, stopSocksBridge, isSocksBridgeRunning } from './utils/socks-bridge';
-import { getOAuthToken } from './mcp-oauth';
+import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from './mcp-oauth';
 // Side-effect imports: each registers itself in the builtin MCP registry
 import './tools/gemini-image-tool';
 import './tools/edge-tts-tool';
@@ -33,6 +33,32 @@ const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'devel
 
 // Shared NO_PROXY value — comprehensive list of localhost addresses to bypass proxy
 const PROXY_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
+
+// ===== OAuth Token Change Listener =====
+// Register once at module load. Token changes trigger session restart
+// so buildSdkMcpServers() picks up the new/refreshed Authorization headers.
+onTokenChange((serverId, event) => {
+  if (!currentMcpServers?.some(s => s.id === serverId)) return;
+
+  if (event === 'acquired' || event === 'refreshed') {
+    console.log(`[agent] OAuth token ${event} for MCP ${serverId}, restarting session to apply`);
+    if (isProcessing && !isPreWarming) {
+      pendingConfigRestart = true;
+    } else {
+      abortPersistentSession();
+    }
+    if (!isProcessing || isPreWarming) {
+      schedulePreWarm();
+    }
+  }
+
+  if (event === 'expired' || event === 'revoked') {
+    broadcast('mcp:oauth-expired', { serverId });
+  }
+});
+
+// Start background token refresh scheduler (checks every 60s, proactive refresh)
+startTokenRefreshScheduler();
 
 // Max length for individual string values in SDK message logs.
 // Base64 images can be several MB; truncate to keep logs readable.
@@ -506,6 +532,12 @@ function flushPendingMidTurnQueue(): void {
 
 /** 中止持久 session：唤醒所有被阻塞的 Promise */
 function abortPersistentSession(): void {
+  // Log warning if browser was used but storage state wasn't saved
+  // (The system prompt instructs the AI to save, but this is the fallback detection)
+  if (sessionBrowserToolUsed && !sessionStorageStateSaved) {
+    console.warn('[agent] Browser tools were used but storage state was not saved. Login state from this session may be lost.');
+  }
+
   shouldAbortSession = true;
   // Discard pending mid-turn messages (session is being torn down)
   pendingMidTurnQueue.length = 0;
@@ -605,6 +637,11 @@ let currentTurnStartTime: number | null = null;
 let currentTurnToolCount = 0;
 // Whether the current turn produced any visible assistant text output
 let currentTurnHasOutput = false;
+// Browser tool tracking for storage-state auto-save
+// Tracks whether any browser_* MCP tools were used in the current session,
+// and whether browser_storage_state was called (to avoid redundant save).
+let sessionBrowserToolUsed = false;
+let sessionStorageStateSaved = false;
 
 function resetTurnUsage(): void {
   currentTurnUsage = {
@@ -1100,7 +1137,7 @@ export function pinMcpPackageVersions(args: string[]): string[] {
  * - For other commands: Uses user-specified command directly (node/python etc.)
  * - Strips proxy env vars to prevent MCP WebSocket breakage
  */
-function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronToolsServer> {
+async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig | typeof cronToolsServer>> {
   // null = MCP not yet configured (e.g. Global sidecar, or Tab pre-warm before /api/mcp/set)
   // [] = explicitly no MCP (user has none enabled)
   // [...]= user's enabled MCP servers
@@ -1172,7 +1209,7 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
 
     if (server.type === 'stdio' && server.command) {
       let command = server.command;
-      let args = server.args || [];
+      let args = [...(server.args || [])];
 
       // For npx commands: prefer system npx → bundled Node.js npx → bun x
       // System Node.js is maintained by the user's package manager, more reliable than our bundled npm.
@@ -1231,9 +1268,6 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
         }
       }
 
-      // Log full command for debugging
-      console.log(`[agent] MCP ${server.id}: ${command} ${args.join(' ')}`);
-
       // Build MCP config with isolated env to prevent proxy interference.
       // The parent Sidecar may have HTTP_PROXY set (injected by Rust at spawn),
       // which leaks into MCP child processes and breaks localhost WebSocket connections
@@ -1255,6 +1289,26 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
         }
       }
 
+      // Playwright MCP: two user-selectable modes (configured in Settings UI):
+      // - Isolated (--isolated): concurrent browser sessions, storage-state for login
+      // - Persistent (--user-data-dir): full profile, single-session only
+      // Backend just respects the args and injects --storage-state when applicable.
+      if (server.id === 'playwright') {
+        const hasIsolated = args.includes('--isolated');
+
+        // In isolated mode, inject --storage-state if file exists (for login state reuse)
+        if (hasIsolated) {
+          const storageStatePath = join(getMyAgentsUserDir(), 'browser-storage-state.json');
+          if (existsSync(storageStatePath) && !args.some((a: string) => a.startsWith('--storage-state'))) {
+            args.push(`--storage-state=${storageStatePath}`);
+            console.log(`[agent] MCP playwright: injecting storage-state from ${storageStatePath}`);
+          }
+        }
+      }
+
+      // Log full command for debugging (after Playwright arg rewrite so logs show actual args)
+      console.log(`[agent] MCP ${server.id}: ${command} ${args.join(' ')}`);
+
       const mcpConfig: SdkMcpServerConfig = {
         command,
         args,
@@ -1269,17 +1323,14 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
         resolvedUrl = resolvedUrl.replace(/\{\{(\w+)\}\}/g, (_, key) => server.env?.[key] ?? '');
       }
 
-      // Inject OAuth token as Authorization header if available and not expired
+      // Inject OAuth token as Authorization header (auto-refreshes if needed)
+      // Respect user-supplied Authorization — don't overwrite if already present
       const headers = { ...server.headers };
-      const oauthToken = getOAuthToken(server.id);
-      if (oauthToken && !headers['Authorization'] && !headers['authorization']) {
-        // Check expiry with 60s buffer — skip injection if token is expired
-        const isExpired = oauthToken.expiresAt && oauthToken.expiresAt < Date.now() + 60000;
-        if (!isExpired) {
-          headers['Authorization'] = `${oauthToken.tokenType || 'Bearer'} ${oauthToken.accessToken}`;
-          console.log(`[agent] MCP ${server.id}: Injecting OAuth token (expires: ${oauthToken.expiresAt ? new Date(oauthToken.expiresAt).toISOString() : 'never'})`);
-        } else {
-          console.warn(`[agent] MCP ${server.id}: OAuth token expired, skipping injection`);
+      if (!headers['Authorization'] && !headers['authorization']) {
+        const oauthHeaders = await resolveAuthHeaders(server.id);
+        if (oauthHeaders['Authorization']) {
+          Object.assign(headers, oauthHeaders);
+          console.log(`[agent] MCP ${server.id}: OAuth token injected`);
         }
       }
 
@@ -2540,6 +2591,15 @@ function handleToolUseStart(tool: {
   });
   // Increment tool count for this turn
   currentTurnToolCount++;
+
+  // Track browser tool usage for storage-state auto-save
+  // MCP tool names follow pattern: mcp__playwright__browser_*
+  if (tool.name.startsWith('mcp__playwright__browser_')) {
+    sessionBrowserToolUsed = true;
+    if (tool.name === 'mcp__playwright__browser_storage_state') {
+      sessionStorageStateSaved = true;
+    }
+  }
 }
 
 /**
@@ -3169,6 +3229,9 @@ function clearMessageState(): void {
   isStreamingMessage = false;
   messageSequence = 0;
   pendingConfigRestart = false;
+  // Reset browser tool tracking for new session
+  sessionBrowserToolUsed = false;
+  sessionStorageStateSaved = false;
 }
 
 /** 排空消息队列，逐条广播 queue:cancelled。用于 session 意外死亡时通知前端清除队列 UI。 */
@@ -4524,7 +4587,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       systemPrompt: {
         type: 'preset' as const,
         preset: 'claude_code' as const,
-        append: buildSystemPromptAppend(currentScenario),
+        append: buildSystemPromptAppend(currentScenario, {
+          playwrightStorageEnabled: (currentMcpServers ?? []).some(
+            s => s.id === 'playwright' && (s.args ?? []).some((a: string) => /^--caps=.*\bstorage\b/.test(a))
+          ),
+        }),
       },
       cwd: agentDir,
       includePartialMessages: true,
@@ -4533,7 +4600,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       toolConfig: {
         askUserQuestion: { previewFormat: 'html' as const },
       },
-      mcpServers: buildSdkMcpServers(),
+      mcpServers: await buildSdkMcpServers(),
       // Sub-agents: inject custom agent definitions if configured
       // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
       ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0

@@ -1,17 +1,21 @@
 ---
 name: self-config
 description: >-
-  通过内置 myagents CLI 直接帮用户完成应用配置与验证。覆盖：MCP 工具接入/启禁用/环境变量/连通性测试，
-  模型服务商添加/删除/设置 API Key/验证连通性/切换默认模型，Agent Channel（IM Bot）管理，
-  通用配置读写，查看运行状态，热加载配置。当用户说"帮我配一下"、"接入这个工具"、"添加这个模型"、
-  "测试下能不能用"、"看看现在配了什么"、"设置 xx"等配置或诊断类请求时触发。
+  MyAgents 应用的统一管理入口——通过 myagents CLI 帮用户完成配置、运维和状态查询。
+  涵盖六大能力域：(1) MCP 工具接入与管理，(2) 模型服务商配置与验证，(3) Agent Channel 管理与运行时状态，
+  (4) 定时任务(cron)的创建/启停/删除/查看执行记录，(5) OpenClaw 社区插件安装/卸载，(6) 通用配置读写与版本查看。
+  当用户涉及以下任何一种意图时必须触发此技能：管理定时任务、查看/操作 cron、安装/卸载插件、
+  添加/测试模型服务商、接入 MCP 工具、查看 Agent 连接状态、修改应用配置、查看版本号。
+  即使用户没有说"配置"二字，只要意图是对 MyAgents 本身做查看或操作（而非让 AI 执行具体业务任务），
+  就应该使用此技能。注意：管理定时任务时使用此技能（通过 CLI），不要直接调用 im-cron MCP 工具——
+  im-cron 是 AI 在自己的会话中管理任务用的，self-config 才是帮用户管理应用级任务的正确入口。
 ---
 
 # Self-Config — 应用自我配置
 
-你可以通过内置的 `myagents` CLI 管理应用配置，包括 MCP 工具、模型服务、Agent/Channel 等。
+你可以通过内置的 `myagents` CLI 管理应用的几乎所有方面——MCP 工具、模型服务、Agent/Channel、定时任务、社区插件等。
 
-这个 CLI 是专门为你设计的——你通过 Bash 工具执行命令，就可以帮用户完成各种配置操作，不需要让用户手动去 Settings 页面操作。
+这个 CLI 是专门为你设计的——你通过 Bash 工具执行命令，就可以帮用户完成各种配置和管理操作，不需要让用户手动去 Settings 页面操作。
 
 ## 使用模式
 
@@ -55,21 +59,25 @@ description: >-
 
 MyAgents 基于 Claude Agent SDK，底层是 Anthropic Messages API。接入第三方 API 时，协议选择的优先级是：
 
-1. **Anthropic 协议（最优先）** — 如果文档提到 "Claude Code"、"Anthropic 兼容"、`ANTHROPIC_BASE_URL` 环境变量，或者 URL 路径中包含 `/anthropic`，说明该服务商原生支持 Anthropic 协议。这是最佳选择，性能最好、兼容性最强。
-2. **OpenAI 兼容协议（兜底）** — 如果服务商只提供 OpenAI 兼容 API（`/v1/chat/completions`），使用 `--protocol openai`。这会通过内置的协议桥接层转换请求格式。
+1. **Anthropic 协议（最优先）** — 这是 MyAgents 的原生协议，性能最好、功能完整、兼容性最强。没有协议转换开销，所有 SDK 能力（工具调用、流式、Extended Thinking 等）都能正常使用。
+2. **OpenAI 兼容协议（兜底）** — 如果服务商只提供 OpenAI 兼容 API（`/v1/chat/completions`），使用 `--protocol openai`。这会通过内置的协议桥接层转换请求格式，部分高级功能可能受限。
 
 #### 从文档提取配置的方法
 
-当用户给你一份 API 服务商的文档时：
+当用户给你一份 API 服务商的文档时，**始终先寻找 Anthropic 协议的接入方式**。
 
-**寻找 Anthropic 协议线索（优先）：**
-- 搜索关键词：`Claude Code`、`Anthropic`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`/anthropic`
+关键洞察：大多数支持 Anthropic 协议的服务商，会在文档里以「接入 Claude Code」或「Claude Code 配置」的形式来呈现。这些板块本质上就是在描述 Anthropic 协议的接入参数——MyAgents 和 Claude Code 共享同一个 SDK，所以 Claude Code 的接入方式就是我们最原生的接入方式。
+
+**第一步：寻找 Anthropic / Claude Code 接入板块（优先）**
+- 在文档中搜索：`Claude Code`、`Anthropic`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`/anthropic`
+- 常见的文档标题模式：「接入 Claude Code」「Anthropic API 兼容」「Claude Code 配置指南」
 - 如果找到，提取：
   - `ANTHROPIC_BASE_URL` 的值 → `--base-url`
   - 认证方式（Bearer Token 还是 API Key）→ `--auth-type`（多数为 `auth_token`）
   - 模型名称列表 → `--models`
+- 即使文档同时提供了 OpenAI 兼容方式，只要有 Anthropic 方式就优先用 Anthropic
 
-**寻找 OpenAI 协议线索（兜底）：**
+**第二步：如果确实没有 Anthropic 支持，再找 OpenAI 兼容（兜底）**
 - 搜索关键词：`OpenAI 兼容`、`/v1/chat/completions`、`chat completions`
 - 如果找到，提取：
   - API base URL → `--base-url`（通常以 `/v1` 结尾或需要去掉 `/chat/completions`）
@@ -147,8 +155,52 @@ myagents model add \
    - 飞书: `--feishu-app-id <id>` + `--feishu-app-secret <secret>`
    - 钉钉: `--dingtalk-client-id <id>` + `--dingtalk-client-secret <secret>`
 
+### 管理定时任务
+
+定时任务让 AI 按计划自动执行工作——数据汇总、监控告警、定期报告等。
+
+```bash
+myagents cron list                              # 列出所有定时任务
+myagents cron add --name "日报" --prompt "生成今日工作汇总" --schedule "0 18 * * *" --workspace /path
+myagents cron start <taskId>                    # 启动已停止的任务
+myagents cron stop <taskId>                     # 停止运行中的任务
+myagents cron remove <taskId>                   # 删除任务
+myagents cron runs <taskId>                     # 查看执行历史
+myagents cron status                            # 查看任务概览（总数/运行中/下次执行）
+```
+
+调度方式有三种：
+- `--schedule "*/30 * * * *"` — 标准 cron 表达式
+- `--every 15` — 每 N 分钟
+- 一次性任务（通过 API 的 `at` 类型）
+
+### 管理社区插件
+
+OpenClaw 社区插件让 Agent 可以连接更多 IM 平台（微信、Slack 等）。
+
+```bash
+myagents plugin list                            # 列出已安装的插件
+myagents plugin install @anthropic/wechat       # 从 npm 安装插件
+myagents plugin remove @anthropic/wechat        # 卸载（须先停止使用该插件的 Channel）
+```
+
+安装可能需要 10-30 秒（npm install），耐心等待即可。卸载前会检查是否有运行中的 Channel 依赖该插件。
+
+### 查看 Agent 运行时状态
+
+查看所有 Agent 及其 Channel 的实时连接状态——在线/离线/错误、运行时长、最近消息时间等。
+
+```bash
+myagents agent runtime-status                   # 查看所有 Agent 运行时状态
+```
+
+这和 `myagents agent list` 的区别：`list` 看的是配置（config.json 里写了什么），`status --runtime` 看的是运行时（实际连接状态、uptime、错误信息）。
+
 ### 查看和修改通用配置
 
-- `myagents config get <key>` 读取（支持点号路径如 `proxySettings.host`）
-- `myagents config set <key> <value>` 修改
-- `myagents status` 查看整体运行状态
+```bash
+myagents config get <key>                       # 读取（支持点号路径如 proxySettings.host）
+myagents config set <key> <value>               # 修改
+myagents status                                 # 查看整体运行状态
+myagents version                                # 查看应用版本号
+```
