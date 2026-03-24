@@ -1508,29 +1508,42 @@ export default function TabProvider({
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
+    const recoveryAttemptsRef = useRef(0);
+    const MAX_RECOVERY_ATTEMPTS = 3;
     // Stable ref for connectSse (avoids circular dependency: recoverSessionSidecar → connectSse → recoverSessionSidecar)
     const connectSseRef = useRef<() => Promise<void>>(() => Promise.resolve());
+    // Unmount guard for async recovery
+    const isMountedRef = useRef(true);
+    useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
 
     // Recover a dead Session Sidecar: re-ensure + reconnect SSE.
     // Called when SSE retries exhaust OR when Rust health monitor restarts the sidecar.
     const recoverSessionSidecar = useCallback(async () => {
-        if (recoveryInFlightRef.current) return; // Deduplicate
+        if (recoveryInFlightRef.current) return; // Deduplicate concurrent calls
+        if (sseRef.current?.isConnected()) return; // Already recovered
+        if (recoveryAttemptsRef.current >= MAX_RECOVERY_ATTEMPTS) {
+            console.error(`[TabProvider ${tabId}] Max recovery attempts (${MAX_RECOVERY_ATTEMPTS}) reached, giving up`);
+            return;
+        }
         const sid = currentSessionIdRef.current;
         if (!sid) return;
         recoveryInFlightRef.current = true;
+        recoveryAttemptsRef.current++;
         try {
-            console.log(`[TabProvider ${tabId}] Recovering Session Sidecar for ${sid}...`);
+            console.log(`[TabProvider ${tabId}] Recovering Session Sidecar for ${sid} (attempt ${recoveryAttemptsRef.current}/${MAX_RECOVERY_ATTEMPTS})...`);
+            // ensureSessionSidecar includes health check — sidecar is ready when it returns
             await ensureSessionSidecar(sid, agentDir, 'tab', tabId);
+            if (!isMountedRef.current) return;
             // Disconnect old SSE and reconnect with fresh port
             if (sseRef.current) {
-                void sseRef.current.disconnect();
+                await sseRef.current.disconnect();
                 sseRef.current = null;
             }
-            // connectSse will call getSessionPort() which now returns the new port
-            // Small delay to let the new sidecar fully initialize
-            await new Promise(r => setTimeout(r, 500));
+            if (!isMountedRef.current) return;
             await connectSseRef.current();
+            if (!isMountedRef.current) return;
             console.log(`[TabProvider ${tabId}] Session Sidecar recovered successfully`);
+            recoveryAttemptsRef.current = 0; // Reset on success
         } catch (err) {
             console.error(`[TabProvider ${tabId}] Session Sidecar recovery failed:`, err);
         } finally {
@@ -1606,10 +1619,13 @@ export default function TabProvider({
     // we need to reconnect SSE to the new port.
     useEffect(() => {
         if (!isTauri()) return;
+        let cancelled = false;
         let unlisten: (() => void) | null = null;
         (async () => {
             const { listen } = await import('@tauri-apps/api/event');
+            if (cancelled) return; // Unmounted before listen resolved
             unlisten = await listen<{ sessionId: string; port: number }>('session-sidecar:restarted', (event) => {
+                if (cancelled) return; // Stale listener after unmount
                 const { sessionId: restartedSid, port } = event.payload;
                 if (restartedSid === currentSessionIdRef.current) {
                     console.log(`[TabProvider ${tabId}] Session Sidecar restarted on port ${port}, reconnecting SSE`);
@@ -1617,7 +1633,7 @@ export default function TabProvider({
                 }
             });
         })();
-        return () => { if (unlisten) unlisten(); };
+        return () => { cancelled = true; if (unlisten) unlisten(); };
     }, [tabId, recoverSessionSidecar]);
 
     // Send message with optional images, permission mode, and model
