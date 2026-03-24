@@ -255,6 +255,14 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Bridge(a) => a.preferred_throttle_ms(),
         }
     }
+    fn supports_edit(&self) -> bool {
+        match self {
+            Self::Telegram(a) => a.supports_edit(),
+            Self::Feishu(a) => a.supports_edit(),
+            Self::Dingtalk(a) => a.supports_edit(),
+            Self::Bridge(a) => a.supports_edit(),
+        }
+    }
     fn bridge_context(&self) -> Option<(u16, String, Vec<String>)> {
         match self {
             Self::Telegram(a) => a.bridge_context(),
@@ -2701,7 +2709,11 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                         // First meaningful text in this block → create or adopt draft
                         // Skip whitespace-only blocks (API spacer blocks before thinking)
                         // Accumulate until sentence boundary or min length for meaningful first send
-                        if draft_id.is_none() && !block_text.trim().is_empty() && has_sentence_boundary(&block_text) {
+                        //
+                        // When !supports_edit (e.g., WeChat), skip draft creation and edit calls
+                        // entirely. Text accumulates in block_text and finalize_block sends it
+                        // once at block-end — no fragment, no wasted 501 roundtrips.
+                        if adapter.supports_edit() && draft_id.is_none() && !block_text.trim().is_empty() && has_sentence_boundary(&block_text) {
                             if let Some(pid) = placeholder_id.take() {
                                 // Adopt the placeholder as draft → edit with real content
                                 draft_id = Some(pid);

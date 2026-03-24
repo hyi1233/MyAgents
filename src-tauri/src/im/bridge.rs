@@ -77,6 +77,9 @@ pub struct BridgeAdapter {
     max_msg_length: usize,
     supports_streaming: bool,
     supports_cardkit: bool,
+    /// Whether the plugin supports edit_message (from capabilities.edit).
+    /// When false, streaming skips draft creation and edit calls entirely.
+    supports_edit: bool,
     enabled_tool_groups: Vec<String>,
     /// Plugin-registered slash commands (name → description)
     commands: Vec<(String, String)>,
@@ -92,6 +95,7 @@ impl BridgeAdapter {
             max_msg_length: 4096,
             supports_streaming: false,
             supports_cardkit: false,
+            supports_edit: true, // assume yes until sync_capabilities proves otherwise
             enabled_tool_groups: Vec::new(),
             commands: Vec::new(),
         }
@@ -116,6 +120,11 @@ impl BridgeAdapter {
                     if caps["streamingCardKit"].as_bool() == Some(true) {
                         self.supports_cardkit = true;
                         ulog_info!("[bridge:{}] CardKit enabled", self.plugin_id);
+                    }
+                    // edit capability — when false, streaming skips draft+edit entirely
+                    if caps["edit"].as_bool() == Some(false) {
+                        self.supports_edit = false;
+                        ulog_info!("[bridge:{}] edit not supported — streaming will accumulate and send once", self.plugin_id);
                     }
                     // Plugin commands
                     if let Some(cmds) = caps["commands"].as_array() {
@@ -535,21 +544,21 @@ impl ImStreamAdapter for BridgeAdapter {
         message_id: &str,
         text: &str,
     ) -> super::adapter::AdapterResult<()> {
-        // For Bridge plugins, finalize = try edit-in-place with the COMPLETE text.
-        // If edit succeeds → done. If the plugin doesn't support edit (501/405) →
-        // the initial send_message_returning_id only sent a partial fragment during streaming.
-        // We must delete the fragment and send the complete text as a new message,
-        // otherwise the user only sees the first ~50 chars.
+        if !self.supports_edit {
+            // Plugin declared edit:false — no draft was created during streaming
+            // (supports_edit guards the streaming loop). The message_id here is either
+            // a placeholder or doesn't exist. Just send the complete text directly.
+            // finalize_block only calls this when draft_id is Some, so clean up the placeholder.
+            let _ = self.delete_message(chat_id, message_id).await;
+            return self.send_message(chat_id, text).await;
+        }
+        // Edit-capable plugin: try edit-in-place with the COMPLETE text.
         match self.edit_message(chat_id, message_id, text).await {
             Ok(()) => Ok(()),
             Err(e) if e.starts_with("status:501:") || e.starts_with("status:405:") => {
-                ulog_info!("[bridge:{}] finalize: edit not supported, replacing fragment with full message", self.plugin_id);
-                // Best-effort delete the partial fragment. If delete also 501 (e.g., WeChat),
-                // user sees both the initial fragment and the full text — acceptable tradeoff
-                // vs. losing the entire response. Future: cache edit/delete capability from
-                // /capabilities to skip edit calls during streaming entirely.
+                // Runtime 501 (capability not detected at startup) — delete fragment + send full text
+                ulog_info!("[bridge:{}] finalize: runtime edit 501, replacing fragment with full message", self.plugin_id);
                 let _ = self.delete_message(chat_id, message_id).await;
-                // Send the complete text — this is the critical path
                 self.send_message(chat_id, text).await
             }
             Err(e) => Err(e),
@@ -558,6 +567,10 @@ impl ImStreamAdapter for BridgeAdapter {
 
     fn use_draft_streaming(&self) -> bool {
         false
+    }
+
+    fn supports_edit(&self) -> bool {
+        self.supports_edit
     }
 
     fn preferred_throttle_ms(&self) -> u64 {

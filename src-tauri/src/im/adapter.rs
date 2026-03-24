@@ -142,6 +142,12 @@ pub trait ImStreamAdapter: ImAdapter {
     /// When true, finalize_block will delete draft + send_message instead of edit_message.
     fn use_draft_streaming(&self) -> bool { false }
 
+    /// Whether this adapter supports edit_message (progressive updates during streaming).
+    /// When false, the streaming loop skips draft creation and edit calls entirely,
+    /// accumulating text and sending once at block-end via finalize_block.
+    /// Default: true. Bridge adapter returns false when the plugin lacks edit capability.
+    fn supports_edit(&self) -> bool { true }
+
     /// Preferred throttle interval in ms for draft edits. Default 1000ms.
     fn preferred_throttle_ms(&self) -> u64 { 1000 }
 
