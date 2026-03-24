@@ -535,16 +535,22 @@ impl ImStreamAdapter for BridgeAdapter {
         message_id: &str,
         text: &str,
     ) -> super::adapter::AdapterResult<()> {
-        // For Bridge plugins, finalize = try edit-in-place.
-        // If the plugin doesn't support edit (501 Not Implemented), that's OK —
-        // the message was already sent via send_message_returning_id, so we just
-        // log and return Ok. Returning Err here would trigger the caller's fallback
-        // which re-sends the same message, causing duplicates.
+        // For Bridge plugins, finalize = try edit-in-place with the COMPLETE text.
+        // If edit succeeds → done. If the plugin doesn't support edit (501/405) →
+        // the initial send_message_returning_id only sent a partial fragment during streaming.
+        // We must delete the fragment and send the complete text as a new message,
+        // otherwise the user only sees the first ~50 chars.
         match self.edit_message(chat_id, message_id, text).await {
             Ok(()) => Ok(()),
             Err(e) if e.starts_with("status:501:") || e.starts_with("status:405:") => {
-                ulog_info!("[bridge:{}] finalize: edit not supported, message already sent — skipping", self.plugin_id);
-                Ok(())
+                ulog_info!("[bridge:{}] finalize: edit not supported, replacing fragment with full message", self.plugin_id);
+                // Best-effort delete the partial fragment. If delete also 501 (e.g., WeChat),
+                // user sees both the initial fragment and the full text — acceptable tradeoff
+                // vs. losing the entire response. Future: cache edit/delete capability from
+                // /capabilities to skip edit calls during streaming entirely.
+                let _ = self.delete_message(chat_id, message_id).await;
+                // Send the complete text — this is the critical path
+                self.send_message(chat_id, text).await
             }
             Err(e) => Err(e),
         }
