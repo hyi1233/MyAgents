@@ -51,9 +51,11 @@ if [ "$PKG_VERSION" != "$TAURI_VERSION" ] || [ "$PKG_VERSION" != "$CARGO_VERSION
 fi
 
 # 杀死残留进程（避免"旧代码"问题）
+# 使用 SIGKILL(-9) 而非默认 SIGTERM：macOS Automatic Termination 会在 SIGTERM 后
+# 自动重启从 Finder/Dock 打开的 .app，导致生产版和 debug 版同时运行互相打架。
 echo -e "${BLUE}[准备] 杀死残留进程...${NC}"
-pkill -f "bun run.*server" 2>/dev/null || true
-pkill -f "MyAgents.app" 2>/dev/null || true
+pkill -9 -f "bun run.*server" 2>/dev/null || true
+pkill -9 -f "MyAgents.app" 2>/dev/null || true
 sleep 1  # 等待进程完全退出
 echo -e "${GREEN}✓ 进程已清理${NC}"
 echo ""
