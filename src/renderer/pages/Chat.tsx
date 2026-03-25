@@ -29,7 +29,7 @@ import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import type { CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
-import { type PermissionMode, type McpServerDefinition } from '@/config/types';
+import { type PermissionMode, type McpServerDefinition, getEffectiveModelAliases } from '@/config/types';
 import {
   getAllMcpServers,
   getEnabledMcpServerIds,
@@ -174,6 +174,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   currentProviderRef.current = currentProvider;
   const apiKeysRef = useRef(apiKeys);
   apiKeysRef.current = apiKeys;
+  const configRef = useRef(config);
+  configRef.current = config;
+
+  /** Build providerEnv for a given provider, including modelAliases for sub-agent model resolution */
+  const buildProviderEnv = useCallback((provider: typeof currentProvider) => {
+    if (!provider || provider.type === 'subscription') return undefined;
+    const aliases = getEffectiveModelAliases(provider, configRef.current.providerModelAliases);
+    return {
+      baseUrl: provider.config.baseUrl,
+      apiKey: apiKeysRef.current[provider.id],
+      authType: provider.authType,
+      apiProtocol: provider.apiProtocol,
+      maxOutputTokens: provider.maxOutputTokens,
+      maxOutputTokensParamName: provider.maxOutputTokensParamName,
+      upstreamFormat: provider.upstreamFormat,
+      ...(aliases ? { modelAliases: aliases } : {}),
+    };
+  }, []);
 
   // PERFORMANCE: inputValue is now managed internally by SimpleChatInput
   // to avoid re-rendering Chat (and MessageList) on every keystroke
@@ -314,15 +332,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         const provider = initialMessage.providerId
           ? providers.find(p => p.id === initialMessage.providerId) ?? currentProvider
           : currentProvider;
-        const providerEnv = provider && provider.type !== 'subscription' ? {
-          baseUrl: provider.config.baseUrl,
-          apiKey: apiKeys[provider.id],
-          authType: provider.authType,
-          apiProtocol: provider.apiProtocol,
-          maxOutputTokens: provider.maxOutputTokens,
-          maxOutputTokensParamName: provider.maxOutputTokensParamName,
-          upstreamFormat: provider.upstreamFormat,
-        } : undefined;
+        const providerEnv = buildProviderEnv(provider);
 
         // 5. Send message
         setIsLoading(true);
@@ -375,15 +385,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       // Send cron task message
       // Note: taskId, isFirstExecution, aiCanExit are available for future enhancements
       // (e.g., injecting cron context into system prompt)
-      const providerEnv = currentProvider && currentProvider.type !== 'subscription' ? {
-        baseUrl: currentProvider.config.baseUrl,
-        apiKey: apiKeys[currentProvider.id],
-        authType: currentProvider.authType,
-        apiProtocol: currentProvider.apiProtocol,
-        maxOutputTokens: currentProvider.maxOutputTokens,
-        maxOutputTokensParamName: currentProvider.maxOutputTokensParamName,
-        upstreamFormat: currentProvider.upstreamFormat,
-      } : undefined;
+      const providerEnv = buildProviderEnv(currentProvider);
       await sendMessage(prompt, undefined, permissionMode, selectedModel, providerEnv, true /* isCron */);
     },
     onComplete: (task, reason) => {
@@ -1059,17 +1061,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     try {
       // Build provider env from current provider config (read from refs for stability)
       // For subscription type, don't send providerEnv (use SDK's default auth)
-      const provider = currentProviderRef.current;
-      const keys = apiKeysRef.current;
-      const providerEnv = provider && provider.type !== 'subscription' ? {
-        baseUrl: provider.config.baseUrl,
-        apiKey: keys[provider.id], // Get from stored apiKeys, not provider object
-        authType: provider.authType,
-        apiProtocol: provider.apiProtocol,
-        maxOutputTokens: provider.maxOutputTokens,
-        maxOutputTokensParamName: provider.maxOutputTokensParamName,
-        upstreamFormat: provider.upstreamFormat,
-      } : undefined;
+      const providerEnv = buildProviderEnv(currentProviderRef.current);
 
       // If cron mode is enabled and task hasn't started yet, start the task
       const cron = cronStateRef.current;
@@ -1765,15 +1757,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         initialPrompt={cronPrompt}
         initialConfig={cronState.config}
         onConfirm={async (config: CronSettingsResult) => {
-          const providerEnv = currentProvider && currentProvider.type !== 'subscription' ? {
-            baseUrl: currentProvider.config.baseUrl,
-            apiKey: apiKeys[currentProvider.id],
-            authType: currentProvider.authType,
-            apiProtocol: currentProvider.apiProtocol,
-            maxOutputTokens: currentProvider.maxOutputTokens,
-            maxOutputTokensParamName: currentProvider.maxOutputTokensParamName,
-            upstreamFormat: currentProvider.upstreamFormat,
-          } : undefined;
+          const providerEnv = buildProviderEnv(currentProvider);
 
           // Both paths: enable cron mode (shows status bar, waits for user to type and send)
           // The difference is handled at send time based on executionTarget

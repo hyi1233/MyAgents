@@ -1645,7 +1645,7 @@ export default function TabProvider({
         images?: ImageAttachment[],
         permissionMode?: PermissionMode,
         model?: string,
-        providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' },
+        providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses'; modelAliases?: { sonnet?: string; opus?: string; haiku?: string } },
         isCron?: boolean
     ): Promise<boolean> => {
         const trimmed = text.trim();
@@ -1664,7 +1664,7 @@ export default function TabProvider({
             pendingUserMessagesRef.current.push(trimmed);
         }
         lastModelRef.current = model;
-        lastProviderEnvRef.current = providerEnv ? { baseUrl: providerEnv.baseUrl, apiKey: providerEnv.apiKey, authType: providerEnv.authType, apiProtocol: providerEnv.apiProtocol, maxOutputTokens: providerEnv.maxOutputTokens, maxOutputTokensParamName: providerEnv.maxOutputTokensParamName, upstreamFormat: providerEnv.upstreamFormat } : undefined;
+        lastProviderEnvRef.current = providerEnv ? { baseUrl: providerEnv.baseUrl, apiKey: providerEnv.apiKey, authType: providerEnv.authType, apiProtocol: providerEnv.apiProtocol, maxOutputTokens: providerEnv.maxOutputTokens, maxOutputTokensParamName: providerEnv.maxOutputTokensParamName, upstreamFormat: providerEnv.upstreamFormat, modelAliases: providerEnv.modelAliases } : undefined;
 
         // Store attachments for merging with SSE replay
         if (hasImages) {
@@ -1702,12 +1702,16 @@ export default function TabProvider({
         // Fire-and-forget: send to backend without blocking the UI.
         // The HTTP response may be delayed by provider changes or session startup,
         // but the input should clear immediately for a responsive experience.
+        // Desktop is the ONLY caller that should trigger provider switches per-message.
+        // When no providerEnv is given (subscription mode), send 'subscription' explicitly
+        // so enqueueUserMessage knows this is an intentional switch, not "I don't know".
+        // IM/Cron callers omit the field entirely (undefined = "keep current provider").
         postJson<{ success: boolean; error?: string; queued?: boolean; queueId?: string }>('/chat/send', {
             text: trimmed,
             images: imageData,
             permissionMode: permissionMode ?? 'auto',
             model,
-            providerEnv,
+            providerEnv: providerEnv ?? 'subscription',
         }).then((response) => {
             if (response.success) {
                 track('message_send', {

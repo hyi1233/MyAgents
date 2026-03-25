@@ -193,6 +193,9 @@ type SendMessagePayload = {
   images?: ImagePayload[];
   permissionMode?: PermissionMode;
   model?: string;
+  // 'subscription' = explicit switch to Anthropic subscription (from desktop)
+  // undefined/missing = "keep current provider" (safe default for IM/Cron callers)
+  // object = use this specific third-party provider
   providerEnv?: {
     baseUrl?: string;
     apiKey?: string;
@@ -201,7 +204,7 @@ type SendMessagePayload = {
     maxOutputTokens?: number;
     maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     upstreamFormat?: 'chat_completions' | 'responses';
-  };
+  } | 'subscription';
 };
 
 // Cron task execution payload
@@ -1473,7 +1476,8 @@ async function main() {
         }
 
         try {
-          console.log(`[chat] send text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerEnv?.baseUrl ?? 'anthropic'}`);
+          const providerLabel = typeof providerEnv === 'object' ? providerEnv?.baseUrl ?? 'anthropic' : (providerEnv ?? 'anthropic');
+          console.log(`[chat] send text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerLabel}`);
           const result = await enqueueUserMessage(text, images, permissionMode, model, providerEnv);
           if (result.error) {
             return jsonResponse({ success: false, error: result.error }, 429);
@@ -6729,7 +6733,7 @@ async function main() {
             payload.images, // forward image attachments from Telegram
             (payload.permissionMode as PermissionMode) ?? 'plan',
             payload.model ?? undefined, // model: per-message from Rust /model command
-            payload.providerEnv ?? undefined, // providerEnv: forwarded from Rust IM
+            payload.providerEnv ?? undefined, // providerEnv: forwarded from Rust IM (undefined = keep current)
             metadata,
           );
 

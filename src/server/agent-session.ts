@@ -463,6 +463,12 @@ let prePlanPermissionMode: PermissionMode | null = null;
 // Current model for the session (updates on each user message if changed)
 let currentModel: string | undefined = undefined;
 // Provider environment config (baseUrl, apiKey, authType) for third-party providers
+export type ModelAliases = {
+  sonnet?: string;
+  opus?: string;
+  haiku?: string;
+};
+
 export type ProviderEnv = {
   baseUrl?: string;
   apiKey?: string;
@@ -471,6 +477,8 @@ export type ProviderEnv = {
   maxOutputTokens?: number;
   maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   upstreamFormat?: 'chat_completions' | 'responses';
+  /** Model alias mapping: SDK sub-agents use "sonnet"/"opus"/"haiku" → actual provider model IDs */
+  modelAliases?: ModelAliases;
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
 
@@ -480,7 +488,7 @@ let sidecarPort: number = 0;
 export type OpenAiBridgeConfig = {
   baseUrl: string;
   apiKey: string;
-  /** Target model name — bridge overrides ALL request models to this */
+  /** Target model name — bridge overrides ALL request models to this (only when no aliases) */
   model?: string;
   /** Max output tokens cap for upstream provider */
   maxOutputTokens?: number;
@@ -488,6 +496,8 @@ export type OpenAiBridgeConfig = {
   maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   /** Upstream API format: 'chat_completions' (default) or 'responses' */
   upstreamFormat?: 'chat_completions' | 'responses';
+  /** Model aliases from provider config — used to build modelMapping for sub-agent model resolution */
+  modelAliases?: ModelAliases;
 } | null;
 
 let currentOpenAiBridgeConfig: OpenAiBridgeConfig = null;
@@ -498,10 +508,18 @@ export function setSidecarPort(port: number): void {
 }
 
 /** Get the current OpenAI bridge config (used by bridge handler in index.ts).
- *  Model is always derived from currentModel to avoid staleness after setSessionModel(). */
+ *  Model is always derived from currentModel to avoid staleness after setSessionModel().
+ *  When modelAliases exist, model override is suppressed — sub-agents need distinct models. */
 export function getOpenAiBridgeConfig(): OpenAiBridgeConfig {
   if (!currentOpenAiBridgeConfig) return null;
-  return { ...currentOpenAiBridgeConfig, model: currentModel || undefined };
+  const aliases = currentOpenAiBridgeConfig.modelAliases;
+  return {
+    ...currentOpenAiBridgeConfig,
+    // When aliases exist, don't set model as blanket override — let modelMapping handle it.
+    // When no aliases, keep the old behavior (override all to currentModel).
+    model: aliases ? undefined : (currentModel || undefined),
+    modelAliases: aliases,
+  };
 }
 // SDK 是否已注册当前 sessionId。true 时后续 query 必须用 resume。
 // 仅由非 pre-warm 的 system_init 设为 true，仅由 sessionId 变更设为 false。
@@ -1065,7 +1083,10 @@ function providerEnvEqual(a: ProviderEnv | undefined, b: ProviderEnv | undefined
     && a.apiProtocol === b.apiProtocol
     && a.maxOutputTokens === b.maxOutputTokens
     && a.maxOutputTokensParamName === b.maxOutputTokensParamName
-    && a.upstreamFormat === b.upstreamFormat;
+    && a.upstreamFormat === b.upstreamFormat
+    && a.modelAliases?.sonnet === b.modelAliases?.sonnet
+    && a.modelAliases?.opus === b.modelAliases?.opus
+    && a.modelAliases?.haiku === b.modelAliases?.haiku;
 }
 
 /**
@@ -2464,6 +2485,18 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     console.log('[env] ANTHROPIC_AUTH_TOKEN cleared (using default auth)');
   }
 
+  // ── Model alias mapping for sub-agents ──
+  // SDK sub-agents use aliases like "sonnet"/"opus"/"haiku" which resolve to claude-* model IDs.
+  // For third-party providers, set ANTHROPIC_DEFAULT_*_MODEL so the SDK resolves aliases
+  // to provider-specific model IDs (e.g., "sonnet" → "deepseek-chat" instead of "claude-sonnet-4-6").
+  const aliases = effectiveProviderEnv?.modelAliases;
+  if (aliases) {
+    if (aliases.sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = aliases.sonnet;
+    if (aliases.opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = aliases.opus;
+    if (aliases.haiku) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = aliases.haiku;
+    console.log(`[env] Model aliases set: sonnet=${aliases.sonnet ?? '(none)'}, opus=${aliases.opus ?? '(none)'}, haiku=${aliases.haiku ?? '(none)'}`);
+  }
+
   return env;
 }
 
@@ -3774,7 +3807,7 @@ export async function enqueueUserMessage(
   images?: ImagePayload[],
   permissionMode?: PermissionMode,
   model?: string,
-  providerEnv?: ProviderEnv,
+  providerEnv?: ProviderEnv | 'subscription',
   metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group'; sourceId?: string; senderName?: string },
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
@@ -3810,27 +3843,36 @@ export async function enqueueUserMessage(
     currentTurnStartTime = Date.now();
   }
 
+  // Provider env semantics (pit-of-success pattern — safe default for all callers):
+  //   undefined        → "no change, keep current provider" (IM/Cron/Heartbeat/internal callers)
+  //   'subscription'   → "switch to Anthropic subscription" (only from desktop)
+  //   ProviderEnv obj  → "use this specific provider" (desktop or Rust with explicit provider)
+  // This prevents IM/Cron callers from accidentally triggering subscription switch
+  // when they simply don't have provider info to forward (the original "Not logged in" bug).
+  const effectiveProviderEnv: ProviderEnv | undefined = providerEnv === undefined
+    ? currentProviderEnv                                         // undefined → keep current (safe default)
+    : (providerEnv === 'subscription' ? undefined : providerEnv); // 'subscription' → clear, object → use it
+
   // Check if provider has changed (requires session restart since environment vars can't be updated)
-  // Also detect switching TO subscription (providerEnv=undefined) FROM an API provider
   // SKIP for queued messages: provider/model changes during streaming would cause a session
   // restart that wipes the queue and races with the active stream. Queued messages inherit
   // the current session's provider/model configuration.
-  const switchingToSubscription = !isSessionBusy && !providerEnv && currentProviderEnv;
+  const switchingToSubscription = !isSessionBusy && providerEnv === 'subscription' && currentProviderEnv;
   const baseUrlChanged = switchingToSubscription ||
-    (!isSessionBusy && providerEnv && providerEnv.baseUrl !== currentProviderEnv?.baseUrl);
-  const providerChanged = baseUrlChanged || (!isSessionBusy && providerEnv && (
-    providerEnv.apiKey !== currentProviderEnv?.apiKey
+    (!isSessionBusy && effectiveProviderEnv && effectiveProviderEnv.baseUrl !== currentProviderEnv?.baseUrl);
+  const providerChanged = baseUrlChanged || (!isSessionBusy && effectiveProviderEnv && (
+    effectiveProviderEnv.apiKey !== currentProviderEnv?.apiKey
   ));
 
   if (providerChanged && querySession) {
     const fromLabel = currentProviderEnv?.baseUrl ?? 'anthropic';
-    const toLabel = providerEnv?.baseUrl ?? 'anthropic';
+    const toLabel = effectiveProviderEnv?.baseUrl ?? 'anthropic';
     if (isDebugMode) console.log(`[agent] provider changed from ${fromLabel} to ${toLabel}, restarting session`);
 
     // Resume logic: Anthropic official validates thinking block signatures, third-party providers don't.
     // Only skip resume when switching FROM third-party (has baseUrl) TO Anthropic official (no baseUrl).
     // All other transitions (official→third-party, third-party→third-party, official→official) can safely resume.
-    const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !providerEnv?.baseUrl;
+    const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !effectiveProviderEnv?.baseUrl;
     if (switchingFromThirdPartyToAnthropic) {
       // Anthropic 官方验证 thinking block 签名，第三方不验证，必须新建 session
       sessionRegistered = false;
@@ -3843,7 +3885,7 @@ export async function enqueueUserMessage(
     // 其他 provider 切换：sessionRegistered 保持不变，自动走正确路径
 
     // Update provider env BEFORE terminating so the new session picks it up
-    currentProviderEnv = providerEnv; // undefined for subscription, object for API
+    currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
     // Terminate current session - it will restart automatically when processing the message
     abortPersistentSession();
     // Wait for the current session to fully terminate before proceeding
@@ -3859,13 +3901,13 @@ export async function enqueueUserMessage(
     streamIndexToToolId.clear();
     toolResultIndexToId.clear();
     imTextBlockIndices.clear();
-  
+
     if (isDebugMode) console.log(`[agent] session terminated for provider switch`);
-  } else if (providerEnv) {
+  } else if (effectiveProviderEnv) {
     // Provider not changed (or first message with API provider), just update tracking
-    currentProviderEnv = providerEnv;
-    if (isDebugMode) console.log(`[agent] provider env set: baseUrl=${providerEnv.baseUrl ?? 'anthropic'}`);
-  } else if (!providerEnv && !currentProviderEnv) {
+    currentProviderEnv = effectiveProviderEnv;
+    if (isDebugMode) console.log(`[agent] provider env set: baseUrl=${effectiveProviderEnv.baseUrl ?? 'anthropic'}`);
+  } else if (!effectiveProviderEnv && !currentProviderEnv) {
     // Both undefined — subscription mode, no change needed
     if (isDebugMode) console.log('[agent] subscription mode, no provider env');
   }
