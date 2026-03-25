@@ -126,6 +126,7 @@ import {
   stripPlaywrightResults,
   setSidecarPort,
   getOpenAiBridgeConfig,
+  getSessionModel,
   syncProjectUserConfig,
   setProxyConfig,
   initSocksBridgeFromEnv,
@@ -193,6 +194,9 @@ type SendMessagePayload = {
   images?: ImagePayload[];
   permissionMode?: PermissionMode;
   model?: string;
+  // 'subscription' = explicit switch to Anthropic subscription (from desktop)
+  // undefined/missing = "keep current provider" (safe default for IM/Cron callers)
+  // object = use this specific third-party provider
   providerEnv?: {
     baseUrl?: string;
     apiKey?: string;
@@ -201,7 +205,7 @@ type SendMessagePayload = {
     maxOutputTokens?: number;
     maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     upstreamFormat?: 'chat_completions' | 'responses';
-  };
+  } | 'subscription';
 };
 
 // Cron task execution payload
@@ -1296,11 +1300,28 @@ async function main() {
       return {
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
-        model: config.model,
+        model: config.model, // undefined when aliases exist (modelMapping handles it)
         maxOutputTokens: config.maxOutputTokens,
         maxOutputTokensParamName: config.maxOutputTokensParamName,
         upstreamFormat: config.upstreamFormat,
       };
+    },
+    // Dynamic model mapping: when aliases exist, map any Claude model ID to the provider's model.
+    // Called per-request, so it always reflects the latest provider config.
+    modelMapping: (requestModel: string) => {
+      const config = getOpenAiBridgeConfig();
+      if (!config?.modelAliases) return undefined; // No aliases → fall through to modelOverride
+      const aliases = config.modelAliases;
+      // Map SDK-resolved model names to provider models
+      if (requestModel.startsWith('claude') && requestModel.includes('sonnet') && aliases.sonnet) return aliases.sonnet;
+      if (requestModel.startsWith('claude') && requestModel.includes('opus') && aliases.opus) return aliases.opus;
+      if (requestModel.startsWith('claude') && requestModel.includes('haiku') && aliases.haiku) return aliases.haiku;
+      // Safety fallback: if this is a Claude model name that wasn't matched by any alias
+      // (e.g., partial alias config — only sonnet configured, not opus/haiku),
+      // fall back to currentModel to prevent raw "claude-*" from leaking to upstream.
+      if (requestModel.startsWith('claude-')) return getSessionModel() || undefined;
+      // Non-Claude models pass through as-is (e.g., the main model "deepseek-chat")
+      return undefined;
     },
     logger: (msg) => console.log(msg),
   });
@@ -1316,8 +1337,13 @@ async function main() {
       const url = new URL(request.url);
       const pathname = url.pathname;
 
-      // Skip logging high-frequency polling paths
-      if (pathname !== '/api/unified-log' && pathname !== '/agent/dir' && pathname !== '/sessions') {
+      // Skip logging high-frequency polling/config-sync paths to reduce unified log noise.
+      // These fire every 15s (health) or on every Tab focus (commands/agents/mcp) with zero diagnostic value.
+      const SILENT_PATHS = new Set([
+        '/health', '/api/unified-log', '/agent/dir', '/sessions',
+        '/api/commands', '/api/agents/enabled', '/api/git/branch',
+      ]);
+      if (!SILENT_PATHS.has(pathname)) {
         console.debug(`[http] ${request.method} ${pathname}`);
       }
 
@@ -1473,7 +1499,8 @@ async function main() {
         }
 
         try {
-          console.log(`[chat] send text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerEnv?.baseUrl ?? 'anthropic'}`);
+          const providerLabel = typeof providerEnv === 'object' ? providerEnv?.baseUrl ?? 'anthropic' : (providerEnv ?? 'anthropic');
+          console.log(`[chat] send text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerLabel}`);
           const result = await enqueueUserMessage(text, images, permissionMode, model, providerEnv);
           if (result.error) {
             return jsonResponse({ success: false, error: result.error }, 429);
@@ -6729,7 +6756,7 @@ async function main() {
             payload.images, // forward image attachments from Telegram
             (payload.permissionMode as PermissionMode) ?? 'plan',
             payload.model ?? undefined, // model: per-message from Rust /model command
-            payload.providerEnv ?? undefined, // providerEnv: forwarded from Rust IM
+            payload.providerEnv ?? undefined, // providerEnv: forwarded from Rust IM (undefined = keep current)
             metadata,
           );
 
@@ -6962,9 +6989,8 @@ description: >
           // Inject heartbeat prompt as user message (wrapped in <system-reminder><HEARTBEAT> tags)
           // System prompt is already permanently injected at IM session creation (/api/im/chat)
           // Heartbeat is unattended — bypass all permissions so tool use doesn't block.
-          // CRITICAL: Pass current model + providerEnv to avoid triggering provider-switch logic.
-          // Without this, undefined providerEnv triggers switchingToSubscription in enqueueUserMessage,
-          // which resets the session to Anthropic subscription and causes "Not logged in" errors.
+          // Pass current model + providerEnv for consistency (undefined is also safe —
+          // enqueueUserMessage treats it as "keep current provider" via pit-of-success semantics).
           getAndClearLastAgentError(); // Clear stale errors from prior turns before injecting heartbeat
           await enqueueUserMessage(
             enrichedPrompt,
@@ -7246,7 +7272,15 @@ description: >
   });
 
   console.log(`Web UI server listening on http://localhost:${port}`);
-  console.log(`[server] Version: MCP-Install-Fix-v2`);
+
+  // ── Sidecar Boot Banner: single-line for AI grep ──
+  {
+    const model = getSessionModel() || '?';
+    const mcpList = getMcpServers();
+    const mcpNames = mcpList ? Object.keys(mcpList).join(',') || 'none' : 'none';
+    const bridge = getOpenAiBridgeConfig() ? 'yes' : 'no';
+    console.log(`[boot] pid=${process.pid} port=${port} bun=${Bun.version} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames}`);
+  }
 
   // Verify PATH detection
   import('./utils/shell').then(({ getShellEnv, getShellPath }) => {

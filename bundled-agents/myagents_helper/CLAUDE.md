@@ -219,6 +219,7 @@ Rust `CronTaskManager` 管理所有定时任务，支持三种调度：
 
 | 标签 | 模块 | 关注场景 |
 |------|------|----------|
+| `[boot]` | 启动自检 | **首先看这个** — 版本、OS、Provider、MCP、Agent/Channel 数量 |
 | `[sidecar]` | Sidecar 进程管理 | 启动失败、端口冲突、进程崩溃 |
 | `[proxy]` | Rust HTTP 代理 | 请求路由、连接错误、404/502 |
 | `[agent]` | Agent Session | AI 对话、pre-warm、超时、rewind/fork |
@@ -545,15 +546,34 @@ SDK subprocess → Provider API（流式响应）
 
 ---
 
+## Boot Banner（启动自检）
+
+每次应用启动和 Sidecar 创建时，会输出 `[boot]` 标签的集中诊断信息。这是排查问题的**第一入口**——不需要翻遍日志拼凑环境信息。
+
+### 应用启动（Rust 层，每次启动一行）
+```
+[boot] v=0.1.53 build=release os=macos-aarch64 provider=deepseek mcp=2 agents=3 channels=5 cron=12 proxy=false dir=/Users/xxx/.myagents
+```
+
+### Sidecar 启动（Bun 层，每个 Session 一行）
+```
+[boot] pid=12345 port=31415 bun=1.2.8 workspace=/Users/xxx/project/my-app session=abc-123 resume=true model=deepseek-chat bridge=yes mcp=playwright,im-cron
+```
+
+**用法**：`grep '\[boot\]' ./logs/unified-*.log` 可快速获取用户的完整环境信息。
+
+---
+
 ## 诊断工作流
 
 遇到用户问题时的标准诊断流程：
 
-1. **读今天的统一日志** `./logs/unified-*.log`，用 grep 搜索关键错误
-2. **读 config.json**（**脱敏后**）了解 Provider / MCP / Agent 配置
-3. **按时间线重建事件**：从 `[REACT]` 触发 → `[RUST]` 代理 → `[BUN]` 处理 → 结果返回
-4. **对照错误模式速查表** 定位根因
-5. **区分用户可解决 vs 需要开发修复**：
+1. **先看 Boot Banner** `grep '[boot]' ./logs/unified-*.log` — 快速了解版本、Provider、运行时、Agent 配置
+2. **读今天的统一日志** `./logs/unified-*.log`，用 grep 搜索关键错误
+3. **读 config.json**（**脱敏后**）了解 Provider / MCP / Agent 详细配置
+4. **按时间线重建事件**：从 `[REACT]` 触发 → `[RUST]` 代理 → `[BUN]` 处理 → 结果返回
+5. **对照错误模式速查表** 定位根因
+6. **区分用户可解决 vs 需要开发修复**：
    - 用户可解决：Key 错误、网络问题、配置错误 → 给出具体操作步骤
    - 需要开发修复：已知 Bug → 使用 /support 技能生成报告并提交
 

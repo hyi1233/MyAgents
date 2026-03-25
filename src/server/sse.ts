@@ -20,6 +20,20 @@ const clients: Set<SseClient> =
 
 const HEARTBEAT_INTERVAL_MS = 15000;
 
+// ── Last-Value Cache ──
+// Events whose latest value is cached and replayed to newly connected clients.
+// Solves the "late joiner" problem: when a Tab connects to a session already in progress
+// (e.g., IM Bot mid-flight), it immediately receives the current session state instead
+// of showing idle until the next live event arrives.
+// Only cache chat:status — chat:system-init is already replayed inline by the /chat/stream
+// handler (index.ts), so caching it here would cause duplicate delivery that poisons
+// isStreamingRef in the frontend.
+const CACHED_EVENTS = new Set(['chat:status']);
+const LAST_VALUE_CACHE_KEY = '__myagents_sse_lvc__';
+const lastValueCache: Map<string, unknown> =
+  (globalThis as Record<string, unknown>)[LAST_VALUE_CACHE_KEY] as Map<string, unknown> ??
+  ((globalThis as Record<string, unknown>)[LAST_VALUE_CACHE_KEY] = new Map<string, unknown>());
+
 function summarizePayload(event: string, data: unknown): string {
   if (event === 'chat:message-replay' && typeof data === 'object' && data !== null) {
     const message = (data as { message?: { id?: string } }).message;
@@ -79,8 +93,21 @@ function heartbeatChunk(): Uint8Array {
   return encoder.encode(': ping\n\n');
 }
 
+// High-frequency streaming events — skip console.log to reduce unified log noise.
+// These events fire per-token/per-delta and produce thousands of lines with zero diagnostic value.
+const SILENT_EVENTS = new Set([
+  'chat:message-chunk', 'chat:thinking-delta', 'chat:tool-input-delta',
+  'chat:content-block-stop', 'chat:message-sdk-uuid', 'chat:log',
+]);
+
 export function broadcast(event: string, data: unknown): void {
-  console.log(`[sse] ${event} -> ${summarizePayload(event, data)}`);
+  if (!SILENT_EVENTS.has(event)) {
+    console.log(`[sse] ${event} -> ${summarizePayload(event, data)}`);
+  }
+  // Update last-value cache for stateful events
+  if (CACHED_EVENTS.has(event)) {
+    lastValueCache.set(event, data);
+  }
   for (const client of clients) {
     client.send(event, data);
   }
@@ -191,6 +218,24 @@ export function createSseClient(onClose: (client: SseClient) => void): {
     });
   } catch {
     // Ignore
+  }
+
+  // Replay last-value cache to newly connected client.
+  // Solves the "late joiner" problem: a Tab connecting to a mid-flight IM session
+  // immediately receives the current session state (e.g., chat:status → "running")
+  // instead of appearing idle until the next live event.
+  // Delay is required: the Bun SSE stream buffers correctly, but the full chain is
+  // Bun → SSE bytes → Rust proxy parse → Tauri emit → React listener.
+  // React's useEffect registers the Tauri listener AFTER first render, so a synchronous
+  // replay arrives before the listener is ready and gets silently dropped.
+  // 200ms matches the log replay delay and gives React enough time to mount.
+  if (lastValueCache.size > 0) {
+    setTimeout(() => {
+      for (const [event, cached] of lastValueCache) {
+        console.log(`[sse] replaying cached ${event} to client ${client?.id}`);
+        client?.send(event, cached);
+      }
+    }, 200);
   }
 
   heartbeatTimer = setInterval(() => {

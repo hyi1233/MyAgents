@@ -1306,12 +1306,10 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
             }
         }
 
-        // Try to find bun.exe in PATH
-        if let Ok(path) = which::which("bun.exe") {
-            log::info!("Using bun from PATH: {:?}", path);
-            return Some(path);
-        }
-        if let Ok(path) = which::which("bun") {
+        // Try to find bun in PATH (augmented with common system dirs)
+        if let Some(path) = crate::system_binary::find("bun.exe")
+            .or_else(|| crate::system_binary::find("bun"))
+        {
             log::info!("Using bun from PATH: {:?}", path);
             return Some(path);
         }
@@ -1322,25 +1320,29 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
 
     #[cfg(not(target_os = "windows"))]
     {
-        let candidates = [
+        // Try well-known paths first, then fall back to augmented PATH search.
+        // system_binary::find already includes /opt/homebrew/bin etc., but checking
+        // explicit paths is faster and covers ~/.bun/bin which isn't in the standard list.
+        let home = std::env::var("HOME").unwrap_or_default();
+        let explicit_paths = [
             "/opt/homebrew/bin/bun",
             "/usr/local/bin/bun",
-            &format!(
-                "{}/.bun/bin/bun",
-                std::env::var("HOME").unwrap_or_default()
-            ),
-            "bun",
         ];
-
-        for candidate in candidates {
+        for candidate in explicit_paths {
             let path = PathBuf::from(candidate);
-            if path.exists() || which::which(candidate).is_ok() {
+            if path.exists() {
                 log::info!("Using system bun: {:?}", path);
                 return Some(path);
             }
         }
+        // ~/.bun/bin/bun (user-local install)
+        let user_bun = PathBuf::from(format!("{}/.bun/bin/bun", home));
+        if user_bun.exists() {
+            log::info!("Using system bun: {:?}", user_bun);
+            return Some(user_bun);
+        }
 
-        which::which("bun").ok()
+        crate::system_binary::find("bun")
     }
 }
 
@@ -1658,8 +1660,14 @@ pub fn start_tab_sidecar<R: Runtime>(
         let tab_id_clone = tab_id.to_string();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
+            let mut bun_logger_active = false;
             for line in reader.lines().flatten() {
-                ulog_info!("[bun-out][{}] {}", tab_id_clone, line);
+                if !bun_logger_active {
+                    if line.contains("[Logger] Unified logging initialized") {
+                        bun_logger_active = true;
+                    }
+                    ulog_info!("[bun-out][{}] {}", tab_id_clone, line);
+                }
             }
         });
     }
@@ -2401,8 +2409,19 @@ fn create_new_session_sidecar<R: Runtime>(
         let session_id_for_log = session_id_clone.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
+            let mut bun_logger_active = false;
             for line in reader.lines().flatten() {
-                ulog_info!("[bun-out][session:{}] {}", session_id_for_log, line);
+                // Once Bun's unified logger is initialized, ALL console.log output is
+                // written directly to the unified log file by Bun's logger interceptor.
+                // Capturing stdout after this point causes 100% duplication ([BUN] + [bun-out]).
+                // Only pre-logger startup lines need to go through bun-out.
+                if !bun_logger_active {
+                    if line.contains("[Logger] Unified logging initialized") {
+                        bun_logger_active = true;
+                    }
+                    ulog_info!("[bun-out][session:{}] {}", session_id_for_log, line);
+                }
+                // After logger init: silently drop stdout (Bun logger handles it)
             }
         });
     }

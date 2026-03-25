@@ -11,6 +11,7 @@ pub mod logger;
 pub mod management_api;
 pub mod process_cmd;
 mod proxy_config;
+pub mod system_binary;
 mod sidecar;
 mod sse_proxy;
 mod tray;
@@ -262,6 +263,48 @@ pub fn run() {
             // for the primary instance. The single-instance plugin exits duplicate
             // processes before .setup() is called, preventing accidental kills.
             cleanup_stale_sidecars();
+
+            // ── Boot Banner: single-line consolidated diagnostics for AI grep ──
+            {
+                let pkg = app.package_info();
+                let version = pkg.version.to_string();
+                let build_mode = if cfg!(debug_assertions) { "debug" } else { "release" };
+                let os = std::env::consts::OS;
+                let arch = std::env::consts::ARCH;
+                let data_dir = app_dirs::myagents_data_dir();
+                let dir_str = data_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "?".into());
+
+                // Read config.json for counts (best-effort)
+                let (mut provider, mut mcp, mut agents, mut channels, mut cron, mut proxy) =
+                    ("?".to_string(), 0u32, 0u32, 0u32, 0u32, false);
+                if let Some(ref dir) = data_dir {
+                    if let Ok(c) = std::fs::read_to_string(dir.join("config.json"))
+                        .ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).ok_or(()) {
+                        // won't reach — see below
+                        let _ = c;
+                    }
+                    // Simpler: parse as Value directly
+                    if let Ok(cfg) = std::fs::read_to_string(dir.join("config.json"))
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))) {
+                        provider = cfg.get("defaultProviderId").and_then(|v| v.as_str()).unwrap_or("none").to_string();
+                        mcp = cfg.get("mcpEnabledServers").and_then(|v| v.as_array()).map(|a| a.len() as u32).unwrap_or(0);
+                        if let Some(ags) = cfg.get("agents").and_then(|v| v.as_array()) {
+                            agents = ags.len() as u32;
+                            for a in ags { channels += a.get("channels").and_then(|v| v.as_array()).map(|a| a.len() as u32).unwrap_or(0); }
+                        }
+                        proxy = cfg.get("proxySettings").and_then(|v| v.get("enabled")).and_then(|v| v.as_bool()).unwrap_or(false);
+                    }
+                    if let Ok(s) = std::fs::read_to_string(dir.join("cron_tasks.json")) {
+                        // Structure: {"tasks": [{...,"enabled":true/false}, ...]}
+                        cron = serde_json::from_str::<serde_json::Value>(&s).ok()
+                            .and_then(|v| v.get("tasks")?.as_array().map(|tasks|
+                                tasks.iter().filter(|t| t.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false)).count() as u32
+                            )).unwrap_or(0);
+                    }
+                }
+
+                ulog_info!("[boot] v={} build={} os={}-{} provider={} mcp={} agents={} channels={} cron={} proxy={} dir={}", version, build_mode, os, arch, provider, mcp, agents, channels, cron, proxy, dir_str);
+            }
 
             // Setup system tray
             if let Err(e) = tray::setup_tray(app) {

@@ -305,6 +305,7 @@ export interface ResolvedProviderEnv {
   maxOutputTokens?: number;
   maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   upstreamFormat?: 'chat_completions' | 'responses';
+  modelAliases?: { sonnet?: string; opus?: string; haiku?: string };
 }
 
 /**
@@ -341,6 +342,30 @@ export function resolveProviderEnv(
   if (provider.maxOutputTokens) result.maxOutputTokens = Number(provider.maxOutputTokens);
   if (provider.maxOutputTokensParamName) result.maxOutputTokensParamName = provider.maxOutputTokensParamName as ResolvedProviderEnv['maxOutputTokensParamName'];
   if (provider.upstreamFormat) result.upstreamFormat = provider.upstreamFormat as ResolvedProviderEnv['upstreamFormat'];
+
+  // Model aliases: merge preset defaults with user overrides (from config.providerModelAliases)
+  const presetAliases = (provider as Record<string, unknown>).modelAliases as Record<string, string> | undefined;
+  const aliasOverrides = c.providerModelAliases as Record<string, Record<string, string>> | undefined;
+  const userOverrides = aliasOverrides?.[providerId];
+  const mergedAliases = presetAliases || userOverrides
+    ? { ...presetAliases, ...userOverrides }
+    : undefined;
+  if (mergedAliases && (mergedAliases.sonnet || mergedAliases.opus || mergedAliases.haiku)) {
+    result.modelAliases = {
+      sonnet: mergedAliases.sonnet,
+      opus: mergedAliases.opus,
+      haiku: mergedAliases.haiku,
+    };
+  } else {
+    // Fallback: no aliases configured — use provider's primaryModel or first model
+    // so sub-agents don't send raw claude-* model names to third-party APIs.
+    const primaryModel = (provider as Record<string, unknown>).primaryModel as string | undefined;
+    const models = (provider as Record<string, unknown>).models as Array<{ model: string }> | undefined;
+    const fallback = primaryModel || models?.[0]?.model;
+    if (fallback) {
+      result.modelAliases = { sonnet: fallback, opus: fallback, haiku: fallback };
+    }
+  }
 
   return result;
 }

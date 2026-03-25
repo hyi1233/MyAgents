@@ -841,9 +841,15 @@ export function getEffectiveModelAliases(
     // User has explicit overrides — merge with defaults (overrides win, including empty strings)
     return { ...defaults, ...overrides };
   }
-  // No user overrides — return preset defaults (or undefined if none)
-  if (!defaults.sonnet && !defaults.opus && !defaults.haiku) return undefined;
-  return defaults;
+  // No user overrides — return preset defaults if any
+  if (defaults.sonnet || defaults.opus || defaults.haiku) return defaults;
+  // Fallback: no preset aliases and no user overrides — use provider's first model or primaryModel
+  // so sub-agents (model: "sonnet"/"opus"/"haiku") don't send raw claude-* to the third-party API.
+  const fallbackModel = provider.primaryModel || provider.models?.[0]?.model;
+  if (fallbackModel) {
+    return { sonnet: fallbackModel, opus: fallbackModel, haiku: fallbackModel };
+  }
+  return undefined;
 }
 
 export const DEFAULT_CONFIG: AppConfig = {

@@ -352,6 +352,48 @@ let shouldAbortSession = false;
 // This prevents Tab config sync from aborting a shared IM session mid-response.
 let pendingConfigRestart = false;
 let sessionTerminationPromise: Promise<void> | null = null;
+
+/**
+ * Await sessionTerminationPromise with a timeout.
+ * On timeout, force-clean session state so the caller is never permanently blocked.
+ */
+async function awaitSessionTermination(timeoutMs = 10_000, label = ''): Promise<void> {
+  if (!sessionTerminationPromise) return;
+  let timerId: ReturnType<typeof setTimeout>;
+  try {
+    await Promise.race([
+      sessionTerminationPromise,
+      new Promise<never>((_, reject) => {
+        timerId = setTimeout(() => reject(new Error(`sessionTermination timeout (${label})`)), timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    const isTimeout = error instanceof Error && error.message.includes('timeout');
+    console.warn(`[agent] ${label}: sessionTerminationPromise ${isTimeout ? 'timed out' : 'rejected'} after ${timeoutMs}ms, force-cleaning:`, error);
+    // Force-clean state so the caller can proceed — mirrors the finally block of startStreamingSession.
+    // Must cover ALL mutable state that the finally block would have reset, otherwise orphaned
+    // flags (e.g. isStreamingMessage=true) cause secondary deadlocks.
+    const session = querySession;
+    querySession = null;
+    isProcessing = false;
+    isPreWarming = false;
+    isStreamingMessage = false;
+    // Don't null sessionTerminationPromise — the real finally block may still be running
+    // and will call resolveTermination!(). Nulling it here creates a race where a subsequent
+    // caller skips waiting while the old finally is still doing cleanup.
+    // Wake any blocked messageGenerator so it doesn't hang forever
+    if (messageResolver) {
+      const resolve = messageResolver;
+      messageResolver = null;
+      resolve(null);
+    }
+    setSessionState('idle');
+    try { void session?.close(); } catch { /* subprocess may already be dead */ }
+  } finally {
+    clearTimeout(timerId!);
+  }
+}
+
 let isInterruptingResponse = false;
 let isStreamingMessage = false;
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
@@ -421,6 +463,12 @@ let prePlanPermissionMode: PermissionMode | null = null;
 // Current model for the session (updates on each user message if changed)
 let currentModel: string | undefined = undefined;
 // Provider environment config (baseUrl, apiKey, authType) for third-party providers
+export type ModelAliases = {
+  sonnet?: string;
+  opus?: string;
+  haiku?: string;
+};
+
 export type ProviderEnv = {
   baseUrl?: string;
   apiKey?: string;
@@ -429,6 +477,8 @@ export type ProviderEnv = {
   maxOutputTokens?: number;
   maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   upstreamFormat?: 'chat_completions' | 'responses';
+  /** Model alias mapping: SDK sub-agents use "sonnet"/"opus"/"haiku" → actual provider model IDs */
+  modelAliases?: ModelAliases;
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
 
@@ -438,7 +488,7 @@ let sidecarPort: number = 0;
 export type OpenAiBridgeConfig = {
   baseUrl: string;
   apiKey: string;
-  /** Target model name — bridge overrides ALL request models to this */
+  /** Target model name — bridge overrides ALL request models to this (only when no aliases) */
   model?: string;
   /** Max output tokens cap for upstream provider */
   maxOutputTokens?: number;
@@ -446,6 +496,8 @@ export type OpenAiBridgeConfig = {
   maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   /** Upstream API format: 'chat_completions' (default) or 'responses' */
   upstreamFormat?: 'chat_completions' | 'responses';
+  /** Model aliases from provider config — used to build modelMapping for sub-agent model resolution */
+  modelAliases?: ModelAliases;
 } | null;
 
 let currentOpenAiBridgeConfig: OpenAiBridgeConfig = null;
@@ -456,10 +508,18 @@ export function setSidecarPort(port: number): void {
 }
 
 /** Get the current OpenAI bridge config (used by bridge handler in index.ts).
- *  Model is always derived from currentModel to avoid staleness after setSessionModel(). */
+ *  Model is always derived from currentModel to avoid staleness after setSessionModel().
+ *  When modelAliases exist, model override is suppressed — sub-agents need distinct models. */
 export function getOpenAiBridgeConfig(): OpenAiBridgeConfig {
   if (!currentOpenAiBridgeConfig) return null;
-  return { ...currentOpenAiBridgeConfig, model: currentModel || undefined };
+  const aliases = currentOpenAiBridgeConfig.modelAliases;
+  return {
+    ...currentOpenAiBridgeConfig,
+    // When aliases exist, don't set model as blanket override — let modelMapping handle it.
+    // When no aliases, keep the old behavior (override all to currentModel).
+    model: aliases ? undefined : (currentModel || undefined),
+    modelAliases: aliases,
+  };
 }
 // SDK 是否已注册当前 sessionId。true 时后续 query 必须用 resume。
 // 仅由非 pre-warm 的 system_init 设为 true，仅由 sessionId 变更设为 false。
@@ -566,13 +626,7 @@ async function forceAbortCurrentTurnAndRecover(): Promise<void> {
   console.warn('[agent] force-aborting session after interrupt timeout');
   abortPersistentSession();
 
-  if (sessionTerminationPromise) {
-    try {
-      await sessionTerminationPromise;
-    } catch (error) {
-      console.warn('[agent] forced stop: session termination error:', error);
-    }
-  }
+  await awaitSessionTermination(10_000, 'forceAbort');
 
   // Another control flow (reset/switch session) already took over.
   if (!shouldAbortSession) {
@@ -589,8 +643,13 @@ async function forceAbortCurrentTurnAndRecover(): Promise<void> {
     return;
   }
 
-  console.log('[agent] forced stop: scheduling recovery pre-warm');
-  schedulePreWarm();
+  // Do NOT schedulePreWarm() here.
+  // After force-abort, if we eagerly pre-warm, a new sessionTerminationPromise is created.
+  // Any subsequent rewindSession() / resetSession() that awaits sessionTerminationPromise
+  // will block on the NEW pre-warm session — causing permanent deadlock.
+  // Instead, clean up and let the user's next action (rewind / new message) start the session.
+  console.log('[agent] forced stop: session terminated, awaiting user action');
+  shouldAbortSession = false;
 }
 
 // ===== Interaction Scenario (unified system prompt) =====
@@ -1024,7 +1083,10 @@ function providerEnvEqual(a: ProviderEnv | undefined, b: ProviderEnv | undefined
     && a.apiProtocol === b.apiProtocol
     && a.maxOutputTokens === b.maxOutputTokens
     && a.maxOutputTokensParamName === b.maxOutputTokensParamName
-    && a.upstreamFormat === b.upstreamFormat;
+    && a.upstreamFormat === b.upstreamFormat
+    && a.modelAliases?.sonnet === b.modelAliases?.sonnet
+    && a.modelAliases?.opus === b.modelAliases?.opus
+    && a.modelAliases?.haiku === b.modelAliases?.haiku;
 }
 
 /**
@@ -2330,6 +2392,19 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   // Use provided providerEnv or fall back to currentProviderEnv
   const effectiveProviderEnv = providerEnv ?? currentProviderEnv;
 
+  // ── Model alias mapping for sub-agents (applies to ALL protocol paths) ──
+  // SDK sub-agents use aliases like "sonnet"/"opus"/"haiku" which resolve to claude-* model IDs.
+  // For third-party providers, set ANTHROPIC_DEFAULT_*_MODEL so the SDK resolves aliases
+  // to provider-specific model IDs (e.g., "sonnet" → "deepseek-chat" instead of "claude-sonnet-4-6").
+  // Hoisted above the OpenAI early return so both protocol paths benefit.
+  const aliases = effectiveProviderEnv?.modelAliases;
+  if (aliases) {
+    if (aliases.sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = aliases.sonnet;
+    if (aliases.opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = aliases.opus;
+    if (aliases.haiku) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = aliases.haiku;
+    console.log(`[env] Model aliases set: sonnet=${aliases.sonnet ?? '(none)'}, opus=${aliases.opus ?? '(none)'}, haiku=${aliases.haiku ?? '(none)'}`);
+  }
+
   // OpenAI Bridge: if provider uses OpenAI protocol, loopback to sidecar
   if (effectiveProviderEnv?.apiProtocol === 'openai' && sidecarPort > 0) {
     // SDK requests go to sidecar's /v1/messages route, which translates to OpenAI format
@@ -2357,6 +2432,7 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
       maxOutputTokens: effectiveProviderEnv.maxOutputTokens,
       maxOutputTokensParamName: effectiveProviderEnv.maxOutputTokensParamName,
       upstreamFormat: effectiveProviderEnv.upstreamFormat,
+      modelAliases: effectiveProviderEnv.modelAliases,
     };
     console.log(`[env] OpenAI bridge: ANTHROPIC_BASE_URL → loopback :${sidecarPort}, upstream → ${effectiveProviderEnv.baseUrl}, proxy vars stripped`);
     return env;
@@ -3394,15 +3470,8 @@ export async function resetSession(): Promise<void> {
     abortPersistentSession();
     messageQueue.length = 0; // Clear queue so old session doesn't pick up stale messages
 
-    // Wait for the session to fully terminate
-    if (sessionTerminationPromise) {
-      try {
-        await sessionTerminationPromise;
-        console.log('[agent] resetSession: SDK session terminated');
-      } catch (error) {
-        console.warn('[agent] resetSession: session termination error:', error);
-      }
-    }
+    await awaitSessionTermination(10_000, 'resetSession');
+    console.log('[agent] resetSession: SDK session terminated (or timed out)');
     querySession = null;
   }
 
@@ -3609,9 +3678,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     console.log('[agent] switchToSession: aborting current session');
     abortPersistentSession();
     messageQueue.length = 0; // Clear queue before waiting so old session doesn't pick up stale messages
-    if (sessionTerminationPromise) {
-      await sessionTerminationPromise;
-    }
+    await awaitSessionTermination(10_000, 'switchToSession');
     querySession = null;
   }
 
@@ -3742,7 +3809,7 @@ export async function enqueueUserMessage(
   images?: ImagePayload[],
   permissionMode?: PermissionMode,
   model?: string,
-  providerEnv?: ProviderEnv,
+  providerEnv?: ProviderEnv | 'subscription',
   metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group'; sourceId?: string; senderName?: string },
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
@@ -3778,27 +3845,36 @@ export async function enqueueUserMessage(
     currentTurnStartTime = Date.now();
   }
 
+  // Provider env semantics (pit-of-success pattern — safe default for all callers):
+  //   undefined        → "no change, keep current provider" (IM/Cron/Heartbeat/internal callers)
+  //   'subscription'   → "switch to Anthropic subscription" (only from desktop)
+  //   ProviderEnv obj  → "use this specific provider" (desktop or Rust with explicit provider)
+  // This prevents IM/Cron callers from accidentally triggering subscription switch
+  // when they simply don't have provider info to forward (the original "Not logged in" bug).
+  const effectiveProviderEnv: ProviderEnv | undefined = providerEnv === undefined
+    ? currentProviderEnv                                         // undefined → keep current (safe default)
+    : (providerEnv === 'subscription' ? undefined : providerEnv); // 'subscription' → clear, object → use it
+
   // Check if provider has changed (requires session restart since environment vars can't be updated)
-  // Also detect switching TO subscription (providerEnv=undefined) FROM an API provider
   // SKIP for queued messages: provider/model changes during streaming would cause a session
   // restart that wipes the queue and races with the active stream. Queued messages inherit
   // the current session's provider/model configuration.
-  const switchingToSubscription = !isSessionBusy && !providerEnv && currentProviderEnv;
+  const switchingToSubscription = !isSessionBusy && providerEnv === 'subscription' && currentProviderEnv;
   const baseUrlChanged = switchingToSubscription ||
-    (!isSessionBusy && providerEnv && providerEnv.baseUrl !== currentProviderEnv?.baseUrl);
-  const providerChanged = baseUrlChanged || (!isSessionBusy && providerEnv && (
-    providerEnv.apiKey !== currentProviderEnv?.apiKey
+    (!isSessionBusy && effectiveProviderEnv && effectiveProviderEnv.baseUrl !== currentProviderEnv?.baseUrl);
+  const providerChanged = baseUrlChanged || (!isSessionBusy && effectiveProviderEnv && (
+    effectiveProviderEnv.apiKey !== currentProviderEnv?.apiKey
   ));
 
   if (providerChanged && querySession) {
     const fromLabel = currentProviderEnv?.baseUrl ?? 'anthropic';
-    const toLabel = providerEnv?.baseUrl ?? 'anthropic';
+    const toLabel = effectiveProviderEnv?.baseUrl ?? 'anthropic';
     if (isDebugMode) console.log(`[agent] provider changed from ${fromLabel} to ${toLabel}, restarting session`);
 
     // Resume logic: Anthropic official validates thinking block signatures, third-party providers don't.
     // Only skip resume when switching FROM third-party (has baseUrl) TO Anthropic official (no baseUrl).
     // All other transitions (official→third-party, third-party→third-party, official→official) can safely resume.
-    const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !providerEnv?.baseUrl;
+    const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !effectiveProviderEnv?.baseUrl;
     if (switchingFromThirdPartyToAnthropic) {
       // Anthropic 官方验证 thinking block 签名，第三方不验证，必须新建 session
       sessionRegistered = false;
@@ -3811,14 +3887,12 @@ export async function enqueueUserMessage(
     // 其他 provider 切换：sessionRegistered 保持不变，自动走正确路径
 
     // Update provider env BEFORE terminating so the new session picks it up
-    currentProviderEnv = providerEnv; // undefined for subscription, object for API
+    currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
     // Terminate current session - it will restart automatically when processing the message
     abortPersistentSession();
     // Wait for the current session to fully terminate before proceeding
     // This prevents race conditions where old session continues processing
-    if (sessionTerminationPromise) {
-      await sessionTerminationPromise;
-    }
+    await awaitSessionTermination(10_000, 'enqueueUserMessage/providerChange');
     querySession = null;
     isProcessing = false;
     setSessionState('idle');
@@ -3829,13 +3903,13 @@ export async function enqueueUserMessage(
     streamIndexToToolId.clear();
     toolResultIndexToId.clear();
     imTextBlockIndices.clear();
-  
+
     if (isDebugMode) console.log(`[agent] session terminated for provider switch`);
-  } else if (providerEnv) {
+  } else if (effectiveProviderEnv) {
     // Provider not changed (or first message with API provider), just update tracking
-    currentProviderEnv = providerEnv;
-    if (isDebugMode) console.log(`[agent] provider env set: baseUrl=${providerEnv.baseUrl ?? 'anthropic'}`);
-  } else if (!providerEnv && !currentProviderEnv) {
+    currentProviderEnv = effectiveProviderEnv;
+    if (isDebugMode) console.log(`[agent] provider env set: baseUrl=${effectiveProviderEnv.baseUrl ?? 'anthropic'}`);
+  } else if (!effectiveProviderEnv && !currentProviderEnv) {
     // Both undefined — subscription mode, no change needed
     if (isDebugMode) console.log('[agent] subscription mode, no provider env');
   }
@@ -4338,9 +4412,7 @@ export async function rewindSession(userMessageId: string): Promise<{
     // 4. 中止当前 session（需要新 session 用 resumeSessionAt 截断 SDK 历史）
     abortPersistentSession();
     messageQueue.length = 0;
-    if (sessionTerminationPromise) {
-      try { await sessionTerminationPromise; } catch { /* ignore */ }
-    }
+    await awaitSessionTermination(10_000, 'rewind');
     shouldAbortSession = false;
 
     // 5. 收集被删消息内容（恢复到输入框）
@@ -4499,9 +4571,7 @@ export function forkSession(assistantMessageId: string): {
 }
 
 async function startStreamingSession(preWarm = false): Promise<void> {
-  if (sessionTerminationPromise) {
-    await sessionTerminationPromise;
-  }
+  await awaitSessionTermination(10_000, 'startStreamingSession');
 
   if (isProcessing || querySession) {
     return;
@@ -4516,7 +4586,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   shouldAbortSession = false;
   resetAbortFlag();
   isProcessing = true;
-  currentSessionUuids.clear(); // 新 session 实例，旧 UUID 不再有效
+  // Only clear UUID tracking for brand-new sessions.
+  // For resume sessions (sessionRegistered=true), loadMessagesFromStorage has already
+  // seeded currentSessionUuids from disk — clearing them here would break rewind
+  // during the pre-warm window (before SDK system_init re-populates via stdout events).
+  if (!sessionRegistered) {
+    currentSessionUuids.clear();
+  }
   let preWarmStartedOk = false; // Tracks whether pre-warm received system_init
   let abortedByTimeout = false; // Distinguishes timeout abort from config-change abort
   let detectedAlreadyInUse = false; // stderr reported "Session ID already in use"
@@ -4911,9 +4987,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       messageCount++;
       lastSdkEventAt = Date.now();
       // stream_event is high-frequency (per token delta) — skip logging entirely;
-      // other types (user/assistant/result/system_init) are low-frequency and important
-      if (sdkMessage.type !== 'stream_event') {
-        console.log(`[agent][sdk] message #${messageCount} type=${sdkMessage.type}`, logStringify(sdkMessage));
+      // other types (user/assistant/result/system_init) are low-frequency and important.
+      // Log only a compact summary to console (unified log). Full JSON is persisted
+      // to the session log file via appendLogLine below AND captured by Rust bun-out.
+      // Logging full JSON here caused double-write: [BUN] + [RUST][bun-out] both contain it.
+      if (sdkMessage.type !== 'stream_event' && sdkMessage.type !== 'rate_limit_event') {
+        const msg = sdkMessage as Record<string, unknown>;
+        const model = (msg.message as Record<string, unknown>)?.model ?? '';
+        const stopReason = (msg.message as Record<string, unknown>)?.stop_reason ?? '';
+        const subtype = msg.subtype ?? '';
+        const extra = subtype ? ` subtype=${subtype}` : model ? ` model=${model}` : '';
+        const stop = stopReason ? ` stop=${stopReason}` : '';
+        console.log(`[agent][sdk] message #${messageCount} type=${sdkMessage.type}${extra}${stop}`);
       }
       try {
         const line = `${localTimestamp()} ${logStringify(sdkMessage)}`;

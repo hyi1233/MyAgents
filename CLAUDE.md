@@ -126,24 +126,26 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 |------|------|----------|
 | WebView 直接 fetch | CORS 失败 | `proxyFetch()` 经 Rust 代理 |
 | Tab 内用全局 API | 请求发到错误 Sidecar | `useTabState()` |
-| 裸 `reqwest::Client` 连 localhost | 系统代理 → 502 | `crate::local_http::builder()` |
+| 裸 `reqwest::Client` 连 localhost（含 Plugin Bridge） | 系统代理拦截 → 502 | `local_http::builder()` / `json_client()` / `sse_client()` |
 | 依赖用户系统安装的运行时 | 用户未安装 | 使用内置 Bun 或内置 Node.js（`runtime.ts`） |
 | 直接设 `shouldAbortSession = true` | generator 永久阻塞 | `abortPersistentSession()` |
-| 配置变更不设 `resumeSessionId` | AI 失忆 | 先设 resumeSessionId 再 abort |
-| `!preWarm` 条件守卫 | 持久模式下永不执行 | 移除或改用其他条件 |
+| 配置变更不设 `resumeSessionId` | abort 后 SDK 从空对话开始，丢失上下文 | 先设 resumeSessionId 再 abort |
+| 用 `if (!preWarm)` / `if (!isPreWarming)` 守卫逻辑 | 持久 Session 中 pre-warm 即最终 session，该逻辑永远不执行 | 移除守卫或改用其他条件 |
 | Config 写盘用 React state | 覆盖其他字段（如 API Key） | `await loadAppConfig()` 磁盘读 |
 | IM config 写盘后不 `refreshConfig()` | UI 显示过期数据 | 写盘后调 `refreshConfig()` |
 | 新增 SSE 事件不注册白名单 | 前端静默丢弃该事件 | 在 `SseConnection.ts` 的 `JSON_EVENTS` 注册 |
 | Sidecar 用 `__dirname` / `readFileSync` | bun build 硬编码路径，生产环境出错 | 内联常量或 `getScriptDir()` |
 | 日志日期用 UTC `toISOString` | 与本地日期文件名不匹配 | 统一用 `localDate()`（`src/shared/logTime.ts`） |
 | UI 硬编码颜色（`#fff`、`bg-blue-500`） | 破坏设计系统一致性 | 使用 CSS Token `var(--xxx)`，参考 design_guide.md |
-| Plugin Bridge 用裸 `reqwest::Client` | 系统代理 → 502 | `local_http::json_client()` — Bridge 进程也在 localhost |
+| 表单用原生 `<select>` | 系统下拉框样式与设计系统不一致（macOS/Windows 各异） | 使用 `<CustomSelect>` 组件（`@/components/CustomSelect`） |
 | CronTask 新增字段不加 `#[serde(default)]` | 旧版 JSON 反序列化失败 | 非核心字段 MUST 加 `#[serde(default)]` |
 | Rust 子进程日志用 `log::info!` | 不进统一日志 | MUST 用 `ulog_info!` / `ulog_error!` |
 | 裸 `std::process::Command::new()` | Windows 弹出黑色控制台窗口 | `crate::process_cmd::new()` |
+| 裸 `which::which()` 查找系统工具 | Finder 启动时 PATH 缺少 homebrew 等路径，找不到已安装的工具 | `crate::system_binary::find()` |
 | 前端 `@tauri-apps/plugin-fs` 读写工作区文件 | Tauri fs scope 仅覆盖 `~/.myagents/**`，工作区路径写入必失败 | `invoke('cmd_read_workspace_file')` / `invoke('cmd_write_workspace_file')` 走 Rust 原生 I/O |
 | 对接外部 SDK/插件时凭假设写适配代码 | 函数签名、config 格式、返回值结构全部猜错 | MUST 先读源码确认接口约定（函数签名、config schema、返回值格式），再写适配层 |
 | 修改 `bundled-agents/myagents_helper/` 后不 bump 版本 | 用户端小助理不会更新，改动形同虚设 | 修改 Helper 的 CLAUDE.md / Skills / bin 后，MUST bump `ADMIN_AGENT_VERSION`（`src-tauri/src/commands.rs`），否则 `cmd_sync_admin_agent` 版本门控不会触发同步 |
+| 函数参数用 `undefined`/`null` 表示特定业务动作 | 不同调用方对"不传"含义不同，内部调用方会无意触发该动作 | 业务动作用自解释的字面量（如 `'subscription'`），`undefined` 只表示"未提供 / 保持现状"——确保不传参数永远是安全的 |
 
 ---
 

@@ -1,8 +1,9 @@
 // Agent config service — CRUD helpers, migration from ImBotConfigs
 import type { AppConfig, Project } from '../types';
+import { getEffectiveModelAliases } from '../types';
 import type { AgentConfig, ChannelConfig, ChannelOverrides } from '../../../shared/types/agent';
 import type { ImBotConfig } from '../../../shared/types/im';
-import { atomicModifyConfig } from './appConfigService';
+import { atomicModifyConfig, loadAppConfig } from './appConfigService';
 
 // ============= Query Helpers =============
 
@@ -260,6 +261,9 @@ export async function patchAgentConfig(
       const [allProviders, apiKeys] = await Promise.all([getAllProviders(), loadApiKeys()]);
       const provider = allProviders.find(p => p.id === patch.providerId);
       if (provider && provider.type !== 'subscription') {
+        // Load config to get user's providerModelAliases overrides
+        const latestConfig = await loadAppConfig();
+        const aliases = getEffectiveModelAliases(provider, latestConfig.providerModelAliases);
         resolvedProviderEnvJson = JSON.stringify({
           baseUrl: provider.config.baseUrl,
           apiKey: apiKeys[provider.id],
@@ -268,6 +272,7 @@ export async function patchAgentConfig(
           maxOutputTokens: provider.maxOutputTokens,
           maxOutputTokensParamName: provider.maxOutputTokensParamName,
           upstreamFormat: provider.upstreamFormat,
+          ...(aliases ? { modelAliases: aliases } : {}),
         });
       } else {
         // Subscription provider (e.g. Anthropic) or unknown — clear providerEnvJson

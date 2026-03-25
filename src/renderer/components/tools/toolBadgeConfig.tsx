@@ -270,8 +270,9 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
           iconColor: 'text-cyan-500 dark:text-cyan-400'
         }
       };
-    // Task management - Indigo
+    // Task / Agent (sub-agent) - Indigo
     case 'Task':
+    case 'Agent':
       return {
         icon: <Zap className="size-2.5" />,
         colors: {
@@ -371,9 +372,9 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
 // For Task tool, returns the subagent_type (e.g., "Explore", "Plan")
 // For other tools, returns the tool name
 export function getToolMainLabel(tool: ToolUseSimple): string {
-  if (tool.name === 'Task') {
+  if (tool.name === 'Task' || tool.name === 'Agent') {
     const subagentType = getStringProp(tool.parsedInput, 'subagent_type');
-    return subagentType || 'Task';
+    return subagentType || tool.name;
   }
   if (tool.name.startsWith('mcp__gemini-image__')) {
     return tool.name.includes('edit_image') ? '编辑图片' : '生成图片';
@@ -470,13 +471,14 @@ export function getToolLabel(tool: ToolUseSimple): string {
       }
       return 'Find';
     }
-    case 'Task': {
+    case 'Task':
+    case 'Agent': {
       const description = getStringProp(tool.parsedInput, 'description');
-      const subagentType = getStringProp(tool.parsedInput, 'subagent_type') || 'Task';
+      const subagentType = getStringProp(tool.parsedInput, 'subagent_type') || tool.name;
       const isTaskRunning = tool.isLoading && !tool.result;
       const isBackground = isObject(tool.parsedInput) && tool.parsedInput.run_in_background === true;
 
-      // When Task is running, show the latest subagent tool (running or most recent)
+      // When Task/Agent is running, show the latest subagent tool (running or most recent)
       if (isTaskRunning && tool.subagentCalls && tool.subagentCalls.length > 0) {
         // Prefer running tool, otherwise show the last tool
         const runningCall = tool.subagentCalls.find(c => c.isLoading);
@@ -485,7 +487,7 @@ export function getToolLabel(tool: ToolUseSimple): string {
           return getSubagentCallLabel(latestCall);
         }
       }
-      // When Task completed or no subagent calls yet, show the Task description
+      // When completed or no subagent calls yet, show the description
       const bgSuffix = isBackground && !isTaskRunning ? ' (后台)' : '';
       if (description) {
         const desc = description.length > 25 ? `${description.substring(0, 22)}...` : description;
@@ -552,9 +554,10 @@ export function getToolExpandedLabel(tool: ToolUseSimple): string {
       return 'Bash Output';
     case 'TodoWrite':
       return 'Todo List';
-    case 'Task': {
+    case 'Task':
+    case 'Agent': {
       const description = getStringProp(tool.parsedInput, 'description');
-      const subagentType = getStringProp(tool.parsedInput, 'subagent_type') || 'Task';
+      const subagentType = getStringProp(tool.parsedInput, 'subagent_type') || tool.name;
       return description || subagentType;
     }
     case 'Read':

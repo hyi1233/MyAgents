@@ -884,6 +884,12 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
             std::thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().flatten() {
+                    // Skip high-frequency heartbeat noise (sent/ACK every ~40s per plugin).
+                    // Only log heartbeat anomalies (timeout, disconnect, error).
+                    if line.contains("Heartbeat sent") || line.contains("Heartbeat ACK")
+                        || line.contains("Received op=11") {
+                        continue;
+                    }
                     ulog_info!("[bridge-out][{}] {}", bot_id_clone, line);
                 }
             });
@@ -1147,7 +1153,25 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     if trimmed != npm_spec.trim() {
         ulog_info!("[bridge] Sanitized npm spec: '{}' → '{}'", npm_spec.trim(), trimmed);
     }
-    ulog_info!("[bridge] Installing plugin {} into {:?}", trimmed, base_dir);
+
+    // Ensure spec always resolves to latest when no version is pinned.
+    // Without @latest, npm may honor an existing package-lock.json and skip the upgrade.
+    // Scoped packages: @scope/name → @scope/name@latest
+    // Versioned:       @scope/name@1.2.3 → keep as-is
+    let install_spec = if trimmed.contains('@') {
+        // Check if the last '@' is a version separator (not the scope prefix)
+        let last_at = trimmed.rfind('@').unwrap_or(0);
+        if last_at == 0 || (trimmed.starts_with('@') && trimmed[1..].find('@').is_none()) {
+            // No version suffix — append @latest
+            format!("{}@latest", trimmed)
+        } else {
+            trimmed.to_string() // Already has version
+        }
+    } else {
+        format!("{}@latest", trimmed) // Unscoped, no version
+    };
+
+    ulog_info!("[bridge] Installing plugin {} (spec: {}) into {:?}", trimmed, install_spec, base_dir);
 
     // Write package.json upfront (shared by both npm and bun paths).
     ensure_package_json(&base_dir, &plugin_id).await?;
@@ -1155,11 +1179,11 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     // --- Try system npm first (user-maintained, most reliable) ---
     let mut npm_succeeded = false;
 
-    if let Ok(system_npm) = which::which("npm") {
+    if let Some(system_npm) = crate::system_binary::find("npm") {
         ulog_info!("[bridge] Using system npm: {:?}", system_npm);
         let sys_npm = system_npm;
         let base_for_sys = base_dir.clone();
-        let spec_for_sys = trimmed.to_string();
+        let spec_for_sys = install_spec.clone();
         let sys_result = tokio::task::spawn_blocking(move || {
             let mut cmd = crate::process_cmd::new(&sys_npm);
             // --omit=peer: openclaw 插件声明 peerDependencies: { openclaw: '*' }，
@@ -1227,7 +1251,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
             let node_for_add = node_bin;
             let cli_str_add = npm_cli_str;
             let base_for_add = base_dir.clone();
-            let npm_spec_owned = trimmed.to_string();
+            let npm_spec_owned = install_spec.clone();
             let path_for_add = augmented_path;
             let add_result = tokio::task::spawn_blocking(move || {
                 let mut cmd = crate::process_cmd::new(&node_for_add);
@@ -1273,7 +1297,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
 
         let bun_for_add = bun_path;
         let base_for_add = base_dir.clone();
-        let npm_spec_owned = trimmed.to_string();
+        let npm_spec_owned = install_spec.clone();
         let add_output = tokio::task::spawn_blocking(move || {
             let mut cmd = crate::process_cmd::new(&bun_for_add);
             cmd.args(["add", npm_spec_owned.as_str()])
@@ -1319,7 +1343,16 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     // Detect QR login support by scanning plugin source for loginWithQrStart
     let supports_qr_login = detect_qr_login_support(&npm_pkg_dir).await;
 
-    ulog_info!("[bridge] Plugin {} installed successfully (qrLogin={})", plugin_id, supports_qr_login);
+    // Post-install compatibility check: verify plugin's peerDependencies.openclaw
+    // against our shim's declared compat version (2026.3.22-shim).
+    // Plugins with peerDeps exceeding our shim version may crash at runtime.
+    let compat_warning = check_plugin_compat(&dep_pkg_path).await;
+    if let Some(ref warning) = compat_warning {
+        ulog_warn!("[bridge] {}", warning);
+    }
+
+    ulog_info!("[bridge] Plugin {} installed successfully (qrLogin={}, compat={})",
+        plugin_id, supports_qr_login, if compat_warning.is_some() { "warn" } else { "ok" });
 
     Ok(json!({
         "pluginId": plugin_id,
@@ -1329,7 +1362,59 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         "packageVersion": package_version,
         "requiredFields": required_fields,
         "supportsQrLogin": supports_qr_login,
+        "compatWarning": compat_warning,
     }))
+}
+
+/// Our shim's OpenClaw compat version. Must match sdk-shim/package.json and compat-runtime.ts.
+const SHIM_COMPAT_VERSION: &str = "2026.3.22";
+
+/// Check if installed plugin's peerDependencies.openclaw is compatible with our shim.
+/// Returns a warning message if incompatible, None if OK.
+async fn check_plugin_compat(pkg_json_path: &std::path::Path) -> Option<String> {
+    let content = tokio::fs::read_to_string(pkg_json_path).await.ok()?;
+    let pkg: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let peer_deps = pkg.get("peerDependencies")?.as_object()?;
+    let required = peer_deps.get("openclaw")?.as_str()?;
+
+    // Parse requirement like ">=2026.3.22" or "*"
+    if required == "*" || required.is_empty() {
+        return None; // Any version — compatible
+    }
+
+    // Extract version number from semver-like constraint (e.g., ">=2026.3.22" → "2026.3.22")
+    let required_ver = required
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .split('-')
+        .next()
+        .unwrap_or("");
+
+    if required_ver.is_empty() {
+        return None; // Can't parse — assume compatible
+    }
+
+    // Simple date-version comparison (YYYY.M.DD format)
+    let shim_base = SHIM_COMPAT_VERSION.split('-').next().unwrap_or(SHIM_COMPAT_VERSION);
+    let parse_ver = |s: &str| -> (u32, u32, u32) {
+        let parts: Vec<u32> = s.split('.').filter_map(|p| p.parse().ok()).collect();
+        (
+            parts.first().copied().unwrap_or(0),
+            parts.get(1).copied().unwrap_or(0),
+            parts.get(2).copied().unwrap_or(0),
+        )
+    };
+
+    let shim = parse_ver(shim_base);
+    let req = parse_ver(required_ver);
+
+    if req > shim {
+        Some(format!(
+            "Plugin requires openclaw >={} but MyAgents shim supports {}. Some features may not work.",
+            required_ver, SHIM_COMPAT_VERSION,
+        ))
+    } else {
+        None
+    }
 }
 
 /// Find the SDK shim source directory (dev: source tree, prod: bundled resource)

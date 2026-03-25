@@ -38,7 +38,7 @@ const ProcessRow = memo(function ProcessRow({
     const isTool = block.type === 'tool_use' || block.type === 'server_tool_use';
     const isServerTool = block.type === 'server_tool_use';
     const isLastBlock = index === totalBlocks - 1;
-    const isTaskTool = isTool && !isServerTool && block.tool?.name === 'Task';
+    const isTaskTool = isTool && !isServerTool && (block.tool?.name === 'Task' || block.tool?.name === 'Agent');
 
     // Thinking: 没有 isComplete 就是 active
     const isThinkingActive = isThinking && block.isComplete !== true;

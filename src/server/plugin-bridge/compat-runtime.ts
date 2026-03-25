@@ -174,9 +174,17 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
   // Parse the plugin config once (passed via env var by Bridge spawner)
   const bridgePluginConfig = JSON.parse(process.env.BRIDGE_PLUGIN_CONFIG || '{}');
 
+  // Shim compat version — must match the version in sdk-shim/package.json.
+  // Plugins check api.runtime.version (e.g. weixin's assertHostCompatibility)
+  // to verify the host supports the required SDK surface.
+  const SHIM_COMPAT_VERSION = '2026.3.22';
+
   const runtime = {
     /** Update the plugin ID after registration */
     setPluginId(id: string) { currentPluginId = id; },
+
+    /** OpenClaw host version — checked by plugins via assertHostCompatibility(). */
+    version: SHIM_COMPAT_VERSION,
 
     // ===== Config =====
     // LarkClient.runtime.config.loadConfig() is called during message handling

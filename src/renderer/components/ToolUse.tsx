@@ -80,6 +80,7 @@ export default function ToolUse({ tool: rawTool }: ToolUseProps) {
     case 'Skill':
       return <SkillTool tool={tool} />;
     case 'Task':
+    case 'Agent':
       return <TaskTool tool={tool} />;
     case 'TodoWrite':
       return <TodoWriteTool tool={tool} />;

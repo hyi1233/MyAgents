@@ -13,7 +13,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import type { InstalledPlugin } from '../../../shared/types/im';
 import { PROMOTED_PLUGINS } from './promotedPlugins';
 import telegramIcon from './assets/telegram.png';
-import feishuIcon from './assets/feishu.jpeg';
+// feishuIcon import removed — old built-in Feishu hidden from this page (replaced by OpenClaw plugin)
 import dingtalkIcon from './assets/dingtalk.svg';
 
 // Guide images
@@ -37,7 +37,9 @@ interface PlatformEntry {
 
 const STATIC_PLATFORMS: PlatformEntry[] = [
   { id: 'telegram', name: 'Telegram', description: '通过 Telegram Bot 远程使用 AI Agent', icon: telegramIcon, badge: '内置', badgeVariant: 'builtin' },
-  { id: 'feishu', name: '飞书', description: '通过飞书自建应用 Bot 远程使用 AI Agent', icon: feishuIcon, badge: '内置', badgeVariant: 'builtin', platformBadge: 'deprecated', deprecationNotice: '推荐迁移到官方插件版本' },
+  // Old built-in Feishu hidden from UI — replaced by official OpenClaw plugin (@larksuite/openclaw-lark).
+  // Code retained for backward compatibility with existing channels; entry removed from display.
+  // { id: 'feishu', name: '飞书', ... platformBadge: 'deprecated' },
   { id: 'dingtalk', name: '钉钉', description: '通过钉钉自建应用 Bot 远程使用 AI Agent', icon: dingtalkIcon, badge: '内置', badgeVariant: 'builtin' },
 ];
 
@@ -59,7 +61,7 @@ export default function BotPlatformRegistry() {
   const [installNpmSpec, setInstallNpmSpec] = useState('');
   const [showInstallInput, setShowInstallInput] = useState(false);
   const [installing, setInstalling] = useState(false);
-  const [updating, setUpdating] = useState<string | null>(null); // pluginId being updated
+  const [updatingSet, setUpdatingSet] = useState<Set<string>>(new Set()); // pluginIds being updated concurrently
   const toast = useToast();
   const toastRef = useRef(toast);
   toastRef.current = toast;
@@ -141,7 +143,7 @@ export default function BotPlatformRegistry() {
 
   const handleUpdatePlugin = useCallback(async (npmSpec: string, pluginId: string) => {
     if (!isTauriEnvironment()) return;
-    setUpdating(pluginId);
+    setUpdatingSet(prev => new Set(prev).add(pluginId));
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const result = await invoke<InstalledPlugin>('cmd_install_openclaw_plugin', { npmSpec });
@@ -163,7 +165,9 @@ export default function BotPlatformRegistry() {
       if (!isMountedRef.current) return;
       toastRef.current.error(`更新失败: ${err}`);
     } finally {
-      if (isMountedRef.current) setUpdating(null);
+      if (isMountedRef.current) {
+        setUpdatingSet(prev => { const next = new Set(prev); next.delete(pluginId); return next; });
+      }
     }
   }, []);
 
@@ -230,11 +234,11 @@ export default function BotPlatformRegistry() {
                   </span>
                   <button
                     onClick={() => handleUpdatePlugin(p.plugin!.npmSpec, p.plugin!.pluginId)}
-                    disabled={updating === p.plugin.pluginId}
+                    disabled={updatingSet.has(p.plugin.pluginId)}
                     className="rounded-full p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
                     title="检查更新"
                   >
-                    <RefreshCw className={`h-3 w-3 ${updating === p.plugin.pluginId ? 'animate-spin' : ''}`} />
+                    <RefreshCw className={`h-3 w-3 ${updatingSet.has(p.plugin.pluginId) ? 'animate-spin' : ''}`} />
                   </button>
                 </div>
               ) : (
@@ -260,13 +264,13 @@ export default function BotPlatformRegistry() {
             const installedPlugin = installedPlugins.find(p => p.pluginId === pp.pluginId);
             const isInstalled = !!installedPlugin;
             const isInstalling = autoInstalling === pp.pluginId;
-            const isUpdating = updating === pp.pluginId;
+            const isUpdating = updatingSet.has(pp.pluginId);
             return (
               <div
                 key={`promoted-${pp.pluginId}`}
                 className="group relative flex flex-col items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
               >
-                {(isInstalling || isUpdating) ? (
+                {isInstalling ? (
                   <Loader2 className="h-12 w-12 animate-spin text-[var(--ink-muted)]" />
                 ) : (
                   <img src={pp.icon} alt={pp.name} className="h-12 w-12 rounded-xl" />
