@@ -356,6 +356,15 @@ export function resolveProviderEnv(
       opus: mergedAliases.opus,
       haiku: mergedAliases.haiku,
     };
+  } else {
+    // Fallback: no aliases configured — use provider's primaryModel or first model
+    // so sub-agents don't send raw claude-* model names to third-party APIs.
+    const primaryModel = (provider as Record<string, unknown>).primaryModel as string | undefined;
+    const models = (provider as Record<string, unknown>).models as Array<{ model: string }> | undefined;
+    const fallback = primaryModel || models?.[0]?.model;
+    if (fallback) {
+      result.modelAliases = { sonnet: fallback, opus: fallback, haiku: fallback };
+    }
   }
 
   return result;
