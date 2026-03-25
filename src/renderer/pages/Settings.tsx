@@ -4919,24 +4919,19 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                     <div>
                                         <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
                                         <div className="flex gap-2 items-center">
-                                            <div className="flex gap-3 shrink-0">
-                                                {(customForm.upstreamFormat === 'responses'
-                                                    ? [{ value: 'max_output_tokens', label: 'max_output_tokens' }] as const
-                                                    : [{ value: 'max_tokens', label: 'max_tokens' }, { value: 'max_completion_tokens', label: 'max_completion_tokens' }] as const
-                                                ).map((opt) => (
-                                                    <label key={opt.value} className="flex items-center gap-1.5 cursor-pointer">
-                                                        <input
-                                                            type="radio"
-                                                            name="create-maxOutputTokensParamName"
-                                                            value={opt.value}
-                                                            checked={customForm.maxOutputTokensParamName === opt.value}
-                                                            onChange={() => setCustomForm((p) => ({ ...p, maxOutputTokensParamName: opt.value }))}
-                                                            className="accent-[var(--ink)]"
-                                                        />
-                                                        <span className="text-xs text-[var(--ink-muted)] font-mono">{opt.label}</span>
-                                                    </label>
-                                                ))}
-                                            </div>
+                                            <select
+                                                value={customForm.maxOutputTokensParamName}
+                                                onChange={(e) => setCustomForm((p) => ({ ...p, maxOutputTokensParamName: e.target.value as 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens' }))}
+                                                className="shrink-0 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-2.5 py-2.5 text-xs font-mono text-[var(--ink-muted)] transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                            >
+                                                {customForm.upstreamFormat === 'responses'
+                                                    ? <option value="max_output_tokens">max_output_tokens</option>
+                                                    : <>
+                                                        <option value="max_tokens">max_tokens</option>
+                                                        <option value="max_completion_tokens">max_completion_tokens</option>
+                                                      </>
+                                                }
+                                            </select>
                                             <input
                                                 type="number"
                                                 value={customForm.maxOutputTokens}
@@ -5219,24 +5214,19 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                     <div>
                                         <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
                                         <div className="flex gap-2 items-center">
-                                            <div className="flex gap-3 shrink-0">
-                                                {((editingProvider.editUpstreamFormat || 'chat_completions') === 'responses'
-                                                    ? [{ value: 'max_output_tokens', label: 'max_output_tokens' }] as const
-                                                    : [{ value: 'max_tokens', label: 'max_tokens' }, { value: 'max_completion_tokens', label: 'max_completion_tokens' }] as const
-                                                ).map((opt) => (
-                                                    <label key={opt.value} className="flex items-center gap-1.5 cursor-pointer">
-                                                        <input
-                                                            type="radio"
-                                                            name="edit-maxOutputTokensParamName"
-                                                            value={opt.value}
-                                                            checked={(editingProvider.editMaxOutputTokensParamName ?? 'max_tokens') === opt.value}
-                                                            onChange={() => setEditingProvider((p) => p ? { ...p, editMaxOutputTokensParamName: opt.value } : null)}
-                                                            className="accent-[var(--ink)]"
-                                                        />
-                                                        <span className="text-xs text-[var(--ink-muted)] font-mono">{opt.label}</span>
-                                                    </label>
-                                                ))}
-                                            </div>
+                                            <select
+                                                value={editingProvider.editMaxOutputTokensParamName ?? 'max_tokens'}
+                                                onChange={(e) => setEditingProvider((p) => p ? { ...p, editMaxOutputTokensParamName: e.target.value as 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens' } : null)}
+                                                className="shrink-0 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-2.5 py-2.5 text-xs font-mono text-[var(--ink-muted)] transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                            >
+                                                {(editingProvider.editUpstreamFormat || 'chat_completions') === 'responses'
+                                                    ? <option value="max_output_tokens">max_output_tokens</option>
+                                                    : <>
+                                                        <option value="max_tokens">max_tokens</option>
+                                                        <option value="max_completion_tokens">max_completion_tokens</option>
+                                                      </>
+                                                }
+                                            </select>
                                             <input
                                                 type="number"
                                                 value={editingProvider.editMaxOutputTokens || ''}
