@@ -211,14 +211,22 @@ export function createSseClient(onClose: (client: SseClient) => void): {
     // Ignore
   }
 
-  // Replay last-value cache to newly connected client (synchronous, no delay).
+  // Replay last-value cache to newly connected client.
   // Solves the "late joiner" problem: a Tab connecting to a mid-flight IM session
   // immediately receives the current session state (e.g., chat:status → "running")
   // instead of appearing idle until the next live event.
-  // client.send() buffers into pending[] if controller isn't ready, so no delay needed.
-  for (const [event, cached] of lastValueCache) {
-    console.log(`[sse] replaying cached ${event} to client ${client.id}`);
-    client.send(event, cached);
+  // Delay is required: the Bun SSE stream buffers correctly, but the full chain is
+  // Bun → SSE bytes → Rust proxy parse → Tauri emit → React listener.
+  // React's useEffect registers the Tauri listener AFTER first render, so a synchronous
+  // replay arrives before the listener is ready and gets silently dropped.
+  // 200ms matches the log replay delay and gives React enough time to mount.
+  if (lastValueCache.size > 0) {
+    setTimeout(() => {
+      for (const [event, cached] of lastValueCache) {
+        console.log(`[sse] replaying cached ${event} to client ${client?.id}`);
+        client?.send(event, cached);
+      }
+    }, 200);
   }
 
   heartbeatTimer = setInterval(() => {
