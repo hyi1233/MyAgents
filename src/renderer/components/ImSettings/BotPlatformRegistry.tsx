@@ -37,7 +37,9 @@ interface PlatformEntry {
 
 const STATIC_PLATFORMS: PlatformEntry[] = [
   { id: 'telegram', name: 'Telegram', description: '通过 Telegram Bot 远程使用 AI Agent', icon: telegramIcon, badge: '内置', badgeVariant: 'builtin' },
-  { id: 'feishu', name: '飞书', description: '通过飞书自建应用 Bot 远程使用 AI Agent', icon: feishuIcon, badge: '内置', badgeVariant: 'builtin', platformBadge: 'deprecated', deprecationNotice: '推荐迁移到官方插件版本' },
+  // Old built-in Feishu hidden from UI — replaced by official OpenClaw plugin (@larksuite/openclaw-lark).
+  // Code retained for backward compatibility with existing channels; entry removed from display.
+  // { id: 'feishu', name: '飞书', ... platformBadge: 'deprecated' },
   { id: 'dingtalk', name: '钉钉', description: '通过钉钉自建应用 Bot 远程使用 AI Agent', icon: dingtalkIcon, badge: '内置', badgeVariant: 'builtin' },
 ];
 
