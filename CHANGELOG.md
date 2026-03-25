@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.53] - 2026-03-26
+
+### Added
+- **三方供应商子 Agent 模型别名映射**：通过 `ANTHROPIC_DEFAULT_SONNET/OPUS/HAIKU_MODEL` 环境变量 + OpenAI Bridge `modelMapping`，子 Agent 指定 `model: "sonnet"` 时自动映射到供应商模型（如 `deepseek-chat`），不再发送 raw `claude-*` 导致卡住
+- **OpenClaw plugin shim 升级至 3.22 兼容级别**：新增 `channel-config-schema`、`channel-contract`、`command-auth`、`core`、`infra-runtime`、`plugin-entry`、`text-runtime` 7 个 shim 模块，解决微信插件 v2.0.1 启动 crash
+- **SSE Last-Value Cache**：新客户端连接 SSE 时立即 replay 缓存的 `chat:status`，Tab 中途接入 IM 运行中的 session 不再短暂闪过 idle 状态
+- **Boot Banner**：应用启动和 Sidecar 创建时输出 `[boot]` 单行自检信息（版本/OS/Provider/MCP/Agent/Cron 数量），`grep '[boot]'` 即可获取完整环境
+- **`system_binary` 模块**：集中系统工具查找（taskkill/pgrep/wmic），pit-of-success 模式
+
+### Improved
+- **统一日志降噪**：SSE 流式事件静默、Health Check 静默、HTTP 路由高频路径静默、SDK message 去重（摘要替代完整 JSON）、bun-out 彻底去重（Bun logger 初始化后停止 stdout 捕获），日志信噪比从 36% → ~85%
+- **插件刷新并行**：多个 Bot 刷新按钮可同时点击，互不影响
+- **供应商设置 UI**：`maxOutputTokensParamName` 改用 Select 下拉；原生 select 替换为 CustomSelect 统一设计系统
+
+### Fixed
+- **Rewind 死锁**：`forceAbortCurrentTurnAndRecover` 不再 eager pre-warm，消除 `await sessionTerminationPromise` 永久阻塞；所有 6 处 await 加 10 秒超时兜底
+- **Rewind 失忆**：`startStreamingSession` 的 `currentSessionUuids.clear()` 改为仅非 resume session 执行，关闭 Tab 重开后 rewind 保留上下文
+- **IM Bot / Cron "Not logged in"**：pit-of-success 架构修复，订阅模式 Sidecar 不再误注入三方 Provider 环境
+- **自定义供应商 modelAliases 默认值**：无配置时自动用 `primaryModel` 兜底
+- **旧版内置飞书入口隐藏**：聊天机器人 Bot 页面移除旧版飞书卡片（已被 OpenClaw 官方插件替代）
+- **插件更新 icon 闪烁**：刷新时保持平台 icon 不变，仅首次安装显示 loading
+- **Agent 工具样式**：复用 Task 子 Agent 样式，显示 `subagent_type` + `description`
+
+---
+
 ## [0.1.52] - 2026-03-24
 
 ### Added
