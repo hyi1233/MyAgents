@@ -24,7 +24,12 @@ export function defineChannelPluginEntry(params) {
       if (typeof params.setRuntime === 'function' && api.runtime) {
         params.setRuntime(api.runtime);
       }
-      api.registerChannel({ plugin: params.plugin });
+      // Pass entry-level id/name alongside plugin so compat-api.registerChannel
+      // can read them (plugin object itself may not have id/name set).
+      const pluginObj = params.plugin || {};
+      if (params.id && !pluginObj.id) pluginObj.id = params.id;
+      if (params.name && !pluginObj.name) pluginObj.name = params.name;
+      api.registerChannel({ plugin: pluginObj });
       if (typeof params.registerFull === 'function') {
         params.registerFull(api);
       }
