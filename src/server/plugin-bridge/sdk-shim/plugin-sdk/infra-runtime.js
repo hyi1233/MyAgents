@@ -1,10 +1,9 @@
 // OpenClaw plugin-sdk/infra-runtime shim for MyAgents Plugin Bridge
 // Provides filesystem utilities: temp dir resolution, file locking.
 
-import { tmpdir, homedir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { mkdirSync, accessSync, constants, lstatSync, chmodSync, writeFileSync, unlinkSync } from 'node:fs';
-import { mkdir, writeFile, unlink } from 'node:fs/promises';
+import { mkdirSync, lstatSync, rmdirSync, writeFileSync, unlinkSync } from 'node:fs';
 
 /**
  * Resolve the preferred OpenClaw temp directory.
@@ -47,7 +46,7 @@ export async function withFileLock(filePath, options, fn) {
           if (age > staleMs) {
             // Stale lock — force remove and retry
             try { unlinkSync(join(lockPath, 'pid')); } catch { /* ignore */ }
-            try { require('node:fs').rmdirSync(lockPath); } catch { /* ignore */ }
+            try { rmdirSync(lockPath); } catch { /* ignore */ }
             continue;
           }
         } catch { /* stat failed, retry */ }
@@ -71,7 +70,7 @@ export async function withFileLock(filePath, options, fn) {
   } finally {
     // Release lock
     try { unlinkSync(join(lockPath, 'pid')); } catch { /* ignore */ }
-    try { require('node:fs').rmdirSync(lockPath); } catch { /* ignore */ }
+    try { rmdirSync(lockPath); } catch { /* ignore */ }
   }
 }
 
@@ -92,7 +91,7 @@ export async function acquireFileLock(filePath, options) {
         lockPath,
         async release() {
           try { unlinkSync(join(lockPath, 'pid')); } catch { /* ignore */ }
-          try { require('node:fs').rmdirSync(lockPath); } catch { /* ignore */ }
+          try { rmdirSync(lockPath); } catch { /* ignore */ }
         },
       };
     } catch (err) {
@@ -101,7 +100,7 @@ export async function acquireFileLock(filePath, options) {
           const stat = lstatSync(lockPath);
           if (Date.now() - stat.mtimeMs > staleMs) {
             try { unlinkSync(join(lockPath, 'pid')); } catch { /* ignore */ }
-            try { require('node:fs').rmdirSync(lockPath); } catch { /* ignore */ }
+            try { rmdirSync(lockPath); } catch { /* ignore */ }
             continue;
           }
         } catch { /* stat failed */ }

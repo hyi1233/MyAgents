@@ -8,19 +8,23 @@
  * as a JSON Schema passthrough (or generic object).
  */
 export function buildChannelConfigSchema(schema) {
-  if (!schema) return { type: 'object', properties: {} };
-  // Zod schema: call .toJSONSchema() if available (zod v4+)
-  if (typeof schema.toJSONSchema === 'function') {
-    try { return schema.toJSONSchema(); } catch { /* fall through */ }
+  // Real OpenClaw wraps the JSON Schema in { schema: ... } (ChannelConfigSchema contract).
+  let jsonSchema;
+  if (!schema) {
+    jsonSchema = { type: 'object', properties: {} };
+  } else if (typeof schema.toJSONSchema === 'function') {
+    // Zod schema: call .toJSONSchema() if available (zod v4+)
+    try { jsonSchema = schema.toJSONSchema(); } catch { jsonSchema = { type: 'object', additionalProperties: true }; }
+  } else if (typeof schema._def === 'object') {
+    // Zod schema (v3): minimal conversion
+    jsonSchema = { type: 'object', additionalProperties: true };
+  } else if (typeof schema === 'object' && schema.type) {
+    // Already a JSON Schema object
+    jsonSchema = schema;
+  } else {
+    jsonSchema = { type: 'object', properties: {} };
   }
-  // Zod schema: try zodToJsonSchema adapter (zod v3 via zod-to-json-schema)
-  if (typeof schema._def === 'object') {
-    // Minimal Zod → JSON Schema: just wrap as generic object
-    return { type: 'object', additionalProperties: true };
-  }
-  // Already a JSON Schema object (plain object passthrough)
-  if (typeof schema === 'object' && schema.type) return schema;
-  return { type: 'object', properties: {} };
+  return { schema: jsonSchema };
 }
 
 /**

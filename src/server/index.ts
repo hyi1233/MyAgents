@@ -6984,9 +6984,8 @@ description: >
           // Inject heartbeat prompt as user message (wrapped in <system-reminder><HEARTBEAT> tags)
           // System prompt is already permanently injected at IM session creation (/api/im/chat)
           // Heartbeat is unattended — bypass all permissions so tool use doesn't block.
-          // CRITICAL: Pass current model + providerEnv to avoid triggering provider-switch logic.
-          // Without this, undefined providerEnv triggers switchingToSubscription in enqueueUserMessage,
-          // which resets the session to Anthropic subscription and causes "Not logged in" errors.
+          // Pass current model + providerEnv for consistency (undefined is also safe —
+          // enqueueUserMessage treats it as "keep current provider" via pit-of-success semantics).
           getAndClearLastAgentError(); // Clear stale errors from prior turns before injecting heartbeat
           await enqueueUserMessage(
             enrichedPrompt,
