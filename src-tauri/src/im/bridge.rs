@@ -1320,6 +1320,69 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     // Install plugin-sdk shim (copies from bundled resource files)
     install_sdk_shim(app_handle, &base_dir).await?;
 
+    // Post-shim dependency repair: the shim replaces node_modules/openclaw/ which may
+    // break the dependency tree (e.g., Bun's hardlink structure on Windows). Run a quick
+    // `npm install` to ensure transitive dependencies like `zod` are intact.
+    // CRITICAL: --omit=peer prevents npm from reinstalling the real `openclaw` package
+    // (which is a peer dep of the plugin) and overwriting the shim we just installed.
+    {
+        let repair_dir = base_dir.clone();
+        let repaired = if let Some((node_path, npm_cli)) = find_bundled_node_npm(app_handle) {
+            let node_dir = node_path.parent().map(|p| p.to_path_buf());
+            match tokio::task::spawn_blocking(move || {
+                let mut cmd = crate::process_cmd::new(&node_path);
+                cmd.args([npm_cli.to_str().unwrap_or(""), "install", "--ignore-scripts", "--omit=peer"])
+                    .current_dir(&repair_dir)
+                    .env("NODE_OPTIONS", "--no-experimental-require-module");
+                // Ensure node is in PATH for npm to find it
+                if let Some(ref nd) = node_dir {
+                    if let Some(path) = std::env::var_os("PATH") {
+                        let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
+                        paths.insert(0, nd.clone());
+                        cmd.env("PATH", std::env::join_paths(&paths).unwrap_or(path));
+                    }
+                }
+                apply_proxy_env(&mut cmd);
+                cmd.output()
+            }).await {
+                Ok(Ok(output)) if output.status.success() => {
+                    ulog_info!("[bridge] Post-shim dependency repair succeeded");
+                    true
+                }
+                Ok(Ok(output)) => {
+                    ulog_warn!("[bridge] Post-shim repair failed (exit {}): {}",
+                        output.status, String::from_utf8_lossy(&output.stderr).trim());
+                    false
+                }
+                _ => { ulog_warn!("[bridge] Post-shim repair: spawn failed"); false }
+            }
+        } else {
+            false
+        };
+        // Bun fallback: `bun install` has no --omit=peer, so it would reinstall openclaw
+        // over the shim. Instead, re-copy the shim after bun install to ensure it survives.
+        if !repaired {
+            use crate::sidecar::find_bun_executable_pub;
+            if let Some(bun_path) = find_bun_executable_pub(app_handle) {
+                let bun_repair_dir = base_dir.clone();
+                let bun_result = tokio::task::spawn_blocking(move || {
+                    let mut cmd = crate::process_cmd::new(&bun_path);
+                    cmd.args(["install"])
+                        .current_dir(&bun_repair_dir);
+                    apply_proxy_env(&mut cmd);
+                    cmd.output()
+                }).await;
+                if matches!(&bun_result, Ok(Ok(o)) if o.status.success()) {
+                    ulog_info!("[bridge] Post-shim repair (bun) succeeded, re-applying shim");
+                    // Re-copy shim after bun install (bun may have overwritten openclaw)
+                    let _ = install_sdk_shim(app_handle, &base_dir).await;
+                } else {
+                    ulog_warn!("[bridge] Post-shim repair (bun) failed");
+                }
+            }
+        }
+    }
+
     // Try to read plugin manifest
     let manifest = read_plugin_manifest(&base_dir, trimmed).await;
 
@@ -1344,7 +1407,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     let supports_qr_login = detect_qr_login_support(&npm_pkg_dir).await;
 
     // Post-install compatibility check: verify plugin's peerDependencies.openclaw
-    // against our shim's declared compat version (2026.3.22-shim).
+    // against our shim's declared compat version (2026.3.25-shim).
     // Plugins with peerDeps exceeding our shim version may crash at runtime.
     let compat_warning = check_plugin_compat(&dep_pkg_path).await;
     if let Some(ref warning) = compat_warning {
@@ -1367,7 +1430,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
 }
 
 /// Our shim's OpenClaw compat version. Must match sdk-shim/package.json and compat-runtime.ts.
-const SHIM_COMPAT_VERSION: &str = "2026.3.22";
+const SHIM_COMPAT_VERSION: &str = "2026.3.25";
 
 /// Check if installed plugin's peerDependencies.openclaw is compatible with our shim.
 /// Returns a warning message if incompatible, None if OK.
@@ -1377,12 +1440,12 @@ async fn check_plugin_compat(pkg_json_path: &std::path::Path) -> Option<String> 
     let peer_deps = pkg.get("peerDependencies")?.as_object()?;
     let required = peer_deps.get("openclaw")?.as_str()?;
 
-    // Parse requirement like ">=2026.3.22" or "*"
+    // Parse requirement like ">=2026.3.25" or "*"
     if required == "*" || required.is_empty() {
         return None; // Any version — compatible
     }
 
-    // Extract version number from semver-like constraint (e.g., ">=2026.3.22" → "2026.3.22")
+    // Extract version number from semver-like constraint (e.g., ">=2026.3.25" → "2026.3.25")
     let required_ver = required
         .trim_start_matches(|c: char| !c.is_ascii_digit())
         .split('-')
