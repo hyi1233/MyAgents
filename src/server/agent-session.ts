@@ -551,15 +551,16 @@ let pendingResumeSessionAt: string | undefined;
 let rewindPromise: Promise<unknown> | null = null;
 
 // 当前 SDK session 的 UUID 集合（包含磁盘加载 + 运行时 SDK 输出）。
-// 主要用途：rewindFiles 的前置校验（UUID 不属于当前 session → 跳过 rewindFiles 调用）。
-// 注意：此集合不适合作为 resumeSessionAt 的唯一判断依据 — 磁盘加载的 UUID 可能已过期
-// （session 被重建过），需配合 liveSessionUuids 双层校验。
+// 用途：rewindFiles 前置校验 + resumeSessionAt 有效性判断（与 liveSessionUuids OR 联合）。
+// 过期防护（两层）：
+//   1. session 重建（!sessionRegistered）时在 startSession 清空
+//   2. SDK 拒绝 UUID（"No message found"）时逐条驱逐（见 error recovery）
 const currentSessionUuids = new Set<string>();
 
 // 仅由当前 SDK subprocess stdout 事件填充的 UUID 集合。
-// 当此集合非空时，表示 SDK subprocess 已经运行过并输出了消息 —— 这些 UUID 一定存在于
-// SDK 的 session JSONL 中，可安全用于 resumeSessionAt。
-// 当此集合为空（pre-warm 窗口期，SDK 尚未 system_init）时，回退到 currentSessionUuids。
+// 注意：resume 场景下 SDK 不重新输出旧历史 UUID，因此此集合是运行时子集而非完整集合。
+// resumeSessionAt 校验采用 OR 逻辑（liveSessionUuids || currentSessionUuids），
+// 不以任一集合为排他权威。
 const liveSessionUuids = new Set<string>();
 
 // ===== 持久 Session 门控 =====
@@ -4491,19 +4492,20 @@ export async function rewindSession(userMessageId: string): Promise<{
     persistMessagesToStorage();
 
     // 7. 设置下次 query 的对话截断点
-    //    双层 UUID 校验：
-    //    - liveSessionUuids（运行时 SDK stdout）非空时以它为准 —— UUID 一定在 SDK JSONL 中
-    //    - liveSessionUuids 为空（pre-warm 窗口期）时回退到 currentSessionUuids（含磁盘种子），
-    //      此时 catch block 的 "No message found" 恢复兜底防止过期 UUID 崩溃
+    //    UUID 有效性校验（OR 逻辑）：
+    //    - liveSessionUuids: SDK subprocess stdout 确认过的 UUID（权威但不完整 — resume 后
+    //      SDK 不会重新输出旧历史的 UUID）
+    //    - currentSessionUuids: 包含磁盘种子 + 运行时 UUID（覆盖 resume 前的历史）
+    //    - 任一集合包含即为有效。过期 UUID 安全性由 session 重建时清空
+    //      currentSessionUuids（!sessionRegistered → clear）保证。
     //    - 两者都不包含 → session 被重建过，旧 UUID 无意义，创建新 session
-    const uuidIsLive = lastAssistantUuid && liveSessionUuids.size > 0
-      ? liveSessionUuids.has(lastAssistantUuid)     // 权威：SDK subprocess 确认过
-      : lastAssistantUuid && currentSessionUuids.has(lastAssistantUuid); // 回退：磁盘种子
+    const uuidIsLive = lastAssistantUuid
+      && (liveSessionUuids.has(lastAssistantUuid) || currentSessionUuids.has(lastAssistantUuid));
     if (uuidIsLive) {
       pendingResumeSessionAt = lastAssistantUuid;
     } else {
       if (lastAssistantUuid) {
-        console.warn(`[agent] rewind: skipping resumeSessionAt — UUID ${lastAssistantUuid} not in ${liveSessionUuids.size > 0 ? 'live' : 'current'} session (stale from disk/previous session)`);
+        console.warn(`[agent] rewind: skipping resumeSessionAt — UUID ${lastAssistantUuid} not in live(${liveSessionUuids.size}) or current(${currentSessionUuids.size}) session (stale/rebuilt)`);
       }
       pendingResumeSessionAt = undefined;
       sessionRegistered = false;
@@ -5953,8 +5955,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Keep sessionRegistered=true — the session itself exists, only the UUID is wrong.
     // The retry will use `resume: sessionId` without resumeSessionAt, loading all messages.
     if (errorMessage.includes('No message found with message.uuid') && sessionRegistered) {
+      const rejectedUuid = pendingResumeSessionAt;
       console.warn(`[agent] resumeSessionAt UUID rejected by SDK — clearing rewind anchor, retry will resume with full history`);
       pendingResumeSessionAt = undefined;
+      // Evict the rejected UUID from currentSessionUuids so subsequent rewinds don't
+      // re-accept it via the OR logic. Without this, the stale UUID stays in the cache
+      // and a future rewind to the same point would re-trigger the same SDK error.
+      if (rejectedUuid) {
+        currentSessionUuids.delete(rejectedUuid);
+      }
       // Don't modify sessionRegistered — session exists, just the UUID is invalid.
       // Don't return — let pre-warm retry (finally block) handle recovery.
       // For non-pre-warm (user message triggered): fall through to error broadcast.
