@@ -51,11 +51,16 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 ## 核心架构约束
 
-### 开发前置要求
+### 第一原则：架构延续性
 
-进行新功能开发或模块重构时，MUST 先阅读整体架构文档 @specs/tech_docs/architecture.md ，从宏观视角理解系统分层、模块边界和数据流，避免局部修改破坏全局设计。对接外部 SDK/插件时，MUST 先读源码确认接口约定（函数签名、config schema、返回值格式），再写适配层。
+**每个功能都在已有架构上生长，而不是另起炉灶。** 项目已有成熟的分层设计、通信模式、安全约束和前端规范。新功能 MUST 复用现有模块和模式（如 `local_http`、`process_cmd`、`broadcast()`、`awaitSessionTermination()`），禁止为单点需求发明新的技术方案。
 
-开发前端界面时，MUST 先阅读项目设计系统（Token/组件/页面规范）：@specs/guides/design_guide.md ，遵循设计系统，并参考行业最佳交互方式进行设计开发。
+开发前 MUST 做的三件事：
+1. **读架构文档** @specs/tech_docs/architecture.md — 理解系统分层、模块边界、数据流
+2. **读设计规范** @specs/guides/design_guide.md — 遵循 Token/组件/页面规范（前端）
+3. **搜索现有实现** — 先在代码库中搜索类似功能是否已有模式，复用而非重建
+
+如果需求确实需要架构变更（新的通信模式、新的状态管理方式、新的进程类型），MUST 先与用户讨论方案，不得自行引入。对接外部 SDK/插件时，MUST 先读源码确认接口约定（函数签名、config schema、返回值格式），再写适配层。
 
 ### Tab-scoped 隔离
 
