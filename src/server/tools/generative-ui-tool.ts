@@ -3,8 +3,8 @@
 //
 // Architecture:
 //   1. widget_read_me MCP tool — On-demand design guideline loader (per-module)
-//      Returns design system + instructions to output <widget> tags in text
-//   2. AI outputs <widget title="...">HTML</widget> tags in regular text response
+//      Returns design system + instructions to output <generative-ui-widget> tags in text
+//   2. AI outputs <generative-ui-widget title="...">HTML</generative-ui-widget> tags in regular text response
 //   3. Frontend parses tags from chat:message-chunk stream → renders in sandbox iframe
 //
 // Why text tags instead of MCP tool_use:
@@ -25,7 +25,7 @@ Widgets render inline in the chat message flow. They must feel like a natural pa
 - **Seamless**: background transparent, typography matches surrounding text
 - **Flat**: no gradients, mesh backgrounds, noise textures, drop shadows, blur, glow
 - **Compact**: show essential content inline, explain the rest in your text response
-- **Text goes in response, visuals go in \`<widget>\` tags**: all explanatory text must be OUTSIDE the widget tags
+- **Text goes in response, visuals go in \`<generative-ui-widget>\` tags**: all explanatory text must be OUTSIDE the widget tags
 
 ## Streaming rules
 HTML streams token by token. Structure for progressive rendering:
@@ -264,19 +264,19 @@ function buildReadMeContent(modules: string[]): string {
 
 // ===================================================================
 // Output Format Section (prepended to all widget_read_me responses)
-// Teaches the AI to output <widget> tags in text instead of tool calls
+// Teaches the AI to output <generative-ui-widget> tags in text instead of tool calls
 // ===================================================================
 
 const SECTION_OUTPUT_FORMAT = `# How to Output Widgets
 
 ## Output format
-To create a widget, output a \`<widget>\` tag directly in your text response (NOT as a tool call).
+To create a widget, output a \`<generative-ui-widget>\` tag directly in your text response (NOT as a tool call).
 The frontend will detect the tag, extract the HTML, and render it in a sandboxed iframe inline in the conversation.
 
 \`\`\`
 Your explanatory text here...
 
-<widget title="snake_case_title">
+<generative-ui-widget>
 <style>
   .widget { font-family: system-ui, sans-serif; color: var(--widget-text); padding: 16px; }
 </style>
@@ -286,21 +286,21 @@ Your explanatory text here...
 <script>
   // Interactive logic. Runs after all HTML is rendered.
 </script>
-</widget>
+</generative-ui-widget>
 
 More explanatory text here...
 \`\`\`
 
 ## Rules
-- The \`<widget>\` tag MUST have a \`title\` attribute (snake_case identifier)
+- The \`<generative-ui-widget>\` tag can optionally have a \`title\` attribute (snake_case identifier)
 - Content inside is a self-contained HTML fragment — NO <!DOCTYPE>, <html>, <head>, <body>
 - Structure for streaming: <style> first (short) → content HTML → <script> last
-- All explanatory text goes OUTSIDE the <widget> tags (in normal markdown)
+- All explanatory text goes OUTSIDE the <generative-ui-widget> tags (in normal markdown)
 - You can output multiple widgets in a single response
 - The widget tag renders inline with your text — like an embedded figure
 
 ## When to use — route on the verb, not the noun
-- "Show me / visualize / chart / graph / plot" → use <widget>
+- "Show me / visualize / chart / graph / plot" → use <generative-ui-widget>
 - Data visualization: charts, graphs, trend lines, comparisons (Chart.js)
 - Architecture/flow diagrams: system architecture, data flow, process flows (SVG)
 - Interactive explainers: calculators, converters, sliders, live demos
@@ -318,7 +318,7 @@ More explanatory text here...
 // ===================================================================
 
 const READ_ME_DESCRIPTION = `Load the design guidelines for creating interactive visual widgets.
-You MUST call this before outputting any <widget> tags. It returns the design system (color palette, component specs, layout rules) and output format instructions.
+You MUST call this before outputting any <generative-ui-widget> tags. It returns the design system (color palette, component specs, layout rules) and output format instructions.
 
 Available modules:
 - chart: Chart.js patterns, data colors, legends, dashboard layouts

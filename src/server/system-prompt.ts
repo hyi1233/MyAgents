@@ -49,7 +49,7 @@ When you receive one, follow its instructions.
 
 const TMPL_GENERATIVE_UI = `<myagents-generative-ui>
 你可以在对话中生成交互式可视化内容（图表、架构图、流程图、交互式工具等）。
-流程：先调用 widget_read_me 工具加载设计指南和输出格式说明，然后按照指南在文本中使用 <widget> 标签输出可视化内容。
+流程：先调用 widget_read_me 工具加载设计指南和输出格式说明，然后按照指南在文本中使用 <generative-ui-widget> 标签输出可视化内容。
 当用户的请求适合用可视化形式呈现时，主动使用，而不是只输出纯文本描述。
 不要对简单的文本回答或普通代码展示使用此功能。
 </myagents-generative-ui>`;

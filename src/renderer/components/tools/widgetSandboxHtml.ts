@@ -92,10 +92,10 @@ body { font-family: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', 
     if (e.data.type === 'widget:finalize') {
       finalized = true;
       var newHtml = e.data.html;
-      if (newHtml !== currentHtml) {
-        root.innerHTML = newHtml;
-        currentHtml = newHtml;
-      }
+      // Always rebuild DOM on finalize — streaming updates had scripts stripped,
+      // so we need to set the full HTML (with scripts) and execute them.
+      root.innerHTML = newHtml;
+      currentHtml = newHtml;
       runScripts();
       reportHeight();
     }

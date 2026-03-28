@@ -179,11 +179,14 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
     }
   }, [isStreaming, widgetCode, sendToIframe]);
 
+  const showSkeleton = isStreaming && widgetCode.length < 50;
+
   return (
     <div
-      className="relative w-full overflow-hidden rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)]"
+      className="relative w-full overflow-hidden"
       style={{
-        height: `${height}px`,
+        minHeight: showSkeleton ? '60px' : undefined,
+        height: showSkeleton ? undefined : `${height}px`,
         transition: firstResize ? 'none' : 'height 0.15s ease',
       }}
     >
@@ -194,11 +197,18 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
         onLoad={onIframeLoad}
         title={title}
         className="h-full w-full border-none"
-        style={{ display: 'block' }}
+        style={{ display: showSkeleton ? 'none' : 'block' }}
       />
-      {/* Streaming overlay */}
-      {isStreaming && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-[var(--paper-elevated)] to-transparent" />
+      {/* Skeleton: shown before real content arrives */}
+      {showSkeleton && (
+        <div className="space-y-2.5 py-2">
+          <div className="h-3 w-3/4 animate-[shimmer-slide_2s_ease-in-out_infinite] rounded bg-gradient-to-r from-[var(--paper-inset)] via-[var(--paper)] to-[var(--paper-inset)] bg-[length:200%_100%]" />
+          <div className="h-3 w-1/2 animate-[shimmer-slide_2s_ease-in-out_infinite_0.2s] rounded bg-gradient-to-r from-[var(--paper-inset)] via-[var(--paper)] to-[var(--paper-inset)] bg-[length:200%_100%]" />
+        </div>
+      )}
+      {/* Streaming fade — subtle gradient at the bottom while content grows */}
+      {isStreaming && !showSkeleton && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-[var(--paper)] to-transparent" />
       )}
     </div>
   );

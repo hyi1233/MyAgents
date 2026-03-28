@@ -468,18 +468,13 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                               </div>
                             );
                           }
-                          // Widget segment — render inline via WidgetRenderer
+                          // Widget segment — render seamlessly inline (no frame, no title header)
                           return (
-                            <div key={`w-${si}`} className="w-full px-1 my-1.5">
-                              <div className="mb-1 flex items-center gap-1.5">
-                                <span className="text-[13px] font-medium text-[var(--ink-muted)]">
-                                  {seg.title.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
-                                </span>
-                              </div>
+                            <div key={`w-${si}`} className="w-full px-1">
                               <WidgetRenderer
                                 widgetCode={seg.code}
                                 isStreaming={!seg.isComplete}
-                                title={seg.title}
+                                title={seg.title || 'widget'}
                               />
                             </div>
                           );
