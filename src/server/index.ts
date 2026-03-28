@@ -1831,10 +1831,11 @@ async function main() {
 
         try {
           console.log(`[cron] execute taskId=${taskId} sessionId=${currentSessionId} interval=${intervalMinutes}min exec#=${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
-          // Send the user's original prompt (clean, without wrapper templates)
+          // Wrap cron prompt so AI recognizes it as system-triggered (not a real-time human message)
+          const wrappedPrompt = `<system-reminder>\n<CRON_TASK>\n${prompt}\n</CRON_TASK>\n</system-reminder>`;
           // Cron tasks are unattended — bypass all permissions so tool requests
           // don't block indefinitely waiting for a user who isn't present.
-          await enqueueUserMessage(prompt, [], 'fullAgency', model, providerEnv);
+          await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', model, providerEnv);
           // Reset scenario after enqueue — already consumed by startStreamingSession()
           resetInteractionScenario();
           return jsonResponse({ success: true });
@@ -1938,11 +1939,12 @@ async function main() {
           console.log(`[cron] execute-sync taskId=${taskId} runMode=${effectiveRunMode} interval=${intervalMinutes}min exec#${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
 
           // Enqueue the message (this starts the async execution)
-          // Send the user's original prompt (clean, without wrapper templates)
+          // Wrap cron prompt so AI recognizes it as system-triggered (not a real-time human message)
+          const wrappedPrompt = `<system-reminder>\n<CRON_TASK>\n${prompt}\n</CRON_TASK>\n</system-reminder>`;
           console.log('[cron] execute-sync: about to enqueue user message');
           // Cron tasks are unattended — bypass all permissions so tool requests
           // (e.g. Bash) don't block forever waiting for human approval.
-          const enqueueResult = await enqueueUserMessage(prompt, [], 'fullAgency', model, providerEnv);
+          const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', model, providerEnv);
           console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
           // Wait for session to become idle (execution complete)

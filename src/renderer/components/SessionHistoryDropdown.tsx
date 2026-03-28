@@ -16,6 +16,7 @@ import type { SessionTag } from '@/hooks/useTaskCenterData';
 import SessionStatsModal from './SessionStatsModal';
 import SessionTagBadge from './SessionTagBadge';
 import Tip from './Tip';
+import { useToast } from './Toast';
 
 interface SessionHistoryDropdownProps {
     agentDir: string;
@@ -39,6 +40,7 @@ export default function SessionHistoryDropdown({
     isOpen,
     onClose,
 }: SessionHistoryDropdownProps) {
+    const toast = useToast();
     const [sessions, setSessions] = useState<FetchState>(null);
     const [cronTasks, setCronTasks] = useState<CronTaskFetchState>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
@@ -289,7 +291,6 @@ export default function SessionHistoryDropdown({
 
     // Export session as .md file
     const [exportingId, setExportingId] = useState<string | null>(null);
-    const [exportSuccess, setExportSuccess] = useState<string | null>(null);
 
     /** Extract text content from assistant message (stored as JSON array of content blocks) */
     const extractAssistantText = (content: string): string => {
@@ -312,7 +313,7 @@ export default function SessionHistoryDropdown({
         try {
             const data = await getSessionDetails(session.id);
             if (!data || data.messages.length === 0) {
-                setDeleteError('该对话暂无内容可导出');
+                toast.error('该对话暂无内容可导出');
                 return;
             }
 
@@ -361,15 +362,22 @@ export default function SessionHistoryDropdown({
             a.click();
             URL.revokeObjectURL(url);
 
-            // Show success toast (auto-dismiss after 3s)
-            setExportSuccess(`已导出到下载目录：${fileName}`);
-            setTimeout(() => setExportSuccess(null), 3000);
+            // Show global toast with full download path
+            try {
+                const { downloadDir, join: joinPath } = await import('@tauri-apps/api/path');
+                const dlDir = await downloadDir();
+                const fullPath = await joinPath(dlDir, fileName);
+                toast.success(`已导出：${fullPath}`);
+            } catch {
+                // Fallback if Tauri path API unavailable (browser dev mode)
+                toast.success(`已导出到下载目录：${fileName}`);
+            }
         } catch {
-            setDeleteError('导出失败，请重试');
+            toast.error('导出失败，请重试');
         } finally {
             setExportingId(null);
         }
-    }, []);
+    }, [toast]);
 
     const formatTime = (isoString: string) => {
         const date = new Date(isoString);
@@ -408,13 +416,6 @@ export default function SessionHistoryDropdown({
                 {deleteError && (
                     <div className="border-b border-[var(--error)]/20 bg-[var(--error)]/10 px-4 py-2 text-xs text-[var(--error)]">
                         {deleteError}
-                    </div>
-                )}
-
-                {/* Export success toast */}
-                {exportSuccess && (
-                    <div className="border-b border-[var(--success)]/20 bg-[var(--success)]/10 px-4 py-2 text-xs text-[var(--success)]">
-                        {exportSuccess}
                     </div>
                 )}
 
@@ -498,7 +499,7 @@ export default function SessionHistoryDropdown({
                                             </>
                                         ) : (
                                             <>
-                                                <Tip label="导出对话内容为 md 文件">
+                                                <Tip label="导出对话内容为 md 文件" position="bottom">
                                                     <button
                                                         aria-label="导出"
                                                         className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
@@ -508,7 +509,7 @@ export default function SessionHistoryDropdown({
                                                         <Download className="h-3.5 w-3.5" />
                                                     </button>
                                                 </Tip>
-                                                <Tip label="查看统计">
+                                                <Tip label="查看统计" position="bottom">
                                                     <button
                                                         aria-label="查看统计"
                                                         className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
@@ -519,7 +520,7 @@ export default function SessionHistoryDropdown({
                                                 </Tip>
                                                 {/* Disable delete for sessions with running cron tasks */}
                                                 {tags.some(t => t.type === 'cron') ? (
-                                                    <Tip label="请先停止循环任务后再删除">
+                                                    <Tip label="请先停止循环任务后再删除" position="bottom">
                                                         <button
                                                             aria-label="删除（请先停止循环任务）"
                                                             className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 group-hover:opacity-40"
@@ -529,7 +530,7 @@ export default function SessionHistoryDropdown({
                                                         </button>
                                                     </Tip>
                                                 ) : (
-                                                    <Tip label="删除">
+                                                    <Tip label="删除" position="bottom">
                                                         <button
                                                             aria-label="删除"
                                                             className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--error-bg)] hover:text-[var(--error)] group-hover:opacity-100"
