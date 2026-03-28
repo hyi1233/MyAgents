@@ -44,9 +44,8 @@ export default function WidgetTool({ tool }: WidgetToolProps) {
   const title = parsedInput?.title ?? 'widget';
   const widgetCode = parsedInput?.widget_code ?? '';
   const isStreaming = !!(tool.isLoading && !tool.result);
-  const isError = tool.result?.startsWith('Error') || false;
 
-  // Check error from result
+  // Check error from result (MCP results arrive as JSON-wrapped content array)
   const errorMessage = useMemo(() => {
     if (!tool.result) return null;
     const unwrapped = unwrapMcpResult(tool.result);
@@ -85,7 +84,7 @@ export default function WidgetTool({ tool }: WidgetToolProps) {
   }
 
   // Error state
-  if (isError || errorMessage) {
+  if (errorMessage) {
     return (
       <div className="my-1.5 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--error)]/20 bg-[var(--error-bg)]">
         <div className="flex items-center gap-2 px-3 py-2">

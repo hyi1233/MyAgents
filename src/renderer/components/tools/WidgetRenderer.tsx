@@ -110,7 +110,7 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
           break;
 
         case 'widget:resize': {
-          const h = Math.max(MIN_HEIGHT, e.data.height as number);
+          const h = Math.max(MIN_HEIGHT, Math.min(4000, Number(e.data.height) || MIN_HEIGHT));
           setHeight(h);
           setCacheHeight(cacheKey, h);
           if (e.data.first) setFirstResize(false);
@@ -118,8 +118,8 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
         }
 
         case 'widget:link':
-          if (e.data.href) {
-            openExternal(e.data.href);
+          if (e.data.href && /^https?:|^mailto:/i.test(String(e.data.href))) {
+            openExternal(String(e.data.href));
           }
           break;
       }

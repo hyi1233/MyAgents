@@ -369,7 +369,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
           colors: {
             border: 'border-amber-200/60 dark:border-amber-500/30',
             bg: 'bg-amber-50/80 dark:bg-amber-500/10',
-            text: 'text-amber-700 dark:text-amber-400',
+            text: 'text-amber-600 dark:text-amber-400',
             hoverBg: 'hover:bg-amber-100/80 dark:hover:bg-amber-500/20',
             chevron: 'text-amber-400 dark:text-amber-500',
             iconColor: 'text-amber-500 dark:text-amber-400'

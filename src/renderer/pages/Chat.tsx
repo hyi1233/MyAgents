@@ -311,6 +311,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         // 1. Sync MCP configuration
         if (initialMessage.mcpEnabledServers?.length) {
           const allServers = await getAllMcpServers();
+          syncMcpServerNames(allServers);
           const globalEnabled = await getEnabledMcpServerIds();
           const effective = allServers.filter(s =>
             globalEnabled.includes(s.id) && initialMessage.mcpEnabledServers!.includes(s.id)
