@@ -1,5 +1,5 @@
 // Agent tasks section — display cron tasks associated with this agent, clickable to open detail
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { AgentConfig } from '../../../../shared/types/agent';
 import { getWorkspaceCronTasks, deleteCronTask, startCronTask, stopCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
@@ -108,19 +108,31 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
     }
   }, [loadTasks]);
 
+  // Only show active (running) tasks, sorted by date descending (newest first)
+  const activeTasks = useMemo(() =>
+    tasks
+      .filter(t => t.status === 'running')
+      .sort((a, b) => {
+        const dateA = new Date(a.updatedAt ?? a.createdAt).getTime();
+        const dateB = new Date(b.updatedAt ?? b.createdAt).getTime();
+        return dateB - dateA;
+      }),
+    [tasks],
+  );
+
   return (
     <div className="space-y-3">
       <h3 className="text-base font-medium text-[var(--ink)]">
         定时任务
       </h3>
 
-      {tasks.length === 0 ? (
+      {activeTasks.length === 0 ? (
         <p className="text-xs text-[var(--ink-subtle)]">
-          暂无与此 Agent 关联的定时任务。
+          暂无运行中的定时任务。
         </p>
       ) : (
         <div className="space-y-2">
-          {tasks.map(task => (
+          {activeTasks.map(task => (
             <button
               key={task.id}
               type="button"

@@ -5,6 +5,8 @@ import { track } from '@/analytics';
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
 import BlockGroup from '@/components/BlockGroup';
 import Markdown from '@/components/Markdown';
+import WidgetRenderer from '@/components/tools/WidgetRenderer';
+import { parseWidgetTags, hasWidgetTags } from '@/components/tools/widgetTagParser';
 import Tip from '@/components/Tip';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
@@ -448,9 +450,39 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
         <article className="w-full px-3 py-2">
           <div className="space-y-3">
             {groupedBlocks.map((item, index) => {
-              // Single text block
+              // Single text block — may contain <widget> tags for inline rendering
               if (!Array.isArray(item)) {
                 if (item.type === 'text' && item.text) {
+                  // Check for <widget> tags in the text
+                  if (hasWidgetTags(item.text)) {
+                    const segments = parseWidgetTags(item.text);
+                    return (
+                      <div key={index} className="w-full space-y-3">
+                        {segments.map((seg, si) => {
+                          if (seg.type === 'text') {
+                            return (
+                              <div key={`t-${si}`} className="flex justify-start w-full px-1 py-1 select-none">
+                                <div className="w-full max-w-none text-[var(--ink)] select-text">
+                                  <Markdown>{seg.content}</Markdown>
+                                </div>
+                              </div>
+                            );
+                          }
+                          // Widget segment — render seamlessly inline (no frame, no title header)
+                          return (
+                            <div key={`w-${si}`} className="w-full px-1">
+                              <WidgetRenderer
+                                widgetCode={seg.code}
+                                isStreaming={!seg.isComplete}
+                                title={seg.title || 'widget'}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  }
+                  // Plain text — no widget tags
                   return (
                     <div
                       key={index}

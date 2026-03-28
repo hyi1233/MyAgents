@@ -17,6 +17,7 @@ import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from '.
 // Side-effect imports: each registers itself in the builtin MCP registry
 import './tools/gemini-image-tool';
 import './tools/edge-tts-tool';
+import { generativeUiServer } from './tools/generative-ui-tool';
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
@@ -1212,6 +1213,12 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
     return { allowed: false, reason: '定时任务管理 API 不可用' };
   }
 
+  // Special case: generative-ui is a built-in MCP server for desktop sessions
+  // Context-injected (not in user's MCP list), always allowed when injected
+  if (serverId === 'generative-ui') {
+    return { allowed: true };
+  }
+
   // Case 1: MCP not set (null) - allow all (backward compatible)
   if (currentMcpServers === null) {
     return { allowed: true };
@@ -1337,6 +1344,13 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
   if (bridgeToolsCtx && bridgeServer) {
     result['im-bridge-tools'] = bridgeServer;
     console.log(`[agent] Added im-bridge-tools MCP server for plugin ${bridgeToolsCtx.pluginId}`);
+  }
+
+  // Add Generative UI tool for desktop sessions (not IM/Cron — they can't render widgets)
+  // Use currentScenario (consistent with system-prompt.ts generativeUiEnabled check)
+  if (currentScenario.type === 'desktop') {
+    result['generative-ui'] = generativeUiServer as typeof cronToolsServer;
+    console.log('[agent] Added generative-ui MCP server');
   }
 
   // --- Pattern 2: Builtin registry MCPs (in-process, user-toggled) ---
@@ -4510,6 +4524,7 @@ export async function rewindSession(userMessageId: string): Promise<{
       pendingResumeSessionAt = undefined;
       sessionRegistered = false;
       sessionId = randomUUID();
+      hasInitialPrompt = false; // Reset so next message creates metadata for the new session
     }
 
     // 8. 预热下次 session
@@ -4813,6 +4828,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           playwrightStorageEnabled: (currentMcpServers ?? []).some(
             s => s.id === 'playwright' && (s.args ?? []).some((a: string) => /^--caps=.*\bstorage\b/.test(a))
           ),
+          generativeUiEnabled: currentScenario.type === 'desktop',
         }),
       },
       cwd: agentDir,
@@ -4858,9 +4874,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Special case: built-in trusted MCP servers (cron-tools, im-cron)
+        // Special case: built-in trusted MCP servers (cron-tools, im-cron, generative-ui)
         // When allowed by checkMcpToolPermission, skip user confirmation entirely
-        if (toolName.startsWith('mcp__cron-tools__') || toolName.startsWith('mcp__im-cron__')) {
+        if (toolName.startsWith('mcp__cron-tools__') || toolName.startsWith('mcp__im-cron__') || toolName.startsWith('mcp__generative-ui__')) {
           console.log(`[permission] built-in tool auto-allowed: ${toolName}`);
           return {
             behavior: 'allow' as const,
