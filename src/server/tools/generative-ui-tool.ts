@@ -48,7 +48,15 @@ HTML streams token by token. Structure for progressive rendering:
 - Responsive: percentage widths, viewBox for SVG. Min width 300px.
 - Match the conversation language for all text content.
 
+## Pre-styled elements & utility classes
+The widget sandbox provides pre-styled form elements and layout utilities:
+- Form elements (input, select, button, range slider, textarea) are automatically styled — write bare HTML tags
+- Button with class "primary" gets accent color: \`<button class="primary">Submit</button>\`
+- Layout classes available: .flex, .flex-col, .grid, .grid-2, .grid-3, .grid-4, .gap-2/3/4/6, .p-2/3/4, .w-full, .text-center, .rounded, .rounded-lg, .border, .bg-elevated, .bg-inset, .text-muted, .text-secondary, .text-accent, .stat-card, .stat-value, .stat-label
+- Use these classes freely — they are scoped to the widget iframe
+
 ## CSS variables (auto light/dark — always use these, never hardcode colors)
+EXCEPTION: Chart.js <canvas> cannot use CSS variables — use hex from color palette instead.
 ### Layout
 - --widget-text: primary text
 - --widget-text-secondary: secondary/muted text
@@ -104,79 +112,112 @@ Colors encode meaning, not sequence. Don't cycle like a rainbow.
 
 const SECTION_CHART = `# Charts — Chart.js patterns
 
-## Canvas setup
-Always wrap canvas in a sized container. Chart.js reads container dimensions.
+## CRITICAL: Canvas cannot use CSS variables — use hex from color palette
+Chart.js renders on <canvas>, which does NOT support CSS variables. Always use hex colors directly.
+
+## Complete working template
 \`\`\`html
-<div style="width:100%;max-width:600px;margin:0 auto">
-  <canvas id="myChart"></canvas>
+<div style="position:relative;width:100%;height:300px"><canvas id="c"></canvas></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js" onload="init()"></script>
+<script>
+var chart;
+function init(){
+  chart=new Chart(document.getElementById('c'),{
+    type:'line',
+    data:{labels:['Jan','Feb','Mar','Apr','May'],datasets:[{
+      data:[30,45,28,50,42],
+      borderColor:'#c26d3a',backgroundColor:'rgba(194,109,58,0.1)',fill:true,tension:0.3
+    }]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{y:{grid:{color:'rgba(0,0,0,0.06)'}},x:{grid:{display:false}}}}
+  });
+}
+if(window.Chart)init();
+</script>
+\`\`\`
+
+## Color hex values for Chart.js (from palette)
+- Warm: borderColor '#c26d3a', bg 'rgba(194,109,58,0.1)'
+- Teal: borderColor '#2e8b6e', bg 'rgba(46,139,110,0.1)'
+- Coral: borderColor '#c25030', bg 'rgba(194,80,48,0.1)'
+- Sky: borderColor '#3a7ab8', bg 'rgba(58,122,184,0.1)'
+- Amber: borderColor '#b88018', bg 'rgba(184,128,24,0.1)'
+- Stone (neutral): borderColor '#857d74', bg 'rgba(133,125,116,0.1)'
+
+## Chart rules
+- Height on wrapper div, responsive:true, maintainAspectRatio:false
+- borderRadius:6 for bars, tension:0.3 for smooth lines
+- Use CDN onload pattern: \`onload="init()"\` + \`if(window.Chart)init();\` fallback
+- Multiple charts: unique canvas IDs (c1, c2...)
+- Round every displayed number
+
+## Interactive controls MUST update chart
+Controls that modify data MUST call chart.update() after changes:
+\`\`\`js
+function update(){
+  var v=+document.getElementById('slider').value;
+  chart.data.datasets[0].data = baseData.map(d => Math.round(d * v / 50));
+  document.getElementById('display').textContent = v;
+  chart.update();
+}
+\`\`\`
+
+## Metric dashboard pattern
+Stat cards above chart. Use .stat-card, .stat-value, .stat-label classes (pre-styled).
+\`\`\`html
+<div class="grid grid-3 gap-3 mb-4">
+  <div class="stat-card"><div class="stat-label">Total</div><div class="stat-value" id="total">¥0</div></div>
+  ...
 </div>
 \`\`\`
 
-## Color usage
-- Use palette ramps at the 500 stop for data series fills (with 20% opacity for area)
-- Use 700 stop for line strokes and point borders
-- Grid lines: var(--widget-border) at 50% opacity
-- Axis labels: var(--widget-text-secondary)
-- Tooltips: var(--widget-bg-elevated) background, var(--widget-text) text
-
-## Legend
-- Use HTML legend (not Chart.js built-in) for styling control
-- Position below chart, centered, gap: 16px between items
-- Legend dot: 8px circle with series color, margin-right: 6px
-- Legend text: 12px, var(--widget-text-secondary)
-
 ## Number formatting
 - Use Intl.NumberFormat for locale-aware formatting
-- Abbreviate large numbers: 1,234,567 → 1.2M
-- Percentages: always show 1 decimal (e.g., 45.2%)
-
-## Dashboard layout (multiple charts)
-- Use CSS Grid: grid-template-columns: repeat(auto-fit, minmax(280px, 1fr))
-- Gap: 16px
-- Each chart card: var(--widget-bg-elevated) background, var(--widget-radius) border-radius, 16px padding
-- Card title: 13px, 600 weight, var(--widget-text)
-- Metric value: 24px, 600 weight, var(--widget-text)
-- Metric label: 11px, var(--widget-text-muted)`;
+- Abbreviate large numbers: 1,234,567 → 1.2M`;
 
 const SECTION_DIAGRAM = `# Diagrams — SVG patterns
 
 ## SVG setup
-- Always set viewBox. Width 100%, height auto.
-- Font: system-ui (matches parent). Calibrate text widths for system-ui metrics.
-- Use <defs> for markers (arrowheads) and reusable patterns.
+\`<svg width="100%" viewBox="0 0 680 H">\` — 680px fixed width. Adjust H to fit content + 40px buffer.
+Font: system-ui. Use <defs> for markers. One SVG per widget.
 
-## Box/node styling
-- Fill: palette 50 stop
-- Stroke: palette 500 stop, 1.5px
-- Border radius: 8px (rx="8")
-- Padding: 12px horizontal, 8px vertical
-- Title: 13px, 600 weight, palette 800 stop
-- Subtitle: 11px, 400 weight, palette 700 stop
-- Max 5 words per subtitle
+## Required arrow marker
+\`<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>\`
+
+## Node styling
+- Fill: palette 50 stop. Stroke: palette 500 stop, 1.5px. rx=12 for rounded corners
+- Title: 13px, 600 weight, palette 800 stop. Subtitle: 11px, palette 700 stop
+- Node width >= (chars × 8 + 40) px. Max 5 words per subtitle
 
 ## Connectors
-- Stroke: var(--widget-border-strong), 1.5px
-- Arrow marker: 8x6, filled with stroke color
-- Curved paths preferred (cubic bezier) over straight lines
-- Labels on connectors: 10px, var(--widget-text-muted), white background knockout
+- Stroke: 1.5px, palette 300 stop. Curved paths (cubic bezier) preferred
+- marker-end="url(#a)" for arrows. Labels: 10px, palette 600 stop
 
-## Layout rules
-- Horizontal tier: max 4 boxes at full width
-- Vertical spacing: 60-80px between tiers
-- Horizontal spacing: 24-40px between boxes
-- Center-align tiers, stagger connectors for clarity
+## Diagram type catalog — pick the best fit
 
-## Flowchart types
-| Type | When | Style |
-|------|------|-------|
-| Structural | "architecture", "components", "modules" | Boxes with hierarchy/containment |
-| Process | "flow", "pipeline", "steps", "workflow" | Left-to-right or top-to-bottom sequence |
-| Illustrative | "how does X work", "explain" | Visual metaphors, loose layout |
+| Type | When to use | Key pattern |
+|------|-------------|-------------|
+| Flowchart | "process", "steps", "flow" | Nodes left→right or top→bottom, straight arrows |
+| Timeline | "history", "evolution", "phases" | Horizontal axis line with event markers, stagger labels above/below |
+| Hierarchy | "architecture", "tree", "org chart" | Root at top, children below with vertical arrows |
+| Layered stack | "layers", "stack", "architecture" | Full-width horizontal bands, items inside each band |
+| Cycle | "loop", "feedback", "lifecycle" | 3-5 nodes in circular arrangement with curved arrows |
+| Comparison | "vs", "compare", "side by side" | Two parallel groups with matching rows |
+| Quadrant | "matrix", "2x2", "classify" | Two axes, four colored quadrant rects |
 
 ## Complexity budget
-- Max 4 boxes per horizontal tier
-- Max 3 tiers for simple diagrams, 5 for complex
-- 2 color ramps max per diagram`;
+- Max 4 nodes per row, max 5 tiers
+- 2-3 color ramps per diagram
+- Verify no arrow crosses unrelated nodes
+
+## Multi-widget narratives
+For complex topics, output MULTIPLE widgets of DIFFERENT types interleaved with text:
+1. Overview diagram (hierarchy/flowchart)
+2. Text explaining one aspect
+3. Detail widget (cycle/chart for that aspect)
+4. Text with quantitative insight
+5. Interactive Chart.js with controls`;
 
 const SECTION_INTERACTIVE = `# Interactive — UI component patterns
 
@@ -292,12 +333,14 @@ More explanatory text here...
 \`\`\`
 
 ## Rules
-- The \`<generative-ui-widget>\` tag can optionally have a \`title\` attribute (snake_case identifier)
 - Content inside is a self-contained HTML fragment — NO <!DOCTYPE>, <html>, <head>, <body>
 - Structure for streaming: <style> first (short) → content HTML → <script> last
 - All explanatory text goes OUTSIDE the <generative-ui-widget> tags (in normal markdown)
-- You can output multiple widgets in a single response
-- The widget tag renders inline with your text — like an embedded figure
+- You can output multiple widgets in a single response — interleave with text
+- Each widget should be focused and ≤ 4000 chars. Split complex topics into multiple widgets.
+- CDN script loading: use \`onload="init()"\` + \`if(window.Lib)init();\` fallback pattern
+- Pre-styled form elements: bare <input>, <button>, <select>, <textarea> are automatically styled. Use class="primary" for accent buttons.
+- Layout utility classes available: .flex, .grid, .grid-2, .grid-3, .gap-3, .gap-4, .p-3, .p-4, .rounded, .rounded-lg, .border, .bg-elevated, .stat-card, .stat-value, .stat-label
 
 ## When to use — route on the verb, not the noun
 - "Show me / visualize / chart / graph / plot" → use <generative-ui-widget>

@@ -22,6 +22,65 @@ ${cssVarsBlock}
 html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
 body { font-family: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 16px; line-height: 1.6; color: var(--widget-text); }
 #root { min-height: 20px; }
+
+/* Pre-styled form elements — AI writes bare tags, they look polished */
+input[type="text"], input[type="number"], select, textarea {
+  font-family: inherit; font-size: 14px; line-height: 1.5;
+  padding: 8px 12px; border: 1px solid var(--widget-border); border-radius: 8px;
+  background: var(--widget-bg-elevated); color: var(--widget-text);
+  outline: none; transition: border-color 0.15s;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--widget-accent); }
+input[type="range"] {
+  width: 100%; height: 6px; -webkit-appearance: none; appearance: none;
+  background: var(--widget-border); border-radius: 3px; outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--widget-accent); cursor: pointer; border: 2px solid white;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+}
+button {
+  font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  padding: 8px 16px; border-radius: 8px; border: 1px solid var(--widget-border);
+  background: var(--widget-bg-elevated); color: var(--widget-text);
+  transition: all 0.15s;
+}
+button:hover { border-color: var(--widget-border-strong); }
+button.primary {
+  background: var(--widget-accent); color: white; border-color: var(--widget-accent);
+}
+button.primary:hover { opacity: 0.9; }
+label { font-size: 12px; font-weight: 600; color: var(--widget-text-secondary); display: block; margin-bottom: 4px; }
+
+/* Layout utilities — AI can use these classes */
+.flex { display: flex; } .flex-col { flex-direction: column; }
+.items-center { align-items: center; } .justify-center { justify-content: center; } .justify-between { justify-content: space-between; }
+.gap-2 { gap: 8px; } .gap-3 { gap: 12px; } .gap-4 { gap: 16px; } .gap-6 { gap: 24px; }
+.grid { display: grid; }
+.grid-2 { grid-template-columns: repeat(2, 1fr); } .grid-3 { grid-template-columns: repeat(3, 1fr); } .grid-4 { grid-template-columns: repeat(4, 1fr); }
+.p-2 { padding: 8px; } .p-3 { padding: 12px; } .p-4 { padding: 16px; }
+.px-3 { padding-left: 12px; padding-right: 12px; } .py-2 { padding-top: 8px; padding-bottom: 8px; }
+.m-0 { margin: 0; } .mt-2 { margin-top: 8px; } .mt-4 { margin-top: 16px; } .mb-2 { margin-bottom: 8px; } .mb-4 { margin-bottom: 16px; }
+.w-full { width: 100%; } .text-center { text-align: center; }
+.text-sm { font-size: 13px; } .text-xs { font-size: 11px; } .text-lg { font-size: 18px; } .text-xl { font-size: 22px; } .text-2xl { font-size: 28px; }
+.font-semibold { font-weight: 600; } .font-normal { font-weight: 400; }
+.rounded { border-radius: 8px; } .rounded-lg { border-radius: 12px; }
+.border { border: 1px solid var(--widget-border); }
+.bg-elevated { background: var(--widget-bg-elevated); }
+.bg-inset { background: var(--widget-bg-inset); }
+.text-muted { color: var(--widget-text-muted); }
+.text-secondary { color: var(--widget-text-secondary); }
+.text-accent { color: var(--widget-accent); }
+.overflow-hidden { overflow: hidden; }
+.relative { position: relative; } .absolute { position: absolute; }
+.flex-wrap { flex-wrap: wrap; } .flex-1 { flex: 1; }
+.cursor-pointer { cursor: pointer; }
+
+/* Stat card pattern */
+.stat-card { background: var(--widget-bg-elevated); border-radius: 12px; padding: 16px; border: 1px solid var(--widget-border); }
+.stat-value { font-size: 24px; font-weight: 600; color: var(--widget-text); }
+.stat-label { font-size: 11px; color: var(--widget-text-muted); margin-top: 4px; }
 </style>
 </head>
 <body>
