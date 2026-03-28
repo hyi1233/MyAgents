@@ -179,17 +179,20 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
     }
   }, [isStreaming, widgetCode, sendToIframe]);
 
-  const showSkeleton = isStreaming && widgetCode.length < 50;
+  // Show skeleton until iframe reports real content height (> MIN_HEIGHT)
+  const hasVisibleContent = height > MIN_HEIGHT;
+  const showSkeleton = isStreaming && !hasVisibleContent;
 
   return (
     <div
       className="relative w-full overflow-hidden"
       style={{
-        minHeight: showSkeleton ? '60px' : undefined,
         height: showSkeleton ? undefined : `${height}px`,
+        minHeight: showSkeleton ? '48px' : undefined,
         transition: firstResize ? 'none' : 'height 0.15s ease',
       }}
     >
+      {/* iframe always mounted (pre-loaded), hidden during skeleton */}
       <iframe
         ref={iframeRef}
         sandbox="allow-scripts"
@@ -199,16 +202,12 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
         className="h-full w-full border-none"
         style={{ display: showSkeleton ? 'none' : 'block' }}
       />
-      {/* Skeleton: shown before real content arrives */}
+      {/* Skeleton: shown until iframe renders visible content */}
       {showSkeleton && (
-        <div className="space-y-2.5 py-2">
+        <div className="space-y-2.5 py-1">
           <div className="h-3 w-3/4 animate-[shimmer-slide_2s_ease-in-out_infinite] rounded bg-gradient-to-r from-[var(--paper-inset)] via-[var(--paper)] to-[var(--paper-inset)] bg-[length:200%_100%]" />
           <div className="h-3 w-1/2 animate-[shimmer-slide_2s_ease-in-out_infinite_0.2s] rounded bg-gradient-to-r from-[var(--paper-inset)] via-[var(--paper)] to-[var(--paper-inset)] bg-[length:200%_100%]" />
         </div>
-      )}
-      {/* Streaming fade — subtle gradient at the bottom while content grows */}
-      {isStreaming && !showSkeleton && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-[var(--paper)] to-transparent" />
       )}
     </div>
   );
