@@ -531,9 +531,9 @@ export default function FilePreviewModal({
                 <ConfirmDialog
                     title="未保存的更改"
                     message="您有未保存的更改，确定要放弃吗？"
-                    confirmLabel="放弃更改"
-                    cancelLabel="继续编辑"
-                    danger
+                    confirmText="放弃更改"
+                    cancelText="继续编辑"
+                    confirmVariant="danger"
                     onConfirm={handleDiscardChanges}
                     onCancel={() => setShowUnsavedConfirm(false)}
                 />
