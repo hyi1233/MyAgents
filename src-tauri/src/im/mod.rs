@@ -745,7 +745,8 @@ async fn create_bot_instance<R: Runtime>(
             bridge_adapter.sync_capabilities().await;
             // Override with user-configured tool groups (if set in channel config).
             // Auto-merge: any new groups from the plugin that aren't in the user's
-            // list get appended so they appear in the UI on next settings open.
+            // list get appended so they're available during this channel session.
+            // The merge runs on every channel startup (idempotent, not persisted to disk).
             if let Some(ref groups) = config.openclaw_enabled_tool_groups {
                 if !groups.is_empty() {
                     let plugin_groups = bridge_adapter.all_tool_groups();

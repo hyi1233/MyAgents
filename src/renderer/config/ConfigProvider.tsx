@@ -66,7 +66,8 @@ function normalizeAgents(config: AppConfig): boolean {
  * Expand to all known groups so everything is enabled.
  */
 const LEGACY_TOOL_GROUPS = new Set(['doc', 'chat', 'wiki_drive', 'bitable']);
-const ALL_KNOWN_TOOL_GROUPS = ['doc', 'chat', 'wiki_drive', 'bitable', 'calendar', 'task', 'sheet', 'search', 'common', 'im', 'perm'];
+// Exclude sensitive groups (im, perm) from auto-migration — keep them opt-in
+const ALL_KNOWN_TOOL_GROUPS = ['doc', 'chat', 'wiki_drive', 'bitable', 'calendar', 'task', 'sheet', 'search', 'common'];
 function migrateToolGroups(config: AppConfig): boolean {
     if (!config.agents) return false;
     let changed = false;

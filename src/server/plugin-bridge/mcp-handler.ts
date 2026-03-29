@@ -29,11 +29,12 @@ function inferToolGroupFeishu(toolName: string): string {
   if (toolName.startsWith('feishu_doc') || (toolName.startsWith('feishu_') && toolName.endsWith('_doc')) || toolName === 'feishu_app_scopes') return 'doc';
   if (toolName.startsWith('feishu_perm')) return 'perm';
   if (toolName.startsWith('feishu_calendar_')) return 'calendar';
-  if (toolName.startsWith('feishu_task') || toolName === 'feishu_tasklist') return 'task';
+  if (toolName.startsWith('feishu_task')) return 'task';
   if (toolName === 'feishu_sheet') return 'sheet';
+  // Exact matches before prefix: feishu_search_user is 'common', feishu_search_* is 'search'
+  if (toolName === 'feishu_get_user' || toolName === 'feishu_search_user') return 'common';
   if (toolName.startsWith('feishu_search')) return 'search';
   if (toolName.startsWith('feishu_im_')) return 'im';
-  if (toolName === 'feishu_get_user' || toolName === 'feishu_search_user') return 'common';
   if (toolName.startsWith('feishu_oauth') || toolName === 'feishu_ask_user_question') return 'interaction';
   return 'other';
 }
