@@ -3155,12 +3155,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     </p>
                                                 </div>
                                                 <button
-                                                    onClick={() => updateConfig({ experimentalSplitView: !config.experimentalSplitView })}
-                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.experimentalSplitView ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                                    onClick={() => updateConfig({ experimentalSplitView: !(config.experimentalSplitView ?? true) })}
+                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${(config.experimentalSplitView ?? true) ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
                                                         }`}
                                                 >
                                                     <span
-                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.experimentalSplitView ? 'translate-x-5' : 'translate-x-0'
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${(config.experimentalSplitView ?? true) ? 'translate-x-5' : 'translate-x-0'
                                                             }`}
                                                     />
                                                 </button>
