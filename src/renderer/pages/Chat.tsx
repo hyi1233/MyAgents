@@ -1585,16 +1585,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               </>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1">
             {/* New Session button - before History */}
             <button
               type="button"
               onClick={handleNewSession}
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+              className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
               title="新建对话"
             >
               <Plus className="h-3.5 w-3.5 flex-shrink-0" />
-              <span className="hidden sm:inline">新对话</span>
+              {!splitFile && <span>新对话</span>}
             </button>
             {/* History button */}
             <div className="relative">
@@ -1602,13 +1602,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 type="button"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={() => setShowHistory((prev) => !prev)}
-                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors ${showHistory
+                className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${showHistory
                   ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
                   : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                   }`}
               >
                 <History className="h-3.5 w-3.5 flex-shrink-0" />
-                <span className="hidden sm:inline">历史</span>
+                {!splitFile && <span>历史</span>}
               </button>
               <SessionHistoryDropdown
                 agentDir={agentDir}
@@ -1852,16 +1852,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           />
         </div>
       )}
-      </div>{/* End left-side wrapper */}
-
-      {/* Narrow/split mode: workspace as right-side drawer overlay — rendered at root level
-          so backdrop covers both chat area and split-view panel */}
+      {/* Overlay workspace drawer — inside left-wrapper so it only covers the chat area */}
       {showWorkspace && shouldUseWorkspaceOverlay && (
         <>
+          {/* Transparent click-away layer (no blur, user can still see chat content) */}
           <div
-            className="absolute inset-0 z-40 bg-black/30 backdrop-blur-sm"
+            className="absolute inset-0 z-40"
             onClick={handleCollapseWorkspace}
           />
+          {/* Drawer */}
           <div
             ref={directoryPanelContainerRef}
             className="absolute bottom-0 right-0 top-0 z-50 flex w-[340px] max-w-[85%] flex-col border-l border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg"
@@ -1892,6 +1891,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           </div>
         </>
       )}
+      </div>{/* End left-side wrapper */}
 
       {/* Split view: draggable divider + right panel */}
       {splitFile && (
