@@ -218,7 +218,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, []);
 
   // Split view: right-side file preview panel (experimental)
-  const isSplitViewEnabled = config.experimentalSplitView ?? false;
+  const isSplitViewEnabled = config.experimentalSplitView ?? true;
   const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
   // Clear split panel when feature is turned off (prevents stale split state)
   useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
