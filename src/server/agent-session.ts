@@ -4786,10 +4786,27 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       disallowedToolsList.push('AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode');
     }
 
+    // SDK 0.2.84 bug: NA() returns "firstParty" for ANY non-bedrock/vertex/foundry provider,
+    // causing xd7() to enable thinking for all non-claude-3 models on third-party APIs.
+    // Third-party anthropic-protocol providers (SiliconFlow etc.) reject `thinking: {type:"adaptive"}`
+    // with "400 thinking type should be enabled or disabled".
+    // Fix: disable thinking for non-Claude models on third-party providers.
+    // Model name check (sonnet/opus) is URL-agnostic — Claude models through any proxy get thinking.
+    const modelLower = (currentModel ?? '').toLowerCase();
+    const isClaudeModel = modelLower.includes('sonnet-4') || modelLower.includes('sonnet-5')
+      || modelLower.includes('opus-4') || modelLower.includes('opus-5');
+    const isOfficialAnthropicApi = !currentProviderEnv?.baseUrl || (() => {
+      try { return new URL(currentProviderEnv.baseUrl!).host === 'api.anthropic.com'; }
+      catch { return false; }
+    })();
+    const thinkingConfig = (isOfficialAnthropicApi || isClaudeModel)
+      ? { type: 'adaptive' as const }
+      : { type: 'disabled' as const };
+
     // Build common query options (shared between normal start and "already in use" fallback)
     const commonQueryOptions = {
       enableFileCheckpointing: true,
-      thinking: { type: 'adaptive' as const },
+      thinking: thinkingConfig,
       effort: 'high' as const,
       // Load settings from project scope only (.claude/)
       // User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectUserConfig()
