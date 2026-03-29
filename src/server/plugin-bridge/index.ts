@@ -191,7 +191,7 @@ async function loadPlugin() {
   // Set up MCP handler with captured tools (use openclawConfig so tools resolve accounts)
   getCapturedToolsFn = () => compatApi.getCapturedTools();
   getCapturedCommandsFn = () => compatApi.getCapturedCommands();
-  mcpHandler = createMcpHandler(getCapturedToolsFn, openclawConfig);
+  mcpHandler = createMcpHandler(getCapturedToolsFn, openclawConfig, channelKey);
   const toolCount = compatApi.getCapturedTools().length;
   if (toolCount > 0) {
     console.log(`[plugin-bridge] MCP handler initialized with ${toolCount} captured tool factories`);

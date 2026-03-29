@@ -53,6 +53,8 @@ interface ResolvedTool {
 export function createMcpHandler(
   getCapturedTools: () => CapturedTool[],
   pluginConfig: Record<string, unknown>,
+  /** Plugin brand (e.g. 'feishu', 'qqbot'). Used to select the correct group inference fallback. */
+  pluginBrand?: string,
 ) {
   // Cache resolved tools (resolved once from factories, reused across calls)
   let resolvedToolsCache: ResolvedTool[] | null = null;
@@ -84,12 +86,14 @@ export function createMcpHandler(
             : async () => ({ error: 'Tool has no execute method' });
 
           // Generic protocol: use plugin-declared group if present.
-          // Feishu fallback: infer group from tool name when plugin doesn't declare one.
+          // Fallback: Feishu → name-based inference; other plugins → 'default' group.
           const declaredGroup = typeof tool.group === 'string' ? tool.group.trim() : '';
+          const inferredGroup = declaredGroup
+            || (pluginBrand === 'feishu' ? inferToolGroupFeishu(name) : 'default');
           resolved.push({
             name,
             description,
-            group: declaredGroup || inferToolGroupFeishu(name),
+            group: inferredGroup,
             ownerOnly: !!(tool as Record<string, unknown>).ownerOnly,
             parameters,
             execute,
