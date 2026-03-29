@@ -645,51 +645,6 @@ function abortPersistentSession(): void {
   querySession?.interrupt().catch(() => {});
 }
 
-/**
- * Hard-abort the current session after an interrupt timeout and recover automatically.
- */
-async function forceAbortCurrentTurnAndRecover(): Promise<void> {
-  console.warn('[agent] force-aborting session after interrupt timeout');
-  abortPersistentSession();
-
-  try {
-    await awaitSessionTermination(10_000, 'forceAbort');
-  } catch {
-    // Termination timed out — the for-await loop is stuck (likely blocked on hung MCP).
-    // Force-close the SDK session to kill the subprocess + MCP transports. (#60)
-    // close() is the nuclear option: terminates process, cleans up MCP transports, releases pipes.
-    if (querySession) {
-      console.warn('[agent] forceAbort: session termination timed out, force-closing SDK session');
-      const session = querySession;
-      querySession = null;
-      try { session.close(); } catch { /* already dead */ }
-    }
-  }
-
-  // Another control flow (reset/switch session) already took over.
-  if (!shouldAbortSession) {
-    return;
-  }
-
-  if (messageQueue.length > 0) {
-    console.log('[agent] forced stop: restarting session to drain queued messages');
-    setTimeout(() => {
-      startStreamingSession().catch((error) => {
-        console.error('[agent] forced stop: failed to restart session', error);
-      });
-    }, 0);
-    return;
-  }
-
-  // Do NOT schedulePreWarm() here.
-  // After force-abort, if we eagerly pre-warm, a new sessionTerminationPromise is created.
-  // Any subsequent rewindSession() / resetSession() that awaits sessionTerminationPromise
-  // will block on the NEW pre-warm session — causing permanent deadlock.
-  // Instead, clean up and let the user's next action (rewind / new message) start the session.
-  console.log('[agent] forced stop: session terminated, awaiting user action');
-  shouldAbortSession = false;
-}
-
 // ===== Interaction Scenario (unified system prompt) =====
 import { buildSystemPromptAppend, type InteractionScenario } from './system-prompt';
 
@@ -4346,28 +4301,36 @@ export async function interruptCurrentResponse(): Promise<boolean> {
 
   isInterruptingResponse = true;
   try {
-    let shouldForceAbort = false;
-    // 使用 Promise.race 添加 5 秒超时
+    // Step 1: Try graceful interrupt (5 seconds).
+    // interrupt() is cooperative — the SDK subprocess must be responsive to process it.
+    // If a MCP tool is hung (e.g., Playwright screenshot on heavy page), the subprocess
+    // may be blocked on I/O and unable to handle the interrupt signal.
     const interruptPromise = querySession.interrupt();
-    // 15s timeout: SDK interrupt may be slow when the subprocess is mid-tool-execution,
-    // waiting for API response, or processing large MCP output. The previous 5s timeout
-    // caused cascading failures (force-abort → rewind error → MIME loss → subprocess crash).
     const timeoutPromise = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error('Interrupt timeout')), 15000);
+      setTimeout(() => reject(new Error('Interrupt timeout')), 5000);
     });
 
+    let interrupted = false;
     try {
       await Promise.race([interruptPromise, timeoutPromise]);
+      interrupted = true;
     } catch (error) {
-      console.error('[agent] Interrupt error or timeout:', error);
-      shouldForceAbort = true;
+      console.error('[agent] Interrupt failed or timed out (5s):', error);
+    }
+
+    // Step 2: If interrupt failed, force-close immediately.
+    // close() is the SDK's nuclear option: kills subprocess + MCP transports synchronously.
+    // Session history is preserved (JSONL persisted), next message triggers fresh subprocess
+    // with resumeSessionId (no data loss, no amnesia). (#60)
+    if (!interrupted && querySession) {
+      console.warn('[agent] Force-closing SDK session (interrupt unresponsive)');
+      const session = querySession;
+      querySession = null;
+      try { session.close(); } catch { /* already dead */ }
     }
 
     broadcast('chat:message-stopped', null);
     handleMessageStopped();
-    if (shouldForceAbort) {
-      void forceAbortCurrentTurnAndRecover();
-    }
     return true;
   } finally {
     isInterruptingResponse = false;
