@@ -874,29 +874,6 @@ code {
   user-select: text;
 }
 
-/* ── File preview: custom line numbers via ::before (replaces SyntaxHighlighter's broken built-in)
-   Line numbers stay at top-left of each logical line; wrapped continuations have no number.
-   Pseudo-elements are inherently non-selectable. ── */
-.preview-code-line {
-  display: block;
-  position: relative;
-  padding-left: 5.5ch;
-}
-/* Zero-width space ensures empty lines have proper height (empty block = 0px without this) */
-.preview-code-line::after {
-  content: '\200b';
-}
-.preview-code-line::before {
-  content: attr(data-line-number);
-  position: absolute;
-  left: 0;
-  width: 4ch;
-  text-align: right;
-  color: var(--ink-muted);
-  font-size: 13px;
-  font-style: normal;
-  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Fira Code', monospace;
-}
 
 /* ── Toolbar responsive: hide text labels when container is narrow ── */
 @container (max-width: 480px) {

@@ -2,9 +2,8 @@
  * FilePreviewModal - File preview and edit modal for workspace files
  *
  * Features:
- * - Syntax highlighted preview for code files (with line numbers)
+ * - Monaco Editor in read-only mode for code preview (with line numbers, word wrap, virtualized rendering)
  * - Rendered HTML preview for Markdown files
- * - Plain text preview for txt/log files
  * - Monaco Editor for editing mode
  * - Unsaved changes confirmation
  *
@@ -16,19 +15,20 @@ import { Edit2, Expand, FileText, FolderOpen, Loader2, Save, X } from 'lucide-re
 import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 import { useTabApiOptional } from '@/context/TabContext';
-import { getPrismLanguage, getMonacoLanguage, shouldShowLineNumbers, isMarkdownFile } from '@/utils/languageUtils';
+import { getMonacoLanguage, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 
 import ConfirmDialog from './ConfirmDialog';
 import Markdown from './Markdown';
 import { useToast } from './Toast';
 
-// Lazy load Monaco Editor: the ~3MB bundle is only loaded when user first clicks "edit"
+// Lazy load Monaco Editor: the ~3MB bundle is only loaded when user first opens a file
 const MonacoEditor = lazy(() => import('./MonacoEditor'));
+
+// No-op change handler for read-only Monaco (stable reference avoids re-renders)
+const noop = () => {};
 
 
 interface FilePreviewModalProps {
@@ -99,23 +99,11 @@ export default function FilePreviewModal({
     const [previewContent, setPreviewContent] = useState(content); // Content displayed in preview mode, updated after save
     const [isSaving, setIsSaving] = useState(false);
     const [showUnsavedConfirm, setShowUnsavedConfirm] = useState(false);
-    // Track if content is ready to render (avoids blank flash while SyntaxHighlighter computes)
-    const [isContentReady, setIsContentReady] = useState(false);
-    // Defer Monaco Editor mounting to avoid blocking the click event's microtask chain
-    const [isEditorReady, setIsEditorReady] = useState(false);
 
     // Sync content when prop changes (e.g., when file is reloaded externally)
-    // Use requestAnimationFrame to let loading state render first before heavy SyntaxHighlighter
     useEffect(() => {
         setEditContent(content);
         setPreviewContent(content);
-        setIsContentReady(false);
-
-        // Defer content ready to next frame so loading spinner shows first
-        const rafId = requestAnimationFrame(() => {
-            setIsContentReady(true);
-        });
-        return () => cancelAnimationFrame(rafId);
     }, [content]);
 
     // Derived state - compare with previewContent (the last saved state)
@@ -123,19 +111,7 @@ export default function FilePreviewModal({
         return isEditing && editContent !== previewContent;
     }, [isEditing, editContent, previewContent]);
 
-    // Defer editor mounting: when isEditing becomes true, wait one frame before rendering Monaco
-    useEffect(() => {
-        if (isEditing && !isEditorReady) {
-            const rafId = requestAnimationFrame(() => {
-                setIsEditorReady(true);
-            });
-            return () => cancelAnimationFrame(rafId);
-        }
-    }, [isEditing, isEditorReady]);
-
-    const language = useMemo(() => getPrismLanguage(name), [name]);
     const monacoLanguage = useMemo(() => getMonacoLanguage(name), [name]);
-    const showLineNumbers = useMemo(() => shouldShowLineNumbers(name), [name]);
     const isMarkdown = useMemo(() => isMarkdownFile(name), [name]);
 
     // Large files: force plaintext to skip tokenization
@@ -144,51 +120,9 @@ export default function FilePreviewModal({
         return monacoLanguage;
     }, [size, monacoLanguage]);
 
-    // Memoize the syntax highlighted content to avoid re-computation on every render
-    // SyntaxHighlighter is expensive - only recompute when content or language changes.
-    // showLineNumbers is ALWAYS false to avoid the library's internal table layout (breaks wrapLongLines).
-    // Line numbers are rendered via CSS ::before on .preview-code-line using a self-incrementing counter.
-    const syntaxHighlightedContent = useMemo(() => {
-        if (isMarkdown || isEditing) return null; // Not used in these modes
-
-        // Counter resets each time this memo recomputes (content/language change).
-        let lineNum = 0;
-        const lineProps = showLineNumbers
-            ? () => ({ className: 'preview-code-line', 'data-line-number': String(++lineNum) })
-            : undefined;
-
-        return (
-            <SyntaxHighlighter
-                language={language}
-                style={oneLight}
-                showLineNumbers={false}
-                wrapLongLines
-                wrapLines={showLineNumbers}
-                lineProps={lineProps}
-                customStyle={{
-                    margin: 0,
-                    padding: '16px 16px 16px 8px',
-                    background: 'transparent',
-                    fontSize: '13px',
-                    lineHeight: '1.6',
-                    fontFamily: 'var(--font-code)',
-                    overflowX: 'hidden',
-                }}
-                codeTagProps={{
-                    style: {
-                        fontFamily: 'inherit',
-                    }
-                }}
-            >
-                {previewContent}
-            </SyntaxHighlighter>
-        );
-    }, [previewContent, language, showLineNumbers, isMarkdown, isEditing]);
-
     // Handlers
     const handleEdit = useCallback(() => {
         setEditContent(previewContent); // Start editing from current preview content
-        setIsEditorReady(false); // Reset so deferred mounting kicks in
         setIsEditing(true);
     }, [previewContent]);
 
@@ -270,16 +204,17 @@ export default function FilePreviewModal({
         }
     }, [canReveal, onRevealFile, apiPost, path]);
 
+    // Monaco loading fallback (shared between preview and edit)
+    const monacoLoading = (
+        <div className="flex h-full items-center justify-center bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
+            <Loader2 className="h-5 w-5 animate-spin" />
+        </div>
+    );
+
     // Render preview content based on file type
     const renderPreviewContent = () => {
-        // Show loading spinner while fetching or while content is preparing to render
-        // Use same background as content area to avoid color flash during transition
-        if (isLoading || !isContentReady) {
-            return (
-                <div className="flex h-full items-center justify-center bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                </div>
-            );
+        if (isLoading) {
+            return monacoLoading;
         }
 
         if (error) {
@@ -310,20 +245,10 @@ export default function FilePreviewModal({
             );
         }
 
-        // Editing mode: use Monaco Editor
-        // - Suspense handles first-time chunk loading (lazy import)
-        // - isEditorReady defers mounting to next frame on every edit (avoids blocking click microtask)
+        // Editing mode: Monaco Editor (writable)
         if (isEditing) {
-            const editorLoading = (
-                <div className="flex h-full items-center justify-center bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                </div>
-            );
-            if (!isEditorReady) {
-                return editorLoading;
-            }
             return (
-                <Suspense fallback={editorLoading}>
+                <Suspense fallback={monacoLoading}>
                     <div className="h-full bg-[var(--paper-elevated)]">
                         <MonacoEditor
                             value={editContent}
@@ -336,7 +261,6 @@ export default function FilePreviewModal({
         }
 
         // Preview mode: Markdown renders as HTML
-        // Use raw mode to skip streaming preprocessing (which can break valid markdown)
         if (isMarkdown) {
             return (
                 <div className="h-full overflow-auto overscroll-contain p-6 bg-[var(--paper-elevated)]">
@@ -347,11 +271,19 @@ export default function FilePreviewModal({
             );
         }
 
-        // Preview mode: Code files with syntax highlighting (memoized)
+        // Preview mode: Code files — Monaco Editor in read-only mode
+        // Monaco handles line numbers, word wrap, syntax highlighting, and large files natively.
         return (
-            <div className="h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)]">
-                {syntaxHighlightedContent}
-            </div>
+            <Suspense fallback={monacoLoading}>
+                <div className="h-full bg-[var(--paper-elevated)]">
+                    <MonacoEditor
+                        value={previewContent}
+                        onChange={noop}
+                        language={effectiveMonacoLanguage}
+                        readOnly
+                    />
+                </div>
+            </Suspense>
         );
     };
 
