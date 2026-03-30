@@ -153,16 +153,18 @@ export default function FilePreviewModal({
                 language={language}
                 style={oneLight}
                 showLineNumbers={showLineNumbers}
+                wrapLongLines
                 lineNumberStyle={{
-                    minWidth: '3em',
-                    paddingRight: '1em',
+                    minWidth: '4ch',
+                    paddingRight: '1.5em',
+                    textAlign: 'right',
                     color: 'var(--ink-muted)',
-                    fontSize: '12px',
-                    userSelect: 'none',
+                    fontSize: '13px',
+                    fontFamily: "ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Fira Code', monospace",
                 }}
                 customStyle={{
                     margin: 0,
-                    padding: '1.5rem',
+                    padding: '16px 24px',
                     background: 'transparent',
                     fontSize: '13px',
                     lineHeight: '1.6',

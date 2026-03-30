@@ -874,6 +874,16 @@ code {
   user-select: text;
 }
 
+/* ── File preview: prevent line numbers from being selected ── */
+.react-syntax-highlighter-line-number {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+.react-syntax-highlighter-line-number::selection,
+.react-syntax-highlighter-line-number *::selection {
+  background: transparent !important;
+}
+
 /* ── Toolbar responsive: hide text labels when container is narrow ── */
 @container (max-width: 480px) {
   .toolbar-menus .toolbar-label {
