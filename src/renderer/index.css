@@ -888,6 +888,10 @@ code {
 .preview-has-custom-line-numbers .linenumber {
   display: none !important;
 }
+/* Zero-width space ensures empty lines have proper height (empty block = 0px without this) */
+.preview-code-line::after {
+  content: '\200b';
+}
 .preview-code-line::before {
   content: attr(data-line-number);
   position: absolute;
