@@ -160,6 +160,7 @@ export default function FilePreviewModal({
                     textAlign: 'right',
                     color: 'var(--ink-muted)',
                     fontSize: '13px',
+                    fontStyle: 'normal',
                     fontFamily: "ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Fira Code', monospace",
                 }}
                 customStyle={{
@@ -169,6 +170,8 @@ export default function FilePreviewModal({
                     fontSize: '13px',
                     lineHeight: '1.6',
                     fontFamily: 'var(--font-code)',
+                    overflowX: 'hidden',
+                    wordBreak: 'break-all',
                 }}
                 codeTagProps={{
                     style: {
