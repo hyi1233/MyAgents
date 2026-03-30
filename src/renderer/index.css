@@ -874,14 +874,24 @@ code {
   user-select: text;
 }
 
-/* ── File preview: prevent line numbers from being selected ── */
-.react-syntax-highlighter-line-number {
-  -webkit-user-select: none !important;
-  user-select: none !important;
+/* ── File preview: custom line numbers via ::before (replaces SyntaxHighlighter's broken built-in)
+   Line numbers stay at top-left of each logical line; wrapped continuations have no number.
+   Pseudo-elements are inherently non-selectable. ── */
+.preview-code-line {
+  display: block;
+  position: relative;
+  padding-left: 5.5ch;
 }
-.react-syntax-highlighter-line-number::selection,
-.react-syntax-highlighter-line-number *::selection {
-  background: transparent !important;
+.preview-code-line::before {
+  content: attr(data-line-number);
+  position: absolute;
+  left: 0;
+  width: 4ch;
+  text-align: right;
+  color: var(--ink-muted);
+  font-size: 13px;
+  font-style: normal;
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Fira Code', monospace;
 }
 
 /* ── Toolbar responsive: hide text labels when container is narrow ── */

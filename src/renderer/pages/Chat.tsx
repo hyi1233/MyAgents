@@ -230,8 +230,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Store drag listeners in refs so unmount cleanup can remove them
   const dragMoveRef = useRef<((ev: MouseEvent) => void) | null>(null);
   const dragUpRef = useRef<(() => void) | null>(null);
-  // Narrow layout uses overlay drawer; split view keeps side panel to preserve tree state
-  const shouldUseWorkspaceOverlay = isNarrowLayout;
+  // When split view is active or layout is narrow, workspace uses overlay drawer
+  const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitFile !== null);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
   const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
@@ -1836,50 +1836,23 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         </div>
       </div>
 
-      {/* Workspace panel — side panel (wide) or overlay drawer (narrow) */}
-      {showWorkspace && !shouldUseWorkspaceOverlay && (
-        <div
-          ref={directoryPanelContainerRef}
-          className="flex w-1/4 flex-col"
-          style={{ minWidth: 'var(--sidebar-min-width)' }}
-        >
-          <DirectoryPanel
-            ref={directoryPanelRef}
-            agentDir={agentDir}
-            projectIcon={currentProject?.icon}
-            projectDisplayName={currentProject?.displayName}
-            provider={currentProvider}
-            providers={providers}
-            onProviderChange={handleProviderChange}
-            onCollapse={handleCollapseWorkspace}
-            onOpenConfig={handleOpenAgentSettings}
-            refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
-            isTauriDragActive={isTauriDragging && activeZoneId === 'directory-panel'}
-            onInsertReference={handleInsertReference}
-            enabledAgents={enabledAgents}
-            enabledSkills={enabledSkills}
-            enabledCommands={enabledCommands}
-            globalSkillFolderNames={globalSkillFolderNames}
-            onInsertSlashCommand={handleInsertSlashCommand}
-            onOpenSettings={handleOpenSettings}
-            onSyncSkillToGlobal={handleSyncSkillToGlobal}
-            onRefreshAll={triggerWorkspaceRefresh}
-            onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
-          />
-        </div>
-      )}
-      {/* Overlay workspace drawer — inside left-wrapper so it only covers the chat area */}
-      {showWorkspace && shouldUseWorkspaceOverlay && (
+      {/* Workspace panel — single instance, container style switches between side panel and overlay */}
+      {showWorkspace && (
         <>
-          {/* Transparent click-away layer (no blur, user can still see chat content) */}
-          <div
-            className="absolute inset-0 z-40"
-            onClick={handleCollapseWorkspace}
-          />
-          {/* Drawer */}
+          {/* Click-away layer for overlay mode */}
+          {shouldUseWorkspaceOverlay && (
+            <div
+              className="absolute inset-0 z-40"
+              onClick={handleCollapseWorkspace}
+            />
+          )}
           <div
             ref={directoryPanelContainerRef}
-            className="absolute bottom-0 right-0 top-0 z-50 flex w-[340px] max-w-[85%] flex-col border-l border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg"
+            className={shouldUseWorkspaceOverlay
+              ? 'absolute bottom-0 right-0 top-0 z-50 flex w-[340px] max-w-[85%] flex-col border-l border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg'
+              : 'flex w-1/4 flex-col'
+            }
+            style={shouldUseWorkspaceOverlay ? undefined : { minWidth: 'var(--sidebar-min-width)' }}
           >
             <DirectoryPanel
               ref={directoryPanelRef}

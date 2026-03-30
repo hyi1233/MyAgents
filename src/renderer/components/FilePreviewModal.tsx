@@ -145,6 +145,16 @@ export default function FilePreviewModal({
     }, [size, monacoLanguage]);
 
     // Memoize the syntax highlighted content to avoid re-computation on every render
+    // Line props factory: wraps each line in a span with data-line-number for CSS ::before rendering.
+    // This replaces SyntaxHighlighter's broken showLineNumbers+wrapLongLines combo.
+    const linePropsFactory = useMemo(() => {
+        if (!showLineNumbers) return undefined;
+        return (lineNumber: number) => ({
+            className: 'preview-code-line',
+            'data-line-number': String(lineNumber),
+        });
+    }, [showLineNumbers]);
+
     // SyntaxHighlighter is expensive - only recompute when content or language changes
     const syntaxHighlightedContent = useMemo(() => {
         if (isMarkdown || isEditing) return null; // Not used in these modes
@@ -152,17 +162,10 @@ export default function FilePreviewModal({
             <SyntaxHighlighter
                 language={language}
                 style={oneLight}
-                showLineNumbers={showLineNumbers}
+                showLineNumbers={false}
                 wrapLongLines
-                lineNumberStyle={{
-                    minWidth: '4ch',
-                    paddingRight: '1.5em',
-                    textAlign: 'right',
-                    color: 'var(--ink-muted)',
-                    fontSize: '13px',
-                    fontStyle: 'normal',
-                    fontFamily: "ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Fira Code', monospace",
-                }}
+                wrapLines={showLineNumbers}
+                lineProps={linePropsFactory}
                 customStyle={{
                     margin: 0,
                     padding: '16px 24px',
@@ -171,8 +174,6 @@ export default function FilePreviewModal({
                     lineHeight: '1.6',
                     fontFamily: 'var(--font-code)',
                     overflowX: 'hidden',
-                    whiteSpace: 'pre-wrap',
-                    overflowWrap: 'break-word',
                 }}
                 codeTagProps={{
                     style: {
@@ -183,7 +184,7 @@ export default function FilePreviewModal({
                 {previewContent}
             </SyntaxHighlighter>
         );
-    }, [previewContent, language, showLineNumbers, isMarkdown, isEditing]);
+    }, [previewContent, language, showLineNumbers, isMarkdown, isEditing, linePropsFactory]);
 
     // Handlers
     const handleEdit = useCallback(() => {
