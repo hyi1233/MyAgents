@@ -230,8 +230,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Store drag listeners in refs so unmount cleanup can remove them
   const dragMoveRef = useRef<((ev: MouseEvent) => void) | null>(null);
   const dragUpRef = useRef<(() => void) | null>(null);
-  // When split view is active, workspace should use overlay mode (like narrow layout)
-  const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitFile !== null);
+  // Narrow layout uses overlay drawer; split view keeps side panel to preserve tree state
+  const shouldUseWorkspaceOverlay = isNarrowLayout;
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
   const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);

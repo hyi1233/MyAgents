@@ -171,7 +171,8 @@ export default function FilePreviewModal({
                     lineHeight: '1.6',
                     fontFamily: 'var(--font-code)',
                     overflowX: 'hidden',
-                    wordBreak: 'break-all',
+                    whiteSpace: 'pre-wrap',
+                    overflowWrap: 'break-word',
                 }}
                 codeTagProps={{
                     style: {
