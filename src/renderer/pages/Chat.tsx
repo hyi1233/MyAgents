@@ -1903,7 +1903,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 onClose={() => setSplitFile(null)}
                 onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
                 embedded
-                onFullscreen={() => setFullscreenPreviewFile(splitFile)}
+                onFullscreen={(currentContent) => {
+                  const file = currentContent !== undefined ? { ...splitFile!, content: currentContent } : splitFile!;
+                  setSplitFile(null);  // Close embedded to prevent dual-editor write conflicts
+                  setFullscreenPreviewFile(file);
+                }}
               />
             </Suspense>
           </div>

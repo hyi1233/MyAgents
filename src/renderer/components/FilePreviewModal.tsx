@@ -1,17 +1,16 @@
 /**
  * FilePreviewModal - File preview and edit modal for workspace files
  *
- * Features:
- * - Monaco Editor in read-only mode for code preview (with line numbers, word wrap, virtualized rendering)
- * - Rendered HTML preview for Markdown files
- * - Monaco Editor for editing mode
- * - Unsaved changes confirmation
+ * Two editing modes:
+ * - **Code files** (non-Markdown): Open directly in writable Monaco with auto-save (VSCode-like).
+ *   No Edit/Save/Cancel buttons — changes save automatically after 1s debounce.
+ * - **Markdown files**: Preview (rendered HTML) ↔ Edit (Monaco) with manual Save.
  *
  * Edit capability comes from two sources (either is sufficient):
  * 1. Tab API (useTabApiOptional) — when rendered inside a Tab context
  * 2. Explicit onSave/onRevealFile props — when caller provides save logic directly
  */
-import { Edit2, Expand, FileText, FolderOpen, Loader2, Save, X } from 'lucide-react';
+import { Check, Edit2, Expand, FileText, FolderOpen, Loader2, Save, X } from 'lucide-react';
 import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
@@ -37,6 +36,9 @@ const monacoLoading = (
     </div>
 );
 
+// Auto-save debounce delay (ms)
+const AUTO_SAVE_DELAY = 1000;
+
 
 interface FilePreviewModalProps {
     /** File name to display */
@@ -61,8 +63,9 @@ interface FilePreviewModalProps {
     onRevealFile?: () => Promise<void>;
     /** When true, render inline (no portal/backdrop) for use in split-view panel */
     embedded?: boolean;
-    /** Callback to open the fullscreen modal from embedded mode */
-    onFullscreen?: () => void;
+    /** Callback to open the fullscreen modal from embedded mode.
+     *  Receives the current editor content so fullscreen opens with up-to-date text. */
+    onFullscreen?: (currentContent?: string) => void;
 }
 
 // Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
@@ -72,6 +75,36 @@ function formatFileSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Auto-save status indicator shown for code files (non-Markdown) */
+function AutoSaveIndicator({ status }: { status: 'idle' | 'saving' | 'saved' | 'error' }) {
+    if (status === 'idle') {
+        return null;
+    }
+    if (status === 'saving') {
+        return (
+            <span className="flex items-center gap-1 text-[11px] text-[var(--ink-muted)]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                保存中
+            </span>
+        );
+    }
+    if (status === 'saved') {
+        return (
+            <span className="flex items-center gap-1 text-[11px] text-[var(--success)]">
+                <Check className="h-3 w-3" />
+                已保存
+            </span>
+        );
+    }
+    // error
+    return (
+        <span className="flex items-center gap-1 text-[11px] text-[var(--error)]">
+            <X className="h-3 w-3" />
+            保存失败
+        </span>
+    );
 }
 
 export default function FilePreviewModal({
@@ -100,26 +133,41 @@ export default function FilePreviewModal({
     const canEdit = !!(apiPost || onSave);
     const canReveal = !!(apiPost || onRevealFile);
 
-    // State
-    const [isEditing, setIsEditing] = useState(false);
+    const isMarkdown = useMemo(() => isMarkdownFile(name), [name]);
+    const monacoLanguage = useMemo(() => getMonacoLanguage(name), [name]);
+
+    // Direct edit mode: non-Markdown code files open directly as writable editor with auto-save
+    const isDirectEdit = canEdit && !isMarkdown;
+
+    // ─── State ───────────────────────────────────────────────────────────────
+    // Markdown manual-edit state (not used for code files)
+    const [isMdEditing, setIsMdEditing] = useState(false);
     const [editContent, setEditContent] = useState(content);
-    const [previewContent, setPreviewContent] = useState(content); // Content displayed in preview mode, updated after save
+    const [savedContent, setSavedContent] = useState(content); // Last saved baseline
     const [isSaving, setIsSaving] = useState(false);
     const [showUnsavedConfirm, setShowUnsavedConfirm] = useState(false);
 
+    // Auto-save state (for direct-edit code files)
+    const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+    const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const isSavingRef = useRef(false); // guard against concurrent saves
+    const savedIndicatorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
     // Sync content when prop changes (e.g., when file is reloaded externally)
     useEffect(() => {
+        // Cancel any pending auto-save — the external content is now the source of truth
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = null;
+        }
         setEditContent(content);
-        setPreviewContent(content);
+        setSavedContent(content);
     }, [content]);
 
-    // Derived state - compare with previewContent (the last saved state)
-    const hasUnsavedChanges = useMemo(() => {
-        return isEditing && editContent !== previewContent;
-    }, [isEditing, editContent, previewContent]);
-
-    const monacoLanguage = useMemo(() => getMonacoLanguage(name), [name]);
-    const isMarkdown = useMemo(() => isMarkdownFile(name), [name]);
+    // Derived state — Markdown manual-edit unsaved changes
+    const hasMdUnsavedChanges = useMemo(() => {
+        return isMdEditing && editContent !== savedContent;
+    }, [isMdEditing, editContent, savedContent]);
 
     // Large files: force plaintext to skip tokenization
     const effectiveMonacoLanguage = useMemo(() => {
@@ -127,65 +175,176 @@ export default function FilePreviewModal({
         return monacoLanguage;
     }, [size, monacoLanguage]);
 
-    // Handlers
-    const handleEdit = useCallback(() => {
-        setEditContent(previewContent); // Start editing from current preview content
-        setIsEditing(true);
-    }, [previewContent]);
+    // ─── Save logic (shared by auto-save and manual save) ────────────────────
+    // Stable refs for save dependencies to avoid re-creating callbacks
+    const onSaveRef = useRef(onSave);
+    onSaveRef.current = onSave;
+    const apiPostRef = useRef(apiPost);
+    apiPostRef.current = apiPost;
+    const pathRef = useRef(path);
+    pathRef.current = path;
+    const onSavedRef = useRef(onSaved);
+    onSavedRef.current = onSaved;
 
-    const handleCancel = useCallback(() => {
-        if (hasUnsavedChanges) {
+    /** Core save function — saves the given content string */
+    const executeSave = useCallback(async (contentToSave: string) => {
+        if (onSaveRef.current) {
+            await onSaveRef.current(contentToSave);
+        } else if (apiPostRef.current) {
+            const response = await apiPostRef.current<{ success: boolean; error?: string }>(
+                '/agent/save-file',
+                { path: pathRef.current, content: contentToSave }
+            );
+            if (!response.success) {
+                throw new Error(response.error ?? '保存失败');
+            }
+        }
+    }, []); // stable — all deps via refs
+
+    // We need ref-accessible versions for async save callbacks
+    const editContentRef = useRef(editContent);
+    editContentRef.current = editContent;
+    const savedContentRef = useRef(savedContent);
+    savedContentRef.current = savedContent;
+
+    // ─── Auto-save for direct-edit code files ─────────────────────────────────
+
+    /** Persist the given content to disk, update status indicator, and call onSaved.
+     *  Includes retry-after-busy: if a save is already in-flight, reschedules after it finishes. */
+    const doAutoSave = useCallback(async (contentToSave: string) => {
+        if (isSavingRef.current) {
+            // Already saving — reschedule so this edit isn't lost
+            if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = setTimeout(() => {
+                void doAutoSave(editContentRef.current);
+            }, AUTO_SAVE_DELAY);
+            return;
+        }
+        isSavingRef.current = true;
+        setAutoSaveStatus('saving');
+        try {
+            await executeSave(contentToSave);
+            setSavedContent(contentToSave);
+            savedContentRef.current = contentToSave;
+            setAutoSaveStatus('saved');
+            onSavedRef.current?.();
+            // Clear "saved" indicator after 2s
+            if (savedIndicatorTimerRef.current) clearTimeout(savedIndicatorTimerRef.current);
+            savedIndicatorTimerRef.current = setTimeout(() => setAutoSaveStatus('idle'), 2000);
+            // After save completes, check if content changed during the save (user kept typing)
+            if (editContentRef.current !== contentToSave) {
+                if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+                debounceTimerRef.current = setTimeout(() => {
+                    void doAutoSave(editContentRef.current);
+                }, AUTO_SAVE_DELAY);
+            }
+        } catch {
+            setAutoSaveStatus('error');
+        } finally {
+            isSavingRef.current = false;
+        }
+    }, [executeSave]);
+
+    const handleDirectEditChange = useCallback((newValue: string) => {
+        setEditContent(newValue);
+
+        // Clear previous debounce
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+        }
+
+        debounceTimerRef.current = setTimeout(() => {
+            void doAutoSave(newValue);
+        }, AUTO_SAVE_DELAY);
+    }, [doAutoSave]);
+
+    const flushAndClose = useCallback(async () => {
+        // Cancel pending debounce
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = null;
+        }
+        // If there are unsaved direct-edit changes, save now
+        if (isDirectEdit && editContentRef.current !== savedContentRef.current) {
+            try {
+                await executeSave(editContentRef.current);
+                onSavedRef.current?.();
+            } catch {
+                // Save failed on close — don't block the close
+                toastRef.current.error('关闭时自动保存失败');
+            }
+        }
+        onClose();
+    }, [isDirectEdit, executeSave, onClose]);
+
+    /** Cmd+S handler for direct-edit mode — flush debounce and save immediately */
+    const handleManualFlush = useCallback(() => {
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = null;
+        }
+        if (editContentRef.current === savedContentRef.current) return; // nothing to save
+        void doAutoSave(editContentRef.current);
+    }, [doAutoSave]);
+
+    // Cleanup timers on unmount
+    useEffect(() => {
+        return () => {
+            if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+            if (savedIndicatorTimerRef.current) clearTimeout(savedIndicatorTimerRef.current);
+        };
+    }, []);
+
+    // ─── Markdown manual-edit handlers ────────────────────────────────────────
+    const handleMdEdit = useCallback(() => {
+        setEditContent(savedContent);
+        setIsMdEditing(true);
+    }, [savedContent]);
+
+    const handleMdCancel = useCallback(() => {
+        if (hasMdUnsavedChanges) {
             setShowUnsavedConfirm(true);
         } else {
-            setIsEditing(false);
+            setIsMdEditing(false);
         }
-    }, [hasUnsavedChanges]);
+    }, [hasMdUnsavedChanges]);
 
-    const handleDiscardChanges = useCallback(() => {
+    const handleMdDiscardChanges = useCallback(() => {
         setShowUnsavedConfirm(false);
-        setEditContent(previewContent); // Revert to current preview content
-        setIsEditing(false);
-    }, [previewContent]);
+        setEditContent(savedContent);
+        setIsMdEditing(false);
+    }, [savedContent]);
 
-    const handleClose = useCallback(() => {
-        if (hasUnsavedChanges) {
-            setShowUnsavedConfirm(true);
-        } else {
-            onClose();
-        }
-    }, [hasUnsavedChanges, onClose]);
-
-    const handleSave = useCallback(async () => {
+    const handleMdSave = useCallback(async () => {
         if (!canEdit) return;
         setIsSaving(true);
         try {
-            if (onSave) {
-                // Caller-provided save (e.g., direct Tauri fs for non-Tab contexts)
-                await onSave(editContent);
-            } else if (apiPost) {
-                // Tab context — save via Sidecar API
-                const response = await apiPost<{ success: boolean; error?: string }>(
-                    '/agent/save-file',
-                    { path, content: editContent }
-                );
-                if (!response.success) {
-                    toastRef.current.error(response.error ?? '保存失败');
-                    return;
-                }
-            }
+            await executeSave(editContent);
             toastRef.current.success('文件保存成功');
-            setPreviewContent(editContent); // Update preview content after successful save
-            setIsEditing(false);
-            onSaved?.();
+            setSavedContent(editContent);
+            setIsMdEditing(false);
+            onSavedRef.current?.();
         } catch (err) {
             toastRef.current.error(err instanceof Error ? err.message : '保存失败');
         } finally {
             setIsSaving(false);
         }
-    }, [canEdit, onSave, apiPost, path, editContent, onSaved]);
+    }, [canEdit, executeSave, editContent]);
+
+    // ─── Close handler ────────────────────────────────────────────────────────
+    const handleClose = useCallback(() => {
+        if (isDirectEdit) {
+            // Auto-save mode: flush pending save and close
+            void flushAndClose();
+        } else if (hasMdUnsavedChanges) {
+            // Markdown with unsaved changes: confirm
+            setShowUnsavedConfirm(true);
+        } else {
+            onClose();
+        }
+    }, [isDirectEdit, hasMdUnsavedChanges, flushAndClose, onClose]);
 
     // Handle backdrop click — only close on genuine clicks (mousedown + mouseup both on backdrop).
-    // Prevents closing when user drags a text selection out of the modal and releases on the backdrop.
     const mouseDownTargetRef = useRef<EventTarget | null>(null);
 
     const handleBackdropMouseDown = useCallback((e: React.MouseEvent) => {
@@ -211,7 +370,7 @@ export default function FilePreviewModal({
         }
     }, [canReveal, onRevealFile, apiPost, path]);
 
-    // Render preview content based on file type
+    // ─── Render content ───────────────────────────────────────────────────────
     const renderPreviewContent = () => {
         if (isLoading) {
             return monacoLoading;
@@ -226,27 +385,8 @@ export default function FilePreviewModal({
             );
         }
 
-        // Empty content: show placeholder with edit prompt
-        if (!previewContent.trim() && !isEditing) {
-            return (
-                <div className="flex h-full flex-col items-center justify-center gap-3 bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
-                    <FileText className="h-10 w-10 opacity-20" />
-                    <p className="text-sm">文档内容为空</p>
-                    {canEdit && (
-                        <button
-                            type="button"
-                            onClick={handleEdit}
-                            className="text-sm text-[var(--accent)] hover:underline"
-                        >
-                            点击开始编辑
-                        </button>
-                    )}
-                </div>
-            );
-        }
-
-        // Editing mode: Monaco Editor (writable)
-        if (isEditing) {
+        // Markdown: editing mode (manual)
+        if (isMarkdown && isMdEditing) {
             return (
                 <Suspense fallback={monacoLoading}>
                     <div className="h-full bg-[var(--paper-elevated)]">
@@ -260,34 +400,49 @@ export default function FilePreviewModal({
             );
         }
 
-        // Preview mode: Markdown renders as HTML
+        // Markdown: preview mode (rendered HTML)
         if (isMarkdown) {
+            // Empty markdown: show placeholder
+            if (!savedContent.trim()) {
+                return (
+                    <div className="flex h-full flex-col items-center justify-center gap-3 bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
+                        <FileText className="h-10 w-10 opacity-20" />
+                        <p className="text-sm">文档内容为空</p>
+                        {canEdit && (
+                            <button type="button" onClick={handleMdEdit}
+                                className="text-sm text-[var(--accent)] hover:underline">
+                                点击开始编辑
+                            </button>
+                        )}
+                    </div>
+                );
+            }
             return (
                 <div className="h-full overflow-auto overscroll-contain p-6 bg-[var(--paper-elevated)]">
                     <div className="prose prose-stone max-w-none dark:prose-invert">
-                        <Markdown raw basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined}>{previewContent}</Markdown>
+                        <Markdown raw basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined}>{savedContent}</Markdown>
                     </div>
                 </div>
             );
         }
 
-        // Preview mode: Code files — Monaco Editor in read-only mode
-        // Monaco handles line numbers, word wrap, syntax highlighting, and large files natively.
+        // Code files: direct writable Monaco with auto-save (or read-only if no edit capability)
         return (
             <Suspense fallback={monacoLoading}>
                 <div className="h-full bg-[var(--paper-elevated)]">
                     <MonacoEditor
-                        value={previewContent}
-                        onChange={noop}
+                        value={isDirectEdit ? editContent : savedContent}
+                        onChange={isDirectEdit ? handleDirectEditChange : noop}
                         language={effectiveMonacoLanguage}
-                        readOnly
+                        readOnly={!isDirectEdit}
+                        onSave={isDirectEdit ? handleManualFlush : undefined}
                     />
                 </div>
             </Suspense>
         );
     };
 
-    // Embedded mode: render content area only (for split-view panel in Chat.tsx)
+    // ─── Embedded mode ────────────────────────────────────────────────────────
     if (embedded) {
         return (
             <div className="flex h-full flex-col overflow-hidden">
@@ -301,34 +456,49 @@ export default function FilePreviewModal({
                         <span className="flex-shrink-0 text-[11px] text-[var(--ink-muted)]">{formatFileSize(size)}</span>
                     </div>
                     <div className="flex flex-shrink-0 items-center gap-2">
-                        {onFullscreen && !isEditing && (
+                        {/* Auto-save indicator for code files */}
+                        {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
+
+                        {/* Fullscreen button — always available (not gated by editing state for code files) */}
+                        {onFullscreen && !(isMarkdown && isMdEditing) && (
                             <Tip label="全屏预览" position="bottom">
-                                <button type="button" onClick={onFullscreen}
+                                <button type="button" onClick={() => {
+                                    // For direct-edit files, flush pending auto-save and pass current content
+                                    if (isDirectEdit) {
+                                        handleManualFlush();
+                                        onFullscreen(editContentRef.current);
+                                    } else {
+                                        onFullscreen();
+                                    }
+                                }}
                                     className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                     <Expand className="h-3.5 w-3.5" />
                                 </button>
                             </Tip>
                         )}
-                        {canEdit && !isEditing && (
+
+                        {/* Markdown: Edit / Cancel+Save buttons */}
+                        {isMarkdown && canEdit && !isMdEditing && (
                             <Tip label="编辑" position="bottom">
-                                <button type="button" onClick={handleEdit} disabled={isLoading || !!error}
+                                <button type="button" onClick={handleMdEdit} disabled={isLoading || !!error}
                                     className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-40">
                                     <Edit2 className="h-3.5 w-3.5" />
                                 </button>
                             </Tip>
                         )}
-                        {canEdit && isEditing && (
+                        {isMarkdown && canEdit && isMdEditing && (
                             <>
-                                <button type="button" onClick={handleCancel}
+                                <button type="button" onClick={handleMdCancel}
                                     className="rounded-md px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
                                     取消
                                 </button>
-                                <button type="button" onClick={handleSave} disabled={isSaving || !hasUnsavedChanges}
+                                <button type="button" onClick={handleMdSave} disabled={isSaving || !hasMdUnsavedChanges}
                                     className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[var(--accent-warm-hover)] disabled:opacity-40">
                                     {isSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : '保存'}
                                 </button>
                             </>
                         )}
+
                         <Tip label="关闭" position="bottom">
                             <button type="button" onClick={handleClose}
                                 className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
@@ -348,7 +518,7 @@ export default function FilePreviewModal({
                         confirmText="放弃更改"
                         cancelText="继续编辑"
                         confirmVariant="danger"
-                        onConfirm={handleDiscardChanges}
+                        onConfirm={handleMdDiscardChanges}
                         onCancel={() => setShowUnsavedConfirm(false)}
                     />
                 )}
@@ -356,8 +526,7 @@ export default function FilePreviewModal({
         );
     }
 
-    // Render via portal to document.body to escape parent stacking context
-    // (prevents chat scrollbar from rendering on top of modal)
+    // ─── Fullscreen mode (portal) ─────────────────────────────────────────────
     return createPortal(
         <>
             {/* Modal backdrop */}
@@ -385,11 +554,14 @@ export default function FilePreviewModal({
                                 <div className="flex items-center gap-3 truncate">
                                     <span className="truncate text-[13px] font-semibold text-[var(--ink)]">{name}</span>
                                     <span className="flex-shrink-0 text-[11px] text-[var(--ink-muted)]">{formatFileSize(size)}</span>
-                                    {isEditing && (
+                                    {/* Markdown editing badge */}
+                                    {isMarkdown && isMdEditing && (
                                         <span className="flex-shrink-0 text-[11px] text-[var(--accent)]">
-                                            {hasUnsavedChanges ? '编辑中（未保存）' : '编辑中'}
+                                            {hasMdUnsavedChanges ? '编辑中（未保存）' : '编辑中'}
                                         </span>
                                     )}
+                                    {/* Auto-save indicator for code files */}
+                                    {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
                                 </div>
                                 <div className="flex items-center gap-1.5">
                                     <span className="max-w-[400px] truncate text-[11px] text-[var(--ink-muted)]" title={path}>
@@ -409,13 +581,14 @@ export default function FilePreviewModal({
                             </div>
                         </div>
 
-                        {/* Action buttons - unified styling with smooth transitions */}
+                        {/* Action buttons */}
                         <div className="flex flex-shrink-0 items-center gap-1.5">
-                            {canEdit && (isEditing ? (
-                                <div key="editing" className="flex items-center gap-1.5">
+                            {/* Markdown: Edit / Cancel+Save */}
+                            {isMarkdown && canEdit && (isMdEditing ? (
+                                <div key="md-editing" className="flex items-center gap-1.5">
                                     <button
                                         type="button"
-                                        onClick={handleCancel}
+                                        onClick={handleMdCancel}
                                         className="inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[11px] font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98]"
                                     >
                                         <X className="h-3.5 w-3.5" />
@@ -423,8 +596,8 @@ export default function FilePreviewModal({
                                     </button>
                                     <button
                                         type="button"
-                                        onClick={handleSave}
-                                        disabled={isSaving || !hasUnsavedChanges}
+                                        onClick={handleMdSave}
+                                        disabled={isSaving || !hasMdUnsavedChanges}
                                         className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm transition-all duration-150 hover:bg-[var(--accent-warm-hover)] hover:shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
                                     >
                                         {isSaving ? (
@@ -437,9 +610,9 @@ export default function FilePreviewModal({
                                 </div>
                             ) : (
                                 <button
-                                    key="view"
+                                    key="md-view"
                                     type="button"
-                                    onClick={handleEdit}
+                                    onClick={handleMdEdit}
                                     disabled={isLoading || !!error}
                                     className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--button-dark-bg)] px-3 py-1.5 text-[11px] font-semibold text-[var(--button-primary-text)] shadow-sm transition-all duration-150 hover:bg-[var(--button-dark-bg-hover)] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
                                 >
@@ -447,6 +620,9 @@ export default function FilePreviewModal({
                                     编辑
                                 </button>
                             ))}
+
+                            {/* Code files: no Edit/Save buttons — auto-save handles it */}
+
                             <button
                                 type="button"
                                 onClick={handleClose}
@@ -464,7 +640,7 @@ export default function FilePreviewModal({
                 </div>
             </div>
 
-            {/* Unsaved changes confirmation dialog */}
+            {/* Unsaved changes confirmation dialog (Markdown only) */}
             {showUnsavedConfirm && (
                 <ConfirmDialog
                     title="未保存的更改"
@@ -472,7 +648,7 @@ export default function FilePreviewModal({
                     confirmText="放弃更改"
                     cancelText="继续编辑"
                     confirmVariant="danger"
-                    onConfirm={handleDiscardChanges}
+                    onConfirm={handleMdDiscardChanges}
                     onCancel={() => setShowUnsavedConfirm(false)}
                 />
             )}
