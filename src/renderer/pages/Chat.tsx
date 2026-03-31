@@ -1965,24 +1965,38 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             {/* Tab switcher — only when both file AND terminal are active */}
             {splitFile && terminalAlive && (
               <div className="flex h-9 flex-shrink-0 items-center gap-0.5 border-b border-[var(--line)] bg-[var(--paper-elevated)] px-2">
+                {/* File tab + its own × */}
                 <button
                   type="button"
                   onClick={() => setSplitActiveView('file')}
-                  className={`relative flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                  className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
                     splitActiveView === 'file'
                       ? 'text-[var(--ink)]'
                       : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                   }`}
                 >
                   <span className="max-w-[120px] truncate">{splitFile.name}</span>
+                  <span
+                    role="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSplitFile(null);
+                      setSplitActiveView('terminal');
+                    }}
+                    className="ml-0.5 flex h-4 w-4 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
+                    title="关闭文件"
+                  >
+                    <span className="text-[11px] leading-none text-[var(--ink-muted)]">×</span>
+                  </span>
                   {splitActiveView === 'file' && (
                     <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
                   )}
                 </button>
+                {/* Terminal tab + its own × */}
                 <button
                   type="button"
                   onClick={() => setSplitActiveView('terminal')}
-                  className={`relative flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                  className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
                     splitActiveView === 'terminal'
                       ? 'text-[var(--ink)]'
                       : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -1990,32 +2004,22 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 >
                   <TerminalSquare className="h-3 w-3" />
                   Terminal
+                  <span
+                    role="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // Hide terminal from tab bar, switch to file view
+                      // Terminal keeps running in background (× never kills terminal)
+                      setSplitActiveView('file');
+                    }}
+                    className="ml-0.5 flex h-4 w-4 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
+                    title="隐藏终端"
+                  >
+                    <span className="text-[11px] leading-none text-[var(--ink-muted)]">×</span>
+                  </span>
                   {splitActiveView === 'terminal' && (
                     <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
                   )}
-                </button>
-                <div className="flex-1" />
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (splitActiveView === 'file') {
-                      setSplitFile(null);
-                      // If terminal is alive, switch to it; otherwise panel closes
-                      if (terminalAlive) setSplitActiveView('terminal');
-                    } else {
-                      // Hiding terminal view: switch to file if available
-                      if (splitFile) {
-                        setSplitActiveView('file');
-                      } else {
-                        // No file open — hide terminal panel (terminal keeps running in background)
-                        setSplitActiveView('file');
-                      }
-                    }
-                  }}
-                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                  title="关闭当前面板"
-                >
-                  <span className="text-sm leading-none">×</span>
                 </button>
               </div>
             )}
