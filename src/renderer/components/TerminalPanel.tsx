@@ -71,9 +71,17 @@ export function TerminalPanel({
 
   // Mounted guard to prevent stale async callbacks
   const isMountedRef = useRef(true);
+  // Store unlisten functions from create flow so they can be cleaned up on unmount.
+  // Without this, each terminal open/close cycle leaks two Tauri event listeners.
+  const unlistenDataRef = useRef<(() => void) | null>(null);
+  const unlistenExitRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
+    return () => {
+      isMountedRef.current = false;
+      unlistenDataRef.current?.();
+      unlistenExitRef.current?.();
+    };
   }, []);
 
   // 1. Initialize xterm.js instance (once on mount)
@@ -181,6 +189,9 @@ export function TerminalPanel({
         unlistenExit?.();
         return;
       }
+      // Store unlisten functions in refs for cleanup on unmount (prevents listener leak)
+      unlistenDataRef.current = unlistenData;
+      unlistenExitRef.current = unlistenExit;
       onTerminalCreatedRef.current(id);
     };
 

@@ -269,8 +269,10 @@ fn terminal_read_loop(
 
     // Self-clean: remove dead session from TerminalManager.
     // This prevents leaked sessions when the frontend misses the exit event.
+    // Use try_current() — Handle::current() panics if runtime is shutting down (app exit).
     let id = terminal_id.to_string();
-    tokio::runtime::Handle::current().spawn(async move {
+    let Some(handle) = tokio::runtime::Handle::try_current().ok() else { return };
+    handle.spawn(async move {
         let mut map = manager.sessions.lock().await;
         if let Some(session) = map.remove(&id) {
             // Kill child process if still running
