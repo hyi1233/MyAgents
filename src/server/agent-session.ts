@@ -1277,7 +1277,18 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
   // [...]= user's enabled MCP servers
   // Never fall back to config file — the frontend's /api/mcp/set is the single source of truth.
   // Global sidecar never receives /api/mcp/set and correctly gets no MCP.
-  const servers: McpServerDefinition[] = currentMcpServers ?? [];
+  // Filter out SDK reserved names to prevent fatal crash:
+  // "Invalid MCP configuration: X is a reserved MCP name." → exit code 1
+  const SDK_RESERVED_MCP_NAMES = ['claude-in-chrome', 'computer-use'];
+  const allServers: McpServerDefinition[] = currentMcpServers ?? [];
+  const servers = allServers.filter(s => {
+    const normalized = s.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (SDK_RESERVED_MCP_NAMES.includes(normalized)) {
+      console.warn(`[agent] MCP "${s.id}" skipped: conflicts with SDK reserved name. Rename to avoid this.`);
+      return false;
+    }
+    return true;
+  });
   if (isDebugMode) console.log(`[agent] MCP servers: ${servers.map(s => s.id).join(', ') || 'none'}`);
 
   const result: Record<string, SdkMcpServerConfig | typeof cronToolsServer> = {};
