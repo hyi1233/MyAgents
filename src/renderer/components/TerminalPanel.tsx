@@ -253,6 +253,8 @@ export function TerminalPanel({
       unlistenDataRef.current = unlistenData;
       unlistenExitRef.current = unlistenExit;
       onTerminalCreatedRef.current(id);
+      // Auto-focus terminal after creation
+      requestAnimationFrame(() => { xtermRef.current?.focus(); });
     };
 
     create().catch((err) => {
@@ -345,6 +347,8 @@ export function TerminalPanel({
     const timer = setTimeout(() => {
       transitionGuardRef.current = false;
       doFitAndResize();
+      // Auto-focus when terminal becomes visible (switching from file view, or reopening panel)
+      xtermRef.current?.focus();
     }, 400);
     return () => {
       clearTimeout(timer);
