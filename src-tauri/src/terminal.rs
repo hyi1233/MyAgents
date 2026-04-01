@@ -69,6 +69,11 @@ pub async fn cmd_terminal_create(
     // otherwise generate one server-side.
     let id = terminal_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // Reject duplicate IDs to prevent orphaning an existing session
+    if state.sessions.lock().await.contains_key(&id) {
+        return Err(format!("Terminal {} already exists", id));
+    }
+
     let pty_system = native_pty_system();
 
     let pair = pty_system
@@ -228,7 +233,9 @@ fn cleanup_session(session: TerminalSession, terminal_id: &str) {
     if let Ok(mut child) = session.child.lock() {
         let _ = child.kill();
     }
-    // Abort the reader task (will exit naturally once PTY closes, but abort as backup)
+    // Note: reader_task is a spawn_blocking task — abort() marks it for cancellation
+    // but won't interrupt a blocked read(). The kill() above closes the PTY slave,
+    // which causes read() to return EOF, naturally ending the reader loop.
     session.reader_task.abort();
     // Writer and master are dropped automatically
     ulog_info!("[terminal] Closed terminal {}", terminal_id);

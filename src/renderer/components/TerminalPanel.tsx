@@ -251,6 +251,9 @@ export function TerminalPanel({
 
     create().catch((err) => {
       creatingRef.current = false;
+      // Clean up pre-registered listeners on failure to prevent leaks
+      unlistenData?.();
+      unlistenExit?.();
       console.error('[TerminalPanel] Failed to create terminal:', err);
       xtermRef.current?.write(`\r\nFailed to create terminal: ${err}\r\n`);
     });
