@@ -110,7 +110,7 @@ import {
   getSystemInitInfo,
   initializeAgent,
   interruptCurrentResponse,
-  isTurnInFlight,
+  getStreamingAssistantId,
   switchToSession,
   setMcpServers,
   getMcpServers,
@@ -1461,15 +1461,15 @@ async function main() {
         const state = getAgentState();
         client.send('chat:init', state);
         const allMessages = getMessages();
-        // When a turn is in-flight, skip the last assistant message (the one being streamed).
+        // When a turn is in-flight, skip the streaming assistant message.
         // Live SSE events (thinking-start, thinking-chunk, message-chunk) will build it from
         // scratch. Replaying it here would create a duplicate in historyMessages alongside the
         // streamingMessage being assembled from live events → duplicate thinking blocks.
-        const streaming = isTurnInFlight();
-        const replayMessages = streaming && allMessages.length > 0 && allMessages[allMessages.length - 1].role === 'assistant'
-          ? allMessages.slice(0, -1)
-          : allMessages;
-        replayMessages.forEach((message) => {
+        // Filter by message ID (not array position) because mid-turn queued user messages
+        // can appear after the streaming assistant in messages[].
+        const streamingId = getStreamingAssistantId();
+        allMessages.forEach((message) => {
+          if (streamingId && message.id === streamingId) return; // skip streaming message
           // Strip Playwright tool results from replay to avoid sending large base64 data to frontend
           const stripped = typeof message.content !== 'string'
             ? { ...message, content: stripPlaywrightResults(message.content) }

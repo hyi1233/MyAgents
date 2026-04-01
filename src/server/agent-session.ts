@@ -598,6 +598,15 @@ export function isTurnInFlight(): boolean {
   return isStreamingMessage;
 }
 
+/** 当前正在流式传输的 assistant 消息 ID（未在流式传输时返回 null） */
+export function getStreamingAssistantId(): string | null {
+  if (!isStreamingMessage) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'assistant') return messages[i].id;
+  }
+  return null;
+}
+
 // Mid-turn injection: messages yielded to SDK but not yet consumed by the AI.
 // queue:started is deferred until a content block boundary (thinking/tool_use/text start)
 // signals the AI has processed the injected message. NOT flushed during text_delta/thinking_delta

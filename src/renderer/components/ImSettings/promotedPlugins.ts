@@ -197,5 +197,5 @@ export function findPromotedPlugin(id: string | undefined): PromotedPlugin | und
 export function findPromotedByPlatform(platform: string): PromotedPlugin | undefined {
     if (!platform.startsWith('openclaw:')) return undefined;
     const channelId = platform.slice('openclaw:'.length);
-    return PROMOTED_PLUGINS.find(p => p.pluginId === channelId);
+    return PROMOTED_PLUGINS.find(p => p.pluginId === channelId || p.channelBrand === channelId);
 }
