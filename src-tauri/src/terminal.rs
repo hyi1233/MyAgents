@@ -400,17 +400,24 @@ fn inject_terminal_env(cmd: &mut CommandBuilder, app: &AppHandle, sidecar_port: 
         cmd.env("MYAGENTS_PORT", port.to_string());
     }
 
-    // 4. Terminal type — CRITICAL: without this, shell doesn't know terminal capabilities,
+    // 4. Suppress zsh PROMPT_EOL_MARK (%) — the partial-line indicator that appears
+    //    when zsh thinks the cursor is not at column 0 on startup. Previous fixes
+    //    (login shell -l, xterm.reset()) were insufficient because the PTY initial
+    //    state can still trigger zsh's detection. Setting PROMPT_EOL_MARK="" is the
+    //    definitive fix, used by embedded terminal implementations (VS Code, etc.).
+    cmd.env("PROMPT_EOL_MARK", "");
+
+    // 5. Terminal type — CRITICAL: without this, shell doesn't know terminal capabilities,
     //    causing broken delete key, missing colors, and broken cursor movement.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM_PROGRAM", "MyAgents");
 
-    // 5. Locale — preserve system locale or default to UTF-8
+    // 6. Locale — preserve system locale or default to UTF-8
     if std::env::var("LANG").is_err() {
         cmd.env("LANG", "en_US.UTF-8");
     }
 
-    // 6. Terminal indicator (so scripts can detect they're in MyAgents terminal)
+    // 7. Terminal indicator (so scripts can detect they're in MyAgents terminal)
     cmd.env("MYAGENTS_TERMINAL", "1");
 }
