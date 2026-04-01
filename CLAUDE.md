@@ -140,27 +140,7 @@ Agent 配置通过 Rust 命令 `cmd_update_agent_config` 写盘，写盘后 MUST
 
 ### 内嵌终端（Embedded Terminal）
 
-Chat 分屏右侧面板可嵌入交互式终端（PTY），工作目录为当前工作区。
-
-**架构**：Rust `terminal.rs`（`TerminalManager` + `portable-pty`）管理 PTY 生命周期，前端 `TerminalPanel.tsx`（xterm.js）渲染终端界面，通过 Tauri IPC（`invoke` + `emit`/`listen`）通信。不走 SSE Proxy，不走 Sidecar HTTP。
-
-**生命周期**：终端绑定 Chat Tab，不绑定面板可见性。关闭面板终端后台存活，关闭 Tab 才销毁。三个 App 退出路径均注册 `close_all_terminals()`。Shell 退出时 reader loop 自行从 `TerminalManager` 清理死 session。
-
-**环境注入**（`inject_terminal_env`）：
-- PATH：内置 Bun → 内置 Node.js → `~/.myagents/bin` → 系统 PATH
-- `MYAGENTS_PORT`：当前 Tab 的 Sidecar 端口（`myagents` CLI 可用）
-- `TERM=xterm-256color` + `COLORTERM=truecolor`（终端能力标识）
-- `NO_PROXY`：复用 `proxy_config::LOCALHOST_NO_PROXY`（保护 localhost）
-- Shell 以 login shell（`-l`）启动，与 iTerm2/VS Code Terminal 一致
-
-**前端状态**（Chat.tsx）：`terminalId`（PTY ID）、`terminalAlive`（进程存活）、`terminalPinned`（面板显示）、`splitActiveView`（当前视图）。xterm.js 实例通过 `hidden` CSS 保持挂载（不卸载），避免切换视图时丢失缓冲区。
-
-**主题**：日间/夜间双主题（`TERMINAL_LIGHT_THEME` / `TERMINAL_DARK_THEME`），通过 `MutationObserver` 监听 `<html>.dark` 类自动切换（同 Monaco 编辑器模式）。
-
-**约束**：
-- PTY 进程由 `portable-pty` 的 `CommandBuilder` 管理，**不走** `process_cmd::new()`（已在 process_cmd 节记录例外）
-- Proxy 配置因 `CommandBuilder` API 不同无法直接调用 `apply_to_subprocess()`，手动复用 `read_proxy_settings()` + `get_proxy_url()` + `LOCALHOST_NO_PROXY` 常量
-- 终端事件用 Tauri event（`terminal:data:{id}` / `terminal:exit:{id}`），**不走** SSE，无需注册 `JSON_EVENTS` 白名单
+Chat 分屏右侧面板的交互式 PTY 终端。Rust `terminal.rs`（`portable-pty`）+ 前端 `TerminalPanel.tsx`（xterm.js），通过 Tauri IPC 通信（不走 SSE/Sidecar）。终端绑定 Tab 生命周期，面板关闭不杀进程。PTY 进程由 `portable-pty` 管理，**不走** `process_cmd`；Proxy 手动复用 `proxy_config` 常量。详见 @specs/tech_docs/architecture.md 的「内嵌终端」节。
 
 ### Plugin Bridge（OpenClaw 插件）
 
