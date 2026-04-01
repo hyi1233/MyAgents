@@ -193,6 +193,12 @@ export function TerminalPanel({
     if (creatingRef.current) return; // Creation already in flight
     creatingRef.current = true;
 
+    // Clear xterm buffer before creating new PTY — prevents zsh PROMPT_EOL_MARK (%)
+    // from appearing when reusing the xterm instance after a previous shell exited
+    if (xtermRef.current) {
+      xtermRef.current.reset();
+    }
+
     const dims = fitAddonRef.current.proposeDimensions();
     const rows = dims?.rows ?? 24;
     const cols = dims?.cols ?? 80;
