@@ -47,14 +47,8 @@ import type { InitialMessage } from '@/types/tab';
 const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
 // Lazy load TerminalPanel for embedded terminal
 const LazyTerminalPanel = lazy(() => import('@/components/TerminalPanel').then(m => ({ default: m.TerminalPanel })));
-// Import terminal theme colors for chrome (header/fallback) — avoids hardcoded hex values
-const terminalThemePromise = import('@/components/TerminalPanel').then(m => m.TERMINAL_THEME);
-let _cachedTerminalTheme: { background: string; foreground: string; brightBlack: string } | null = null;
-terminalThemePromise.then(t => { _cachedTerminalTheme = t; });
-/** Terminal chrome colors — falls back to known values before lazy module loads */
-function getTerminalTheme() {
-  return _cachedTerminalTheme ?? { background: '#1a1614', foreground: '#d4c8bc', brightBlack: '#6f6156' };
-}
+// Terminal chrome now uses CSS tokens that auto-switch with light/dark theme.
+// No need for cached theme constants — the header uses var(--paper), var(--ink), etc.
 
 /** Inline-editable session title — click to edit, Enter/Blur to save, Esc to cancel */
 function SessionTitleEditor({ title, onRename }: { title: string; onRename: (newTitle: string) => void }) {
@@ -2064,11 +2058,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${splitActiveView !== 'terminal' ? 'hidden' : ''}`}>
                 {/* Terminal header — only when tab switcher is NOT showing */}
                 {!(splitFile && terminalPinned && terminalAlive) && (
-                  <div className="flex h-9 flex-shrink-0 items-center justify-between px-3" style={{ background: getTerminalTheme().background }}>
+                  <div className="flex h-9 flex-shrink-0 items-center justify-between bg-[var(--paper)] px-3">
                     <div className="flex items-center gap-1.5">
-                      <TerminalSquare className="h-3.5 w-3.5" style={{ color: getTerminalTheme().foreground }} />
-                      <span className="text-[12px] font-medium" style={{ color: getTerminalTheme().foreground }}>终端</span>
-                      <span className="text-[11px]" style={{ color: getTerminalTheme().brightBlack }}>
+                      <TerminalSquare className="h-3.5 w-3.5 text-[var(--ink)]" />
+                      <span className="text-[12px] font-medium text-[var(--ink)]">终端</span>
+                      <span className="text-[11px] text-[var(--ink-muted)]">
                         {agentDir ? `~/${agentDir.split('/').pop()}` : ''}
                       </span>
                     </div>
@@ -2079,15 +2073,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                           setTerminalPinned(false);
                           setSplitActiveView('file');
                         }}
-                        className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-white/15"
-                        style={{ color: getTerminalTheme().foreground }}
+                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                       >
                         <X className="h-3.5 w-3.5" />
                       </button>
                     </Tip>
                   </div>
                 )}
-                <Suspense fallback={<div className="flex h-full items-center justify-center" style={{ background: getTerminalTheme().background }}><Loader2 className="h-5 w-5 animate-spin" style={{ color: getTerminalTheme().brightBlack }} /></div>}>
+                <Suspense fallback={<div className="flex h-full items-center justify-center bg-[var(--paper)]"><Loader2 className="h-5 w-5 animate-spin text-[var(--ink-muted)]" /></div>}>
                   <LazyTerminalPanel
                     workspacePath={agentDir}
                     terminalId={terminalId}
