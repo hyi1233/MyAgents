@@ -85,9 +85,13 @@ pub async fn cmd_terminal_create(
         })
         .map_err(|e| format!("Failed to open PTY: {}", e))?;
 
-    // Build shell command
+    // Build shell command — start as login shell (like iTerm2/VS Code Terminal).
+    // Login shell reads /etc/zprofile + ~/.zprofile, shows "Last login" message,
+    // and prevents the zsh PROMPT_EOL_MARK (%) on the first line.
     let shell = default_shell();
     let mut cmd = CommandBuilder::new(&shell);
+    #[cfg(unix)]
+    cmd.args(&["-l"]);
     cmd.cwd(&workspace_path);
 
     // Inject environment: bundled runtimes PATH + proxy config + sidecar port
