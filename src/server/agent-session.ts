@@ -423,6 +423,9 @@ async function awaitSessionTermination(timeoutMs = 10_000, label = ''): Promise<
 
 let isInterruptingResponse = false;
 let isStreamingMessage = false;
+// Post-interrupt turn-completion signal: resolves when for-await loop receives a `result` message.
+// Used by interruptCurrentResponse() to verify the SDK subprocess actually stopped after interrupt().
+let postInterruptTurnEndResolve: (() => void) | null = null;
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
 const streamIndexToToolId: Map<number, string> = new Map();
@@ -4366,6 +4369,36 @@ export async function interruptCurrentResponse(): Promise<boolean> {
       try { session.close(); } catch { /* already dead */ }
     }
 
+    // Step 3: If interrupt "succeeded" (SDK ACKed), verify the turn actually completed.
+    // interrupt() resolving only means the SDK received the signal — it does NOT guarantee
+    // the subprocess stopped processing. If an MCP tool is hung (e.g., cuse Read on a large
+    // screenshot), the SDK subprocess remains blocked on client.callTool() with a ~28-hour
+    // timeout. The for-await loop gets no more events, stdin messages are swallowed, and
+    // the user sees "no response" until the 10-minute watchdog fires.
+    //
+    // Fix: wait up to 3 seconds for the for-await loop to receive a `result` message
+    // (turn completion). If it doesn't arrive, the MCP tool is likely hung — force-close.
+    if (interrupted && querySession) {
+      const turnEnded = new Promise<void>(resolve => {
+        postInterruptTurnEndResolve = resolve;
+      });
+      const postInterruptTimeout = new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error('Post-interrupt turn completion timeout')), 3000)
+      );
+      try {
+        await Promise.race([turnEnded, postInterruptTimeout]);
+      } catch {
+        // Turn didn't complete within 3s — MCP tool likely hung, force-close
+        postInterruptTurnEndResolve = null;
+        if (querySession) {
+          console.warn('[agent] Force-closing: turn did not complete 3s after interrupt (hung MCP tool?)');
+          const session = querySession;
+          querySession = null;
+          try { session.close(); } catch { /* already dead */ }
+        }
+      }
+    }
+
     broadcast('chat:message-stopped', null);
     handleMessageStopped();
     return true;
@@ -5793,6 +5826,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Turn complete — reset watchdog state for next turn
         pendingTools = 0;
         watchdogFired = false;
+        // Signal post-interrupt verification (if waiting)
+        if (postInterruptTurnEndResolve) {
+          postInterruptTurnEndResolve();
+          postInterruptTurnEndResolve = null;
+        }
         // Extract token usage from result message
         // SDK result contains modelUsage (per-model stats) and/or usage (aggregate)
         // This is the authoritative source for token statistics
@@ -6091,6 +6129,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const wasPreWarming = isPreWarming;
     isPreWarming = false;
     isProcessing = false;
+
+    // Resolve any pending post-interrupt wait (session ended, turn is implicitly done)
+    if (postInterruptTurnEndResolve) {
+      postInterruptTurnEndResolve();
+      postInterruptTurnEndResolve = null;
+    }
 
     // 确保 generator 退出（防止 streamInput 永远阻塞）
     if (messageResolver) {
