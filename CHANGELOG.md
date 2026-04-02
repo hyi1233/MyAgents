@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.58] - 2026-04-02
+
+### Fixed
+- **飞书 Bot 不回复**：飞书 Bot 收到消息后无任何回复，由上一版修复企微时引入的回归问题导致
+- **Windows 更新失败**：更新或卸载时因 node.exe 文件锁导致安装器报错
+
+---
+
 ## [0.1.57] - 2026-04-02
 
 ### Added
