@@ -186,6 +186,14 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
     /** OpenClaw host version — checked by plugins via assertHostCompatibility(). */
     version: SHIM_COMPAT_VERSION,
 
+    // ===== RuntimeEnv top-level interface =====
+    // OpenClaw RuntimeEnv requires { log, error, exit } at the top level.
+    // dispatch-context.js does `const log = runtime.log;` — if missing, dc.log
+    // is undefined and every dispatch crashes with "dc.log is not a function".
+    log: (...args: unknown[]) => console.log('[plugin]', ...args),
+    error: (...args: unknown[]) => console.error('[plugin]', ...args),
+    exit: (code: number) => { console.error('[plugin] exit requested with code', code); },
+
     // ===== Config =====
     // LarkClient.runtime.config.loadConfig() is called during message handling
     config: {
