@@ -229,6 +229,9 @@ pub fn cleanup_stale_sidecars() {
         kill_windows_processes_by_pattern("@playwright/mcp");
         kill_windows_processes_by_pattern("@anthropic-ai/mcp");
 
+        // 5. Clean up bundled Node.js processes (MCP servers started via bundled npx)
+        kill_windows_processes_by_pattern("\\MyAgents\\nodejs\\");
+
         // Verify cleanup completed (max 1 second wait)
         let start = std::time::Instant::now();
         let max_wait = Duration::from_secs(1);
@@ -236,6 +239,7 @@ pub fn cleanup_stale_sidecars() {
             if !has_windows_processes(SIDECAR_MARKER)
                 && !has_windows_processes("claude-agent-sdk")
                 && !has_windows_processes(".myagents\\mcp\\")
+                && !has_windows_processes("\\MyAgents\\nodejs\\")
             {
                 ulog_info!("[sidecar] Windows cleanup verified in {:?}", start.elapsed());
                 break;
@@ -3031,7 +3035,14 @@ pub fn shutdown_for_update(manager: &ManagedSidecarManager) -> Result<(), String
     // 1. Stop all sidecar instances (via Drop → kill_process → taskkill /T /F)
     stop_all_sidecars(manager)?;
 
-    // 2. Wait for all related processes to truly exit
+    // 2. Actively kill orphan processes that may survive sidecar tree-kill
+    //    (e.g., node.exe from bundled npx — cmd.exe intermediate layers break process tree)
+    #[cfg(windows)]
+    {
+        cleanup_child_processes();
+    }
+
+    // 3. Wait for all related processes to truly exit
     #[cfg(windows)]
     {
         let max_wait = Duration::from_secs(5);
@@ -3040,8 +3051,9 @@ pub fn shutdown_for_update(manager: &ManagedSidecarManager) -> Result<(), String
             let has_sidecar = has_windows_processes(SIDECAR_MARKER);
             let has_sdk = has_windows_processes("claude-agent-sdk");
             let has_mcp = has_windows_processes(".myagents\\mcp\\");
+            let has_node = has_windows_processes("\\MyAgents\\nodejs\\");
 
-            if !has_sidecar && !has_sdk && !has_mcp {
+            if !has_sidecar && !has_sdk && !has_mcp && !has_node {
                 ulog_info!("[sidecar] All processes terminated in {:?}", start.elapsed());
                 break;
             }
@@ -3051,6 +3063,7 @@ pub fn shutdown_for_update(manager: &ManagedSidecarManager) -> Result<(), String
                 kill_windows_processes_by_pattern(SIDECAR_MARKER);
                 kill_windows_processes_by_pattern("claude-agent-sdk");
                 kill_windows_processes_by_pattern(".myagents\\mcp\\");
+                kill_windows_processes_by_pattern("\\MyAgents\\nodejs\\");
                 // Brief wait to confirm termination
                 thread::sleep(Duration::from_secs(1));
                 break;
@@ -3099,6 +3112,10 @@ fn cleanup_child_processes() {
     // Clean up MCP servers launched via bun x / npx (not under ~/.myagents/mcp/)
     kill_windows_processes_by_pattern("@playwright\\mcp");
     kill_windows_processes_by_pattern("@anthropic-ai\\mcp");
+
+    // Clean up bundled Node.js processes (MCP servers started via bundled npx)
+    // These may survive tree-kill when npx.cmd creates intermediate cmd.exe layers
+    kill_windows_processes_by_pattern("\\MyAgents\\nodejs\\");
 }
 
 #[cfg(windows)]
@@ -3160,7 +3177,7 @@ fn kill_windows_processes_by_pattern(pattern: &str) {
     }
 
     if killed > 0 {
-        eprintln!("[sidecar] Killed {} processes (tree) matching '{}'", killed, pattern);
+        ulog_info!("[sidecar] Killed {} processes (tree) matching '{}'", killed, pattern);
     }
 }
 
