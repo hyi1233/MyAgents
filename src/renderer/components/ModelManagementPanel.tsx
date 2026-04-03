@@ -231,7 +231,7 @@ export default function ModelManagementPanel({
             {provider.models.length === 0 ? (
               <p className="py-4 text-center text-sm text-[var(--ink-muted)]">暂无模型，请在下方发现或手动添加</p>
             ) : (
-              <div className="-mx-2">
+              <div>
                 {provider.models.map(model => (
                   <ActiveModelRow
                     key={model.model}
@@ -342,7 +342,7 @@ export default function ModelManagementPanel({
 
             {/* Model list — no checkboxes, just rows with hover "添加" */}
             {filteredDiscovered.length > 0 && (
-              <div className="-mx-2">
+              <div>
                 {filteredDiscovered.map(m => (
                   <DiscoveredModelRow
                     key={m.id}
