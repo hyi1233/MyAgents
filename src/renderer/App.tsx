@@ -691,16 +691,10 @@ export default function App() {
         }
       } else if (e.key === 'w' || e.key === 'W') {
         e.preventDefault();
-        // Mark that Cmd+W was handled by our JS layer. On macOS, Cmd+W ALSO triggers
-        // Tauri's native CloseRequested → window:close-requested → minimize to tray.
-        // The flag tells useTrayEvents to skip that close request (see useTrayEvents.ts).
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).__cmdWHandled = Date.now();
-        // Hierarchical close: dismiss topmost overlay/panel first, tab last.
-        // Safety net: if dismissTopmost() found nothing but a backdrop-blur overlay
-        // IS visible (unregistered overlay), block tab close instead of exiting the app.
-        // Design guide mandates backdrop-blur-sm for all closeable overlays (Section 6.7),
-        // so this catches both registered AND unregistered overlays.
+        // On macOS, Cmd+W triggers Tauri CloseRequested BEFORE this JS handler
+        // (window hides → keydown skipped). The primary closeLayer logic is in
+        // useTrayEvents.ts window:close-requested handler. This JS handler serves
+        // as fallback for non-macOS or cases where JS keydown does fire.
         if (!dismissTopmost()) {
           const hasOverlayBackdrop = !!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]');
           if (!hasOverlayBackdrop) closeCurrentTab();

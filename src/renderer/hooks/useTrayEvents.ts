@@ -100,20 +100,28 @@ export function useTrayEvents(options: TrayEventsOptions) {
           }
         });
 
-        // Listen for window close request (X button or native Cmd+W)
+        // Listen for window close request (X button AND native Cmd+W on macOS).
+        // On macOS, Cmd+W triggers Tauri CloseRequested BEFORE JS keydown (the window
+        // hides → "app has no keyWindow" → JS keydown is skipped entirely).
+        // So the closeLayer logic MUST run here, not in the JS keydown handler.
         unlistenCloseRequested = await listen('window:close-requested', async () => {
-          // On macOS, Cmd+W triggers BOTH our JS keydown handler AND Tauri's native
-          // CloseRequested. If our JS handler already handled it (overlay close / tab close),
-          // skip the tray minimize to avoid the double-action.
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const cmdWFlag = (window as any).__cmdWHandled as number | undefined;
-          if (cmdWFlag && Date.now() - cmdWFlag < 500) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            delete (window as any).__cmdWHandled;
-            console.log('[useTrayEvents] Skipping close-requested (already handled by Cmd+W)');
+          console.log('[useTrayEvents] Window close requested');
+
+          // Hierarchical close: try to dismiss topmost overlay/panel first.
+          // Import lazily to avoid circular deps.
+          const { dismissTopmost } = await import('@/utils/closeLayer');
+          if (dismissTopmost()) {
+            console.log('[useTrayEvents] Overlay dismissed by closeLayer, skipping window close');
             return;
           }
-          console.log('[useTrayEvents] Window close requested');
+          // Safety net: if no overlay registered but a backdrop-blur overlay IS visible
+          // (unregistered overlay), block close to prevent unexpected window hide/exit.
+          const hasOverlayBackdrop = !!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]');
+          if (hasOverlayBackdrop) {
+            console.log('[useTrayEvents] Unregistered overlay visible, blocking window close');
+            return;
+          }
+
           const { minimizeToTray } = optionsRef.current;
 
           if (minimizeToTray) {
