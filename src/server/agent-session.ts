@@ -1023,7 +1023,7 @@ export async function getSupportedModels(): Promise<Array<{ value: string; displ
   // Slow path: spawn a temporary query — maxTurns:0 makes SDK initialize then exit
   let tempQuery: Query | null = null;
   try {
-    tempQuery = query({ prompt: ' ', options: { maxTurns: 0 } });
+    tempQuery = query({ prompt: '1+1=', options: { maxTurns: 0 } });
     // Drain the generator — SDK initializes, runs 0 turns, then completes
     // initializationResult() resolves once subprocess handshake is done
     const initResult = await tempQuery.initializationResult();
