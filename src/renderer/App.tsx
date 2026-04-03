@@ -1547,17 +1547,10 @@ export default function App() {
     minimizeToTray: config.minimizeToTray,
     onOpenSettings: () => handleOpenSettings('general'),
     onCloseTab: () => {
-      // Close current tab. performCloseTab auto-creates a launcher when closing
-      // the last tab, so Cmd+W never leaves the user with zero tabs.
-      // Only return false (→ fall through to tray/exit) when already on the launcher.
-      const tabs = tabsRef.current;
-      const activeId = activeTabIdRef.current;
-      const activeTab = tabs.find(t => t.id === activeId);
-      if (tabs.length === 1 && activeTab?.view === 'launcher') {
-        return false; // Already on launcher — Cmd+W → tray/exit
-      }
-      closeCurrentTab();
-      return true;
+      // Cmd+W bottom: overlay → split → tab → launcher → STOP.
+      // Never exit/tray from Cmd+W. The launcher is the final resting state.
+      closeCurrentTab(); // Last tab auto-creates launcher; launcher is a no-op.
+      return true;       // Always consumed — never fall through to tray/exit.
     },
     onNavigateToTab: (tabId: string) => {
       // Verify the tab still exists before switching
