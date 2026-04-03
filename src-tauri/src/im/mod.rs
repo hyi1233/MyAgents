@@ -956,6 +956,7 @@ async fn create_bot_instance<R: Runtime>(
     let group_activation_for_loop = Arc::clone(&group_activation);
     let group_tools_deny_for_loop = Arc::clone(&group_tools_deny);
     let group_history_for_loop = Arc::clone(&group_history);
+    let group_event_tx_for_loop = group_event_tx.clone();
     let mut process_shutdown_rx = shutdown_rx.clone();
 
     // Concurrency primitives (live outside the router for lock-free access)
@@ -1703,6 +1704,24 @@ async fn create_bot_instance<R: Runtime>(
                     }
 
                     if msg.source_type == ImSourceType::Group {
+                        // Bridge group auto-discovery: when a Bridge plugin delivers a group
+                        // message for an unknown group, auto-create a Pending permission entry.
+                        // Native adapters discover groups via platform events (my_chat_member etc.),
+                        // but Bridge/OpenClaw plugins have no equivalent lifecycle event.
+                        if is_bridge_platform {
+                            let known = group_permissions_for_loop.read().await
+                                .iter().any(|g| g.group_id == msg.chat_id);
+                            if !known {
+                                let _ = group_event_tx_for_loop.send(GroupEvent::BotAdded {
+                                    chat_id: msg.chat_id.clone(),
+                                    chat_title: msg.hint_group_name.clone()
+                                        .unwrap_or_else(|| msg.chat_id.clone()),
+                                    platform: msg.platform.clone(),
+                                    added_by_name: msg.sender_name.clone(),
+                                }).await;
+                            }
+                        }
+
                         // Check if sender is a whitelisted user OR group is approved
                         let is_allowed_user = {
                             let users = allowed_users_for_loop.read().await;
@@ -1714,7 +1733,16 @@ async fn create_bot_instance<R: Runtime>(
                         };
 
                         if !is_allowed_user && !group_approved {
-                            // Not authorized — skip silently
+                            // Buffer history even for unapproved groups so AI has context
+                            // when the group is eventually approved or an allowedUser @triggers.
+                            group_history_for_loop.lock().await.push(
+                                &session_key,
+                                GroupHistoryEntry {
+                                    sender_name: msg.sender_name.clone().unwrap_or_else(|| msg.sender_id.clone()),
+                                    text: msg.text.clone(),
+                                    timestamp: std::time::Instant::now(),
+                                },
+                            );
                             continue;
                         }
 
@@ -6094,6 +6122,28 @@ pub async fn cmd_update_agent_config(
                     serde_json::from_str(mau_json).ok()
                 };
                 *mau_arc.write().await = parsed;
+            }
+        }
+
+        // Hot-reload per-channel group settings when channels array is patched.
+        // Frontend patchChannel() writes the full channels array to disk, then sends
+        // the patch here for runtime sync. Match by channel ID to update the running instance.
+        if let Some(ref channels) = patch.channels {
+            for ch_config in channels {
+                if let Some(ch_inst) = agent.channels.get(&ch_config.id) {
+                    // groupActivation
+                    if let Some(ref act) = ch_config.group_activation {
+                        let activation = match act.as_str() {
+                            "always" => GroupActivation::Always,
+                            _ => GroupActivation::Mention,
+                        };
+                        *ch_inst.bot_instance.group_activation.write().await = activation;
+                    }
+                    // groupPermissions
+                    if !ch_config.group_permissions.is_empty() {
+                        *ch_inst.bot_instance.group_permissions.write().await = ch_config.group_permissions.clone();
+                    }
+                }
             }
         }
 
