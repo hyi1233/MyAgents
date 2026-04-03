@@ -708,8 +708,12 @@ export default function App() {
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    // Capture phase: application-level shortcuts (Cmd+W/T/Tab, etc.) MUST fire before
+    // any component-level handlers. Without capture, Monaco editor (or any component
+    // calling stopPropagation) blocks the event → our handler never fires →
+    // e.preventDefault() never called → Tauri native Cmd+W closes the window.
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
 
