@@ -222,8 +222,10 @@ export default function BrowserPanel({
     ? (() => { try { return new URL(currentUrl).hostname || currentUrl; } catch { return currentUrl; } })()
     : '';
 
+  // No `transition-colors` — let global `button { transition-property: ...transform... }` handle it,
+  // so the unified active:scale(0.98) animates smoothly instead of snapping.
   const navBtn =
-    'flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]';
+    'flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]';
 
   return (
     <div className="flex h-full flex-col">
@@ -272,7 +274,7 @@ export default function BrowserPanel({
           </button>
         )}
 
-        <Tip label="在浏览器中打开" position="bottom">
+        <Tip label="在浏览器中打开" position="bottom" align="end">
           <button
             type="button"
             className={navBtn}
@@ -284,7 +286,7 @@ export default function BrowserPanel({
         </Tip>
 
         {/* Close button — always present */}
-        <Tip label="关闭浏览器" position="bottom">
+        <Tip label="关闭浏览器" position="bottom" align="end">
           <button type="button" className={navBtn} onClick={onClose}>
             <X className="h-3.5 w-3.5" />
           </button>
