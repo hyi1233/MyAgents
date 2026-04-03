@@ -1,5 +1,5 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ChevronDown, Copy, Check, Undo2, RotateCcw, GitBranch } from 'lucide-react';
+import { ChevronDown, Copy, Check, Undo2, RotateCcw, GitBranch, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
 
 import { track } from '@/analytics';
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
@@ -81,6 +81,25 @@ function parseLocalCommandOutput(content: string): { isLocalCommand: boolean; co
     return { isLocalCommand: true, content: match[1].trim() };
   }
   return { isLocalCommand: false, content };
+}
+
+/**
+ * Parse background task notification tags injected by TabProvider.
+ * These synthetic messages bridge background task completion so the user
+ * understands why AI continues responding (prevents "AI talking to itself" UX).
+ */
+function parseTaskNotification(content: string): {
+  isTaskNotification: boolean;
+  taskId?: string; status?: string; summary?: string; description?: string;
+} {
+  const match = content.match(/<task-notification>([\s\S]*?)<\/task-notification>/);
+  if (match) {
+    try {
+      const data = JSON.parse(match[1]);
+      return { isTaskNotification: true, ...data };
+    } catch { /* malformed JSON — treat as normal message */ }
+  }
+  return { isTaskNotification: false };
 }
 
 /**
@@ -251,6 +270,29 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
           (line): line is string => Boolean(line)
         )
       })) ?? [];
+
+    // Check if this is a background task notification
+    const taskNotif = parseTaskNotification(userContent);
+    if (taskNotif.isTaskNotification) {
+      const isSuccess = taskNotif.status === 'completed';
+      const StatusIcon = isSuccess ? CheckCircle : taskNotif.status === 'error' || taskNotif.status === 'failed' ? XCircle : AlertCircle;
+      const statusColor = isSuccess ? 'var(--success)' : 'var(--error)';
+      const statusLabel = isSuccess ? '已完成' : taskNotif.status === 'error' ? '出错' : taskNotif.status === 'failed' ? '失败' : '已停止';
+      const displayText = taskNotif.description || taskNotif.summary || taskNotif.taskId || '后台任务';
+      return (
+        <div className="flex justify-start w-full px-4 py-1.5 select-none">
+          <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-[12px] text-[var(--ink-muted)]">
+            <StatusIcon className="h-3.5 w-3.5 flex-shrink-0" style={{ color: statusColor }} />
+            <span>后台任务</span>
+            <span className="font-medium text-[var(--ink-secondary)]">&ldquo;{displayText}&rdquo;</span>
+            <span>{statusLabel}</span>
+            {taskNotif.summary && taskNotif.summary !== taskNotif.description && (
+              <span className="text-[var(--ink-subtle)]">— {taskNotif.summary}</span>
+            )}
+          </div>
+        </div>
+      );
+    }
 
     // Check if this is a local command output (like /cost, /context)
     const parsed = parseLocalCommandOutput(userContent);
