@@ -1743,7 +1743,7 @@ async fn create_bot_instance<R: Runtime>(
                                 GroupHistoryEntry {
                                     sender_name: msg.sender_name.clone().unwrap_or_else(|| msg.sender_id.clone()),
                                     text: msg.text.clone(),
-                                    timestamp: std::time::Instant::now(),
+                                    timestamp: chrono::Local::now(),
                                 },
                             );
                             continue;
@@ -1762,7 +1762,7 @@ async fn create_bot_instance<R: Runtime>(
                                 GroupHistoryEntry {
                                     sender_name: msg.sender_name.clone().unwrap_or_else(|| msg.sender_id.clone()),
                                     text: msg.text.clone(),
-                                    timestamp: std::time::Instant::now(),
+                                    timestamp: chrono::Local::now(),
                                 },
                             );
                             continue;
@@ -1904,10 +1904,11 @@ async fn create_bot_instance<R: Runtime>(
                             let history = task_group_history.lock().await.drain(&session_key);
                             let pending_history = GroupHistoryBuffer::format_as_context(&history);
                             // Check if this is the first turn for this group session
-                            let is_first_turn = {
+                            let (is_first_turn, message_count) = {
                                 let router = task_router.lock().await;
                                 let ps = router.get_peer_session(&session_key);
-                                ps.map_or(true, |p| p.message_count == 0)
+                                (ps.map_or(true, |p| p.message_count == 0),
+                                 ps.map_or(0, |p| p.message_count))
                             };
                             let activation = task_group_activation.read().await.clone();
                             let tools_deny = task_group_tools_deny.read().await.clone();
@@ -1927,6 +1928,8 @@ async fn create_bot_instance<R: Runtime>(
                                 is_first_turn,
                                 pending_history,
                                 tools_deny,
+                                is_mention: msg.is_mention,
+                                message_count,
                             })
                         } else {
                             None
@@ -2569,6 +2572,8 @@ struct GroupStreamContext {
     is_first_turn: bool,
     pending_history: Option<String>,
     tools_deny: Vec<String>,
+    is_mention: bool,
+    message_count: u32,
 }
 
 /// Placeholder message sent when the AI's first response block is non-text (thinking/tool_use).
@@ -2650,6 +2655,8 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
             GroupActivation::Always => "always",
         });
         body["isFirstGroupTurn"] = json!(gc.is_first_turn);
+        body["isMention"] = json!(gc.is_mention);
+        body["messageCount"] = json!(gc.message_count);
         if let Some(ref history) = gc.pending_history {
             body["pendingHistory"] = json!(history);
         }

@@ -6676,6 +6676,8 @@ async function main() {
             groupToolsDeny?: string[];
             replyToBody?: string;
             groupSystemPrompt?: string;
+            isMention?: boolean;
+            messageCount?: number;
             // Bridge plugin tools context (v0.1.42)
             bridgePort?: number;
             bridgePluginId?: string;
@@ -6746,33 +6748,60 @@ async function main() {
             });
           }
 
-          // Build final message with group context (v0.1.28)
+          // Build final message with group context (v0.1.59 — rewritten per PRD group_chat_prompt)
           let finalMessage = payload.message || '';
           if (payload.sourceType === 'group') {
             const parts: string[] = [];
-            // System-level group context (first turn only)
-            if (payload.isFirstGroupTurn) {
-              const platformLabel = payload.groupPlatform ?? '';
-              let groupInfo = `[群聊信息]\n你正在「${payload.groupName ?? '未知群聊'}」${platformLabel}群聊中。\n你的回复会自动发送到群里，直接回复即可。\n群内不同人的消息会以 [from: 名字] 标注发送者。`;
-              if (payload.groupActivation === 'always') {
-                groupInfo += '\n你会收到群里的所有消息。如果你认为不需要回复当前消息，请只回复 <NO_REPLY>，不要添加任何其他内容。';
+            const isAlways = payload.groupActivation === 'always';
+            const botName = payload.botName ?? 'AI';
+            const platformLabel = payload.groupPlatform ?? '';
+            const messageCount = payload.messageCount ?? 0;
+
+            // ── <system-reminder> injection strategy ──
+            // Full version: first turn + every 10 turns (survives context compaction)
+            // Brief version: every turn in Always mode (prevents multi-bot confusion)
+            const shouldInjectFullRules = payload.isFirstGroupTurn || (messageCount > 0 && messageCount % 10 === 0);
+
+            if (shouldInjectFullRules) {
+              // Full system-reminder with group info + rules
+              let reminder = `<system-reminder>\n[群聊信息]\n你正在「${payload.groupName ?? '未知群聊'}」${platformLabel}群聊中。你的名字是「${botName}」。`;
+              if (isAlways) {
+                reminder += '\n激活模式：全部消息（你会收到群里所有消息，包括不是发给你的）。';
+              } else {
+                reminder += '\n激活模式：仅 @提及（只有被 @、被回复或使用 /ask 时才会收到消息）。';
+              }
+              reminder += '\n你的回复会自动发送到群里，直接回复即可。\n群内不同人的消息会以 [from: 名字 时间] 标注发送者。';
+              if (isAlways) {
+                reminder += `\n\n[回复规则]\n你必须非常克制，大多数消息不需要你回复。仅在以下情况回复：\n1. 消息明确 @你（即 @${botName}）\n2. 消息回复了你之前的消息\n3. 有人直接向你提问或请求帮助\n4. 你确信能提供明确价值的信息\n\n以下情况必须保持沉默：\n- 消息 @的是其他人或其他机器人\n- 普通闲聊、与你无关的讨论\n- 你不确定是否该回复时\n\n不需要回复时，只回复 <NO_REPLY>，不要添加任何其他内容。`;
               }
               if (payload.groupSystemPrompt) {
-                groupInfo += `\n\n[群聊指令]\n${payload.groupSystemPrompt}`;
+                reminder += `\n\n[群聊指令]\n${payload.groupSystemPrompt}`;
               }
-              parts.push(groupInfo);
+              reminder += '\n</system-reminder>';
+              parts.push(reminder);
+            } else if (isAlways) {
+              // Brief per-turn reminder (Always mode only) — prevents multi-bot confusion
+              parts.push(`<system-reminder>\n你是「${botName}」，当前处于群聊的全部消息模式 — 你会收到群聊内的全部信息，你需要自主判断是否需要回复消息，与自己无关的消息不要回复，@其他人的消息不要回复。当你判断不需要回复消息时，只输出字符<NO_REPLY>\n</system-reminder>`);
             }
-            // Pending history (accumulated non-triggered messages)
+
+            // Pending history (accumulated non-triggered messages, Mention mode only)
             if (payload.pendingHistory) {
               parts.push(payload.pendingHistory);
             }
-            // Add quoted reply context (threaded reply from Bridge plugins)
+            // Quoted reply context (threaded reply from Bridge plugins)
             if (payload.replyToBody) {
               parts.push(`[引用回复]\n> ${payload.replyToBody.split('\n').join('\n> ')}`);
             }
-            // Add sender identity tag + original message
-            const senderTag = payload.senderName ? `[from: ${payload.senderName}]\n` : '';
-            parts.push(`${senderTag}${finalMessage}`);
+            // Mention context tag (Always mode only) + sender + message
+            const now = new Date();
+            const ts = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+            let messageBlock = '';
+            if (isAlways) {
+              messageBlock += payload.isMention ? '[本条消息 @了你]\n' : '[本条消息未 @你]\n';
+            }
+            messageBlock += payload.senderName ? `[from: ${payload.senderName} ${ts}]\n` : '';
+            messageBlock += finalMessage;
+            parts.push(messageBlock);
             finalMessage = parts.join('\n\n');
           } else if (payload.replyToBody) {
             // Private/DM quoted reply — prepend context before message

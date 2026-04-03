@@ -3,7 +3,6 @@
 // when it is eventually @mentioned.
 
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
 
 /// Maximum messages to keep per group
 const MAX_PER_GROUP: usize = 30;
@@ -17,7 +16,8 @@ const MAX_TEXT_LENGTH: usize = 200;
 pub struct GroupHistoryEntry {
     pub sender_name: String,
     pub text: String,
-    pub timestamp: Instant,
+    /// Wall-clock timestamp for display in AI context (year-month-day hour:minute:second)
+    pub timestamp: chrono::DateTime<chrono::Local>,
 }
 
 /// Buffers recent group messages that didn't trigger the bot.
@@ -98,7 +98,8 @@ impl GroupHistoryBuffer {
         }
         let mut lines = vec!["[以下是上次回复后的群聊记录，仅供参考]".to_string()];
         for entry in entries {
-            lines.push(format!("[from: {}] {}", entry.sender_name, entry.text));
+            let ts = entry.timestamp.format("%Y-%m-%d %H:%M:%S");
+            lines.push(format!("[from: {} {}] {}", entry.sender_name, ts, entry.text));
         }
         lines.push("[以下是当前消息，请回复]".to_string());
         Some(lines.join("\n"))
