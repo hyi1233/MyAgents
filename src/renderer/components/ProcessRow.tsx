@@ -40,8 +40,8 @@ const ProcessRow = memo(function ProcessRow({
     const isLastBlock = index === totalBlocks - 1;
     const isTaskTool = isTool && !isServerTool && (block.tool?.name === 'Task' || block.tool?.name === 'Agent');
 
-    // Thinking: 没有 isComplete 就是 active
-    const isThinkingActive = isThinking && block.isComplete !== true;
+    // Thinking: 没有 isComplete 且正在 streaming 才是 active（避免历史消息计时器永跑）
+    const isThinkingActive = isThinking && block.isComplete !== true && isStreaming;
 
     // Tool: 是最后一个 block 且正在 streaming 且没有 result 就是 active
     const isToolActive = isTool && isLastBlock && isStreaming && !block.tool?.result;
