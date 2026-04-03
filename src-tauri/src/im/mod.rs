@@ -1712,13 +1712,16 @@ async fn create_bot_instance<R: Runtime>(
                             let known = group_permissions_for_loop.read().await
                                 .iter().any(|g| g.group_id == msg.chat_id);
                             if !known {
-                                let _ = group_event_tx_for_loop.send(GroupEvent::BotAdded {
+                                ulog_info!("[im] Bridge group auto-discovery: {} ({})", msg.chat_id, msg.hint_group_name.as_deref().unwrap_or("?"));
+                                // try_send (not send().await) — sender and receiver share the same
+                                // select! loop; .await could deadlock if the channel is full.
+                                let _ = group_event_tx_for_loop.try_send(GroupEvent::BotAdded {
                                     chat_id: msg.chat_id.clone(),
                                     chat_title: msg.hint_group_name.clone()
                                         .unwrap_or_else(|| msg.chat_id.clone()),
                                     platform: msg.platform.clone(),
                                     added_by_name: msg.sender_name.clone(),
-                                }).await;
+                                });
                             }
                         }
 
@@ -2171,12 +2174,12 @@ async fn create_bot_instance<R: Runtime>(
                             };
                             {
                                 let mut perms = group_permissions_for_loop.write().await;
-                                // Don't downgrade already-approved groups (e.g., platform migration, re-invite while present)
-                                if perms.iter().any(|g| g.group_id == chat_id && g.status == GroupPermissionStatus::Approved) {
-                                    ulog_info!("[im] Group {} already approved, skipping BotAdded", chat_id);
+                                // Dedup: skip if group already known (Approved or Pending).
+                                // Prevents duplicate welcome messages under burst traffic from Bridge.
+                                if perms.iter().any(|g| g.group_id == chat_id) {
+                                    ulog_info!("[im] Group {} already known, skipping BotAdded", chat_id);
                                     continue;
                                 }
-                                perms.retain(|g| g.group_id != chat_id);
                                 perms.push(perm.clone());
                             }
                             // Persist to config.json
@@ -6139,10 +6142,9 @@ pub async fn cmd_update_agent_config(
                         };
                         *ch_inst.bot_instance.group_activation.write().await = activation;
                     }
-                    // groupPermissions
-                    if !ch_config.group_permissions.is_empty() {
-                        *ch_inst.bot_instance.group_permissions.write().await = ch_config.group_permissions.clone();
-                    }
+                    // groupPermissions — always overwrite (the full channels array is sent,
+                    // so empty Vec means "no permissions", not "field absent")
+                    *ch_inst.bot_instance.group_permissions.write().await = ch_config.group_permissions.clone();
                 }
             }
         }
