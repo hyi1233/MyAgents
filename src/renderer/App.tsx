@@ -1546,6 +1546,16 @@ export default function App() {
   useTrayEvents({
     minimizeToTray: config.minimizeToTray,
     onOpenSettings: () => handleOpenSettings('general'),
+    onCloseTab: () => {
+      // Close current tab if more than one tab exists.
+      // Returns true if a tab was closed, false if this is the last tab (→ fall through to tray/exit).
+      const tabs = tabsRef.current;
+      if (tabs.length > 1) {
+        closeCurrentTab();
+        return true;
+      }
+      return false;
+    },
     onNavigateToTab: (tabId: string) => {
       // Verify the tab still exists before switching
       const exists = tabsRef.current.some(t => t.id === tabId);

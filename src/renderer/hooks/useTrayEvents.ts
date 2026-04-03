@@ -14,6 +14,9 @@ interface TrayEventsOptions {
   onExitRequested?: () => Promise<boolean>;
   /** Callback when notification click triggers navigation to a specific tab */
   onNavigateToTab?: (tabId: string) => void;
+  /** Callback when Cmd+W should close a tab (after overlay dismissal, before tray/exit).
+   *  Returns true if a tab was closed (stop here), false if no tab to close (proceed to tray/exit). */
+  onCloseTab?: () => boolean;
 }
 
 export function useTrayEvents(options: TrayEventsOptions) {
@@ -119,6 +122,14 @@ export function useTrayEvents(options: TrayEventsOptions) {
           const hasOverlayBackdrop = !!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]');
           if (hasOverlayBackdrop) {
             console.log('[useTrayEvents] Unregistered overlay visible, blocking window close');
+            return;
+          }
+
+          // Try closing the current tab before falling through to tray/exit.
+          // This gives Cmd+W the layer: overlay → tab → tray/exit.
+          const { onCloseTab } = optionsRef.current;
+          if (onCloseTab && onCloseTab()) {
+            console.log('[useTrayEvents] Tab closed by onCloseTab, skipping window close');
             return;
           }
 
