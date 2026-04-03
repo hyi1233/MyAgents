@@ -1012,24 +1012,24 @@ export function getSessionModel(): string | undefined {
 }
 
 /** Get supported models from SDK.
- *  Uses existing session if available; otherwise spawns a lightweight query
- *  that initializes just enough to retrieve the model list, then closes. */
+ *  Uses existing session if available; otherwise spawns a temporary query
+ *  with maxTurns:0 to get the initialization data (includes model list). */
 export async function getSupportedModels(): Promise<Array<{ value: string; displayName: string; description: string }>> {
   // Fast path: existing session
   if (querySession) {
     try { return await querySession.supportedModels(); } catch { /* fall through */ }
   }
 
-  // Slow path: spawn a temporary query for initialization data
+  // Slow path: spawn a temporary query — maxTurns:0 makes SDK initialize then exit
   let tempQuery: Query | null = null;
   try {
-    // Empty async iterable — SDK initializes but never receives a user message
-    const emptyPrompt: AsyncIterable<SDKUserMessage> = { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) };
-    tempQuery = query({ prompt: emptyPrompt, options: { maxTurns: 0 } });
-    // First next() triggers subprocess spawn + initialization handshake
-    await tempQuery.next();
-    return await tempQuery.supportedModels();
-  } catch {
+    tempQuery = query({ prompt: ' ', options: { maxTurns: 0 } });
+    // Drain the generator — SDK initializes, runs 0 turns, then completes
+    // initializationResult() resolves once subprocess handshake is done
+    const initResult = await tempQuery.initializationResult();
+    return initResult.models ?? [];
+  } catch (e) {
+    console.error('[agent] getSupportedModels temp query failed:', e);
     return [];
   } finally {
     try { tempQuery?.return(undefined as never); } catch { /* cleanup */ }
