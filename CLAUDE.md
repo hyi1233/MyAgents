@@ -142,6 +142,21 @@ Agent 配置通过 Rust 命令 `cmd_update_agent_config` 写盘，写盘后 MUST
 
 Chat 分屏右侧面板的交互式 PTY 终端。Rust `terminal.rs`（`portable-pty`）+ 前端 `TerminalPanel.tsx`（xterm.js），通过 Tauri IPC 通信（不走 SSE/Sidecar）。终端绑定 Tab 生命周期，面板关闭不杀进程。PTY 进程由 `portable-pty` 管理，**不走** `process_cmd`；Proxy 手动复用 `proxy_config` 常量。详见 @specs/tech_docs/architecture.md 的「内嵌终端」节。
 
+### 内嵌浏览器（Embedded Browser）
+
+Chat 分屏右侧面板的 URL 预览器（Tauri Multi-Webview）。Rust `browser.rs` + 前端 `BrowserPanel.tsx`，通过 Tauri IPC 通信。AI Markdown 链接和 HTML 文件优先在此打开。
+
+- **依赖 Tauri `"unstable"` feature**（`Window::add_child()` 多 Webview API），Cargo.toml 已开启
+- **安全隔离**：`browser.json` Capability 零权限，Webview 无法访问 Tauri IPC；`on_navigation` 限制 http/https scheme
+- **Overlay 协调**：原生 Webview 浮于 React DOM 之上，Overlay 出现时通过 `closeLayer.hasOverlayLayer()` 自动 hide
+- **Cookie 持久化**：同 App 所有 Webview 共享，默认持久化磁盘，关闭即销毁（不后台保活）
+
+详见 @specs/tech_docs/architecture.md 的「内嵌浏览器」节。
+
+### 层级关闭系统（Close Layer）
+
+Cmd+W 层级关闭：Overlay → 分屏面板 → Tab。`closeLayer.ts` 模块级注册表，`useCloseLayer(handler, zIndex)` 一行集成。新增 Overlay 组件 MUST 调用 `useCloseLayer`，z-index 与 CSS 保持一致。详见 @specs/tech_docs/architecture.md 的「层级关闭系统」节。
+
 ### Plugin Bridge（OpenClaw 插件）
 
 - Bridge 是独立 Bun 进程，MUST 与 Sidecar 保持同等待遇：环境变量注入（`proxy_config`、`NO_PROXY`）、日志宏（`ulog_*` 不是 `log::*`）、config 查询范围（`imBotConfigs` + `agents[].channels[]`）
