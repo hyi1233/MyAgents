@@ -161,6 +161,7 @@ export default function BrowserPanel({
     if (!browserAlive) return;
 
     const shouldShow = isVisible && !isDraggingSplit && !overlayDetected;
+    console.log(`[browser] visibility effect: shouldShow=${shouldShow} isVisible=${isVisible} isDragging=${isDraggingSplit} overlayDetected=${overlayDetected}`);
 
     if (shouldShow) {
       invoke('cmd_browser_show', { tabId }).catch(() => {});

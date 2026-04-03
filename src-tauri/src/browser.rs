@@ -58,10 +58,16 @@ pub async fn cmd_browser_create(
 ) -> Result<(), String> {
     let label = format!("browser-{}", tab_id);
 
+    ulog_info!(
+        "[browser] cmd_browser_create: tab={} url={} pos=({},{}) size={}x{}",
+        tab_id, url, x, y, width, height
+    );
+
     // Prevent duplicate creation
     {
         let sessions = state.sessions.lock().await;
         if sessions.contains_key(&tab_id) {
+            ulog_info!("[browser] Duplicate creation blocked for tab {}", tab_id);
             return Err(format!("Browser already exists for tab {}", tab_id));
         }
     }
@@ -76,34 +82,40 @@ pub async fn cmd_browser_create(
     let app_new_win = app.clone();
     let label_new_win = label.clone();
 
-    let builder = WebviewBuilder::new(&label, tauri::WebviewUrl::External(parsed_url))
+    let builder = WebviewBuilder::new(&label, tauri::WebviewUrl::External(parsed_url.clone()))
         .on_navigation(move |nav_url| {
             let scheme = nav_url.scheme();
             // Security: block dangerous schemes; allow everything else
-            // (about:srcdoc/blank for iframes, data: for inline content, blob: for blobs)
             if scheme == "javascript" || scheme == "file" {
-                ulog_info!("[browser] Blocked navigation to {} (scheme: {})", nav_url, scheme);
+                ulog_info!("[browser] on_navigation BLOCKED: {} (scheme: {})", nav_url, scheme);
                 return false;
             }
             // Only emit URL changes for http/https (skip about:, data:, blob: noise)
             if scheme == "http" || scheme == "https" {
+                ulog_info!("[browser] on_navigation ALLOW: {}", nav_url);
                 let _ = app_nav.emit(
                     &format!("browser:url-changed:{}", tab_id_nav),
                     nav_url.to_string(),
                 );
+            } else {
+                ulog_info!("[browser] on_navigation ALLOW (internal): {} (scheme: {})", nav_url, scheme);
             }
             true
         })
         .on_page_load(move |_webview, payload| {
+            let url_str = payload.url().to_string();
             let event_name = format!("browser:loading:{}", tab_id_load);
             match payload.event() {
                 PageLoadEvent::Started => {
+                    ulog_info!("[browser] on_page_load STARTED: {}", url_str);
                     let _ = app_load.emit(&event_name, true);
                 }
                 PageLoadEvent::Finished => {
+                    ulog_info!("[browser] on_page_load FINISHED: {}", url_str);
                     let _ = app_load.emit(&event_name, false);
                     // Emit final URL (may differ from navigation URL due to redirects)
                     if let Ok(final_url) = _webview.url() {
+                        ulog_info!("[browser] Final URL after load: {}", final_url);
                         let _ = app_load.emit(
                             &format!("browser:url-changed:{}", tab_id_load),
                             final_url.to_string(),
@@ -113,6 +125,7 @@ pub async fn cmd_browser_create(
             }
         })
         .on_new_window(move |url, _features| {
+            ulog_info!("[browser] on_new_window: {} — redirecting to current webview", url);
             // Redirect target="_blank" / window.open() into the current webview
             let app = app_new_win.clone();
             let lbl = label_new_win.clone();
@@ -133,9 +146,25 @@ pub async fn cmd_browser_create(
     let position = LogicalPosition::new(x, y);
     let size = LogicalSize::new(width, height);
 
+    ulog_info!("[browser] Calling window.add_child for label='{}' url={}", label, parsed_url);
     window
         .add_child(builder, position, size)
-        .map_err(|e| format!("Failed to create browser webview: {e}"))?;
+        .map_err(|e| {
+            ulog_info!("[browser] add_child FAILED: {}", e);
+            format!("Failed to create browser webview: {e}")
+        })?;
+
+    ulog_info!("[browser] add_child SUCCESS for label='{}'", label);
+
+    // Verify webview is accessible
+    if let Some(wv) = app.get_webview(&label) {
+        match wv.url() {
+            Ok(u) => ulog_info!("[browser] Webview current url: {}", u),
+            Err(e) => ulog_info!("[browser] Webview url() error: {}", e),
+        }
+    } else {
+        ulog_info!("[browser] WARNING: webview '{}' not found after add_child!", label);
+    }
 
     // Store session
     let mut sessions = state.sessions.lock().await;
@@ -152,7 +181,7 @@ pub async fn cmd_browser_create(
         },
     );
 
-    ulog_info!("[browser] Created webview '{}' for tab {}", label, tab_id);
+    ulog_info!("[browser] Created webview '{}' for tab {} — session stored", label, tab_id);
     Ok(())
 }
 
@@ -164,6 +193,7 @@ pub async fn cmd_browser_navigate(
     tab_id: String,
     url: String,
 ) -> Result<(), String> {
+    ulog_info!("[browser] cmd_browser_navigate: tab={} url={}", tab_id, url);
     let sessions = state.sessions.lock().await;
     let session = sessions
         .get(&tab_id)
@@ -298,6 +328,7 @@ pub async fn cmd_browser_show(
     let _ = webview.set_size(LogicalSize::new(session.last_width, session.last_height));
     let _ = webview.show();
     session.visible = true;
+    ulog_info!("[browser] SHOW webview '{}' at ({},{}) {}x{}", session.webview_label, session.last_x, session.last_y, session.last_width, session.last_height);
     Ok(())
 }
 
@@ -323,6 +354,7 @@ pub async fn cmd_browser_hide(
 
     let _ = webview.hide();
     session.visible = false;
+    ulog_info!("[browser] HIDE webview '{}'", session.webview_label);
     Ok(())
 }
 
