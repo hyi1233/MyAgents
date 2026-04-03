@@ -280,6 +280,42 @@ export async function verifyProviderViaSdk(
 }
 
 /**
+ * Fetch supported models from SDK by spawning a lightweight query.
+ * Works for both subscription (OAuth) and API key providers.
+ * Uses the same SDK spawning pattern as verify, but only reads initialization data.
+ */
+export async function fetchSdkSupportedModels(): Promise<Array<{ value: string; displayName: string; description: string }>> {
+  const cliPath = resolveClaudeCodeCli();
+  const cwd = join(homedir(), '.myagents', 'projects');
+  mkdirSync(cwd, { recursive: true });
+
+  // No custom env — use default credentials (subscription OAuth or API key from ~/.claude.json)
+  const testQuery = query({
+    prompt: '1+1=',
+    options: {
+      maxTurns: 0,
+      sessionId: randomUUID(),
+      cwd,
+      settingSources: ['project'],
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      pathToClaudeCodeExecutable: cliPath,
+      executable: 'bun',
+      persistSession: false,
+      mcpServers: {},
+      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const },
+    },
+  });
+
+  try {
+    const initResult = await testQuery.initializationResult();
+    return initResult.models ?? [];
+  } finally {
+    try { testQuery.return(undefined as never); } catch { /* cleanup */ }
+  }
+}
+
+/**
  * Check if Anthropic subscription credentials exist locally
  * Claude CLI stores OAuth account info in ~/.claude.json file
  */

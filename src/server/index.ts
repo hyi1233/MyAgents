@@ -6442,12 +6442,14 @@ async function main() {
       }
 
       // GET /api/supported-models - Get available models from SDK
+      // Spawns a lightweight SDK subprocess (same pattern as provider verify)
       if (pathname === '/api/supported-models' && request.method === 'GET') {
         try {
-          const { getSupportedModels } = await import('./agent-session');
-          const models = await getSupportedModels();
+          const { fetchSdkSupportedModels } = await import('./provider-verify');
+          const models = await fetchSdkSupportedModels();
           return jsonResponse({ models });
         } catch (error) {
+          console.error('[api/supported-models] Error:', error);
           return jsonResponse({ models: [], error: error instanceof Error ? error.message : 'Failed to get models' });
         }
       }
