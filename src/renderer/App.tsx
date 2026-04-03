@@ -1547,14 +1547,17 @@ export default function App() {
     minimizeToTray: config.minimizeToTray,
     onOpenSettings: () => handleOpenSettings('general'),
     onCloseTab: () => {
-      // Close current tab if more than one tab exists.
-      // Returns true if a tab was closed, false if this is the last tab (→ fall through to tray/exit).
+      // Close current tab. performCloseTab auto-creates a launcher when closing
+      // the last tab, so Cmd+W never leaves the user with zero tabs.
+      // Only return false (→ fall through to tray/exit) when already on the launcher.
       const tabs = tabsRef.current;
-      if (tabs.length > 1) {
-        closeCurrentTab();
-        return true;
+      const activeId = activeTabIdRef.current;
+      const activeTab = tabs.find(t => t.id === activeId);
+      if (tabs.length === 1 && activeTab?.view === 'launcher') {
+        return false; // Already on launcher — Cmd+W → tray/exit
       }
-      return false;
+      closeCurrentTab();
+      return true;
     },
     onNavigateToTab: (tabId: string) => {
       // Verify the tab still exists before switching
