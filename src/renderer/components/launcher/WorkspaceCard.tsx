@@ -7,6 +7,7 @@
 
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, Trash2, Settings2, HeartPulse, SlidersHorizontal } from 'lucide-react';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 import type { Project } from '@/config/types';
 import type { AgentConfig } from '../../../shared/types/agent';
@@ -67,6 +68,13 @@ export default memo(function WorkspaceCard({
         const y = Math.min(e.clientY, window.innerHeight - menuHeight);
         setContextMenu({ x, y });
     }, []);
+
+    // Cmd+W dismissal: when context menu is open, close it instead of closing the tab.
+    useCloseLayer(() => {
+        if (!contextMenu) return false;
+        setContextMenu(null);
+        return true;
+    }, 50);
 
     // Close context menu on click-outside or Escape
     useEffect(() => {

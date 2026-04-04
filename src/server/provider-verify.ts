@@ -158,6 +158,11 @@ async function verifyViaSdk(
         resolve({ success: false, error: `验证超时，请检查网络连接${stderrHint}` });
       }, TIMEOUT_MS);
     });
+    // Cleanup helper: terminate SDK subprocess regardless of race outcome.
+    // Without this, the losing promise's `for await` keeps the subprocess alive.
+    const cleanupQuery = () => {
+      try { testQuery.return(undefined as never); } catch { /* already terminated */ }
+    };
 
     const verifyPromise = (async (): Promise<{ success: boolean; error?: string; detail?: string }> => {
       for await (const message of testQuery) {
@@ -231,6 +236,7 @@ async function verifyViaSdk(
       return await Promise.race([verifyPromise, timeoutPromise]);
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
+      cleanupQuery();
     }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -311,8 +317,14 @@ export async function fetchSdkSupportedModels(): Promise<Array<{ value: string; 
     },
   });
 
+  const INIT_TIMEOUT_MS = 30000;
   try {
-    const initResult = await testQuery.initializationResult();
+    const initResult = await Promise.race([
+      testQuery.initializationResult(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('SDK initialization timeout')), INIT_TIMEOUT_MS),
+      ),
+    ]);
     return initResult.models ?? [];
   } finally {
     try { testQuery.return(undefined as never); } catch { /* cleanup */ }
