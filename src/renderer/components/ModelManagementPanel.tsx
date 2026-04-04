@@ -271,20 +271,21 @@ export default function ModelManagementPanel({
               <h3 className="text-xs font-semibold text-[var(--ink-muted)]">
                 发现更多模型
               </h3>
-              {canDiscover && !discoveryLoading && discoveredModels.length > 0 && (
+              {canDiscover && discoveredModels.length > 0 && (
                 <button
                   type="button"
                   onClick={doFetch}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                  disabled={discoveryLoading}
+                  className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
                 >
-                  <RefreshCw className="h-3 w-3" />
+                  <RefreshCw className={`h-3 w-3 ${discoveryLoading ? 'animate-spin' : ''}`} />
                   刷新
                 </button>
               )}
             </div>
 
-            {/* Search */}
-            {canDiscover && !discoveryLoading && !discoveryError && discoveredModels.length > 0 && (
+            {/* Search — always visible once models have been loaded (avoids layout jump on refresh) */}
+            {canDiscover && !discoveryError && discoveredModels.length > 0 && (
               <div className="relative mb-3">
                 <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-subtle)]" />
                 <input
@@ -305,7 +306,7 @@ export default function ModelManagementPanel({
               <p className="py-6 text-center text-sm text-[var(--ink-muted)]">当前供应商不支持发现模型</p>
             )}
 
-            {canDiscover && discoveryLoading && (
+            {canDiscover && discoveryLoading && discoveredModels.length === 0 && (
               <div className="flex flex-col items-center justify-center py-8 text-[var(--ink-muted)]">
                 <Loader2 className="h-5 w-5 animate-spin" />
                 <p className="mt-2 text-sm">正在拉取模型列表...</p>
