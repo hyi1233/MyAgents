@@ -1030,6 +1030,9 @@ export function setSessionPermissionMode(mode: PermissionMode): void {
     const sdkMode = mapToSdkPermissionMode(mode);
     querySession.setPermissionMode(sdkMode).catch(err => {
       console.error('[agent] failed to apply permission mode to running session:', err);
+      // Rollback: restore old mode and notify frontend to undo
+      currentPermissionMode = oldMode;
+      broadcast('chat:permission-mode-changed', { permissionMode: oldMode });
     });
   }
 
@@ -5277,11 +5280,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           prePlanPermissionMode = currentPermissionMode;
           currentPermissionMode = 'plan';
           broadcast('enter-plan-mode:request', { requestId: `sdk_auto_${Date.now()}`, autoApproved: true });
+          broadcast('chat:permission-mode-changed', { permissionMode: 'plan' });
           console.log(`[agent] SDK auto-entered plan mode, saved prePlanPermissionMode=${prePlanPermissionMode}`);
         } else if (statusResult.permissionMode && statusResult.permissionMode !== 'plan' && prePlanPermissionMode) {
           // SDK exited plan mode (e.g. after ExitPlanMode approval)
           currentPermissionMode = prePlanPermissionMode;
           prePlanPermissionMode = null;
+          broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
           console.log(`[agent] SDK exited plan mode, restored currentPermissionMode=${currentPermissionMode}`);
         }
       }

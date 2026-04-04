@@ -708,10 +708,11 @@ export default function TabProvider({
             case 'chat:permission-mode-changed': {
                 // Backend permission mode changed (e.g., ExitPlanMode restored auto).
                 // Dispatch to Chat.tsx so it can sync the UI toggle.
+                // Include tabId for cross-tab isolation (SSE is tab-scoped but DOM events are global).
                 const payload = data as { permissionMode: string } | null;
                 if (payload?.permissionMode) {
                     window.dispatchEvent(new CustomEvent('permission-mode-sync', {
-                        detail: { permissionMode: payload.permissionMode }
+                        detail: { permissionMode: payload.permissionMode, tabId }
                     }));
                 }
                 break;
