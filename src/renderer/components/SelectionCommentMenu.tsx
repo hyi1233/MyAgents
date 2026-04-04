@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Quote, Sparkles } from 'lucide-react';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 /**
  * Floating menu that appears when user selects text within assistant messages.
@@ -44,6 +45,14 @@ const SelectionCommentMenu = memo(function SelectionCommentMenu({
     setVisible(false);
     selectedTextRef.current = '';
   }, []);
+
+  // Cmd+W dismissal: when menu is visible, close it instead of closing the tab.
+  useCloseLayer(() => {
+    if (!visible) return false;
+    window.getSelection()?.removeAllRanges();
+    hideMenu();
+    return true;
+  }, 300);
 
   useEffect(() => {
     const handleMouseUp = (e: MouseEvent) => {

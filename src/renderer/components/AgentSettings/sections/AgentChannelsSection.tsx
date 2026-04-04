@@ -6,6 +6,7 @@ import { Plus, X, Loader2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentConfig, ChannelConfig, ChannelType } from '../../../../shared/types/agent';
 import type { AgentStatusData, ChannelStatusData } from '@/hooks/useAgentStatuses';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { invokeStartAgentChannel } from '@/config/services/agentConfigService';
 import ChannelPlatformSelect from '../channels/ChannelPlatformSelect';
 import ChannelWizard from '../channels/ChannelWizard';
@@ -234,13 +235,9 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
 
       {/* === Unified Overlay Panel === */}
       {overlay && createPortal(
-        <div
-          className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-          onClick={closeOverlay}
-        >
+        <OverlayBackdrop onClose={closeOverlay} className="z-[200]">
           <div
             className="relative flex h-[90vh] w-[90vw] max-w-5xl flex-col overflow-hidden rounded-2xl bg-[var(--paper-elevated)] shadow-2xl"
-            onClick={e => e.stopPropagation()}
           >
             {/* Close button — absolute top-right */}
             <button
@@ -257,7 +254,7 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
               </div>
             </div>
           </div>
-        </div>,
+        </OverlayBackdrop>,
         document.body,
       )}
     </>

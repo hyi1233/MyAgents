@@ -17,6 +17,8 @@ import { getSessions, type SessionMetadata } from '@/api/sessionClient';
 import type { CronSchedule, CronEndConditions, CronRunMode } from '@/types/cronTask';
 import { MIN_CRON_INTERVAL } from '@/types/cronTask';
 import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 function toLocalDateTimeString(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -91,6 +93,8 @@ function PillButton({ selected, onClick, children }: { selected: boolean; onClic
 }
 
 export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalProps) {
+  useCloseLayer(() => { onClose(); return true; }, 200);
+
   const { projects } = useConfig();
   const toast = useToast();
 
@@ -207,8 +211,7 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
   }, [errors, isCreating, name, prompt, selectedProjectPath, schedule, intervalMinutes, endConditionMode, deadline, maxExecutions, aiCanExit, notifyEnabled, deliveryBotId, resolveDelivery, runMode, selectedSessionId, onClose, onCreated, toast, isAtSchedule, isLoopSchedule]);
 
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+    <OverlayBackdrop onClose={onClose} className="z-[200]">
       <div className="flex h-[80vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg">
 
         {/* ── Header ── */}
@@ -380,6 +383,6 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
           </div>
         </div>
       </div>
-    </div>
+    </OverlayBackdrop>
   );
 }

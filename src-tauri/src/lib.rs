@@ -15,6 +15,7 @@ pub mod system_binary;
 mod sidecar;
 mod sse_proxy;
 pub mod terminal;
+pub mod browser;
 mod tray;
 mod updater;
 
@@ -98,6 +99,12 @@ pub fn run() {
     let terminal_state_for_window = terminal_state.clone();
     let terminal_state_for_tray_exit = terminal_state.clone();
 
+    // Create browser manager state
+    let browser_state = browser::BrowserManager::new();
+    let browser_state_for_exit = browser_state.clone();
+    let browser_state_for_window = browser_state.clone();
+    let browser_state_for_tray_exit = browser_state.clone();
+
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
 
@@ -124,6 +131,7 @@ pub fn run() {
         .manage(im_bot_state)
         .manage(agent_state)
         .manage(terminal_state)
+        .manage(browser_state)
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
             commands::cmd_start_sidecar,
@@ -235,14 +243,27 @@ pub fn run() {
             // WeCom QR code commands (public API, not plugin gateway)
             commands::cmd_wecom_qr_generate,
             commands::cmd_wecom_qr_poll,
+            // Model discovery
+            commands::cmd_fetch_provider_models,
             // Terminal commands (embedded PTY)
             terminal::cmd_terminal_create,
             terminal::cmd_terminal_write,
             terminal::cmd_terminal_resize,
             terminal::cmd_terminal_close,
+            // Browser commands (embedded webview)
+            browser::cmd_browser_create,
+            browser::cmd_browser_navigate,
+            browser::cmd_browser_go_back,
+            browser::cmd_browser_go_forward,
+            browser::cmd_browser_reload,
+            browser::cmd_browser_resize,
+            browser::cmd_browser_show,
+            browser::cmd_browser_hide,
+            browser::cmd_browser_close,
             // File utility commands
             commands::cmd_read_workspace_file,
             commands::cmd_write_workspace_file,
+            commands::cmd_delete_workspace_file,
             commands::cmd_read_file_base64,
             commands::cmd_open_file,
         ])
@@ -342,6 +363,9 @@ pub fn run() {
                     // Clean up terminal PTY sessions
                     let ts = terminal_state_for_tray_exit.clone();
                     tauri::async_runtime::block_on(terminal::close_all_terminals(&ts));
+                    // Clean up browser webviews
+                    let bs = browser_state_for_tray_exit.clone();
+                    tauri::async_runtime::block_on(browser::close_all_browsers(&bs, &app_handle_for_tray));
                     app_dirs::release_lock();
                 }
                 app_handle_for_tray.exit(0);
@@ -354,6 +378,69 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     window.open_devtools();
                 }
+            }
+
+            // macOS: Custom menu — replace native "Close Window" (Cmd+W) with a custom
+            // menu item that emits window:cmd-w to the frontend. This separates the
+            // Cmd+W path (overlay → tab → launcher → stop) from the X button path
+            // (CloseRequested → tray/exit). Without this, Cmd+W triggers CloseRequested
+            // which hides the window before JS can handle it.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{MenuBuilder, SubmenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+
+                let app_name = app.package_info().name.clone();
+                let app_handle = app.handle();
+
+                let close_tab = MenuItemBuilder::with_id("cmd-w-close", "Close Tab")
+                    .accelerator("CmdOrCtrl+W")
+                    .build(app_handle)?;
+
+                let app_menu = SubmenuBuilder::new(app_handle, &app_name)
+                    .about(None)
+                    .separator()
+                    .services()
+                    .separator()
+                    .hide()
+                    .hide_others()
+                    .show_all()
+                    .separator()
+                    .quit()
+                    .build()?;
+
+                let edit_menu = SubmenuBuilder::new(app_handle, "Edit")
+                    .undo()
+                    .redo()
+                    .separator()
+                    .cut()
+                    .copy()
+                    .paste()
+                    .select_all()
+                    .build()?;
+
+                let window_menu = SubmenuBuilder::new(app_handle, "Window")
+                    .item(&close_tab)
+                    .item(&PredefinedMenuItem::minimize(app_handle, None)?)
+                    .item(&PredefinedMenuItem::maximize(app_handle, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::fullscreen(app_handle, None)?)
+                    .build()?;
+
+                let menu = MenuBuilder::new(app_handle)
+                    .item(&app_menu)
+                    .item(&edit_menu)
+                    .item(&window_menu)
+                    .build()?;
+
+                app.set_menu(menu)?;
+
+                // Handle custom menu item click
+                let app_handle_for_menu = app.handle().clone();
+                app.on_menu_event(move |_app, event| {
+                    if event.id().as_ref() == "cmd-w-close" {
+                        let _ = app_handle_for_menu.emit("window:cmd-w", ());
+                    }
+                });
             }
 
             // Windows: Remove system decorations for custom title bar
@@ -463,6 +550,10 @@ pub fn run() {
                         // Clean up terminal PTY sessions
                         let ts = terminal_state_for_window.clone();
                         tauri::async_runtime::block_on(terminal::close_all_terminals(&ts));
+                        // Clean up browser webviews
+                        let bs = browser_state_for_window.clone();
+                        let app_for_browser = window.app_handle().clone();
+                        tauri::async_runtime::block_on(browser::close_all_browsers(&bs, &app_for_browser));
                         app_dirs::release_lock();
                     }
                 }
@@ -487,6 +578,9 @@ pub fn run() {
                     // Clean up terminal PTY sessions
                     let ts = terminal_state_for_exit.clone();
                     tauri::async_runtime::block_on(terminal::close_all_terminals(&ts));
+                    // Clean up browser webviews
+                    let bs = browser_state_for_exit.clone();
+                    tauri::async_runtime::block_on(browser::close_all_browsers(&bs, _app_handle));
                     app_dirs::release_lock();
                 }
             }

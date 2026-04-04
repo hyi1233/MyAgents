@@ -3,6 +3,7 @@
 
 import { useEffect, useCallback, useRef } from 'react';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { dismissTopmost } from '@/utils/closeLayer';
 import { setWindowVisible, consumePendingNavigation } from '@/services/notificationService';
 
 interface TrayEventsOptions {
@@ -14,6 +15,9 @@ interface TrayEventsOptions {
   onExitRequested?: () => Promise<boolean>;
   /** Callback when notification click triggers navigation to a specific tab */
   onNavigateToTab?: (tabId: string) => void;
+  /** Callback for Cmd+W close-tab action (after overlay dismissal).
+   *  closeCurrentTab() auto-creates launcher on last tab; launcher is a no-op. */
+  onCmdWCloseTab?: () => void;
 }
 
 export function useTrayEvents(options: TrayEventsOptions) {
@@ -64,6 +68,7 @@ export function useTrayEvents(options: TrayEventsOptions) {
   useEffect(() => {
     if (!isTauriEnvironment()) return;
 
+    let unlistenCmdW: (() => void) | null = null;
     let unlistenCloseRequested: (() => void) | null = null;
     let unlistenOpenSettings: (() => void) | null = null;
     let unlistenExitRequested: (() => void) | null = null;
@@ -100,20 +105,39 @@ export function useTrayEvents(options: TrayEventsOptions) {
           }
         });
 
-        // Listen for window close request (X button)
+        // ── Cmd+W handler (macOS custom menu item → window:cmd-w) ──
+        // Separated from X button (CloseRequested). Cmd+W walks the close hierarchy:
+        // overlay → split panel → tab → launcher (terminal state, never exits).
+        unlistenCmdW = await listen('window:cmd-w', () => {
+          console.log('[useTrayEvents] Cmd+W received');
+          // 1. Try dismissing topmost overlay/panel
+          if (dismissTopmost()) {
+            console.log('[useTrayEvents] Cmd+W: overlay dismissed');
+            return;
+          }
+          // 2. Safety net: unregistered overlay visible → block (safe degradation)
+          if (document.querySelector('.fixed.inset-0[class*="backdrop-blur"]')) {
+            console.log('[useTrayEvents] Cmd+W: unregistered overlay visible, blocked');
+            return;
+          }
+          // 3. Close current tab (auto-creates launcher on last tab; launcher is no-op)
+          optionsRef.current.onCmdWCloseTab?.();
+          console.log('[useTrayEvents] Cmd+W: tab closed');
+        });
+
+        // ── X button / system close (CloseRequested → window:close-requested) ──
+        // Pure tray/exit behavior — no overlay/tab logic (that's Cmd+W's job).
         unlistenCloseRequested = await listen('window:close-requested', async () => {
-          console.log('[useTrayEvents] Window close requested');
+          console.log('[useTrayEvents] Window close requested (X button)');
           const { minimizeToTray } = optionsRef.current;
 
           if (minimizeToTray) {
-            // Hide to tray instead of closing
             const window = getCurrentWindow();
             await window.hide();
             wasHidden = true;
-            setWindowVisible(false); // Update notification service state
+            setWindowVisible(false);
             console.log('[useTrayEvents] Window hidden to tray');
           } else {
-            // Check if exit callback returns true (can exit)
             const { onExitRequested } = optionsRef.current;
             if (onExitRequested) {
               const canExit = await onExitRequested();
@@ -162,6 +186,7 @@ export function useTrayEvents(options: TrayEventsOptions) {
     setupListeners();
 
     return () => {
+      if (unlistenCmdW) unlistenCmdW();
       if (unlistenCloseRequested) unlistenCloseRequested();
       if (unlistenOpenSettings) unlistenOpenSettings();
       if (unlistenExitRequested) unlistenExitRequested();

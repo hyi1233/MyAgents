@@ -29,6 +29,8 @@ import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EV
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
+import { dismissTopmost } from '@/utils/closeLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
@@ -689,8 +691,15 @@ export default function App() {
           setActiveTabId(newTab.id);
         }
       } else if (e.key === 'w' || e.key === 'W') {
+        // macOS: handled by native menu → window:cmd-w → useTrayEvents.ts.
+        // Windows/Linux: no native menu with Ctrl+W, so handle here directly.
+        // (On macOS this branch is dead code — the menu intercepts before JS.)
         e.preventDefault();
-        closeCurrentTab();
+        if (!dismissTopmost()) {
+          if (!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]')) {
+            closeCurrentTab();
+          }
+        }
       } else if (e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
         // Cmd+Shift+[ = previous tab, Cmd+Shift+] = next tab
         e.preventDefault();
@@ -706,8 +715,12 @@ export default function App() {
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    // Capture phase: application-level shortcuts (Cmd+W/T/Tab, etc.) MUST fire before
+    // any component-level handlers. Without capture, Monaco editor (or any component
+    // calling stopPropagation) blocks the event → our handler never fires →
+    // e.preventDefault() never called → Tauri native Cmd+W closes the window.
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
 
@@ -1534,6 +1547,10 @@ export default function App() {
   useTrayEvents({
     minimizeToTray: config.minimizeToTray,
     onOpenSettings: () => handleOpenSettings('general'),
+    onCmdWCloseTab: () => {
+      // Cmd+W bottom: overlay → split → tab → launcher → STOP.
+      closeCurrentTab(); // Last tab auto-creates launcher; launcher is a no-op.
+    },
     onNavigateToTab: (tabId: string) => {
       // Verify the tab still exists before switching
       const exists = tabsRef.current.some(t => t.id === tabId);
@@ -1677,10 +1694,7 @@ export default function App() {
 
       {/* Warning: ~/.claude/settings.json env overrides detected */}
       {claudeEnvOverride && (
-        <div
-          className="fixed inset-0 z-[300] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm"
-          onMouseDown={(e) => { if (e.target === e.currentTarget && !claudeEnvClearing) setClaudeEnvOverride(null); }}
-        >
+        <OverlayBackdrop onClose={claudeEnvClearing ? undefined : () => setClaudeEnvOverride(null)} className="z-[300] px-4">
           <div className="glass-panel w-full max-w-sm">
             <div className="border-b border-[var(--line)] px-5 py-4">
               <div className="text-[14px] font-semibold text-[var(--ink)]">检测到全局配置覆盖</div>
@@ -1733,7 +1747,7 @@ export default function App() {
               </div>
             </div>
           </div>
-        </div>
+        </OverlayBackdrop>
       )}
 
       {/* Bug report overlay triggered from titlebar feedback button */}

@@ -423,6 +423,9 @@ async function awaitSessionTermination(timeoutMs = 10_000, label = ''): Promise<
 
 let isInterruptingResponse = false;
 let isStreamingMessage = false;
+// Post-interrupt turn-completion signal: resolves when for-await loop receives a `result` message.
+// Used by interruptCurrentResponse() to verify the SDK subprocess actually stopped after interrupt().
+let postInterruptTurnEndResolve: (() => void) | null = null;
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
 const streamIndexToToolId: Map<number, string> = new Map();
@@ -1012,12 +1015,29 @@ export function getSessionPermissionMode(): PermissionMode {
   return currentPermissionMode;
 }
 
-/** Set permission mode (called by Rust IM router via /api/session/permission-mode) */
+/** Set permission mode (called from frontend via /api/session/permission-mode) */
 export function setSessionPermissionMode(mode: PermissionMode): void {
   if (mode === currentPermissionMode) return;
   const oldMode = currentPermissionMode;
   currentPermissionMode = mode;
   console.log(`[agent] session permission mode set: ${oldMode} -> ${mode}`);
+
+  // Apply permission mode change to SDK subprocess immediately (same as setSessionModel).
+  // Without this, the SDK subprocess stays in the old mode until the next message
+  // triggers applySessionConfig(). Critical for plan mode: user switches to plan in UI
+  // but SDK keeps auto → canUseTool may be skipped → tools execute unchecked.
+  if (querySession) {
+    const sdkMode = mapToSdkPermissionMode(mode);
+    querySession.setPermissionMode(sdkMode).catch(err => {
+      console.error('[agent] failed to apply permission mode to running session:', err);
+      // Rollback: restore old mode and notify frontend to undo
+      currentPermissionMode = oldMode;
+      broadcast('chat:permission-mode-changed', { permissionMode: oldMode });
+    });
+  }
+
+  // Notify frontend of the mode change so UI stays in sync
+  broadcast('chat:permission-mode-changed', { permissionMode: mode });
 }
 
 export function setSessionModel(model: string): void {
@@ -1810,6 +1830,8 @@ export function handleExitPlanModeResponse(requestId: string, approved: boolean)
     currentPermissionMode = prePlanPermissionMode;
     prePlanPermissionMode = null;
     console.debug(`[ExitPlanMode] Restored currentPermissionMode to: ${currentPermissionMode}`);
+    // Notify frontend that mode changed (plan → auto/custom/etc.)
+    broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
   }
   pending.resolve(approved);
   return true;
@@ -1876,6 +1898,7 @@ export function handleEnterPlanModeResponse(requestId: string, approved: boolean
     prePlanPermissionMode = currentPermissionMode;
     currentPermissionMode = 'plan';
     console.debug(`[EnterPlanMode] Saved prePlanPermissionMode=${prePlanPermissionMode}, switched to plan`);
+    broadcast('chat:permission-mode-changed', { permissionMode: 'plan' });
   }
   pending.resolve(approved);
   return true;
@@ -2142,10 +2165,28 @@ function persistMessagesToStorage(
     if (sessionMessages[i].role === 'user') {
       const content = sessionMessages[i].content;
       const text = typeof content === 'string' ? content : '';
-      if (text.includes('<HEARTBEAT>') || text.includes('<MEMORY_UPDATE>') || text.startsWith('<system-reminder>')) {
+      if (text.includes('<HEARTBEAT>') || text.includes('<MEMORY_UPDATE>')) {
         continue;
       }
-      lastMessagePreview = text.trim().slice(0, 60) || undefined;
+      // Skip pure system-reminder messages (heartbeat/cron injections where the
+      // ENTIRE message is <system-reminder>...</system-reminder> with no user content).
+      // Mixed messages (group chat: system-reminder prefix + actual user text) are
+      // real user messages and MUST update lastMessagePreview/lastActiveAt.
+      if (text.startsWith('<system-reminder>')) {
+        const closeTag = '</system-reminder>';
+        const closeIdx = text.indexOf(closeTag);
+        // Pure: no content after closing tag → skip. Mixed: has content → keep.
+        if (closeIdx >= 0 && text.slice(closeIdx + closeTag.length).trim() === '') continue;
+        if (closeIdx < 0) continue; // malformed, treat as system
+      }
+      // For group messages with <system-reminder> prefix, extract the user-visible part for preview
+      let previewText = text;
+      if (previewText.startsWith('<system-reminder>')) {
+        const closeTag = '</system-reminder>';
+        const closeIdx = previewText.indexOf(closeTag);
+        if (closeIdx >= 0) previewText = previewText.slice(closeIdx + closeTag.length).trim();
+      }
+      lastMessagePreview = previewText.slice(0, 60) || undefined;
       foundRealUserMessage = true;
       break;
     }
@@ -4366,6 +4407,36 @@ export async function interruptCurrentResponse(): Promise<boolean> {
       try { session.close(); } catch { /* already dead */ }
     }
 
+    // Step 3: If interrupt "succeeded" (SDK ACKed), verify the turn actually completed.
+    // interrupt() resolving only means the SDK received the signal — it does NOT guarantee
+    // the subprocess stopped processing. If an MCP tool is hung (e.g., cuse Read on a large
+    // screenshot), the SDK subprocess remains blocked on client.callTool() with a ~28-hour
+    // timeout. The for-await loop gets no more events, stdin messages are swallowed, and
+    // the user sees "no response" until the 10-minute watchdog fires.
+    //
+    // Fix: wait up to 3 seconds for the for-await loop to receive a `result` message
+    // (turn completion). If it doesn't arrive, the MCP tool is likely hung — force-close.
+    if (interrupted && querySession) {
+      const turnEnded = new Promise<void>(resolve => {
+        postInterruptTurnEndResolve = resolve;
+      });
+      const postInterruptTimeout = new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error('Post-interrupt turn completion timeout')), 3000)
+      );
+      try {
+        await Promise.race([turnEnded, postInterruptTimeout]);
+      } catch {
+        // Turn didn't complete within 3s — MCP tool likely hung, force-close
+        postInterruptTurnEndResolve = null;
+        if (querySession) {
+          console.warn('[agent] Force-closing: turn did not complete 3s after interrupt (hung MCP tool?)');
+          const session = querySession;
+          querySession = null;
+          try { session.close(); } catch { /* already dead */ }
+        }
+      }
+    }
+
     broadcast('chat:message-stopped', null);
     handleMessageStopped();
     return true;
@@ -5209,11 +5280,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           prePlanPermissionMode = currentPermissionMode;
           currentPermissionMode = 'plan';
           broadcast('enter-plan-mode:request', { requestId: `sdk_auto_${Date.now()}`, autoApproved: true });
+          broadcast('chat:permission-mode-changed', { permissionMode: 'plan' });
           console.log(`[agent] SDK auto-entered plan mode, saved prePlanPermissionMode=${prePlanPermissionMode}`);
         } else if (statusResult.permissionMode && statusResult.permissionMode !== 'plan' && prePlanPermissionMode) {
           // SDK exited plan mode (e.g. after ExitPlanMode approval)
           currentPermissionMode = prePlanPermissionMode;
           prePlanPermissionMode = null;
+          broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
           console.log(`[agent] SDK exited plan mode, restored currentPermissionMode=${currentPermissionMode}`);
         }
       }
@@ -5793,6 +5866,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Turn complete — reset watchdog state for next turn
         pendingTools = 0;
         watchdogFired = false;
+        // Signal post-interrupt verification (if waiting)
+        if (postInterruptTurnEndResolve) {
+          postInterruptTurnEndResolve();
+          postInterruptTurnEndResolve = null;
+        }
         // Extract token usage from result message
         // SDK result contains modelUsage (per-model stats) and/or usage (aggregate)
         // This is the authoritative source for token statistics
@@ -6091,6 +6169,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const wasPreWarming = isPreWarming;
     isPreWarming = false;
     isProcessing = false;
+
+    // Resolve any pending post-interrupt wait (session ended, turn is implicitly done)
+    if (postInterruptTurnEndResolve) {
+      postInterruptTurnEndResolve();
+      postInterruptTurnEndResolve = null;
+    }
 
     // 确保 generator 退出（防止 streamInput 永远阻塞）
     if (messageResolver) {

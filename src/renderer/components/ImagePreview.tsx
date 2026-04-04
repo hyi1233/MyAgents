@@ -2,6 +2,9 @@ import { X, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
+
 interface ImagePreviewProps {
     src: string;
     name: string;
@@ -11,6 +14,9 @@ interface ImagePreviewProps {
 export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) {
     const [scale, setScale] = useState(1);
     const [rotation, setRotation] = useState(0);
+
+    // Cmd+W dismissal: z-[200] matches the component's CSS z-index
+    useCloseLayer(() => { onClose(); return true; }, 200);
 
     // Close on Escape key
     useEffect(() => {
@@ -49,14 +55,10 @@ export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) 
     }, []);
 
     return createPortal(
-        <div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm"
-            onClick={onClose}
-        >
+        <OverlayBackdrop onClose={onClose} className="z-[200]" variant="dark">
             {/* Header with title and controls */}
             <div
                 className="absolute top-0 left-0 right-0 flex items-center justify-between px-6 py-4"
-                onClick={(e) => e.stopPropagation()}
             >
                 <span className="text-sm font-medium text-white/90 truncate max-w-[50%]">{name}</span>
                 <div className="flex items-center gap-2">
@@ -107,7 +109,6 @@ export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) 
             {/* Image container */}
             <div
                 className="relative flex items-center justify-center"
-                onClick={(e) => e.stopPropagation()}
             >
                 <img
                     src={src}
@@ -124,7 +125,7 @@ export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) 
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-xs text-white/50">
                 双击图片放大 · 按 Esc 关闭
             </div>
-        </div>,
+        </OverlayBackdrop>,
         document.body
     );
 }

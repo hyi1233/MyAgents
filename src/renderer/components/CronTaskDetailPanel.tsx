@@ -25,6 +25,8 @@ import TaskRunHistory from './scheduled-tasks/TaskRunHistory';
 import ScheduleTypeTabs from './scheduled-tasks/ScheduleTypeTabs';
 import * as cronClient from '@/api/cronTaskClient';
 import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface CronTaskDetailPanelProps {
     task: CronTask;
@@ -73,6 +75,8 @@ function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v
 }
 
 export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, onResume, onStop, onOpenSession }: CronTaskDetailPanelProps) {
+    useCloseLayer(() => { onClose(); return true; }, 50);
+
     const toast = useToast();
     const { projects } = useConfig();
     const isMountedRef = useRef(true);
@@ -174,10 +178,9 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
             {showDeleteConfirm && <ConfirmDialog title="删除定时任务" message={`确定要删除「${displayName}」吗？此操作不可撤销。`} confirmText="删除" cancelText="取消" confirmVariant="danger" loading={isDeleting} onConfirm={handleDelete} onCancel={() => setShowDeleteConfirm(false)} />}
             {showStopConfirm && <ConfirmDialog title="停止定时任务" message={`确定要停止「${displayName}」吗？停止后可以重新恢复。`} confirmText="停止" cancelText="取消" confirmVariant="danger" loading={isStopping} onConfirm={handleStop} onCancel={() => setShowStopConfirm(false)} />}
 
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" style={{ animation: 'overlayFadeIn 200ms ease-out' }}
-                onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+            <OverlayBackdrop onClose={onClose} className="z-50" style={{ animation: 'overlayFadeIn 200ms ease-out' }}>
                 <div className="flex h-[80vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg"
-                    style={{ animation: 'overlayPanelIn 250ms ease-out' }} onClick={e => e.stopPropagation()}>
+                    style={{ animation: 'overlayPanelIn 250ms ease-out' }}>
 
                     {/* Header */}
                     <div className="flex shrink-0 items-center justify-between px-6 py-4">
@@ -433,7 +436,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                         )}
                     </div>
                 </div>
-            </div>
+            </OverlayBackdrop>
         </>
     );
 }

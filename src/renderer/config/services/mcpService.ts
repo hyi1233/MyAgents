@@ -6,14 +6,24 @@ import { loadAppConfig, atomicModifyConfig } from './appConfigService';
 import { loadProjects, saveProjects } from './projectService';
 
 /**
- * Get all available MCP servers (preset + custom), with user-configured args/env merged in
+ * Get all available MCP servers (preset + custom), with user-configured args/env merged in.
+ * Defensive: all disk-loaded array fields are validated with Array.isArray() before spread,
+ * because config.json is a trust boundary — TypeScript types don't constrain raw JSON.
  */
 export async function getAllMcpServers(): Promise<McpServerDefinition[]> {
     const config = await loadAppConfig();
-    const customServers = config.mcpServers ?? [];
-    const allServers = [...PRESET_MCP_SERVERS, ...customServers];
-    const serverArgsConfig = config.mcpServerArgs ?? {};
-    const serverEnvConfig = config.mcpServerEnv ?? {};
+    const customServers = Array.isArray(config.mcpServers) ? config.mcpServers : [];
+    // Deduplicate: custom servers with the same ID as a preset override the preset
+    // (aligned with server-side getAllMcpServers in admin-config.ts)
+    const customIds = new Set(customServers.map(s => s.id));
+    const allServers = [
+        ...PRESET_MCP_SERVERS.filter(p => !customIds.has(p.id)),
+        ...customServers,
+    ];
+    const serverArgsConfig = config.mcpServerArgs && typeof config.mcpServerArgs === 'object' && !Array.isArray(config.mcpServerArgs)
+        ? config.mcpServerArgs : {};
+    const serverEnvConfig = config.mcpServerEnv && typeof config.mcpServerEnv === 'object' && !Array.isArray(config.mcpServerEnv)
+        ? config.mcpServerEnv : {};
 
     return allServers.map(server => {
         const extraArgs = serverArgsConfig[server.id];
@@ -21,20 +31,20 @@ export async function getAllMcpServers(): Promise<McpServerDefinition[]> {
         if (extraArgs === undefined && !extraEnv) return server;
         return {
             ...server,
-            ...(extraArgs !== undefined && { args: [...(server.args ?? []), ...extraArgs] }),
-            ...(extraEnv && { env: { ...server.env, ...extraEnv } }),
+            ...(Array.isArray(extraArgs) && { args: [...(Array.isArray(server.args) ? server.args : []), ...extraArgs] }),
+            ...(extraEnv && typeof extraEnv === 'object' && !Array.isArray(extraEnv) && { env: { ...server.env, ...extraEnv } }),
         };
     });
 }
 
 export async function getEnabledMcpServerIds(): Promise<string[]> {
     const config = await loadAppConfig();
-    return config.mcpEnabledServers ?? [];
+    return Array.isArray(config.mcpEnabledServers) ? config.mcpEnabledServers : [];
 }
 
 export async function toggleMcpServerEnabled(serverId: string, enabled: boolean): Promise<void> {
     await atomicModifyConfig(c => {
-        const enabledServers = new Set(c.mcpEnabledServers ?? []);
+        const enabledServers = new Set(Array.isArray(c.mcpEnabledServers) ? c.mcpEnabledServers : []);
         if (enabled) {
             enabledServers.add(serverId);
         } else {
@@ -47,7 +57,7 @@ export async function toggleMcpServerEnabled(serverId: string, enabled: boolean)
 
 export async function addCustomMcpServer(server: McpServerDefinition): Promise<void> {
     await atomicModifyConfig(c => {
-        const customServers = [...(c.mcpServers ?? [])];
+        const customServers = [...(Array.isArray(c.mcpServers) ? c.mcpServers : [])];
         const existingIndex = customServers.findIndex(s => s.id === server.id);
         if (existingIndex >= 0) {
             customServers[existingIndex] = server;
@@ -62,8 +72,8 @@ export async function addCustomMcpServer(server: McpServerDefinition): Promise<v
 export async function deleteCustomMcpServer(serverId: string): Promise<void> {
     await atomicModifyConfig(c => ({
         ...c,
-        mcpServers: (c.mcpServers ?? []).filter(s => s.id !== serverId),
-        mcpEnabledServers: (c.mcpEnabledServers ?? []).filter(id => id !== serverId),
+        mcpServers: (Array.isArray(c.mcpServers) ? c.mcpServers : []).filter(s => s.id !== serverId),
+        mcpEnabledServers: (Array.isArray(c.mcpEnabledServers) ? c.mcpEnabledServers : []).filter(id => id !== serverId),
     }));
     console.log('[configService] Custom MCP server deleted:', serverId);
 }
@@ -91,7 +101,8 @@ export async function saveMcpServerArgs(serverId: string, args: string[]): Promi
 
 export async function getMcpServerArgs(serverId: string): Promise<string[] | undefined> {
     const config = await loadAppConfig();
-    return config.mcpServerArgs?.[serverId];
+    const args = config.mcpServerArgs?.[serverId];
+    return Array.isArray(args) ? args : undefined;
 }
 
 export async function updateProjectMcpServers(projectId: string, enabledServerIds: string[]): Promise<void> {
@@ -109,7 +120,7 @@ export async function updateProjectMcpServers(projectId: string, enabledServerId
 export async function getEffectiveMcpServers(projectId: string): Promise<McpServerDefinition[]> {
     const projects = await loadProjects();
     const project = projects.find(p => p.id === projectId);
-    const workspaceEnabledIds = project?.mcpEnabledServers ?? [];
+    const workspaceEnabledIds = Array.isArray(project?.mcpEnabledServers) ? project.mcpEnabledServers : [];
 
     if (workspaceEnabledIds.length === 0) {
         return [];
@@ -117,7 +128,7 @@ export async function getEffectiveMcpServers(projectId: string): Promise<McpServ
 
     const allServers = await getAllMcpServers();
     const config = await loadAppConfig();
-    const globalEnabledIds = new Set(config.mcpEnabledServers ?? []);
+    const globalEnabledIds = new Set(Array.isArray(config.mcpEnabledServers) ? config.mcpEnabledServers : []);
 
     return allServers.filter(s =>
         globalEnabledIds.has(s.id) && workspaceEnabledIds.includes(s.id)

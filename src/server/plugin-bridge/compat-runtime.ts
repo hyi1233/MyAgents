@@ -324,8 +324,8 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
 
           // --- Protocol-standard path ---
 
-          // Extract chatId (same logic as dispatchReplyWithBufferedBlockDispatcher)
-          let chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
+          // Extract chatId: ctx.To is the reply destination in OpenClaw protocol.
+          let chatId = String(ctx.To || ctx.to || ctx.From || ctx.from || '');
           if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
 
           if (!chatId) {
@@ -464,11 +464,13 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const text = String(ctx.BodyForAgent || ctx.Body || ctx.body || ctx.RawBody || '');
           const senderId = String(ctx.SenderId || ctx.senderId || '');
           const senderName = String(ctx.SenderName || ctx.senderName || '');
-          // Feishu plugin sets From = "feishu:ou_xxx" (prefixed); strip the channel prefix
-          // to get the raw chat/user ID that Rust expects
-          let chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
-          if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
+          // Chat ID extraction: ctx.To is the REPLY DESTINATION in OpenClaw protocol.
+          // ctx.From is the SENDER identity — wrong for group routing.
+          // Feishu plugin: To = "chat:oc_xxx" (group) or "user:ou_xxx" (private),
+          // From = "feishu:ou_xxx" (always sender). Using From for groups sends replies to private chat.
+          let chatId = String(ctx.To || ctx.to || ctx.From || ctx.from || '');
+          if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
           // Default isMention by chatType: private=true (always directed at bot),
@@ -634,8 +636,11 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
       },
 
       // ===== Group policies =====
+      // MyAgents handles access control at Rust layer (group approval UI).
+      // Return allowed=true here so plugin-level gating doesn't block groups
+      // before they reach the Rust layer for registration/approval.
       groups: {
-        resolveGroupPolicy: () => ({}),
+        resolveGroupPolicy: () => ({ allowed: true, allowlistEnabled: false }),
         resolveRequireMention: () => false,
       },
 

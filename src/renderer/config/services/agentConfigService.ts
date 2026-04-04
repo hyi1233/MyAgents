@@ -364,6 +364,11 @@ async function syncAgentRuntime(
     runtimePatch.mcpServersJson = preResolvedMcpJson ?? null;
     hasRuntimeChanges = true;
   }
+  // channels changed → forward to Rust for per-channel hot-reload (groupActivation etc.)
+  if ('channels' in patch && patch.channels) {
+    runtimePatch.channels = patch.channels;
+    hasRuntimeChanges = true;
+  }
 
   if (!hasRuntimeChanges) return;
 

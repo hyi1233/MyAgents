@@ -10,18 +10,20 @@
  * 1. Tab API (useTabApiOptional) — when rendered inside a Tab context
  * 2. Explicit onSave/onRevealFile props — when caller provides save logic directly
  */
-import { Check, Edit2, Expand, FileText, FolderOpen, Loader2, Save, X } from 'lucide-react';
+import { Check, Edit2, Expand, Eye, FileText, FolderOpen, Loader2, Save, X } from 'lucide-react';
 import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useTabApiOptional } from '@/context/TabContext';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { getMonacoLanguage, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 
 import ConfirmDialog from './ConfirmDialog';
 import Markdown from './Markdown';
 import { useToast } from './Toast';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 // Lazy load Monaco Editor: the ~3MB bundle is only loaded when user first opens a file
 const MonacoEditor = lazy(() => import('./MonacoEditor'));
@@ -66,6 +68,8 @@ interface FilePreviewModalProps {
     /** Callback to open the fullscreen modal from embedded mode.
      *  Receives the current editor content so fullscreen opens with up-to-date text. */
     onFullscreen?: (currentContent?: string) => void;
+    /** Switch to browser preview (only for HTML files with an active browser panel) */
+    onSwitchToBrowser?: () => void;
 }
 
 // Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
@@ -120,7 +124,12 @@ export default function FilePreviewModal({
     onRevealFile,
     embedded = false,
     onFullscreen,
+    onSwitchToBrowser,
 }: FilePreviewModalProps) {
+    // Cmd+W dismissal: only register for fullscreen mode (z-[210]).
+    // Embedded mode (split-panel) has no z-index overlay and is handled separately.
+    useCloseLayer(() => { if (embedded) return false; onClose(); return true; }, 210);
+
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
@@ -359,18 +368,6 @@ export default function FilePreviewModal({
         }
     }, [isDirectEdit, hasMdUnsavedChanges, flushAndClose, onClose]);
 
-    // Handle backdrop click — only close on genuine clicks (mousedown + mouseup both on backdrop).
-    const mouseDownTargetRef = useRef<EventTarget | null>(null);
-
-    const handleBackdropMouseDown = useCallback((e: React.MouseEvent) => {
-        mouseDownTargetRef.current = e.target;
-    }, []);
-
-    const handleBackdropClick = useCallback((e: React.MouseEvent) => {
-        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
-            handleClose();
-        }
-    }, [handleClose]);
 
     const handleOpenInFinder = useCallback(async () => {
         if (!canReveal) return;
@@ -474,6 +471,19 @@ export default function FilePreviewModal({
                         {/* Auto-save indicator for code files */}
                         {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
 
+                        {/* Switch to browser preview — only for HTML files with an active browser */}
+                        {onSwitchToBrowser && (
+                            <Tip label="网页预览" position="bottom">
+                                <button type="button" onClick={() => {
+                                    if (isDirectEdit) handleManualFlush();
+                                    onSwitchToBrowser();
+                                }}
+                                    className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                                    <Eye className="h-3.5 w-3.5" />
+                                </button>
+                            </Tip>
+                        )}
+
                         {/* Fullscreen button — always available (not gated by editing state for code files) */}
                         {onFullscreen && !(isMarkdown && isMdEditing) && (
                             <Tip label="全屏预览" position="bottom">
@@ -545,17 +555,11 @@ export default function FilePreviewModal({
     return createPortal(
         <>
             {/* Modal backdrop */}
-            <div
-                className="fixed inset-0 z-[210] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-                style={{ padding: '3vh 3vw' }}
-                onMouseDown={handleBackdropMouseDown}
-                onClick={handleBackdropClick}
-                onWheel={(e) => e.stopPropagation()}
-            >
+            <OverlayBackdrop onClose={handleClose} className="z-[210]" style={{ padding: '3vh 3vw' }}>
                 {/* Modal content */}
                 <div
                     className="glass-panel flex h-full w-full max-w-7xl flex-col overflow-hidden"
-                    onClick={(e) => e.stopPropagation()}
+                    onWheel={(e) => e.stopPropagation()}
                 >
                     {/* Header */}
                     <div
@@ -653,7 +657,7 @@ export default function FilePreviewModal({
                         {renderPreviewContent()}
                     </div>
                 </div>
-            </div>
+            </OverlayBackdrop>
 
             {/* Unsaved changes confirmation dialog (Markdown only) */}
             {showUnsavedConfirm && (

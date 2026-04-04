@@ -6,6 +6,9 @@ import { X, SlidersHorizontal, ChevronLeft } from 'lucide-react';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
+
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { useToast } from '@/components/Toast';
 import SystemPromptsPanel from './SystemPromptsPanel';
@@ -18,6 +21,8 @@ import type { CommandDetailPanelRef } from './CommandDetailPanel';
 import WorkspaceAgentsList from './WorkspaceAgentsList';
 import AgentDetailPanel from './AgentDetailPanel';
 import type { AgentDetailPanelRef } from './AgentDetailPanel';
+import IntroductionPanel from './IntroductionPanel';
+import type { IntroductionPanelRef } from './IntroductionPanel';
 import { WorkspaceGeneralTab } from './AgentSettings';
 
 interface WorkspaceConfigPanelProps {
@@ -29,7 +34,7 @@ interface WorkspaceConfigPanelProps {
     initialTab?: Tab;
 }
 
-export type Tab = 'general' | 'system-prompts' | 'skills' | 'agent';
+export type Tab = 'general' | 'system-prompts' | 'introduction' | 'skills' | 'agent';
 type DetailView =
     | { type: 'none' }
     | { type: 'skill'; name: string; scope: 'user' | 'project'; isNewSkill?: boolean }
@@ -39,10 +44,12 @@ type DetailView =
 const TAB_ITEMS: { key: Tab; label: string }[] = [
     { key: 'general', label: '通用' },
     { key: 'system-prompts', label: '系统提示词' },
+    { key: 'introduction', label: '使用指南' },
     { key: 'skills', label: '技能 Skills' },
 ];
 
 export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0, initialTab }: WorkspaceConfigPanelProps) {
+    useCloseLayer(() => { onClose(); return true; }, 200);
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
@@ -63,6 +70,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
 
     // Refs for checking editing state
     const systemPromptsRef = useRef<SystemPromptsPanelRef>(null);
+    const introductionRef = useRef<IntroductionPanelRef>(null);
     const skillDetailRef = useRef<SkillDetailPanelRef>(null);
     const commandDetailRef = useRef<CommandDetailPanelRef>(null);
     const agentDetailRef = useRef<AgentDetailPanelRef>(null);
@@ -70,6 +78,9 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
     // Check if any component is in editing mode
     const isAnyEditing = useCallback(() => {
         if (activeTab === 'system-prompts' && systemPromptsRef.current?.isEditing()) {
+            return true;
+        }
+        if (activeTab === 'introduction' && introductionRef.current?.isEditing()) {
             return true;
         }
         if (detailView.type === 'skill' && skillDetailRef.current?.isEditing()) {
@@ -168,14 +179,10 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
     }, [isAnyEditing]);
 
     return createPortal(
-        <div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-            onClick={handleClose}
-        >
+        <OverlayBackdrop onClose={handleClose} className="z-[200]">
             {/* Main Panel */}
             <div
                 className="relative flex h-[90vh] w-[90vw] max-w-5xl flex-col overflow-hidden rounded-2xl bg-[var(--paper-elevated)] shadow-2xl"
-                onClick={(e) => e.stopPropagation()}
             >
                 {/* Header — three zones: left (icon+title), center (tabs), right (close) */}
                 <div className="flex flex-shrink-0 items-center border-b border-[var(--line)] bg-gradient-to-r from-[var(--paper-inset)] to-[var(--paper)] px-6 py-3">
@@ -244,6 +251,9 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                             {activeTab === 'system-prompts' && (
                                 <SystemPromptsPanel ref={systemPromptsRef} agentDir={agentDir} />
                             )}
+                            {activeTab === 'introduction' && (
+                                <IntroductionPanel ref={introductionRef} agentDir={agentDir} />
+                            )}
                             {activeTab === 'skills' && (
                                 <div className="h-full overflow-auto">
                                     <SkillsCommandsList
@@ -306,7 +316,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                     </p>
                 </div>
             </div>
-        </div>,
+        </OverlayBackdrop>,
         document.body
     );
 }

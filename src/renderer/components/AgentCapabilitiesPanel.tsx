@@ -42,6 +42,8 @@ interface AgentCapabilitiesPanelProps {
     onExpandChange?: (expanded: boolean) => void;
     /** Trigger full refresh (file tree + capabilities) */
     onRefresh?: () => void;
+    /** Height ratio (0-1) when expanded, controlled by parent drag. Default 0.4. */
+    heightRatio?: number;
 }
 
 /** Tooltip shown on hover — width matches the sidebar with small inset */
@@ -111,6 +113,7 @@ export default memo(function AgentCapabilitiesPanel({
     onSyncSkillToGlobal,
     onExpandChange,
     onRefresh,
+    heightRatio = 0.4,
 }: AgentCapabilitiesPanelProps) {
     const [isExpanded, setIsExpanded] = useState(true); // Default expanded
     const toast = useToast();
@@ -263,10 +266,8 @@ export default memo(function AgentCapabilitiesPanel({
         <div
             data-capabilities-panel
             className={`flex flex-col ${isExpanded ? 'min-h-0' : 'shrink-0'}`}
-            style={isExpanded ? { flex: '0 0 40%' } : undefined}
+            style={isExpanded ? { flex: `0 0 ${heightRatio * 100}%` } : undefined}
         >
-            {/* Inset divider: file tree → capabilities */}
-            <div className="mx-4 border-b border-[var(--line-subtle)]" />
             {/* Header - always visible */}
             <button
                 onClick={toggleExpand}

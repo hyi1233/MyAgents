@@ -1,6 +1,6 @@
 # MyAgents 技术架构
 
-> 最后更新：v0.1.54 (2026-03-27)
+> 最后更新：v0.1.58 (2026-04-03)
 
 ## 概述
 
@@ -306,6 +306,62 @@ PTY master read → emit('terminal:data:{id}') → xterm.write → 屏幕渲染
 
 **与 Pit-of-Success 模块关系**：不走 `process_cmd`（`portable-pty` 自管进程创建）、不走 `local_http`（不发 HTTP）、复用 `proxy_config` 常量和函数、使用 `system_binary::find()` 检测 Windows Shell。
 
+### 11. 内嵌浏览器 (`src-tauri/src/browser.rs` + `src/renderer/components/BrowserPanel.tsx`) (v0.1.58)
+
+Chat 分屏右侧面板中的 URL 预览器，与文件预览、终端并列为第三个分屏视图。AI 消息中的外部链接和 AI 生成的 HTML 文件优先在此打开。
+
+**架构**：
+
+```
+用户点击 Markdown 链接 → BrowserPanelContext.openUrl(url)
+  → invoke('cmd_browser_create', { tabId, url, x, y, w, h })
+  → Tauri Window::add_child(WebviewBuilder::new(label, External(url)))
+  → 原生 OS Webview 渲染（macOS: WKWebView / Windows: WebView2）
+
+URL 变化 → emit('browser:url-changed:{tabId}') → 前端更新地址栏
+页面加载 → emit('browser:loading:{tabId}') → 前端更新 loading 状态
+```
+
+- **Rust**: `BrowserManager` 管理 `HashMap<String, BrowserSession>`，per-tab 生命周期
+- **前端**: `BrowserPanel.tsx` 导航工具栏（◀ ▶ ↻ ↗）+ 占位容器 + ResizeObserver 坐标同步
+- **通信**: Tauri IPC（invoke + event），不走 SSE Proxy
+- **入口**: Markdown 链接点击（`BrowserPanelContext`）、HTML 文件预览
+- **安全**: URL scheme 限制为 `http://` `https://`，Capability 隔离（`browser.json` 零权限）
+
+**依赖说明**：需要 Tauri `"unstable"` feature flag（`Window::add_child()` 多 Webview API）。该 API 尚未承诺稳定时间表，但 `browser.rs` 模块隔离良好，Tauri 升级时迁移成本可控。
+
+**生命周期**：
+
+| 事件 | 行为 |
+|------|------|
+| 首次 `openUrl(url)` | 创建子 Webview → `browserAlive=true` → 切换到 browser 视图 |
+| 再次 `openUrl(newUrl)` | 复用 Webview → `cmd_browser_navigate(newUrl)` |
+| 关闭浏览器 Tab（×） | `cmd_browser_close` → 销毁 Webview（关闭即销毁，不后台保活） |
+| 切换到其他分屏视图 | `cmd_browser_hide`（不销毁，保留页面状态） |
+| 切换回浏览器视图 | `cmd_browser_show` + 坐标同步 |
+| Overlay/Modal 弹出 | `closeLayer` 注册表检测 → 自动 hide |
+| 拖拽分屏 divider | hide + 毛玻璃占位 → 松手 resize + show |
+| Tab 关闭 / App 退出 | `cmd_browser_close` / `close_all_browsers()` |
+
+**Cookie 持久化**：同 App 内所有 Webview 共享 Cookie Store，默认持久化到磁盘。一处登录 → 处处可用 → 重启保持。
+
+**Overlay 遮挡处理**：原生 Webview 浮在 React DOM 之上（OS 层级），需在 Overlay 出现时 hide。使用 `closeLayer` 注册表的 `hasOverlayLayer()` 检测（零 DOM 遍历），通过 `useBrowserOverlayGuard` hook 驱动 BrowserPanel 的 show/hide 效果。
+
+**与终端面板的差异**：终端在 React DOM 内渲染（xterm.js），不需要坐标同步和 Overlay 协调；浏览器是原生 OS 视图，需要 ResizeObserver 手动同步坐标、Overlay 检测自动 hide/show、拖拽时毛玻璃遮罩。
+
+**与 Pit-of-Success 模块关系**：不走 `process_cmd`（Tauri API 创建 Webview）、不走 `local_http`（Webview 自行发起网络请求）、Webview 自动继承系统代理。
+
+### 12. 层级关闭系统 (`src/renderer/utils/closeLayer.ts`) (v0.1.58)
+
+Cmd+W 层级关闭：Overlay → 分屏面板 → Tab，高 z-index 优先。
+
+- **注册表**: 模块级 `layers[]` 数组，每个 Overlay/面板 mount 时 `registerCloseLayer(handler, zIndex)`，unmount 自动 deregister
+- **优先级**: 以组件 CSS z-index 为排序依据（z-300 ConfirmDialog > z-200 WorkspaceConfigPanel > z-0 分屏面板）
+- **同级 LIFO**: 相同 z-index 按注册顺序后进先出（最新 mount 的先关闭）
+- **Hook**: `useCloseLayer(handler, zIndex)` — 一行集成，`handlerRef` 模式防止闭包过期
+- **App 集成**: `App.tsx` 的 Cmd+W handler：`if (!dismissTopmost()) closeCurrentTab()`
+- **浏览器联动**: `hasOverlayLayer()` 导出给 `useBrowserOverlayGuard`，当有 z-index > 0 的注册层时自动隐藏原生 Webview
+
 ## 通信流程
 
 ### SSE 流式事件
@@ -344,7 +400,9 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 | 终端打开 | `cmd_terminal_create(workspace, rows, cols, port, id)` |
 | 终端关闭 / Tab 关闭 | `cmd_terminal_close(terminalId)` |
 | Shell 退出 | reader loop 自行从 `TerminalManager` 移除 |
-| 应用退出 | `stopAllSidecars()` + `close_all_terminals()`，清理全部进程 |
+| 浏览器打开 | `cmd_browser_create(tabId, url, x, y, width, height)` |
+| 浏览器关闭 / Tab 关闭 | `cmd_browser_close(tabId)` |
+| 应用退出 | `stopAllSidecars()` + `close_all_terminals()` + `close_all_browsers()`，清理全部进程 |
 
 **Owner 释放规则**：当一个 Session 的所有 Owner 都释放后，Sidecar 才停止。
 
@@ -387,6 +445,7 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 - **本地绑定**: Sidecar 仅监听 `127.0.0.1`
 - **CSP**: `img-src` 允许 `https:`（支持 AI Markdown 图片预览），`connect-src` 和 `fetch-src` 严格锁定
 - **代理安全**: `local_http` 模块内置 `.no_proxy()` 防止系统代理拦截 localhost
+- **浏览器沙箱**: 内嵌浏览器 Webview 通过 Capability 隔离（`browser.json` 零权限），无法访问 Tauri IPC；URL scheme 限制为 http/https
 
 ## 跨平台工具模块 (`src/server/utils/platform.ts`)
 

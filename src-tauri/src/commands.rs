@@ -1,6 +1,7 @@
 // Tauri IPC commands for sidecar management and app operations
 // Supports both legacy single-instance and new multi-instance APIs
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, Runtime, State};
@@ -873,6 +874,17 @@ pub async fn cmd_write_workspace_file(path: String, content: String) -> Result<(
         .map_err(|e| format!("Failed to write {}: {}", path, e))
 }
 
+/// Delete a workspace file. Returns true if deleted, false if not found.
+/// Bypasses Tauri fs plugin scope (which only covers ~/.myagents).
+#[tauri::command]
+pub async fn cmd_delete_workspace_file(path: String) -> Result<bool, String> {
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("Failed to delete {}: {}", path, e)),
+    }
+}
+
 /// Read a local file and return its contents as base64.
 /// Used by the audio player to create blob URLs without asset protocol scope issues.
 #[tauri::command]
@@ -1049,4 +1061,69 @@ pub async fn cmd_wecom_qr_poll(scode: String, poll_index: Option<u32>) -> Result
             Ok(WecomQrPollResult { status: "waiting".into(), bot_id: None, secret: None })
         }
     }
+}
+
+// ============= Model Discovery =============
+
+/// Fetch provider model list via external API.
+/// Returns raw JSON response — parsing is done in the frontend.
+#[tauri::command]
+pub async fn cmd_fetch_provider_models(
+    url: String,
+    auth_header_name: String,
+    auth_header_value: String,
+    extra_headers: Option<HashMap<String, String>>,
+) -> Result<serde_json::Value, String> {
+    ulog_info!("[model-discovery] Fetching models from {}", url);
+
+    // Determine if URL points to localhost — if so, use local_http (no proxy) to avoid
+    // the system-proxy-intercepts-localhost bug. Otherwise, use proxy_config for external APIs.
+    let is_localhost = url.starts_with("http://127.0.0.1")
+        || url.starts_with("http://localhost")
+        || url.starts_with("https://127.0.0.1")
+        || url.starts_with("https://localhost");
+
+    let client = if is_localhost {
+        crate::local_http::json_client(std::time::Duration::from_secs(15))
+    } else {
+        let builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15));
+        crate::proxy_config::build_client_with_proxy(builder)?
+    };
+
+    let mut request = client.get(&url)
+        .header(&auth_header_name, &auth_header_value);
+
+    if let Some(headers) = extra_headers {
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+    }
+
+    let response = request.send().await
+        .map_err(|e| {
+            ulog_error!("[model-discovery] Network error for {}: {}", url, e);
+            format!("Network error: {}", e)
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        // Limit error body to ~2KB to avoid unbounded allocation (char-boundary safe for UTF-8)
+        let body = response.text().await.unwrap_or_default();
+        let truncated = match body.char_indices().nth(2048) {
+            Some((byte_pos, _)) => &body[..byte_pos],
+            None => &body,
+        };
+        ulog_error!("[model-discovery] HTTP {} from {}", status.as_u16(), url);
+        return Err(format!("HTTP {}: {}", status.as_u16(), truncated));
+    }
+
+    let result = response.json::<serde_json::Value>().await
+        .map_err(|e| {
+            ulog_error!("[model-discovery] Invalid JSON from {}: {}", url, e);
+            format!("Invalid JSON response: {}", e)
+        })?;
+
+    ulog_info!("[model-discovery] Success from {}", url);
+    Ok(result)
 }

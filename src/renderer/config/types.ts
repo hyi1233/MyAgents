@@ -43,9 +43,19 @@ export const PERMISSION_MODES: {
  * Model entity representing a single model configuration
  */
 export interface ModelEntity {
+  // === 核心字段（必填）===
   model: string;         // API 代码，如 "claude-sonnet-4-6"
   modelName: string;     // 显示名称，如 "Claude Sonnet 4.6"
   modelSeries: string;   // 品牌系列，如 "claude" | "deepseek" | "zhipu"
+
+  // === 元数据字段（可选，API 发现时填充）===
+  contextLength?: number;       // 上下文窗口（token 数）
+  maxOutputTokens?: number;     // 最大输出 token 数
+  inputModalities?: string[];   // 输入模态 ["text", "image", "video"]
+  outputModalities?: string[];  // 输出模态 ["text"]
+
+  // === 来源标记 ===
+  source?: 'preset' | 'discovered' | 'manual';
 }
 
 /**
@@ -78,6 +88,20 @@ export function getModelDisplayName(provider: Provider, modelId: string): string
  */
 export function getProviderModels(provider: Provider): ModelEntity[] {
   return provider.models ?? [];
+}
+
+/**
+ * Get effective primary model (user override > preset default)
+ */
+export function getEffectivePrimaryModel(
+  provider: Provider,
+  providerPrimaryModels?: Record<string, string>,
+): string {
+  const userOverride = providerPrimaryModels?.[provider.id];
+  if (userOverride && provider.models?.some(m => m.model === userOverride)) {
+    return userOverride;
+  }
+  return provider.primaryModel;
 }
 
 /**
@@ -147,6 +171,11 @@ export interface Provider {
 
   // 官网链接 (用于"去官网"入口)
   websiteUrl?: string;
+
+  // 模型发现端点 URL（可选覆盖）
+  // 默认行为：GET {config.baseUrl}/v1/models
+  // 当供应商的 Anthropic 路径不支持 /v1/models 时，指向其 OpenAI 路径
+  modelListUrl?: string;
 
   // 模型列表 - 使用新的 ModelEntity 结构
   models: ModelEntity[];
@@ -304,6 +333,13 @@ export interface AppConfig {
   // These are merged with preset models at runtime, allowing users to add models
   // while keeping preset definitions unchanged (updated with app releases)
   presetCustomModels?: Record<string, ModelEntity[]>;
+  // Preset models explicitly removed by user (key = provider ID, value = model IDs)
+  // App upgrades won't re-add these; new models NOT in this list appear automatically
+  presetRemovedModels?: Record<string, string[]>;
+
+  // ===== Provider Primary Model (user overrides) =====
+  // Maps provider ID → user's preferred primary model (overrides preset primaryModel)
+  providerPrimaryModels?: Record<string, string>;
 
   // ===== Provider Model Aliases (user overrides) =====
   // Maps provider ID → user-configured model alias overrides (merged with preset defaults)
@@ -416,6 +452,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://platform.deepseek.com',
+    modelListUrl: 'https://api.deepseek.com/v1/models',
     config: {
       baseUrl: 'https://api.deepseek.com/anthropic',
       timeout: 600000,
@@ -437,6 +474,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://platform.moonshot.cn/console',
+    modelListUrl: 'https://api.moonshot.cn/v1/models',
     config: {
       baseUrl: 'https://api.moonshot.cn/anthropic',
     },
@@ -457,13 +495,16 @@ export const PRESET_PROVIDERS: Provider[] = [
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://bigmodel.cn/console/overview',
+    modelListUrl: 'https://open.bigmodel.cn/api/paas/v4/models',
     config: {
       baseUrl: 'https://open.bigmodel.cn/api/anthropic',
       timeout: 600000,
       disableNonessential: true,
     },
-    modelAliases: { sonnet: 'glm-4.7', opus: 'glm-5', haiku: 'glm-4.5-air' },
+    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.1', haiku: 'glm-5.1' },
     models: [
+      { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu' },
+      { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu' },
       { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu' },
       { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'zhipu' },
       { model: 'glm-4.5-air', modelName: 'GLM 4.5 Air', modelSeries: 'zhipu' },
@@ -475,15 +516,17 @@ export const PRESET_PROVIDERS: Provider[] = [
     vendor: 'MiniMax',
     cloudProvider: '模型官方',
     type: 'api',
-    primaryModel: 'MiniMax-M2.5',
+    primaryModel: 'MiniMax-M2.7',
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://platform.minimaxi.com/docs/guides/models-intro',
     config: {
       baseUrl: 'https://api.minimaxi.com/anthropic',
     },
-    modelAliases: { sonnet: 'MiniMax-M2.5', opus: 'MiniMax-M2.5', haiku: 'MiniMax-M2.5-lightning' },
+    modelAliases: { sonnet: 'MiniMax-M2.7', opus: 'MiniMax-M2.7', haiku: 'MiniMax-M2.7' },
     models: [
+      { model: 'MiniMax-M2.7', modelName: 'MiniMax M2.7', modelSeries: 'minimax' },
+      { model: 'MiniMax-M2.7-highspeed', modelName: 'MiniMax M2.7 Highspeed', modelSeries: 'minimax' },
       { model: 'MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'minimax' },
       { model: 'MiniMax-M2.5-lightning', modelName: 'MiniMax M2.5 Lightning', modelSeries: 'minimax' },
       { model: 'MiniMax-M2.1', modelName: 'MiniMax M2.1', modelSeries: 'minimax' },
@@ -616,6 +659,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://bailian.console.aliyun.com/',
+    modelListUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/models',
     config: {
       baseUrl: 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
     },

@@ -5,6 +5,8 @@ import { createPortal } from 'react-dom';
 import type { Project } from '@/config/types';
 import { getFolderName } from '@/types/tab';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface WorkspaceSelectDialogProps {
   projects: Project[];
@@ -13,16 +15,15 @@ interface WorkspaceSelectDialogProps {
 }
 
 export default function WorkspaceSelectDialog({ projects, onSelect, onClose }: WorkspaceSelectDialogProps) {
+  useCloseLayer(() => { onClose(); return true; }, 50);
+
   const eligibleProjects = useMemo(
     () => projects.filter(p => !p.isAgent && !p.internal),
     [projects],
   );
 
   return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
-    >
+    <OverlayBackdrop onClose={onClose} className="z-50">
       <div className="w-full max-w-md rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-6 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-base font-semibold text-[var(--ink)]">
@@ -62,7 +63,7 @@ export default function WorkspaceSelectDialog({ projects, onSelect, onClose }: W
           </div>
         )}
       </div>
-    </div>,
+    </OverlayBackdrop>,
     document.body,
   );
 }

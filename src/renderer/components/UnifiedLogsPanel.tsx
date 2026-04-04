@@ -4,7 +4,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 import type { LogEntry, LogLevel, LogSource } from '@/types/log';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface UnifiedLogsPanelProps {
     /** Logs received from SSE via TabProvider */
@@ -65,6 +68,7 @@ const HIDE_FILTERS: { value: HideFilter; label: string }[] = [
 const DEFAULT_HIDE_FILTERS = new Set<HideFilter>(['stream_event', 'analytics']);
 
 export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: UnifiedLogsPanelProps) {
+    useCloseLayer(() => { if (!isVisible) return false; onClose(); return true; }, 50);
     // All logs (React + Bun + Rust) now come from sseLogs prop via TabProvider
     const [filter, setFilter] = useState<LogSource | 'all'>('all');
     const [levelFilter, setLevelFilter] = useState<LogLevel | 'all'>('all');
@@ -179,30 +183,13 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
 
     // Only close on genuine clicks (mousedown + mouseup both on backdrop).
     // Prevents closing when user drags a text selection out of the modal.
-    const mouseDownTargetRef = useRef<EventTarget | null>(null);
-
-    const handleBackdropMouseDown = useCallback((e: React.MouseEvent) => {
-        mouseDownTargetRef.current = e.target;
-    }, []);
-
-    const handleBackdropClick = useCallback((e: React.MouseEvent) => {
-        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
-            onClose();
-        }
-    }, [onClose]);
-
     if (!isVisible) return null;
 
     // Use portal to render at document root for true fullscreen overlay
     return createPortal(
-        <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-            onMouseDown={handleBackdropMouseDown}
-            onClick={handleBackdropClick}
-        >
+        <OverlayBackdrop onClose={onClose} className="z-50">
             <div
                 className="flex h-[90vh] w-[95vw] max-w-6xl flex-col overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] shadow-2xl"
-                onClick={(e) => e.stopPropagation()}
             >
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-3">
@@ -371,7 +358,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                     </div>
                 </div>
             </div>
-        </div>,
+        </OverlayBackdrop>,
         document.body
     );
 }

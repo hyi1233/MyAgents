@@ -37,7 +37,7 @@ import {
     notifyAskUserQuestion,
     notifyPlanModeRequest,
 } from '@/services/notificationService';
-import { setBackgroundTaskStatus, clearAllBackgroundTaskStatuses } from '@/utils/backgroundTaskStatus';
+import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTaskDescription, clearAllBackgroundTaskStatuses } from '@/utils/backgroundTaskStatus';
 
 /** Minimum QA rounds before triggering AI title generation */
 const AUTO_TITLE_MIN_ROUNDS = 3;
@@ -705,6 +705,19 @@ export default function TabProvider({
                 break;
             }
 
+            case 'chat:permission-mode-changed': {
+                // Backend permission mode changed (e.g., ExitPlanMode restored auto).
+                // Dispatch to Chat.tsx so it can sync the UI toggle.
+                // Include tabId for cross-tab isolation (SSE is tab-scoped but DOM events are global).
+                const payload = data as { permissionMode: string } | null;
+                if (payload?.permissionMode) {
+                    window.dispatchEvent(new CustomEvent('permission-mode-sync', {
+                        detail: { permissionMode: payload.permissionMode, tabId }
+                    }));
+                }
+                break;
+            }
+
             case 'chat:api-retry': {
                 // SDK is retrying API call (rate limit or transient error)
                 // null payload = retry resolved, streaming resumed — clear status
@@ -1368,16 +1381,35 @@ export default function TabProvider({
             }
 
             // Background task lifecycle (SDK Task tool)
-            case 'chat:task-started':
+            case 'chat:task-started': {
+                console.log(`[TabProvider ${tabId}] ${eventName}:`, data);
+                const startPayload = data as { taskId?: string; description?: string };
+                if (startPayload.taskId && startPayload.description) {
+                    setBackgroundTaskDescription(startPayload.taskId, startPayload.description);
+                }
+                break;
+            }
             case 'chat:task-notification': {
                 console.log(`[TabProvider ${tabId}] ${eventName}:`, data);
-                // Persist status to module-level Map + dispatch DOM event so TaskTool
-                // components can read it regardless of mount timing.
-                if (eventName === 'chat:task-notification') {
-                    const payload = data as { taskId?: string; status?: string };
-                    if (payload.taskId && payload.status) {
-                        setBackgroundTaskStatus(payload.taskId, payload.status);
-                    }
+                const payload = data as { taskId?: string; status?: string; summary?: string };
+                if (payload.taskId && payload.status) {
+                    setBackgroundTaskStatus(payload.taskId, payload.status);
+                    // Inject a visible notification message into the chat so the user
+                    // understands why AI continues responding (prevents "AI talking to itself" UX).
+                    const description = getBackgroundTaskDescription(payload.taskId);
+                    const notificationData = JSON.stringify({
+                        taskId: payload.taskId,
+                        status: payload.status,
+                        summary: payload.summary ?? '',
+                        description: description ?? '',
+                    });
+                    const notificationMsg: Message = {
+                        id: `task-notification-${payload.taskId}`,
+                        role: 'user',
+                        content: `<task-notification>${notificationData}</task-notification>`,
+                        timestamp: new Date(),
+                    };
+                    setHistoryMessages(prev => [...prev, notificationMsg]);
                 }
                 break;
             }

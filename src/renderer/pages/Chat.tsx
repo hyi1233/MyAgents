@@ -1,7 +1,8 @@
-import { AlertTriangle, ArrowLeft, Bot, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { AlertTriangle, ArrowLeft, Bot, Globe, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useToast } from '@/components/Toast';
@@ -39,6 +40,7 @@ import {
   resolveProvider,
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
+import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
@@ -47,6 +49,10 @@ import type { InitialMessage } from '@/types/tab';
 const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
 // Lazy load TerminalPanel for embedded terminal
 const LazyTerminalPanel = lazy(() => import('@/components/TerminalPanel').then(m => ({ default: m.TerminalPanel })));
+// Lazy load BrowserPanel for embedded browser
+const LazyBrowserPanel = lazy(() => import('@/components/BrowserPanel'));
+// Lazy load IntroductionOverlay for empty session welcome content
+const LazyIntroductionOverlay = lazy(() => import('@/components/IntroductionOverlay'));
 // Terminal chrome now uses CSS tokens that auto-switch with light/dark theme.
 // No need for cached theme constants — the header uses var(--paper), var(--ink), etc.
 
@@ -213,6 +219,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // In narrow mode, default workspace to hidden (overlay) — otherwise it blocks chat on startup
   const [showWorkspace, setShowWorkspace] = useState(() => typeof window === 'undefined' || window.innerWidth >= 768);
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
+  // Introduction overlay: INTRODUCTION.md content for empty session welcome
+  const [introductionContent, setIntroductionContent] = useState<string | null>(null);
   useEffect(() => {
     const breakpoint = parseInt(getComputedStyle(document.documentElement)
       .getPropertyValue('--breakpoint-mobile') || '768', 10);
@@ -248,25 +256,93 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // false = terminal may be alive in background but not displayed.
   // Clicking terminal icon sets true; clicking terminal × sets false.
   const [terminalPinned, setTerminalPinned] = useState(false);
-  // Which view is active in the right panel: 'file' or 'terminal'
-  const [splitActiveView, setSplitActiveView] = useState<'file' | 'terminal'>('file');
+  // Which view is active in the right panel: 'file', 'terminal', or 'browser'
+  const [splitActiveView, setSplitActiveView] = useState<'file' | 'terminal' | 'browser'>('file');
+
+  // ── Embedded browser state ──
+  const [browserUrl, setBrowserUrl] = useState<string | null>(null);
+  const [browserAlive, setBrowserAlive] = useState(false);
+  // When browser is previewing a local file, store its metadata for editor toggle
+  const [browserSourceFile, setBrowserSourceFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
+
+  // ── Introduction overlay: read INTRODUCTION.md per agentDir/sessionId ──
+  // sessionId in deps → re-reads when user creates a new session (so edits via settings are reflected)
+  useEffect(() => {
+    if (!agentDir || !isTauriEnvironment()) return;
+    setIntroductionContent(null); // Clear stale content before async read
+    let cancelled = false;
+    const sep = agentDir.includes('\\') ? '\\' : '/';
+    const filePath = `${agentDir}${sep}INTRODUCTION.md`;
+    import('@tauri-apps/api/core').then(({ invoke }) => {
+      invoke<string | null>('cmd_read_workspace_file', { path: filePath })
+        .then(content => {
+          if (!cancelled) setIntroductionContent(content && content.trim() ? content : null);
+        })
+        .catch(() => {
+          if (!cancelled) setIntroductionContent(null);
+        });
+    });
+    return () => { cancelled = true; };
+  }, [agentDir, sessionId]);
 
   // Derived: is the right split panel visible?
-  const splitPanelVisible = splitFile !== null || (terminalPinned && (terminalAlive || splitActiveView === 'terminal'));
+  const splitPanelVisible = splitFile !== null
+    || (terminalPinned && (terminalAlive || splitActiveView === 'terminal'))
+    || (browserUrl !== null);
   // Should the terminal component stay mounted? (for xterm.js state preservation)
   const terminalMounted = terminalAlive || (terminalPinned && splitActiveView === 'terminal');
 
   // When split view is active or layout is narrow, workspace uses overlay drawer
   const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitPanelVisible);
 
+  // Cmd+W: split panel visible → always close the active view first (no focus detection).
+  // Simpler mental model: Cmd+W closes from right to left, outside to inside.
+  // Split panel acts as a buffer — absorbs Cmd+W before it reaches the tab.
+  useCloseLayer(() => {
+    if (!splitPanelVisible) return false;
+    if (splitActiveView === 'file' && splitFile) {
+      setSplitFile(null);
+      if (browserUrl) setSplitActiveView('browser');
+      else if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+      return true;
+    }
+    if (splitActiveView === 'terminal' && terminalPinned) {
+      setTerminalPinned(false);
+      if (browserUrl) setSplitActiveView('browser');
+      else if (splitFile) setSplitActiveView('file');
+      return true;
+    }
+    if (splitActiveView === 'browser' && browserUrl) {
+      setBrowserUrl(null);
+      setBrowserAlive(false);
+      setBrowserSourceFile(null);
+      if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+      else if (splitFile) setSplitActiveView('file');
+      return true;
+    }
+    return false;
+  }, 0);
+
   // Fullscreen preview triggered from split panel's "全屏预览" button
   const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
 
   const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }) => {
-    setSplitFile(file);
-    setSplitActiveView('file');
+    const ext = file.name.toLowerCase().split('.').pop();
+    if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled) {
+      // HTML files → open in embedded browser for live preview
+      // Store file metadata so browser toolbar can offer "Edit Source" toggle
+      setBrowserSourceFile(file);
+      // file.path is relative to agentDir — construct absolute path for Rust
+      const sep = agentDir?.includes('\\') ? '\\' : '/';
+      const absPath = agentDir ? `${agentDir}${sep}${file.path}` : file.path;
+      setBrowserUrl(absPath);
+      setSplitActiveView('browser');
+    } else {
+      setSplitFile(file);
+      setSplitActiveView('file');
+    }
     // Keep workspace open — user can dismiss it manually
-  }, []);
+  }, [isSplitViewEnabled, agentDir]);
 
   // Open terminal in split panel (called from DirectoryPanel header button)
   const handleOpenTerminal = useCallback(() => {
@@ -274,6 +350,68 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setSplitActiveView('terminal');
     // If terminal was already created, just switch view; otherwise TerminalPanel will create it
   }, []);
+
+  // Open a URL in the embedded browser panel
+  const handleOpenInBrowserPanel = useCallback((url: string) => {
+    setBrowserUrl(url);
+    setSplitActiveView('browser');
+  }, []);
+
+  const handleBrowserCreated = useCallback(() => setBrowserAlive(true), []);
+  const handleBrowserCreateFailed = useCallback(() => {
+    setBrowserAlive(false);
+    setBrowserUrl(null);
+    setBrowserSourceFile(null);
+  }, []);
+  const handleBrowserClose = useCallback(() => {
+    setBrowserUrl(null);
+    setBrowserAlive(false);
+    setBrowserSourceFile(null);
+    if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+    else if (splitFile) setSplitActiveView('file');
+  }, [terminalPinned, terminalAlive, splitFile]);
+
+  // Switch from browser preview to editor for a local HTML file.
+  // Re-reads from disk to ensure editor shows the latest saved content
+  // (browserSourceFile holds the initial snapshot which may be stale).
+  const handleBrowserSwitchToEditor = useCallback(async () => {
+    if (!browserSourceFile || !agentDir) return;
+    setSplitActiveView('file');
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const sep = agentDir.includes('\\') ? '\\' : '/';
+      const absPath = `${agentDir}${sep}${browserSourceFile.path}`;
+      const fresh = await invoke<string | null>('cmd_read_workspace_file', { path: absPath });
+      if (fresh !== null) {
+        const updated = { ...browserSourceFile, content: fresh, size: new Blob([fresh]).size };
+        setBrowserSourceFile(updated);
+        setSplitFile(updated);
+      } else {
+        setSplitFile(browserSourceFile);
+      }
+    } catch {
+      setSplitFile(browserSourceFile); // fallback: use cached version
+    }
+  }, [browserSourceFile, agentDir]);
+
+  // Switch from editor back to browser preview for an HTML file.
+  // Reloads webview so it reflects any edits saved to disk.
+  const handleEditorSwitchToBrowser = useCallback(() => {
+    if (!browserUrl) return;
+    setSplitActiveView('browser');
+    // Give auto-save a moment to flush, then reload the webview
+    setTimeout(() => {
+      import('@tauri-apps/api/core').then(({ invoke: inv }) => {
+        inv('cmd_browser_reload', { tabId }).catch(() => {});
+      });
+    }, 300);
+  }, [browserUrl, tabId]);
+
+  // Stable context value for BrowserPanelContext (only provided when split view is available)
+  const browserPanelCtx = useMemo(
+    () => (isSplitViewEnabled && !isNarrowLayout ? { openUrl: handleOpenInBrowserPanel } : null),
+    [isSplitViewEnabled, isNarrowLayout, handleOpenInBrowserPanel],
+  );
 
   // When split panel closes entirely, restore workspace sidebar to visible
   const prevSplitVisibleRef = useRef(splitPanelVisible);
@@ -309,7 +447,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const onMouseMove = (ev: MouseEvent) => {
       if (!isDraggingSplitRef.current) return;
       const dx = ev.clientX - startX;
-      const newRatio = Math.max(0.25, Math.min(0.75, startRatio + dx / containerWidth));
+      const newRatio = Math.max(0.35, Math.min(0.65, startRatio + dx / containerWidth));
       setSplitRatio(newRatio);
     };
     const onMouseUp = () => {
@@ -1405,6 +1543,27 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [pendingExitPlanMode?.resolved, pendingExitPlanMode?.requestId]);
 
+  // Sync permission mode from backend → frontend.
+  // Backend is the source of truth: SDK tools (EnterPlanMode/ExitPlanMode) and
+  // setSessionPermissionMode() all broadcast 'chat:permission-mode-changed'.
+  // This ensures the UI toggle always reflects the actual SDK subprocess state.
+  const permissionModeRef = useRef(permissionMode);
+  permissionModeRef.current = permissionMode;
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      // Tab isolation: only process events for this tab (SSE is tab-scoped,
+      // but the DOM CustomEvent is global — filter by tabId)
+      if (detail?.tabId && detail.tabId !== tabId) return;
+      const mode = detail?.permissionMode as PermissionMode | undefined;
+      if (mode && mode !== permissionModeRef.current) {
+        setPermissionMode(mode);
+      }
+    };
+    window.addEventListener('permission-mode-sync', handler);
+    return () => window.removeEventListener('permission-mode-sync', handler);
+  }, [tabId]); // stable — reads permissionMode via ref
+
   // Stable callback for time rewind — uses ref for messages to keep reference stable
   const handleRewind = useCallback((messageId: string) => {
     const msgs = messagesRef.current;
@@ -1486,10 +1645,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const aIdx = msgs.findIndex(m => m.id === assistantMessageId);
     if (aIdx < 0) return;
 
-    // Find the nearest user message before this assistant message
+    // Find the nearest real user message before this assistant message
+    // (skip synthetic task-notification messages which are injected as role='user')
     let userMsg: typeof msgs[number] | null = null;
     for (let i = aIdx - 1; i >= 0; i--) {
-      if (msgs[i].role === 'user') { userMsg = msgs[i]; break; }
+      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { userMsg = msgs[i]; break; }
     }
     if (!userMsg) return;
 
@@ -1747,7 +1907,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     const msgs = messagesRef.current;
                     let lastUserMsg = null;
                     for (let i = msgs.length - 1; i >= 0; i--) {
-                      if (msgs[i].role === 'user') { lastUserMsg = msgs[i]; break; }
+                      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { lastUserMsg = msgs[i]; break; }
                     }
                     if (!lastUserMsg) return null;
                     return (
@@ -1812,6 +1972,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           />
 
           {/* Message list with max-width */}
+          <BrowserPanelContext.Provider value={browserPanelCtx}>
           <FileActionProvider
             onInsertReference={handleInsertReference}
             refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
@@ -1842,6 +2003,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onFork={handleFork}
             />
 
+            {/* Introduction overlay — shown in empty sessions when INTRODUCTION.md exists */}
+            {introductionContent && historyMessages.length === 0 && !streamingMessage && !isSessionLoading && (
+              <Suspense fallback={null}>
+                <LazyIntroductionOverlay content={introductionContent} />
+              </Suspense>
+            )}
+
             {/* Inline cron task card — shown in message flow after creating a "新开对话" task */}
             {cronCardTask && (
               <div className="mx-auto w-full max-w-3xl px-4 py-2">
@@ -1854,6 +2022,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               </div>
             )}
           </FileActionProvider>
+          </BrowserPanelContext.Provider>
 
           {/* Text selection floating menu for quoting AI text */}
           <SelectionCommentMenu
@@ -1966,64 +2135,108 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           {/* Right panel — single flex-1 container for tab bar + file + terminal.
               Uses `hidden` when panel is not visible but terminal is alive in background. */}
           <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${!splitPanelVisible ? 'hidden' : ''}`}>
-            {/* Tab switcher — only when both file AND terminal are pinned */}
-            {splitFile && terminalPinned && terminalAlive && (
+            {/* Tab switcher — only when 2+ views are active */}
+            {(() => {
+              const activeViews = [splitFile, terminalPinned && terminalAlive, browserUrl].filter(Boolean).length;
+              return activeViews >= 2;
+            })() && (
               <div className="flex h-9 flex-shrink-0 items-center gap-0.5 border-b border-[var(--line)] bg-[var(--paper-elevated)] px-2">
                 {/* File tab + its own × */}
-                <button
-                  type="button"
-                  onClick={() => setSplitActiveView('file')}
-                  className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
-                    splitActiveView === 'file'
-                      ? 'text-[var(--ink)]'
-                      : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                  }`}
-                >
-                  <span className="max-w-[120px] truncate">{splitFile.name}</span>
-                  <span
-                    role="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSplitFile(null);
-                      setSplitActiveView('terminal');
-                    }}
-                    className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
-                    title="关闭文件"
+                {splitFile && (
+                  <button
+                    type="button"
+                    onClick={() => setSplitActiveView('file')}
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                      splitActiveView === 'file'
+                        ? 'text-[var(--ink)]'
+                        : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                    }`}
                   >
-                    <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
-                  </span>
-                  {splitActiveView === 'file' && (
-                    <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
-                  )}
-                </button>
+                    <span className="max-w-[120px] truncate">{splitFile.name}</span>
+                    <span
+                      role="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSplitFile(null);
+                        if (browserUrl) setSplitActiveView('browser');
+                        else if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+                      }}
+                      className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
+                      title="关闭文件"
+                    >
+                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                    </span>
+                    {splitActiveView === 'file' && (
+                      <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
+                    )}
+                  </button>
+                )}
                 {/* Terminal tab + its own × */}
-                <button
-                  type="button"
-                  onClick={() => setSplitActiveView('terminal')}
-                  className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
-                    splitActiveView === 'terminal'
-                      ? 'text-[var(--ink)]'
-                      : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                  }`}
-                >
-                  <TerminalSquare className="h-3 w-3" />
-                  终端
-                  <span
-                    role="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setTerminalPinned(false);
-                      setSplitActiveView('file');
-                    }}
-                    className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
-                    title="隐藏终端"
+                {terminalPinned && terminalAlive && (
+                  <button
+                    type="button"
+                    onClick={() => setSplitActiveView('terminal')}
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                      splitActiveView === 'terminal'
+                        ? 'text-[var(--ink)]'
+                        : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                    }`}
                   >
-                    <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
-                  </span>
-                  {splitActiveView === 'terminal' && (
-                    <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
-                  )}
-                </button>
+                    <TerminalSquare className="h-3 w-3" />
+                    终端
+                    <span
+                      role="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTerminalPinned(false);
+                        if (browserUrl) setSplitActiveView('browser');
+                        else if (splitFile) setSplitActiveView('file');
+                      }}
+                      className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
+                      title="隐藏终端"
+                    >
+                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                    </span>
+                    {splitActiveView === 'terminal' && (
+                      <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
+                    )}
+                  </button>
+                )}
+                {/* Browser tab + its own × */}
+                {browserUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setSplitActiveView('browser')}
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                      splitActiveView === 'browser'
+                        ? 'text-[var(--ink)]'
+                        : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                    }`}
+                  >
+                    <Globe className="h-3 w-3" />
+                    <span className="max-w-[120px] truncate">
+                      {browserSourceFile ? browserSourceFile.name : (() => { try { return new URL(browserUrl).hostname; } catch { return '浏览器'; } })()}
+                    </span>
+                    <span
+                      role="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setBrowserUrl(null);
+                        setBrowserAlive(false);
+                        setBrowserSourceFile(null);
+                        if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+                        else if (splitFile) setSplitActiveView('file');
+                      }}
+                      className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
+                      title="关闭浏览器"
+                    >
+                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                    </span>
+                    {splitActiveView === 'browser' && (
+                      <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
+                    )}
+                  </button>
+                )}
               </div>
             )}
 
@@ -2038,7 +2251,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     path={splitFile.path}
                     onClose={() => {
                       setSplitFile(null);
-                      if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+                      if (browserUrl) setSplitActiveView('browser');
+                      else if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
                     }}
                     onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
                     embedded
@@ -2047,6 +2261,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                       setSplitFile(null);
                       setFullscreenPreviewFile(file);
                     }}
+                    onSwitchToBrowser={browserUrl ? handleEditorSwitchToBrowser : undefined}
                   />
                 </Suspense>
               </div>
@@ -2056,8 +2271,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 Stays mounted while alive, uses `hidden` when not the active view. */}
             {terminalMounted && (
               <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${splitActiveView !== 'terminal' ? 'hidden' : ''}`}>
-                {/* Terminal header — only when tab switcher is NOT showing */}
-                {!(splitFile && terminalPinned && terminalAlive) && (
+                {/* Terminal header — only when tab switcher is NOT showing (single view) */}
+                {[splitFile, terminalPinned && terminalAlive, browserUrl].filter(Boolean).length < 2 && (
                   <div className="flex h-9 flex-shrink-0 items-center justify-between bg-[var(--paper)] px-3">
                     <div className="flex items-center gap-1.5">
                       <TerminalSquare className="h-3.5 w-3.5 text-[var(--ink)]" />
@@ -2071,7 +2286,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                         type="button"
                         onClick={() => {
                           setTerminalPinned(false);
-                          setSplitActiveView('file');
+                          if (browserUrl) setSplitActiveView('browser');
+                          else if (splitFile) setSplitActiveView('file');
                         }}
                         className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                       >
@@ -2101,6 +2317,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                         });
                       }
                     }}
+                  />
+                </Suspense>
+              </div>
+            )}
+
+            {/* Browser — embedded Tauri child Webview */}
+            {browserUrl && (
+              <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${splitActiveView !== 'browser' ? 'hidden' : ''}`}>
+                <Suspense fallback={<div className="flex h-full items-center justify-center bg-[var(--paper)]"><Loader2 className="h-5 w-5 animate-spin text-[var(--ink-muted)]" /></div>}>
+                  <LazyBrowserPanel
+                    tabId={tabId}
+                    url={browserUrl}
+                    isVisible={isActive && splitPanelVisible && splitActiveView === 'browser'}
+                    isDraggingSplit={isDraggingSplit}
+                    browserAlive={browserAlive}
+                    sourceFile={browserSourceFile}
+                    onBrowserCreated={handleBrowserCreated}
+                    onCreateFailed={handleBrowserCreateFailed}
+                    onClose={handleBrowserClose}
+                    onSwitchToEditor={handleBrowserSwitchToEditor}
                   />
                 </Suspense>
               </div>

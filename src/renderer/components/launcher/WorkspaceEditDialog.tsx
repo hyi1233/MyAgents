@@ -3,11 +3,13 @@
  * Shown from workspace card right-click "Edit" option
  */
 
-import { memo, useCallback, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useState } from 'react';
 import type { Project } from '@/config/types';
 import { getFolderName } from '@/types/tab';
 import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
 import WorkspaceIcon from './WorkspaceIcon';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface WorkspaceEditDialogProps {
     project: Project;
@@ -20,11 +22,18 @@ export default memo(function WorkspaceEditDialog({
     onSave,
     onClose,
 }: WorkspaceEditDialogProps) {
+    useCloseLayer(() => { onClose(); return true; }, 200);
+
+    // Escape to close
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); onClose(); } };
+        document.addEventListener('keydown', handler);
+        return () => document.removeEventListener('keydown', handler);
+    }, [onClose]);
+
     const [name, setName] = useState(project.displayName || getFolderName(project.path));
     const [icon, setIcon] = useState(project.icon || '');
     const [saving, setSaving] = useState(false);
-    const backdropRef = useRef<HTMLDivElement>(null);
-
     const handleSave = useCallback(async () => {
         setSaving(true);
         try {
@@ -41,21 +50,8 @@ export default memo(function WorkspaceEditDialog({
         }
     }, [project.id, project.path, name, icon, onSave, onClose]);
 
-    const handleBackdropClick = useCallback((e: React.MouseEvent) => {
-        if (e.target === e.currentTarget) onClose();
-    }, [onClose]);
-
-    const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-        if (e.key === 'Escape') onClose();
-    }, [onClose]);
-
     return (
-        <div
-            ref={backdropRef}
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-            onMouseDown={handleBackdropClick}
-            onKeyDown={handleKeyDown}
-        >
+        <OverlayBackdrop onClose={onClose} className="z-[200]">
             <div className="w-[420px] rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-lg">
                 <h3 className="mb-5 text-lg font-semibold text-[var(--ink)]">编辑工作区</h3>
 
@@ -130,6 +126,6 @@ export default memo(function WorkspaceEditDialog({
                     </button>
                 </div>
             </div>
-        </div>
+        </OverlayBackdrop>
     );
 });

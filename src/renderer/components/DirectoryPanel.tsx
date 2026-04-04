@@ -329,6 +329,15 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
 
   // Narrow mode collapse state (for responsive layout)
   const [isNarrowMode, setIsNarrowMode] = useState(false);
+
+  // ── Vertical drag: tree / capabilities ratio ──
+  // Default 0.6 = tree 60%, capabilities 40%. Resets on tab close (local state).
+  const [capRatio, setCapRatio] = useState(0.4);
+  const capRatioRef = useRef(0.4);
+  capRatioRef.current = capRatio;
+  const isDraggingCapRef = useRef(false);
+  const capDragMoveRef = useRef<((e: MouseEvent) => void) | null>(null);
+  const capDragUpRef = useRef<(() => void) | null>(null);
   const [isCollapsed, setIsCollapsed] = useState(true); // Default collapsed in narrow mode
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -497,6 +506,52 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
   useLayoutEffect(() => {
     updateTreeHeight();
   }, [directoryInfo]);
+
+  // Vertical divider drag handler (tree ↔ capabilities)
+  const handleCapDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingCapRef.current = true;
+    const startY = e.clientY;
+    const startRatio = capRatioRef.current;
+    const containerHeight = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect().height;
+    if (containerHeight <= 0) return; // Guard against zero-height container (collapsed/hidden)
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isDraggingCapRef.current) return;
+      const dy = ev.clientY - startY;
+      // dy > 0 = mouse moves down = capabilities shrinks
+      const newRatio = Math.max(0.15, Math.min(0.65, startRatio - dy / containerHeight));
+      setCapRatio(newRatio);
+    };
+    const onMouseUp = () => {
+      isDraggingCapRef.current = false;
+      capDragMoveRef.current = null;
+      capDragUpRef.current = null;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      // Final tree height update after drag ends
+      requestAnimationFrame(updateTreeHeight);
+    };
+    capDragMoveRef.current = onMouseMove;
+    capDragUpRef.current = onMouseUp;
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+  }, []); // stable — uses refs
+
+  // Cleanup cap drag listeners on unmount (match Chat.tsx pattern: reset body styles too)
+  useEffect(() => {
+    return () => {
+      if (capDragMoveRef.current) document.removeEventListener('mousemove', capDragMoveRef.current);
+      if (capDragUpRef.current) document.removeEventListener('mouseup', capDragUpRef.current);
+      isDraggingCapRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, []);
 
   // Re-run when directoryInfo changes because the tree container is conditionally rendered
   // and may not exist on initial mount (the ref would be null with [] deps)
@@ -1598,6 +1653,16 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
               )}
             </div>
 
+            {/* Vertical drag divider — tree ↔ capabilities
+                Outer div: invisible hit area (py-1.5 = 12px), cursor hint
+                Inner div: thin visual line, hover changes color via group */}
+            <div
+              className="group/cap-divider mx-4 cursor-row-resize py-1.5"
+              onMouseDown={handleCapDividerMouseDown}
+            >
+              <div className="border-b border-[var(--line-subtle)] transition-colors group-hover/cap-divider:border-[var(--accent)]/40" />
+            </div>
+
             {/* Agent Capabilities Panel */}
             <AgentCapabilitiesPanel
               enabledAgents={enabledAgents}
@@ -1609,6 +1674,7 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
               onSyncSkillToGlobal={onSyncSkillToGlobal}
               onRefresh={() => { refresh(); onRefreshAll?.(); }}
               onExpandChange={updateTreeHeight}
+              heightRatio={capRatio}
             />
           </div>
         </>

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronUp, Send, ImagePlus } from 'lucide-react';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+
 import { track } from '@/analytics';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
@@ -8,6 +10,7 @@ import type { ImageAttachment } from './SimpleChatInput';
 import { ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { isProviderAvailable } from '@/config/configService';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 const MAX_IMAGES = 5;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
@@ -24,6 +27,9 @@ interface BugReportOverlayProps {
 export default function BugReportOverlay({
     onClose, onNavigateToProviders, appVersion, providers, apiKeys, providerVerifyStatus,
 }: BugReportOverlayProps) {
+    // Cmd+W dismissal: z-[250] matches the component's CSS z-index
+    useCloseLayer(() => { onClose(); return true; }, 250);
+
     const [description, setDescription] = useState('');
     const [images, setImages] = useState<ImageAttachment[]>([]);
     const [showModelMenu, _setShowModelMenu] = useState(false);
@@ -173,10 +179,7 @@ export default function BugReportOverlay({
     };
 
     return (
-        <div
-            className="fixed inset-0 z-[250] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm"
-            onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
-        >
+        <OverlayBackdrop onClose={onClose} className="z-[250] px-4">
             <div className="glass-panel w-full max-w-md">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
@@ -340,6 +343,6 @@ export default function BugReportOverlay({
                     </div>
                 </div>
             </div>
-        </div>
+        </OverlayBackdrop>
     );
 }

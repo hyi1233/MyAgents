@@ -18,8 +18,19 @@ export function isTerminalStatus(status: string | undefined): status is Backgrou
 }
 
 const statuses = new Map<string, string>();
+const descriptions = new Map<string, string>();
 
 const EVENT_NAME = 'background-task-status';
+
+/** Called by TabProvider when `chat:task-started` arrives. Stores description for later display. */
+export function setBackgroundTaskDescription(taskId: string, description: string): void {
+    descriptions.set(taskId, description);
+}
+
+/** Read task description (set at task-started time). */
+export function getBackgroundTaskDescription(taskId: string): string | undefined {
+    return descriptions.get(taskId);
+}
 
 /** Called by TabProvider when `chat:task-notification` arrives. */
 export function setBackgroundTaskStatus(taskId: string, status: string): void {
@@ -37,6 +48,7 @@ export function getBackgroundTaskStatus(taskId: string): string | undefined {
 /** Clear all entries — call on session reset to prevent unbounded growth. */
 export function clearAllBackgroundTaskStatuses(): void {
     statuses.clear();
+    descriptions.clear();
 }
 
 /** Event name for addEventListener — exported to avoid magic strings. */

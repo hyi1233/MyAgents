@@ -18,6 +18,8 @@ import { isBrowserDevMode } from '@/utils/browserMock';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import WorkspaceIcon from './WorkspaceIcon';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface TemplateLibraryDialogProps {
     onCreateWorkspace: (path: string, icon?: string, displayName?: string) => Promise<void>;
@@ -28,6 +30,8 @@ export default memo(function TemplateLibraryDialog({
     onCreateWorkspace,
     onClose,
 }: TemplateLibraryDialogProps) {
+    useCloseLayer(() => { onClose(); return true; }, 200);
+
     // State
     const [templates, setTemplates] = useState<WorkspaceTemplate[]>([...PRESET_TEMPLATES]);
     const [selectedId, setSelectedId] = useState<string>(PRESET_TEMPLATES[0]?.id ?? '');
@@ -44,7 +48,6 @@ export default memo(function TemplateLibraryDialog({
     const [editingDesc, setEditingDesc] = useState(false);
     const [descDraft, setDescDraft] = useState('');
 
-    const backdropRef = useRef<HTMLDivElement>(null);
     const pathCheckTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
     const iconPickerRef = useRef<HTMLDivElement>(null);
 
@@ -238,10 +241,6 @@ export default memo(function TemplateLibraryDialog({
         }
     }, [selectedTemplate, targetDir, projectName, findAvailablePath, onCreateWorkspace, onClose]);
 
-    const handleBackdropClick = useCallback((e: React.MouseEvent) => {
-        if (e.target === e.currentTarget) onClose();
-    }, [onClose]);
-
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
         if (e.key === 'Escape') {
             if (showIconPicker) { setShowIconPicker(false); return; }
@@ -276,13 +275,8 @@ export default memo(function TemplateLibraryDialog({
     }, [selectedTemplate]);
 
     return (
-        <div
-            ref={backdropRef}
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-            onMouseDown={handleBackdropClick}
-            onKeyDown={handleKeyDown}
-        >
-            <div className="flex w-[640px] max-h-[80vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg">
+        <OverlayBackdrop onClose={onClose} className="z-[200]">
+            <div className="flex w-[640px] max-h-[80vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg" onKeyDown={handleKeyDown}>
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
                     <h2 className="text-lg font-semibold text-[var(--ink)]">从模板创建 Agent</h2>
@@ -579,6 +573,6 @@ export default memo(function TemplateLibraryDialog({
                     onCancel={() => setTemplateToRemove(null)}
                 />
             )}
-        </div>
+        </OverlayBackdrop>
     );
 });

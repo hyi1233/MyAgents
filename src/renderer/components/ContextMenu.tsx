@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 export type ContextMenuItem = {
     label: string;
@@ -20,6 +21,9 @@ interface ContextMenuProps {
 
 export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null);
+
+    // Cmd+W dismissal: always active while mounted (component only renders when open)
+    useCloseLayer(() => { onClose(); return true; }, 50);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {

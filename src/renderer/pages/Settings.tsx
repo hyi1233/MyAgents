@@ -7,6 +7,8 @@ import { listen } from '@tauri-apps/api/event';
 import { homeDir, join } from '@tauri-apps/api/path';
 
 import { track } from '@/analytics';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { apiFetch, apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
 import CustomSelect from '@/components/CustomSelect';
@@ -17,11 +19,10 @@ import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
 import { BotPlatformRegistry } from '@/components/ImSettings';
 import { WorkspaceSelectDialog } from '@/components/AgentSettings';
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
+import ModelManagementPanel from '@/components/ModelManagementPanel';
 import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
-    getModelsDisplay,
     getEffectiveModelAliases,
-    PRESET_PROVIDERS,
     type ModelAliases,
     type Provider,
     type ProviderAuthType,
@@ -158,82 +159,6 @@ interface SettingsProps {
 const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'sub-agents', 'agent', 'usage-stats', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
-const ModelTagList = React.memo(function ModelTagList({
-    provider,
-    removedModels,
-    onRemove,
-    customModels,
-    onRemoveCustomModel,
-}: {
-    provider: Provider;
-    removedModels: string[];
-    onRemove: (modelId: string) => void;
-    customModels: string[];           // Newly added models (not yet saved)
-    onRemoveCustomModel: (modelId: string) => void;
-}) {
-    // For preset providers, determine which models are preset vs user-added
-    const presetModelIds = useMemo(() => {
-        if (!provider.isBuiltin) return new Set<string>();
-        const presetProvider = PRESET_PROVIDERS.find(p => p.id === provider.id);
-        return new Set(presetProvider?.models.map(m => m.model) ?? []);
-    }, [provider.id, provider.isBuiltin]);
-
-    const visibleModels = useMemo(
-        () => provider.models.filter(m => !removedModels.includes(m.model)),
-        [provider.models, removedModels]
-    );
-
-    return (
-        <>
-            {/* Existing saved models */}
-            {visibleModels.map((model) => {
-                const isPresetModel = presetModelIds.has(model.model);
-                const canDelete = !isPresetModel;
-
-                return (
-                    <div
-                        key={model.model}
-                        className={`group flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-[var(--ink)] ${
-                            canDelete
-                                ? 'bg-[var(--paper-inset)] hover:bg-[var(--paper)]'
-                                : 'bg-[var(--paper-inset)]'
-                        }`}
-                    >
-                        <span>{model.model}</span>
-                        {isPresetModel ? (
-                            <span className="text-[10px] text-[var(--ink-muted)]">预设</span>
-                        ) : (
-                            <button
-                                type="button"
-                                onClick={() => onRemove(model.model)}
-                                className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
-                            >
-                                <X className="h-3 w-3" />
-                            </button>
-                        )}
-                    </div>
-                );
-            })}
-            {/* Newly added models (not yet saved) */}
-            {customModels.map((model) => (
-                <div
-                    key={`custom-${model}`}
-                    className="group flex items-center gap-1 rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-medium text-[var(--ink)] hover:bg-[var(--paper-inset)]"
-                >
-                    <span>{model}</span>
-                    <button
-                        type="button"
-                        onClick={() => onRemoveCustomModel(model)}
-                        className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
-                    >
-                        <X className="h-3 w-3" />
-                    </button>
-                </div>
-            ))}
-        </>
-    );
-});
-
 /** Default args for Playwright MCP: persistent profile mode (preserves login state, single-session) */
 async function getPlaywrightDefaultArgs(): Promise<string[]> {
     const home = await homeDir();
@@ -260,9 +185,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         addCustomProvider,
         updateCustomProvider,
         deleteCustomProvider: deleteCustomProviderService,
+        refreshProviders,
         savePresetCustomModels,
         removePresetCustomModel: _removePresetCustomModel,
+        savePrimaryModel,
         saveProviderModelAliases,
+        refreshConfig,
     } = useConfig();
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -348,7 +276,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     const [editingProvider, setEditingProvider] = useState<ProviderEditForm | null>(null);
     // 删除确认弹窗状态
     const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<Provider | null>(null);
-
+    // 模型管理面板状态 — 存 ID 而非 Provider 对象，从 providers 派生最新引用
+    const [managingProviderId, setManagingProviderId] = useState<string | null>(null);
+    const managingProvider = useMemo(
+        () => managingProviderId ? providers.find(p => p.id === managingProviderId) ?? null : null,
+        [managingProviderId, providers],
+    );
     // UI-only loading state (not persisted)
     const [verifyLoading, setVerifyLoading] = useState<Record<string, boolean>>({});
     const [verifyError, setVerifyError] = useState<Record<string, { error: string; detail?: string }>>({});
@@ -711,6 +644,23 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     });
     const [mcpHeadersExpanded, setMcpHeadersExpanded] = useState(false);
     const [mcpOAuthExpanded, setMcpOAuthExpanded] = useState(false);
+
+    // Cmd+W dismissal for all inline Settings overlays (z-50 / z-[60]).
+    // Checks from highest z-index down; first truthy state gets closed.
+    useCloseLayer(() => {
+        // z-[60]: delete confirmation (highest)
+        if (deleteConfirmProvider) { setDeleteConfirmProvider(null); return true; }
+        // z-50: all other inline overlays
+        if (runtimeDialog.show) { setRuntimeDialog(prev => ({ ...prev, show: false })); return true; }
+        if (editingProvider) { setEditingProvider(null); return true; }
+        if (showCustomForm) { setShowCustomForm(false); return true; }
+        if (showMcpForm) { setShowMcpForm(false); setEditingMcpId(null); return true; }
+        if (builtinMcpSettings) { setBuiltinMcpSettings(null); return true; }
+        if (geminiImageSettings) { setGeminiImageSettings(null); return true; }
+        if (playwrightSettings) { setPlaywrightSettings(null); return true; }
+        if (edgeTtsSettings) { setEdgeTtsSettings(null); return true; }
+        return false;
+    }, 50);
 
     // Check which MCP servers need configuration (missing required fields)
     const checkMcpConfigStatus = async (servers: McpServerDefinition[]) => {
@@ -1825,9 +1775,13 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         };
     }, []);
 
-    const handleAddCustomProvider = async () => {
-        if (!customForm.name || !customForm.baseUrl || customForm.models.length === 0) {
-            return;
+    const handleAddCustomProvider = async (): Promise<Provider | null> => {
+        if (!customForm.name || !customForm.baseUrl) {
+            return null;
+        }
+        if (customForm.models.length === 0) {
+            toast.error('请添加至少一个模型 ID');
+            return null;
         }
         const newProvider: Provider = {
             id: `custom-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
@@ -1835,7 +1789,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             vendor: 'Custom',  // 内部保留但不在 UI 显示
             cloudProvider: customForm.cloudProvider || '自定义',
             type: 'api',
-            primaryModel: customForm.models[0],
+            primaryModel: customForm.models[0] ?? '',
             isBuiltin: false,
             authType: customForm.authType,
             apiProtocol: customForm.apiProtocol === 'openai' ? 'openai' : undefined,
@@ -1878,11 +1832,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         } catch (error) {
             console.error('[Settings] Failed to add custom provider:', error);
             toast.error('添加服务商失败');
-            return;
+            return null;
         }
 
         setCustomForm(EMPTY_CUSTOM_FORM);
         setShowCustomForm(false);
+        return newProvider;
     };
 
     // 确认删除自定义供应商
@@ -1942,43 +1897,6 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 editMaxOutputTokensParamName: provider.maxOutputTokensParamName ?? 'max_tokens',
                 editUpstreamFormat: provider.upstreamFormat ?? 'chat_completions',
             }),
-        });
-    };
-
-    // Add custom model to editing provider
-    const addCustomModelToProvider = () => {
-        if (!editingProvider || !editingProvider.newModelInput.trim()) return;
-        const newModel = editingProvider.newModelInput.trim();
-        // Check if model already exists
-        const existingModels = editingProvider.provider.models.map((m) => m.model);
-        if (existingModels.includes(newModel) || editingProvider.customModels.includes(newModel)) {
-            toast.error('该模型 ID 已存在');
-            return;
-        }
-        setEditingProvider({
-            ...editingProvider,
-            customModels: [...editingProvider.customModels, newModel],
-            newModelInput: '',
-        });
-    };
-
-    // Remove custom model from editing provider
-    const removeCustomModelFromProvider = (modelId: string) => {
-        if (!editingProvider) return;
-        setEditingProvider({
-            ...editingProvider,
-            customModels: editingProvider.customModels.filter((m) => m !== modelId),
-        });
-    };
-
-    // Remove existing (saved) model from editing provider
-    // For custom providers: any model can be removed
-    // For preset providers: only user-added models can be removed (not preset models)
-    const removeExistingModel = (modelId: string) => {
-        if (!editingProvider) return;
-        setEditingProvider({
-            ...editingProvider,
-            removedModels: [...editingProvider.removedModels, modelId],
         });
     };
 
@@ -2377,7 +2295,9 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                 )}
                                             </div>
                                             <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
-                                                {getModelsDisplay(provider)}
+                                                {provider.models.length > 0
+                                                    ? provider.models.map(m => m.modelName || m.model).join(', ')
+                                                    : '暂无模型'}
                                             </p>
                                         </div>
                                         <div className="flex shrink-0 items-center gap-1">
@@ -3260,7 +3180,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Builtin MCP Settings Modal */}
             {builtinMcpSettings && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -3460,12 +3380,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Gemini Image Settings Modal */}
             {geminiImageSettings && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -3657,12 +3577,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Playwright Settings Modal */}
             {playwrightSettings && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -4027,12 +3947,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Edge TTS Settings Modal */}
             {edgeTtsSettings && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -4264,12 +4184,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Add MCP Modal */}
             {showMcpForm && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -4887,12 +4807,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         </div>
                         )}
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Custom Provider Modal */}
             {showCustomForm && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm overflow-y-auto py-8">
+                <OverlayBackdrop className="z-50 overflow-y-auto py-8">
                     <div className="mx-4 w-full max-w-md flex max-h-[90vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
                         <div className="flex-shrink-0 px-6 pt-6 pb-4">
                             <div className="flex items-center justify-between">
@@ -4909,7 +4829,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </div>
                         </div>
 
-                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6">
+                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-4">
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
                                     供应商名称 <span className="text-[var(--error)]">*</span>
@@ -5068,73 +4988,47 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 </div>
                             )}
 
+                            {/* Models — inline input, no dependency on provider creation */}
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    模型 ID <span className="text-[var(--error)]">*</span>
+                                    模型 <span className="text-[var(--error)]">*</span>
                                 </label>
-                                <div className="flex gap-2">
-                                    <input
-                                        type="text"
-                                        value={customForm.newModelInput}
-                                        onChange={(e) => setCustomForm((p) => ({ ...p, newModelInput: e.target.value }))}
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter' && customForm.newModelInput.trim()) {
-                                                e.preventDefault();
-                                                const newModel = customForm.newModelInput.trim();
-                                                if (!customForm.models.includes(newModel)) {
-                                                    setCustomForm((p) => ({
-                                                        ...p,
-                                                        models: [...p.models, newModel],
-                                                        newModelInput: '',
-                                                    }));
-                                                }
-                                            }
-                                        }}
-                                        placeholder="输入模型 ID，按 Enter 添加"
-                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            const newModel = customForm.newModelInput.trim();
-                                            if (newModel && !customForm.models.includes(newModel)) {
-                                                setCustomForm((p) => ({
-                                                    ...p,
-                                                    models: [...p.models, newModel],
-                                                    newModelInput: '',
-                                                }));
-                                            }
-                                        }}
-                                        disabled={!customForm.newModelInput.trim()}
-                                        className="rounded-lg bg-[var(--paper-inset)] px-3 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
-                                    >
-                                        <Plus className="h-4 w-4" />
-                                    </button>
-                                </div>
-                                {/* Model tags */}
                                 {customForm.models.length > 0 && (
-                                    <div className="mt-2 flex flex-wrap gap-1.5">
-                                        {customForm.models.map((model, index) => (
-                                            <div
-                                                key={model}
-                                                className="flex items-center gap-1 rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-medium text-[var(--ink)]"
+                                    <div className="mb-2 flex flex-wrap gap-1.5">
+                                        {customForm.models.map((m) => (
+                                            <span
+                                                key={m}
+                                                className="inline-flex items-center gap-1 rounded-md bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]"
                                             >
-                                                <span className="text-[10px] text-[var(--ink-muted)]">{index + 1}.</span>
-                                                <span>{model}</span>
+                                                {m}
                                                 <button
                                                     type="button"
-                                                    onClick={() => setCustomForm((p) => ({
-                                                        ...p,
-                                                        models: p.models.filter((m) => m !== model),
-                                                    }))}
-                                                    className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--error)]"
+                                                    onClick={() => setCustomForm((p) => ({ ...p, models: p.models.filter((id) => id !== m) }))}
+                                                    className="rounded-sm p-0.5 text-[var(--ink-subtle)] transition-colors hover:text-[var(--ink)]"
                                                 >
                                                     <X className="h-3 w-3" />
                                                 </button>
-                                            </div>
+                                            </span>
                                         ))}
                                     </div>
                                 )}
+                                <div className="flex gap-2">
+                                    <input
+                                        type="text"
+                                        placeholder="输入模型 ID，回车添加"
+                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors placeholder:text-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none"
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                                e.preventDefault();
+                                                const val = (e.target as HTMLInputElement).value.trim();
+                                                if (val && !customForm.models.includes(val)) {
+                                                    setCustomForm((p) => ({ ...p, models: [...p.models, val] }));
+                                                    (e.target as HTMLInputElement).value = '';
+                                                }
+                                            }
+                                        }}
+                                    />
+                                </div>
                             </div>
 
                             {/* API Key moved to provider list page for consistency with edit flow */}
@@ -5161,12 +5055,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </div>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Provider Management Modal */}
             {editingProvider && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm overflow-y-auto py-8">
+                <OverlayBackdrop className="z-50 overflow-y-auto py-8">
                     <div className="mx-4 w-full max-w-md flex max-h-[90vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
                         <div className="flex-shrink-0 px-6 pt-6 pb-4">
                             <div className="flex items-center justify-between">
@@ -5360,50 +5254,26 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 </div>
                             )}
 
-                            {/* Existing models */}
+                            {/* Models — preview + manage button */}
                             <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    模型列表
-                                </label>
-                                <div className="flex flex-wrap gap-1.5">
-                                    <ModelTagList
-                                        provider={editingProvider.provider}
-                                        removedModels={editingProvider.removedModels}
-                                        onRemove={removeExistingModel}
-                                        customModels={editingProvider.customModels}
-                                        onRemoveCustomModel={removeCustomModelFromProvider}
-                                    />
-                                </div>
-                            </div>
-
-                            {/* Custom models for this provider */}
-                            <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    添加自定义模型 ID
-                                </label>
-                                <div className="flex gap-2">
-                                    <input
-                                        type="text"
-                                        value={editingProvider.newModelInput}
-                                        onChange={(e) => setEditingProvider((p) => p ? { ...p, newModelInput: e.target.value } : null)}
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter') {
-                                                e.preventDefault();
-                                                addCustomModelToProvider();
-                                            }
-                                        }}
-                                        placeholder="输入模型 ID，按 Enter 添加"
-                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
-                                    />
+                                <div className="mb-1.5 flex items-center justify-between">
+                                    <label className="text-sm font-medium text-[var(--ink)]">
+                                        模型
+                                    </label>
                                     <button
                                         type="button"
-                                        onClick={addCustomModelToProvider}
-                                        disabled={!editingProvider.newModelInput.trim()}
-                                        className="rounded-lg bg-[var(--paper-inset)] px-3 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
+                                        onClick={() => setManagingProviderId(editingProvider.provider.id)}
+                                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                                     >
-                                        <Plus className="h-4 w-4" />
+                                        <Settings2 className="h-3.5 w-3.5" />
+                                        管理可用模型
                                     </button>
                                 </div>
+                                <p className="truncate text-sm text-[var(--ink-muted)]">
+                                    {editingProvider.provider.models.length > 0
+                                        ? editingProvider.provider.models.map(m => m.modelName || m.model).join(', ')
+                                        : '暂无模型'}
+                                </p>
                             </div>
 
                             {/* Advanced Options - Model Alias Mapping (not shown for Anthropic providers) */}
@@ -5492,12 +5362,33 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </div>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
+            )}
+
+            {/* Model Management Panel */}
+            {managingProvider && (
+                <ModelManagementPanel
+                    provider={managingProvider}
+                    apiKey={apiKeys[managingProvider.id]}
+                    config={config}
+                    onClose={() => {
+                        setManagingProviderId(null);
+                        // Refresh editingProvider with latest provider data after model changes
+                        if (editingProvider && managingProvider) {
+                            const fresh = providers.find(p => p.id === editingProvider.provider.id);
+                            if (fresh) setEditingProvider(prev => prev ? { ...prev, provider: fresh } : null);
+                        }
+                    }}
+                    onSaveCustomModels={savePresetCustomModels}
+                    onUpdateCustomProvider={updateCustomProvider}
+                    onSetPrimaryModel={savePrimaryModel}
+                    onRefresh={async () => { await refreshConfig(); await refreshProviders(); }}
+                />
             )}
 
             {/* Delete Confirmation Modal */}
             {deleteConfirmProvider && (
-                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-[60]">
                     <div className="mx-4 w-full max-w-sm rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
                         <div className="mb-4 flex items-center gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--error-bg)]">
@@ -5523,18 +5414,14 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Runtime not found dialog */}
             {runtimeDialog.show && (
-                <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-                    onClick={() => setRuntimeDialog({ show: false })}
-                >
+                <OverlayBackdrop onClose={() => setRuntimeDialog({ show: false })} className="z-50">
                     <div
                         className="mx-4 w-full max-w-sm rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl"
-                        onClick={e => e.stopPropagation()}
                     >
                         <div className="flex items-center gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--warning-bg)]">
@@ -5572,7 +5459,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             )}
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Bug Report Overlay */}

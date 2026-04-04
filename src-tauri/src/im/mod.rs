@@ -956,6 +956,7 @@ async fn create_bot_instance<R: Runtime>(
     let group_activation_for_loop = Arc::clone(&group_activation);
     let group_tools_deny_for_loop = Arc::clone(&group_tools_deny);
     let group_history_for_loop = Arc::clone(&group_history);
+    let group_event_tx_for_loop = group_event_tx.clone();
     let mut process_shutdown_rx = shutdown_rx.clone();
 
     // Concurrency primitives (live outside the router for lock-free access)
@@ -1703,6 +1704,29 @@ async fn create_bot_instance<R: Runtime>(
                     }
 
                     if msg.source_type == ImSourceType::Group {
+                        // Bridge group auto-discovery: when a Bridge plugin delivers a group
+                        // message for an unknown group, auto-create a Pending permission entry.
+                        // Native adapters discover groups via platform events (my_chat_member etc.),
+                        // but Bridge/OpenClaw plugins have no equivalent lifecycle event.
+                        if is_bridge_platform {
+                            // Match by group_id OR group_name (handles chatId format migration:
+                            // old records have group_id=ou_xxx, new format uses oc_xxx)
+                            let known = group_permissions_for_loop.read().await
+                                .iter().any(|g| g.group_id == msg.chat_id || g.group_name == msg.chat_id);
+                            if !known {
+                                ulog_info!("[im] Bridge group auto-discovery: {} ({})", msg.chat_id, msg.hint_group_name.as_deref().unwrap_or("?"));
+                                // try_send (not send().await) — sender and receiver share the same
+                                // select! loop; .await could deadlock if the channel is full.
+                                let _ = group_event_tx_for_loop.try_send(GroupEvent::BotAdded {
+                                    chat_id: msg.chat_id.clone(),
+                                    chat_title: msg.hint_group_name.clone()
+                                        .unwrap_or_else(|| msg.chat_id.clone()),
+                                    platform: msg.platform.clone(),
+                                    added_by_name: msg.sender_name.clone(),
+                                });
+                            }
+                        }
+
                         // Check if sender is a whitelisted user OR group is approved
                         let is_allowed_user = {
                             let users = allowed_users_for_loop.read().await;
@@ -1714,7 +1738,16 @@ async fn create_bot_instance<R: Runtime>(
                         };
 
                         if !is_allowed_user && !group_approved {
-                            // Not authorized — skip silently
+                            // Buffer history even for unapproved groups so AI has context
+                            // when the group is eventually approved or an allowedUser @triggers.
+                            group_history_for_loop.lock().await.push(
+                                &session_key,
+                                GroupHistoryEntry {
+                                    sender_name: msg.sender_name.clone().unwrap_or_else(|| msg.sender_id.clone()),
+                                    text: msg.text.clone(),
+                                    timestamp: chrono::Local::now(),
+                                },
+                            );
                             continue;
                         }
 
@@ -1731,7 +1764,7 @@ async fn create_bot_instance<R: Runtime>(
                                 GroupHistoryEntry {
                                     sender_name: msg.sender_name.clone().unwrap_or_else(|| msg.sender_id.clone()),
                                     text: msg.text.clone(),
-                                    timestamp: std::time::Instant::now(),
+                                    timestamp: chrono::Local::now(),
                                 },
                             );
                             continue;
@@ -1873,10 +1906,11 @@ async fn create_bot_instance<R: Runtime>(
                             let history = task_group_history.lock().await.drain(&session_key);
                             let pending_history = GroupHistoryBuffer::format_as_context(&history);
                             // Check if this is the first turn for this group session
-                            let is_first_turn = {
+                            let (is_first_turn, message_count) = {
                                 let router = task_router.lock().await;
                                 let ps = router.get_peer_session(&session_key);
-                                ps.map_or(true, |p| p.message_count == 0)
+                                (ps.map_or(true, |p| p.message_count == 0),
+                                 ps.map_or(0, |p| p.message_count))
                             };
                             let activation = task_group_activation.read().await.clone();
                             let tools_deny = task_group_tools_deny.read().await.clone();
@@ -1896,6 +1930,8 @@ async fn create_bot_instance<R: Runtime>(
                                 is_first_turn,
                                 pending_history,
                                 tools_deny,
+                                is_mention: msg.is_mention,
+                                message_count,
                             })
                         } else {
                             None
@@ -2143,12 +2179,19 @@ async fn create_bot_instance<R: Runtime>(
                             };
                             {
                                 let mut perms = group_permissions_for_loop.write().await;
-                                // Don't downgrade already-approved groups (e.g., platform migration, re-invite while present)
-                                if perms.iter().any(|g| g.group_id == chat_id && g.status == GroupPermissionStatus::Approved) {
-                                    ulog_info!("[im] Group {} already approved, skipping BotAdded", chat_id);
+                                // Dedup: skip if group already known (Approved or Pending).
+                                // Also match by group_name to handle the chatId format migration
+                                // (pre-fix: group_id=ou_xxx from ctx.From, post-fix: group_id=oc_xxx from ctx.To).
+                                if let Some(existing) = perms.iter_mut().find(|g| g.group_id == chat_id || g.group_name == chat_id) {
+                                    // If found by group_name (old format), update group_id to the correct value
+                                    if existing.group_id != chat_id {
+                                        ulog_info!("[im] Group {} migrating group_id: {} -> {}", chat_title, existing.group_id, chat_id);
+                                        existing.group_id = chat_id.clone();
+                                    } else {
+                                        ulog_info!("[im] Group {} already known, skipping BotAdded", chat_id);
+                                    }
                                     continue;
                                 }
-                                perms.retain(|g| g.group_id != chat_id);
                                 perms.push(perm.clone());
                             }
                             // Persist to config.json
@@ -2538,6 +2581,8 @@ struct GroupStreamContext {
     is_first_turn: bool,
     pending_history: Option<String>,
     tools_deny: Vec<String>,
+    is_mention: bool,
+    message_count: u32,
 }
 
 /// Placeholder message sent when the AI's first response block is non-text (thinking/tool_use).
@@ -2619,6 +2664,8 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
             GroupActivation::Always => "always",
         });
         body["isFirstGroupTurn"] = json!(gc.is_first_turn);
+        body["isMention"] = json!(gc.is_mention);
+        body["messageCount"] = json!(gc.message_count);
         if let Some(ref history) = gc.pending_history {
             body["pendingHistory"] = json!(history);
         }
@@ -6094,6 +6141,27 @@ pub async fn cmd_update_agent_config(
                     serde_json::from_str(mau_json).ok()
                 };
                 *mau_arc.write().await = parsed;
+            }
+        }
+
+        // Hot-reload per-channel group settings when channels array is patched.
+        // Frontend patchChannel() writes the full channels array to disk, then sends
+        // the patch here for runtime sync. Match by channel ID to update the running instance.
+        if let Some(ref channels) = patch.channels {
+            for ch_config in channels {
+                if let Some(ch_inst) = agent.channels.get(&ch_config.id) {
+                    // groupActivation
+                    if let Some(ref act) = ch_config.group_activation {
+                        let activation = match act.as_str() {
+                            "always" => GroupActivation::Always,
+                            _ => GroupActivation::Mention,
+                        };
+                        *ch_inst.bot_instance.group_activation.write().await = activation;
+                    }
+                    // groupPermissions — always overwrite (the full channels array is sent,
+                    // so empty Vec means "no permissions", not "field absent")
+                    *ch_inst.bot_instance.group_permissions.write().await = ch_config.group_permissions.clone();
+                }
             }
         }
 
