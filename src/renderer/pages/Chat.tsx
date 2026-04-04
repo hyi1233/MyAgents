@@ -371,19 +371,41 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     else if (splitFile) setSplitActiveView('file');
   }, [terminalPinned, terminalAlive, splitFile]);
 
-  // Switch from browser preview to editor for a local HTML file
-  const handleBrowserSwitchToEditor = useCallback(() => {
-    if (!browserSourceFile) return;
-    setSplitFile(browserSourceFile);
+  // Switch from browser preview to editor for a local HTML file.
+  // Re-reads from disk to ensure editor shows the latest saved content
+  // (browserSourceFile holds the initial snapshot which may be stale).
+  const handleBrowserSwitchToEditor = useCallback(async () => {
+    if (!browserSourceFile || !agentDir) return;
     setSplitActiveView('file');
-    // Keep browser alive in background (hidden) so user can switch back
-  }, [browserSourceFile]);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const sep = agentDir.includes('\\') ? '\\' : '/';
+      const absPath = `${agentDir}${sep}${browserSourceFile.path}`;
+      const fresh = await invoke<string | null>('cmd_read_workspace_file', { path: absPath });
+      if (fresh !== null) {
+        const updated = { ...browserSourceFile, content: fresh, size: new Blob([fresh]).size };
+        setBrowserSourceFile(updated);
+        setSplitFile(updated);
+      } else {
+        setSplitFile(browserSourceFile);
+      }
+    } catch {
+      setSplitFile(browserSourceFile); // fallback: use cached version
+    }
+  }, [browserSourceFile, agentDir]);
 
-  // Switch from editor back to browser preview for an HTML file
+  // Switch from editor back to browser preview for an HTML file.
+  // Reloads webview so it reflects any edits saved to disk.
   const handleEditorSwitchToBrowser = useCallback(() => {
     if (!browserUrl) return;
     setSplitActiveView('browser');
-  }, [browserUrl]);
+    // Give auto-save a moment to flush, then reload the webview
+    setTimeout(() => {
+      import('@tauri-apps/api/core').then(({ invoke: inv }) => {
+        inv('cmd_browser_reload', { tabId }).catch(() => {});
+      });
+    }, 300);
+  }, [browserUrl, tabId]);
 
   // Stable context value for BrowserPanelContext (only provided when split view is available)
   const browserPanelCtx = useMemo(
