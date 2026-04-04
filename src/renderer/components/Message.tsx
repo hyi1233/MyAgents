@@ -416,7 +416,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
           <div className="text-[var(--ink)] select-text">
             <Markdown>{message.content}</Markdown>
           </div>
-          {actionsReady && <AssistantActions message={message} onRetry={onRetry} onFork={onFork} />}
+          {actionsReady && !isLoading && <AssistantActions message={message} onRetry={onRetry} onFork={onFork} />}
         </div>
       </div>
     );
@@ -554,7 +554,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
             })}
           </div>
         </article>
-        {actionsReady && <AssistantActions className="px-4" message={message} onRetry={onRetry} onFork={onFork} />}
+        {actionsReady && !isLoading && <AssistantActions className="px-4" message={message} onRetry={onRetry} onFork={onFork} />}
       </div>
     </div>
   );
