@@ -1779,6 +1779,10 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         if (!customForm.name || !customForm.baseUrl) {
             return null;
         }
+        if (customForm.models.length === 0) {
+            toast.error('请添加至少一个模型 ID');
+            return null;
+        }
         const newProvider: Provider = {
             id: `custom-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
             name: customForm.name,
@@ -4984,31 +4988,47 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 </div>
                             )}
 
-                            {/* Models — create provider first, then open management panel */}
+                            {/* Models — inline input, no dependency on provider creation */}
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    模型
+                                    模型 <span className="text-[var(--error)]">*</span>
                                 </label>
-                                <p className="text-sm text-[var(--ink-muted)]">
-                                    {customForm.models.length > 0
-                                        ? customForm.models.join(', ')
-                                        : '暂无模型'}
-                                </p>
-                                <button
-                                    type="button"
-                                    onClick={async () => {
-                                        if (!customForm.name?.trim() || !customForm.baseUrl?.trim()) {
-                                            toast.error('请先填写供应商名称和 Base URL');
-                                            return;
-                                        }
-                                        const created = await handleAddCustomProvider();
-                                        if (created) setManagingProviderId(created.id);
-                                    }}
-                                    className="mt-2 flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
-                                >
-                                    <Plus className="h-3.5 w-3.5" />
-                                    添加模型
-                                </button>
+                                {customForm.models.length > 0 && (
+                                    <div className="mb-2 flex flex-wrap gap-1.5">
+                                        {customForm.models.map((m) => (
+                                            <span
+                                                key={m}
+                                                className="inline-flex items-center gap-1 rounded-md bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]"
+                                            >
+                                                {m}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setCustomForm((p) => ({ ...p, models: p.models.filter((id) => id !== m) }))}
+                                                    className="rounded-sm p-0.5 text-[var(--ink-subtle)] transition-colors hover:text-[var(--ink)]"
+                                                >
+                                                    <X className="h-3 w-3" />
+                                                </button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+                                <div className="flex gap-2">
+                                    <input
+                                        type="text"
+                                        placeholder="输入模型 ID，回车添加"
+                                        className="flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--ink)] focus:outline-none"
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                                e.preventDefault();
+                                                const val = (e.target as HTMLInputElement).value.trim();
+                                                if (val && !customForm.models.includes(val)) {
+                                                    setCustomForm((p) => ({ ...p, models: [...p.models, val] }));
+                                                    (e.target as HTMLInputElement).value = '';
+                                                }
+                                            }
+                                        }}
+                                    />
+                                </div>
                             </div>
 
                             {/* API Key moved to provider list page for consistency with edit flow */}
@@ -5027,7 +5047,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 </button>
                                 <button
                                     onClick={handleAddCustomProvider}
-                                    disabled={!customForm.name || !customForm.baseUrl}
+                                    disabled={!customForm.name || !customForm.baseUrl || customForm.models.length === 0}
                                     className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                                 >
                                     添加
@@ -5236,22 +5256,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                             {/* Models — preview + manage button */}
                             <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    模型
-                                </label>
-                                <p className="truncate pl-1 text-sm text-[var(--ink-muted)]">
+                                <div className="mb-1.5 flex items-center justify-between">
+                                    <label className="text-sm font-medium text-[var(--ink)]">
+                                        模型
+                                    </label>
+                                    <button
+                                        type="button"
+                                        onClick={() => setManagingProviderId(editingProvider.provider.id)}
+                                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                                    >
+                                        <Settings2 className="h-3.5 w-3.5" />
+                                        管理可用模型
+                                    </button>
+                                </div>
+                                <p className="truncate text-sm text-[var(--ink-muted)]">
                                     {editingProvider.provider.models.length > 0
                                         ? editingProvider.provider.models.map(m => m.modelName || m.model).join(', ')
                                         : '暂无模型'}
                                 </p>
-                                <button
-                                    type="button"
-                                    onClick={() => setManagingProviderId(editingProvider.provider.id)}
-                                    className="mt-2 flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
-                                >
-                                    <Settings2 className="h-3.5 w-3.5" />
-                                    管理可用模型
-                                </button>
                             </div>
 
                             {/* Advanced Options - Model Alias Mapping (not shown for Anthropic providers) */}
