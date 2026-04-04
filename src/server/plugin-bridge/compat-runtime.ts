@@ -325,7 +325,13 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           // --- Protocol-standard path ---
 
           // Extract chatId (same logic as dispatchReplyWithBufferedBlockDispatcher)
-          let chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
+          const cfgChatType = String(ctx.ChatType || ctx.chatType || 'direct');
+          let chatId: string;
+          if (cfgChatType === 'group') {
+            chatId = String(ctx.ChatId || ctx.chatId || ctx.From || ctx.from || '');
+          } else {
+            chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
+          }
           if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
 
           if (!chatId) {
@@ -464,11 +470,20 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const text = String(ctx.BodyForAgent || ctx.Body || ctx.body || ctx.RawBody || '');
           const senderId = String(ctx.SenderId || ctx.senderId || '');
           const senderName = String(ctx.SenderName || ctx.senderName || '');
-          // Feishu plugin sets From = "feishu:ou_xxx" (prefixed); strip the channel prefix
-          // to get the raw chat/user ID that Rust expects
-          let chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
-          if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
+          // Chat ID extraction: For group messages, ctx.From is the SENDER's ID
+          // (e.g., "feishu:ou_xxx"), not the group chat ID. The correct group chat ID
+          // is in ctx.ChatId/ctx.chatId (e.g., "oc_xxx" from Feishu API).
+          // For private messages, ctx.From IS the correct chat ID.
+          let chatId: string;
+          if (chatType === 'group') {
+            // Group: prefer ChatId (actual group chat ID) over From (sender ID)
+            chatId = String(ctx.ChatId || ctx.chatId || ctx.From || ctx.from || '');
+          } else {
+            // Private: From is the correct chat/user ID
+            chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
+          }
+          if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
           // Default isMention by chatType: private=true (always directed at bot),
