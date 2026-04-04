@@ -1594,11 +1594,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                               {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
                               {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
-                                <span className="group/warn relative">
+                                <span title="验证未通过，部分模型可能不可用">
                                   <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
-                                  <div className="pointer-events-none absolute bottom-full left-0 z-50 mb-1 w-44 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-2.5 py-1.5 text-[11px] font-normal normal-case tracking-normal text-[var(--ink-muted)] opacity-0 shadow-lg transition-opacity group-hover/warn:opacity-100">
-                                    验证未通过，部分模型可能不可用
-                                  </div>
                                 </span>
                               )}
                             </div>

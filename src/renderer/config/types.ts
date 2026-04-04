@@ -501,8 +501,10 @@ export const PRESET_PROVIDERS: Provider[] = [
       timeout: 600000,
       disableNonessential: true,
     },
-    modelAliases: { sonnet: 'glm-4.7', opus: 'glm-5', haiku: 'glm-4.5-air' },
+    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.1', haiku: 'glm-5.1' },
     models: [
+      { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu' },
+      { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu' },
       { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu' },
       { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'zhipu' },
       { model: 'glm-4.5-air', modelName: 'GLM 4.5 Air', modelSeries: 'zhipu' },
