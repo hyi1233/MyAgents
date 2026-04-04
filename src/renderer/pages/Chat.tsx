@@ -262,6 +262,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // ── Embedded browser state ──
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   const [browserAlive, setBrowserAlive] = useState(false);
+  // When browser is previewing a local file, store its metadata for editor toggle
+  const [browserSourceFile, setBrowserSourceFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
 
   // ── Introduction overlay: read INTRODUCTION.md per agentDir/sessionId ──
   // sessionId in deps → re-reads when user creates a new session (so edits via settings are reflected)
@@ -313,6 +315,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (splitActiveView === 'browser' && browserUrl) {
       setBrowserUrl(null);
       setBrowserAlive(false);
+      setBrowserSourceFile(null);
       if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
       else if (splitFile) setSplitActiveView('file');
       return true;
@@ -324,10 +327,22 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
 
   const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }) => {
-    setSplitFile(file);
-    setSplitActiveView('file');
+    const ext = file.name.toLowerCase().split('.').pop();
+    if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled) {
+      // HTML files → open in embedded browser for live preview
+      // Store file metadata so browser toolbar can offer "Edit Source" toggle
+      setBrowserSourceFile(file);
+      // file.path is relative to agentDir — construct absolute path for Rust
+      const sep = agentDir?.includes('\\') ? '\\' : '/';
+      const absPath = agentDir ? `${agentDir}${sep}${file.path}` : file.path;
+      setBrowserUrl(absPath);
+      setSplitActiveView('browser');
+    } else {
+      setSplitFile(file);
+      setSplitActiveView('file');
+    }
     // Keep workspace open — user can dismiss it manually
-  }, []);
+  }, [isSplitViewEnabled, agentDir]);
 
   // Open terminal in split panel (called from DirectoryPanel header button)
   const handleOpenTerminal = useCallback(() => {
@@ -346,13 +361,29 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const handleBrowserCreateFailed = useCallback(() => {
     setBrowserAlive(false);
     setBrowserUrl(null);
+    setBrowserSourceFile(null);
   }, []);
   const handleBrowserClose = useCallback(() => {
     setBrowserUrl(null);
     setBrowserAlive(false);
+    setBrowserSourceFile(null);
     if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
     else if (splitFile) setSplitActiveView('file');
   }, [terminalPinned, terminalAlive, splitFile]);
+
+  // Switch from browser preview to editor for a local HTML file
+  const handleBrowserSwitchToEditor = useCallback(() => {
+    if (!browserSourceFile) return;
+    setSplitFile(browserSourceFile);
+    setSplitActiveView('file');
+    // Keep browser alive in background (hidden) so user can switch back
+  }, [browserSourceFile]);
+
+  // Switch from editor back to browser preview for an HTML file
+  const handleEditorSwitchToBrowser = useCallback(() => {
+    if (!browserUrl) return;
+    setSplitActiveView('browser');
+  }, [browserUrl]);
 
   // Stable context value for BrowserPanelContext (only provided when split view is available)
   const browserPanelCtx = useMemo(
@@ -2162,7 +2193,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                   >
                     <Globe className="h-3 w-3" />
                     <span className="max-w-[120px] truncate">
-                      {(() => { try { return new URL(browserUrl).hostname; } catch { return '浏览器'; } })()}
+                      {browserSourceFile ? browserSourceFile.name : (() => { try { return new URL(browserUrl).hostname; } catch { return '浏览器'; } })()}
                     </span>
                     <span
                       role="button"
@@ -2170,6 +2201,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                         e.stopPropagation();
                         setBrowserUrl(null);
                         setBrowserAlive(false);
+                        setBrowserSourceFile(null);
                         if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
                         else if (splitFile) setSplitActiveView('file');
                       }}
@@ -2207,6 +2239,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                       setSplitFile(null);
                       setFullscreenPreviewFile(file);
                     }}
+                    onSwitchToBrowser={browserUrl ? handleEditorSwitchToBrowser : undefined}
                   />
                 </Suspense>
               </div>
@@ -2277,9 +2310,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     isVisible={isActive && splitPanelVisible && splitActiveView === 'browser'}
                     isDraggingSplit={isDraggingSplit}
                     browserAlive={browserAlive}
+                    sourceFile={browserSourceFile}
                     onBrowserCreated={handleBrowserCreated}
                     onCreateFailed={handleBrowserCreateFailed}
                     onClose={handleBrowserClose}
+                    onSwitchToEditor={handleBrowserSwitchToEditor}
                   />
                 </Suspense>
               </div>

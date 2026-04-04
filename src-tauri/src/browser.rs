@@ -13,7 +13,19 @@ use tauri::{
     LogicalPosition, LogicalSize, Url,
 };
 
+use std::path::Path;
 use crate::ulog_info;
+
+/// Parse a URL string that may be an absolute file path or an http(s) URL.
+/// Handles both Unix (`/Users/...`) and Windows (`C:\Users\...`) paths.
+fn parse_url_or_path(url: &str) -> Result<Url, String> {
+    let path = Path::new(url);
+    if path.is_absolute() {
+        Url::from_file_path(path).map_err(|_| format!("Invalid file path: {}", url))
+    } else {
+        url.parse().map_err(|e| format!("Invalid URL: {e}"))
+    }
+}
 
 /// Per-tab browser session.
 struct BrowserSession {
@@ -72,7 +84,7 @@ pub async fn cmd_browser_create(
         }
     }
 
-    let parsed_url: Url = url.parse().map_err(|e| format!("Invalid URL: {e}"))?;
+    let parsed_url = parse_url_or_path(&url)?;
 
     // Clone values for closures
     let app_nav = app.clone();
@@ -85,13 +97,15 @@ pub async fn cmd_browser_create(
     let builder = WebviewBuilder::new(&label, tauri::WebviewUrl::External(parsed_url.clone()))
         .on_navigation(move |nav_url| {
             let scheme = nav_url.scheme();
-            // Security: block dangerous schemes; allow everything else
-            if scheme == "javascript" || scheme == "file" {
+            // Security: block dangerous schemes; allow everything else.
+            // file: is allowed — used for local HTML preview; the webview is
+            // already sandboxed (browser.json zero Tauri permissions).
+            if scheme == "javascript" {
                 ulog_info!("[browser] on_navigation BLOCKED: {} (scheme: {})", nav_url, scheme);
                 return false;
             }
-            // Only emit URL changes for http/https (skip about:, data:, blob: noise)
-            if scheme == "http" || scheme == "https" {
+            // Emit URL changes for http/https/file (skip about:, data:, blob: noise)
+            if scheme == "http" || scheme == "https" || scheme == "file" {
                 ulog_info!("[browser] on_navigation ALLOW: {}", nav_url);
                 let _ = app_nav.emit(
                     &format!("browser:url-changed:{}", tab_id_nav),
@@ -199,7 +213,7 @@ pub async fn cmd_browser_navigate(
         .get(&tab_id)
         .ok_or_else(|| format!("No browser for tab {}", tab_id))?;
 
-    let parsed_url: Url = url.parse().map_err(|e| format!("Invalid URL: {e}"))?;
+    let parsed_url = parse_url_or_path(&url)?;
     let webview = app
         .get_webview(&session.webview_label)
         .ok_or_else(|| "Webview not found".to_string())?;

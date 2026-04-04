@@ -13,7 +13,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { ChevronLeft, ChevronRight, RotateCw, ExternalLink, Loader2, Globe, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Code2, RotateCw, ExternalLink, Loader2, Globe, X } from 'lucide-react';
 import { openExternal } from '@/utils/openExternal';
 import { useBrowserOverlayGuard } from '@/hooks/useBrowserOverlayGuard';
 import Tip from '@/components/Tip';
@@ -25,9 +25,13 @@ interface BrowserPanelProps {
   isVisible: boolean;
   isDraggingSplit: boolean;
   browserAlive: boolean;
+  /** When previewing a local file, stores its metadata for editor toggle */
+  sourceFile?: { name: string; content: string; size: number; path: string } | null;
   onBrowserCreated: () => void;
   onCreateFailed: () => void;
   onClose: () => void;
+  /** Switch to code editor view (only available when sourceFile is set) */
+  onSwitchToEditor?: () => void;
 }
 
 export default function BrowserPanel({
@@ -36,9 +40,11 @@ export default function BrowserPanel({
   isVisible,
   isDraggingSplit,
   browserAlive,
+  sourceFile,
   onBrowserCreated,
   onCreateFailed,
   onClose,
+  onSwitchToEditor,
 }: BrowserPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [currentUrl, setCurrentUrl] = useState(url ?? '');
@@ -272,6 +278,15 @@ export default function BrowserPanel({
           >
             {currentUrl}
           </button>
+        )}
+
+        {/* Edit Source — only for local file previews */}
+        {sourceFile && onSwitchToEditor && (
+          <Tip label="编辑源码" position="bottom" align="end">
+            <button type="button" className={navBtn} onClick={onSwitchToEditor}>
+              <Code2 className="h-3.5 w-3.5" />
+            </button>
+          </Tip>
         )}
 
         <Tip label="在浏览器中打开" position="bottom" align="end">

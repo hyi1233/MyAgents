@@ -10,7 +10,7 @@
  * 1. Tab API (useTabApiOptional) — when rendered inside a Tab context
  * 2. Explicit onSave/onRevealFile props — when caller provides save logic directly
  */
-import { Check, Edit2, Expand, FileText, FolderOpen, Loader2, Save, X } from 'lucide-react';
+import { Check, Edit2, Expand, Eye, FileText, FolderOpen, Loader2, Save, X } from 'lucide-react';
 import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
@@ -68,6 +68,8 @@ interface FilePreviewModalProps {
     /** Callback to open the fullscreen modal from embedded mode.
      *  Receives the current editor content so fullscreen opens with up-to-date text. */
     onFullscreen?: (currentContent?: string) => void;
+    /** Switch to browser preview (only for HTML files with an active browser panel) */
+    onSwitchToBrowser?: () => void;
 }
 
 // Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
@@ -122,6 +124,7 @@ export default function FilePreviewModal({
     onRevealFile,
     embedded = false,
     onFullscreen,
+    onSwitchToBrowser,
 }: FilePreviewModalProps) {
     // Cmd+W dismissal: only register for fullscreen mode (z-[210]).
     // Embedded mode (split-panel) has no z-index overlay and is handled separately.
@@ -467,6 +470,19 @@ export default function FilePreviewModal({
                     <div className="flex flex-shrink-0 items-center gap-2">
                         {/* Auto-save indicator for code files */}
                         {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
+
+                        {/* Switch to browser preview — only for HTML files with an active browser */}
+                        {onSwitchToBrowser && (
+                            <Tip label="网页预览" position="bottom">
+                                <button type="button" onClick={() => {
+                                    if (isDirectEdit) handleManualFlush();
+                                    onSwitchToBrowser();
+                                }}
+                                    className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                                    <Eye className="h-3.5 w-3.5" />
+                                </button>
+                            </Tip>
+                        )}
 
                         {/* Fullscreen button — always available (not gated by editing state for code files) */}
                         {onFullscreen && !(isMarkdown && isMdEditing) && (
