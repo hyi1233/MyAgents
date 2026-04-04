@@ -180,12 +180,11 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
     return createPortal(
         <div
             className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-            onClick={handleClose}
+            onMouseDown={(e) => { if (e.target === e.currentTarget) handleClose(); }}
         >
             {/* Main Panel */}
             <div
                 className="relative flex h-[90vh] w-[90vw] max-w-5xl flex-col overflow-hidden rounded-2xl bg-[var(--paper-elevated)] shadow-2xl"
-                onClick={(e) => e.stopPropagation()}
             >
                 {/* Header — three zones: left (icon+title), center (tabs), right (close) */}
                 <div className="flex flex-shrink-0 items-center border-b border-[var(--line)] bg-gradient-to-r from-[var(--paper-inset)] to-[var(--paper)] px-6 py-3">
