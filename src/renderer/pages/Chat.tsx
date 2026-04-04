@@ -551,6 +551,25 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Initial tab for workspace config panel (set when opening from capabilities panel)
   const [workspaceConfigInitialTab, setWorkspaceConfigInitialTab] = useState<WorkspaceTab | undefined>();
 
+  // Agent Runtime detection (v0.1.59)
+  const [runtimeDetections, setRuntimeDetections] = useState<import('../../shared/types/runtime').RuntimeDetections>({
+    'builtin': { installed: true },
+    'claude-code': { installed: false },
+    'codex': { installed: false },
+  });
+  const currentRuntime = (currentAgent?.runtime as import('../../shared/types/runtime').RuntimeType) || 'builtin';
+
+  // Detect installed runtimes once on mount
+  useEffect(() => {
+    let cancelled = false;
+    import('@tauri-apps/api/core').then(({ invoke }) => {
+      invoke<Record<string, { installed: boolean; version?: string; path?: string }>>('cmd_detect_runtimes')
+        .then(detections => { if (!cancelled) setRuntimeDetections(detections as import('../../shared/types/runtime').RuntimeDetections); })
+        .catch(() => { /* detection failure is non-fatal */ });
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   // Callback to refresh workspace (exposed to SimpleChatInput)
   const triggerWorkspaceRefresh = useCallback(() => {
     setWorkspaceRefreshTrigger(prev => prev + 1);
@@ -1445,6 +1464,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [stopResponse]);
 
   const handleOpenAgentSettings = useCallback(() => setShowWorkspaceConfig(true), []);
+
+  // Runtime change handler (v0.1.59) — save to config, inform user
+  const handleRuntimeChange = useCallback(async (runtime: import('../../shared/types/runtime').RuntimeType) => {
+    if (!currentAgent) return;
+    try {
+      await patchAgentConfig(currentAgent.id, { runtime });
+      await refreshProviderData(); // refresh config state
+      toast.info('Runtime 变更将在新建会话时生效');
+    } catch (err) {
+      console.error('[chat] Failed to change runtime:', err);
+    }
+  }, [currentAgent, refreshProviderData, toast]);
   const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
   const handleOpenCronSettings = useCallback(() => setShowCronSettings(true), []);
 
@@ -2065,6 +2096,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onCronCancel={disableCronMode}
             onCronStop={handleCronStop}
             onInputChange={setCronPrompt}
+            runtime={currentRuntime}
+            runtimeDetections={runtimeDetections}
+            onRuntimeChange={handleRuntimeChange}
             queuedMessages={queuedMessages}
             onCancelQueued={handleCancelQueuedVoid}
             onForceExecuteQueued={handleForceExecuteQueuedVoid}

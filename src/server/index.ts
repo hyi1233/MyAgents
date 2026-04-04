@@ -157,6 +157,17 @@ import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifyS
 import { createBridgeHandler } from './openai-bridge';
 import { registerBridgeSeedFn } from './bridge-cache';
 import { generateTitle } from './title-generator';
+import {
+  shouldUseExternalRuntime,
+  startExternalSession,
+  sendExternalMessage,
+  respondExternalPermission,
+  stopExternalSession,
+  isExternalSessionActive,
+  queryRuntimeModels,
+  getRuntimePermissionModes,
+  getActiveRuntimeType,
+} from './runtimes/external-session';
 
 type ImagePayload = {
   name: string;
@@ -1507,6 +1518,37 @@ async function main() {
           return jsonResponse({ success: false, error: 'Message must have text or images.' }, 400);
         }
 
+        // ─── External Runtime branch (v0.1.59) ───
+        if (shouldUseExternalRuntime()) {
+          try {
+            const runtimeType = getActiveRuntimeType();
+            console.log(`[chat] send via ${runtimeType}: text="${text.slice(0, 200)}"`);
+
+            if (!isExternalSessionActive()) {
+              // First message — start the external session
+              await startExternalSession({
+                sessionId: getSessionId(),
+                workspacePath: agentDir,
+                initialMessage: text,
+                model: model ?? undefined,
+                permissionMode: permissionMode,
+                scenario: { type: 'desktop' },
+              });
+              return jsonResponse({ success: true, queued: true });
+            } else {
+              // Follow-up message — send to active session
+              const result = await sendExternalMessage(text, images, permissionMode, model ?? undefined);
+              return jsonResponse({ success: result.queued, error: result.error });
+            }
+          } catch (error) {
+            return jsonResponse(
+              { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+              500
+            );
+          }
+        }
+
+        // ─── Builtin Runtime (existing path) ───
         try {
           const providerLabel = typeof providerEnv === 'object' ? providerEnv?.baseUrl ?? 'anthropic' : (providerEnv ?? 'anthropic');
           console.log(`[chat] send text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerLabel}`);
@@ -1526,10 +1568,16 @@ async function main() {
       if (pathname === '/chat/stop' && request.method === 'POST') {
         try {
           console.log('[chat] stop');
+
+          // External Runtime: stop the subprocess
+          if (shouldUseExternalRuntime() && isExternalSessionActive()) {
+            const stopped = await stopExternalSession();
+            return jsonResponse({ success: true, alreadyStopped: !stopped });
+          }
+
+          // Builtin Runtime: existing path
           const stopped = await interruptCurrentResponse();
           if (!stopped) {
-            // Not an error — common when user double-clicks stop or response finishes
-            // between button click and request arrival. Return 200 to avoid frontend error toast.
             return jsonResponse({ success: true, alreadyStopped: true });
           }
           return jsonResponse({ success: true });
@@ -1538,6 +1586,44 @@ async function main() {
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
             500
           );
+        }
+      }
+
+      // ─── Runtime API endpoints (v0.1.59) ───
+
+      if (pathname === '/api/runtime/type' && request.method === 'GET') {
+        return jsonResponse({ runtime: getActiveRuntimeType() });
+      }
+
+      if (pathname === '/api/runtime/models' && request.method === 'GET') {
+        const type = url.searchParams.get('type');
+        if (!type) return jsonResponse({ error: 'Missing type parameter' }, 400);
+        try {
+          const models = await queryRuntimeModels(type as import('../shared/types/runtime').RuntimeType);
+          return jsonResponse({ models });
+        } catch (error) {
+          return jsonResponse({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+        }
+      }
+
+      if (pathname === '/api/runtime/permission-modes' && request.method === 'GET') {
+        const type = url.searchParams.get('type');
+        if (!type) return jsonResponse({ error: 'Missing type parameter' }, 400);
+        const modes = getRuntimePermissionModes(type as import('../shared/types/runtime').RuntimeType);
+        return jsonResponse({ modes });
+      }
+
+      if (pathname === '/api/runtime/permission-response' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const requestId = body.requestId as string;
+        const approved = body.approved as boolean;
+        const reason = body.reason as string | undefined;
+        if (!requestId) return jsonResponse({ error: 'Missing requestId' }, 400);
+        try {
+          await respondExternalPermission(requestId, approved, reason);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          return jsonResponse({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
         }
       }
 

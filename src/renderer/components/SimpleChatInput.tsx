@@ -16,6 +16,8 @@ import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 import { isProviderAvailable } from '@/config/configService';
+import RuntimeSelector from '@/components/RuntimeSelector';
+import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 
 // ===== Module-level pure helpers (extracted from render body) =====
 
@@ -108,6 +110,10 @@ interface SimpleChatInputProps {
   mode?: 'chat' | 'launcher';
   /** Optional ReactNode rendered at the start of the toolbar (e.g., workspace selector in launcher) */
   toolbarPrefix?: React.ReactNode;
+  // Agent Runtime (v0.1.59)
+  runtime?: RuntimeType;
+  runtimeDetections?: RuntimeDetections;
+  onRuntimeChange?: (runtime: RuntimeType) => void;
   // Queued messages props
   queuedMessages?: QueuedMessageInfo[];
   onCancelQueued?: (queueId: string) => void;
@@ -179,11 +185,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onInputChange,
   mode = 'chat',
   toolbarPrefix,
+  runtime = 'builtin',
+  runtimeDetections,
+  onRuntimeChange,
   queuedMessages = [],
   onCancelQueued,
   onForceExecuteQueued,
 }, ref) {
   const isLauncherMode = mode === 'launcher';
+  const isExternalRuntime = runtime !== 'builtin';
 
   // PERFORMANCE FIX: Use internal state to avoid parent re-renders on every keystroke
   // This prevents MessageList from re-rendering when typing in long conversations
@@ -1362,6 +1372,16 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 onChange={handleFileChange}
               />
 
+              {/* Runtime Selector (v0.1.59) */}
+              {runtimeDetections && onRuntimeChange && !isLauncherMode && (
+                <RuntimeSelector
+                  value={runtime}
+                  detections={runtimeDetections}
+                  onChange={onRuntimeChange}
+                  variant="toolbar"
+                />
+              )}
+
               {/* Mode Dropdown */}
               <div className="relative">
                 <button
@@ -1427,7 +1447,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 )}
               </div>
 
-              {/* Tool/MCP Dropdown - always visible */}
+              {/* Tool/MCP Dropdown - hidden for external runtimes (they use their own tools) */}
+              {!isExternalRuntime && (
               <div className="relative">
                 <button
                   type="button"
@@ -1524,6 +1545,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   </div>
                 )}
               </div>
+              )}
 
               {/* Heartbeat Loop Button */}
               {!isLauncherMode && onCronButtonClick && (

@@ -1,0 +1,501 @@
+// ClaudeCodeRuntime — drives the Claude Code CLI as a subprocess (v0.1.59)
+//
+// Communication: NDJSON bidirectional via stdin/stdout
+// Flags: --output-format stream-json --input-format stream-json --verbose
+// Permission: --permission-prompt-tool stdio (delegates to MyAgents UI)
+// System prompt: --append-system-prompt (or --bare + --append-system-prompt for IM)
+// Session: --session-id / --resume
+
+import { spawn, type Subprocess } from 'bun';
+import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
+import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
+import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback } from './types';
+
+// ─── RuntimeProcess wrapper ───
+
+class ClaudeCodeProcess implements RuntimeProcess {
+  readonly pid: number;
+  exited = false;
+  private proc: Subprocess;
+  private encoder = new TextEncoder();
+
+  constructor(proc: Subprocess) {
+    this.proc = proc;
+    this.pid = proc.pid;
+  }
+
+  async writeLine(line: string): Promise<void> {
+    if (this.exited) throw new Error('Process has exited');
+    const stdin = this.proc.stdin;
+    if (!stdin || typeof stdin === 'number') throw new Error('stdin not available');
+    // Bun's FileSink has .write() and .flush()
+    const sink = stdin as { write(data: Uint8Array): number; flush(): void };
+    sink.write(this.encoder.encode(line + '\n'));
+    sink.flush();
+  }
+
+  kill(signal?: number): void {
+    if (this.exited) return;
+    try {
+      this.proc.kill(signal ?? 15); // SIGTERM
+    } catch { /* already dead */ }
+  }
+
+  async waitForExit(): Promise<number> {
+    const code = await this.proc.exited;
+    this.exited = true;
+    return code;
+  }
+
+  /** Close stdin to signal the process to finish */
+  closeStdin(): void {
+    const stdin = this.proc.stdin;
+    if (!stdin || typeof stdin === 'number') return;
+    try {
+      const sink = stdin as { end(): void };
+      sink.end();
+    } catch { /* ignore */ }
+  }
+}
+
+// ─── Model cache ───
+
+let modelCache: { models: RuntimeModelInfo[]; timestamp: number } | null = null;
+const MODEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// ─── ClaudeCodeRuntime ───
+
+export class ClaudeCodeRuntime implements AgentRuntime {
+  readonly type: RuntimeType = 'claude-code';
+
+  // Track content_block_index → toolUseId for associating input_json_delta with tool blocks
+  private blockIndexToToolUseId = new Map<number, string>();
+  // Track content_block_index → block type for correct stop events
+  private blockIndexToType = new Map<number, 'text' | 'thinking' | 'tool_use'>();
+
+  async detect(): Promise<RuntimeDetection> {
+    try {
+      const proc = spawn(['claude', '--version'], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+        stdin: 'ignore',
+      });
+      const text = await new Response(proc.stdout).text();
+      const code = await proc.exited;
+      if (code === 0) {
+        return {
+          installed: true,
+          version: text.trim(),
+          path: 'claude', // system_binary finds full path on Rust side
+        };
+      }
+    } catch { /* not installed */ }
+    return { installed: false };
+  }
+
+  async queryModels(): Promise<RuntimeModelInfo[]> {
+    // Return cached if fresh
+    if (modelCache && Date.now() - modelCache.timestamp < MODEL_CACHE_TTL_MS) {
+      return modelCache.models;
+    }
+
+    // Claude Code models are well-known aliases.
+    // Spawning a CC session just to query models is wasteful (consumes API tokens).
+    // Use static list matching CC's /model picker options.
+    const models: RuntimeModelInfo[] = [
+      { value: 'sonnet', displayName: 'Sonnet', isDefault: true },
+      { value: 'opus', displayName: 'Opus' },
+      { value: 'haiku', displayName: 'Haiku' },
+      { value: 'sonnet[1m]', displayName: 'Sonnet (1M context)' },
+      { value: 'opus[1m]', displayName: 'Opus (1M context)' },
+    ];
+
+    modelCache = { models, timestamp: Date.now() };
+    return models;
+  }
+
+  getPermissionModes(): RuntimePermissionMode[] {
+    return CC_PERMISSION_MODES;
+  }
+
+  async startSession(
+    options: SessionStartOptions,
+    onEvent: UnifiedEventCallback,
+  ): Promise<RuntimeProcess> {
+    const args: string[] = [
+      '-p',
+      '--output-format', 'stream-json',
+      '--input-format', 'stream-json',
+      '--verbose',
+    ];
+
+    // System Prompt injection
+    const isImOrChannel = options.scenario.type === 'im' || options.scenario.type === 'agent-channel';
+    if (isImOrChannel) {
+      // IM/Channel: bare mode + full system prompt
+      args.push('--bare');
+    }
+    if (options.systemPromptAppend) {
+      args.push('--append-system-prompt', options.systemPromptAppend);
+    }
+
+    // Permission mode
+    if (isImOrChannel || options.scenario.type === 'cron') {
+      // IM/Cron: no human to approve → bypass
+      args.push('--permission-mode', 'bypassPermissions');
+      args.push('--dangerously-skip-permissions');
+    } else {
+      // Desktop: delegate permission prompts to MyAgents UI
+      args.push('--permission-prompt-tool', 'stdio');
+      if (options.permissionMode) {
+        args.push('--permission-mode', options.permissionMode);
+      }
+    }
+
+    // Model
+    if (options.model) {
+      args.push('--model', options.model);
+    }
+
+    // Session management
+    if (options.resumeSessionId) {
+      args.push('--resume', options.resumeSessionId);
+    } else {
+      args.push('--session-id', options.sessionId);
+    }
+
+    // Safety limits
+    if (options.maxTurns) {
+      args.push('--max-turns', String(options.maxTurns));
+    }
+
+    // Tool control
+    if (options.disallowedTools?.length) {
+      args.push('--disallowed-tools', ...options.disallowedTools);
+    }
+
+    // IM: disable interactive-only tools
+    if (isImOrChannel) {
+      args.push('--disallowed-tools', 'AskUserQuestion');
+    }
+
+    // Additional args from config
+    if (options.additionalArgs?.length) {
+      args.push(...options.additionalArgs);
+    }
+
+    // Initial message as positional argument
+    if (options.initialMessage) {
+      args.push(options.initialMessage);
+    }
+
+    console.log(`[claude-code] Starting session: claude ${args.slice(0, 6).join(' ')} ... (${args.length} args)`);
+
+    // NOTE: Inherits process.env from the Bun Sidecar, which has NO_PROXY injected
+    // by proxy_config::apply_to_subprocess() in Rust. CC's internal localhost
+    // MCP traffic is protected by this inherited NO_PROXY.
+    const proc = spawn(['claude', ...args], {
+      cwd: options.workspacePath,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      stdin: 'pipe',
+    });
+
+    const handle = new ClaudeCodeProcess(proc);
+
+    // Read stderr for logging
+    this.readStderr(proc.stderr);
+
+    // Track process exit — only emit session_complete if NDJSON parser didn't already
+    let sessionCompleteEmitted = false;
+    const wrappedOnEvent: UnifiedEventCallback = (event) => {
+      if (event.kind === 'session_complete') sessionCompleteEmitted = true;
+      onEvent(event);
+    };
+
+    // Start reading stdout NDJSON in background (uses wrappedOnEvent)
+    this.readEvents(proc.stdout, wrappedOnEvent, handle);
+
+    proc.exited.then((code) => {
+      handle.exited = true;
+      console.log(`[claude-code] Process exited with code ${code}`);
+      if (!sessionCompleteEmitted) {
+        onEvent({
+          kind: 'session_complete',
+          result: '',
+          subtype: code === 0 ? 'success' : 'error',
+        });
+      }
+    });
+
+    return handle;
+  }
+
+  async sendMessage(process: RuntimeProcess, message: string): Promise<void> {
+    const userMsg = {
+      type: 'user',
+      message: { role: 'user', content: message },
+      parent_tool_use_id: null,
+    };
+    await process.writeLine(JSON.stringify(userMsg));
+  }
+
+  async respondPermission(
+    process: RuntimeProcess,
+    requestId: string,
+    approved: boolean,
+    reason?: string,
+  ): Promise<void> {
+    const response = {
+      type: 'control_response',
+      response: {
+        request_id: requestId,
+        subtype: 'success',
+        response: { approved, reason },
+      },
+    };
+    await process.writeLine(JSON.stringify(response));
+  }
+
+  async stopSession(process: RuntimeProcess): Promise<void> {
+    if (process.exited) return;
+
+    // Close stdin to let CC finish naturally
+    (process as ClaudeCodeProcess).closeStdin();
+
+    // Wait briefly then force kill
+    const timeout = setTimeout(() => {
+      if (!process.exited) {
+        process.kill(15); // SIGTERM
+      }
+    }, 5000);
+
+    await process.waitForExit().catch(() => { });
+    clearTimeout(timeout);
+  }
+
+  // ─── Private: NDJSON event stream reader ───
+
+  private async readEvents(
+    stdout: ReadableStream<Uint8Array>,
+    onEvent: UnifiedEventCallback,
+    handle: ClaudeCodeProcess,
+  ): Promise<void> {
+    const reader = stdout.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete lines
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = this.parseLine(line);
+          if (event) {
+            onEvent(event);
+          }
+        }
+      }
+    } catch (err) {
+      if (!handle.exited) {
+        console.error('[claude-code] stdout read error:', err);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  private async readStderr(stderr: ReadableStream<Uint8Array>): Promise<void> {
+    const reader = stderr.getReader();
+    const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        if (text.trim()) {
+          console.log(`[claude-code:stderr] ${text.trim()}`);
+        }
+      }
+    } catch { /* ignore */ } finally {
+      reader.releaseLock();
+    }
+  }
+
+  // ─── Private: NDJSON line parser ───
+
+  private parseLine(line: string): UnifiedEvent | null {
+    let msg: Record<string, unknown>;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return null;
+    }
+
+    switch (msg.type) {
+      case 'stream_event':
+        return this.parseStreamEvent(msg.event as Record<string, unknown>);
+
+      case 'assistant':
+        // Complete assistant message (for replay / resume)
+        return {
+          kind: 'message_replay',
+          message: {
+            id: (msg.uuid as string) || '',
+            role: 'assistant',
+            content: (msg.message as Record<string, unknown>)?.content,
+          },
+        };
+
+      case 'user':
+        return {
+          kind: 'message_replay',
+          message: {
+            id: (msg.uuid as string) || '',
+            role: 'user',
+            content: (msg.message as Record<string, unknown>)?.content,
+          },
+        };
+
+      case 'system':
+        return this.parseSystemMessage(msg);
+
+      case 'result':
+        return {
+          kind: 'session_complete',
+          result: (msg.result as string) || '',
+          subtype: this.mapResultSubtype(msg.subtype as string),
+        };
+
+      case 'control_request': {
+        const request = msg.request as Record<string, unknown> | undefined;
+        if (request?.subtype === 'can_use_tool') {
+          return {
+            kind: 'permission_request',
+            requestId: (request.request_id as string) || '',
+            toolName: (request.tool_name as string) || '',
+            toolUseId: (request.tool_use_id as string) || '',
+            input: (request.input as Record<string, unknown>) || {},
+          };
+        }
+        return null;
+      }
+
+      case 'rate_limit_event':
+        return { kind: 'log', level: 'warn', message: 'Rate limited by API' };
+
+      default:
+        return null;
+    }
+  }
+
+  private parseStreamEvent(event: Record<string, unknown> | undefined): UnifiedEvent | null {
+    if (!event) return null;
+
+    switch (event.type) {
+      case 'content_block_start': {
+        const block = event.content_block as Record<string, unknown>;
+        const index = event.index as number | undefined;
+        if (block?.type === 'tool_use') {
+          const toolUseId = (block.id as string) || '';
+          if (index !== undefined) {
+            this.blockIndexToToolUseId.set(index, toolUseId);
+            this.blockIndexToType.set(index, 'tool_use');
+          }
+          return {
+            kind: 'tool_use_start',
+            toolUseId,
+            toolName: (block.name as string) || '',
+          };
+        }
+        if (block?.type === 'thinking') {
+          const idx = index ?? 0;
+          if (index !== undefined) {
+            this.blockIndexToType.set(index, 'thinking');
+          }
+          return { kind: 'thinking_start', index: idx };
+        }
+        // Text block
+        if (index !== undefined) {
+          this.blockIndexToType.set(index, 'text');
+        }
+        return null;
+      }
+
+      case 'content_block_delta': {
+        const delta = event.delta as Record<string, unknown>;
+        const index = event.index as number | undefined;
+        if (delta?.type === 'text_delta') {
+          return { kind: 'text_delta', text: (delta.text as string) || '' };
+        }
+        if (delta?.type === 'thinking_delta') {
+          return { kind: 'thinking_delta', text: (delta.thinking as string) || '', index: index ?? 0 };
+        }
+        if (delta?.type === 'input_json_delta') {
+          const toolUseId = (index !== undefined ? this.blockIndexToToolUseId.get(index) : undefined) || '';
+          return {
+            kind: 'tool_input_delta',
+            toolUseId,
+            delta: (delta.partial_json as string) || '',
+          };
+        }
+        return null;
+      }
+
+      case 'content_block_stop': {
+        const index = event.index as number | undefined;
+        const blockType = index !== undefined ? this.blockIndexToType.get(index) : undefined;
+        if (blockType === 'tool_use') {
+          const toolUseId = (index !== undefined ? this.blockIndexToToolUseId.get(index) : undefined) || '';
+          return { kind: 'tool_use_stop', toolUseId };
+        }
+        if (blockType === 'thinking') {
+          return { kind: 'thinking_stop', index: index ?? 0 };
+        }
+        return { kind: 'text_stop' };
+      }
+
+      case 'message_stop':
+        return { kind: 'turn_complete' };
+
+      case 'message_start':
+        return { kind: 'status_change', state: 'running' };
+
+      default:
+        return null;
+    }
+  }
+
+  private parseSystemMessage(msg: Record<string, unknown>): UnifiedEvent | null {
+    switch (msg.subtype) {
+      case 'init':
+        return {
+          kind: 'session_init',
+          sessionId: (msg.session_id as string) || '',
+          model: (msg.model as string) || '',
+          tools: (msg.tools as string[]) || [],
+        };
+      case 'status':
+      case 'session_state_changed':
+        return { kind: 'status_change', state: 'running' };
+      default:
+        return null;
+    }
+  }
+
+  private mapResultSubtype(subtype: string): 'success' | 'error' | 'error_max_turns' | 'error_max_budget' {
+    switch (subtype) {
+      case 'success': return 'success';
+      case 'error_max_turns': return 'error_max_turns';
+      case 'error_max_budget_usd': return 'error_max_budget';
+      default: return 'error';
+    }
+  }
+}

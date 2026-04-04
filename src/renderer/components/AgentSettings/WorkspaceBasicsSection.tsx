@@ -11,6 +11,9 @@ import { PERMISSION_MODES, type Project, type McpServerDefinition } from '@/conf
 import type { AgentConfig } from '../../../shared/types/agent';
 import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
 import WorkspaceIcon from '../launcher/WorkspaceIcon';
+import RuntimeSelector from '../RuntimeSelector';
+import type { RuntimeType, RuntimeDetections } from '../../../shared/types/runtime';
+import { invoke } from '@tauri-apps/api/core';
 
 interface WorkspaceBasicsSectionProps {
   project: Project | undefined;
@@ -31,6 +34,14 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
   const [globalEnabledMcp, setGlobalEnabledMcp] = useState<string[]>([]);
   const isMountedRef = useRef(true);
 
+  // Runtime detection (v0.1.59)
+  const [runtimeDetections, setRuntimeDetections] = useState<RuntimeDetections>({
+    'builtin': { installed: true },
+    'claude-code': { installed: false },
+    'codex': { installed: false },
+  });
+  const currentRuntime: RuntimeType = (agent?.runtime as RuntimeType) || 'builtin';
+
   // Sync name when canonical name changes externally
   useEffect(() => {
     setName(canonicalName);
@@ -40,6 +51,30 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     isMountedRef.current = true;
     return () => { isMountedRef.current = false; };
   }, []);
+
+  // Detect installed runtimes (v0.1.59)
+  useEffect(() => {
+    void (async () => {
+      try {
+        const detections = await invoke<Record<string, { installed: boolean; version?: string; path?: string }>>('cmd_detect_runtimes');
+        if (isMountedRef.current) {
+          setRuntimeDetections(detections as RuntimeDetections);
+        }
+      } catch (err) {
+        console.warn('[runtime] Failed to detect runtimes:', err);
+      }
+    })();
+  }, []);
+
+  const handleRuntimeChange = useCallback(async (runtime: RuntimeType) => {
+    if (!agent) return;
+    try {
+      await patchAgentConfig(agent.id, { runtime });
+      refreshConfig();
+    } catch (err) {
+      console.error('[runtime] Failed to save runtime:', err);
+    }
+  }, [agent, refreshConfig]);
 
   // Load globally available MCP servers
   useEffect(() => {
@@ -221,7 +256,21 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
         </span>
       </div>
 
-      {/* Model */}
+      {/* Runtime (v0.1.59) */}
+      <div className="flex items-center gap-3">
+        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">运行时</label>
+        <div className="flex-1">
+          <RuntimeSelector
+            value={currentRuntime}
+            detections={runtimeDetections}
+            onChange={handleRuntimeChange}
+            variant="panel"
+          />
+        </div>
+      </div>
+
+      {/* Model — hidden when external runtime (they manage their own models) */}
+      {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
         <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">模型</label>
         <button
@@ -258,8 +307,10 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           </>
         )}
       </div>
+      )}
 
-      {/* Permission */}
+      {/* Permission — hidden when external runtime */}
+      {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
         <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">权限</label>
         <button
@@ -295,8 +346,10 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           </>
         )}
       </div>
+      )}
 
-      {/* MCP Tools */}
+      {/* MCP Tools — hidden when external runtime */}
+      {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
         <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">工具</label>
         <button
@@ -343,6 +396,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           </>
         )}
       </div>
+      )}
     </div>
   );
 }
