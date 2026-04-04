@@ -328,7 +328,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const cfgChatType = String(ctx.ChatType || ctx.chatType || 'direct');
           let chatId: string;
           if (cfgChatType === 'group') {
-            chatId = String(ctx.ChatId || ctx.chatId || ctx.From || ctx.from || '');
+            chatId = String(ctx.GroupSubject || ctx.ChatId || ctx.chatId || ctx.From || ctx.from || '');
           } else {
             chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
           }
@@ -471,16 +471,16 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const senderId = String(ctx.SenderId || ctx.senderId || '');
           const senderName = String(ctx.SenderName || ctx.senderName || '');
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
-          // DEBUG: log ctx fields for group chatId diagnosis
-          console.log(`[compat-debug] chatType=${chatType}, ctx.ChatType=${ctx.ChatType}, ctx.chatType=${ctx.chatType}, ctx.ChatId=${ctx.ChatId}, ctx.chatId=${ctx.chatId}, ctx.From=${ctx.From}, ctx.GroupSubject=${ctx.GroupSubject}`);
           // Chat ID extraction: For group messages, ctx.From is the SENDER's ID
           // (e.g., "feishu:ou_xxx"), not the group chat ID. The correct group chat ID
           // is in ctx.ChatId/ctx.chatId (e.g., "oc_xxx" from Feishu API).
           // For private messages, ctx.From IS the correct chat ID.
           let chatId: string;
           if (chatType === 'group') {
-            // Group: prefer ChatId (actual group chat ID) over From (sender ID)
-            chatId = String(ctx.ChatId || ctx.chatId || ctx.From || ctx.from || '');
+            // Group: prefer GroupSubject/ChatId (actual group chat ID) over From (sender ID).
+            // Feishu plugin: ctx.ChatId is undefined, ctx.GroupSubject = oc_xxx (group chat ID),
+            // ctx.From = feishu:ou_xxx (sender user ID — intentionally per-user for session isolation).
+            chatId = String(ctx.GroupSubject || ctx.ChatId || ctx.chatId || ctx.From || ctx.from || '');
           } else {
             // Private: From is the correct chat/user ID
             chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
