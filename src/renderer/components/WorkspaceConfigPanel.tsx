@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { useToast } from '@/components/Toast';
@@ -178,10 +179,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
     }, [isAnyEditing]);
 
     return createPortal(
-        <div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-            onMouseDown={(e) => { if (e.target === e.currentTarget) handleClose(); }}
-        >
+        <OverlayBackdrop onClose={handleClose} className="z-[200]">
             {/* Main Panel */}
             <div
                 className="relative flex h-[90vh] w-[90vw] max-w-5xl flex-col overflow-hidden rounded-2xl bg-[var(--paper-elevated)] shadow-2xl"
@@ -318,7 +316,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                     </p>
                 </div>
             </div>
-        </div>,
+        </OverlayBackdrop>,
         document.body
     );
 }

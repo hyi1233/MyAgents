@@ -2,6 +2,7 @@ import { useEffect, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface ConfirmDialogProps {
     title: string;
@@ -56,10 +57,7 @@ export default function ConfirmDialog({
     }, [handleKeyDown]);
 
     return (
-        <div
-            className="fixed inset-0 z-[300] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm"
-            onMouseDown={(e) => { if (e.target === e.currentTarget && !loading) onCancel(); }}
-        >
+        <OverlayBackdrop onClose={loading ? undefined : onCancel} className="z-[300] px-4">
             <div className="glass-panel w-full max-w-sm">
                 <div className="border-b border-[var(--line)] px-5 py-4">
                     <div className="text-[14px] font-semibold text-[var(--ink)]">{title}</div>
@@ -90,7 +88,7 @@ export default function ConfirmDialog({
                     </button>
                 </div>
             </div>
-        </div>
+        </OverlayBackdrop>
     );
 }
 

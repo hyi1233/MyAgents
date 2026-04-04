@@ -8,6 +8,7 @@ import { homeDir, join } from '@tauri-apps/api/path';
 
 import { track } from '@/analytics';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { apiFetch, apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
 import CustomSelect from '@/components/CustomSelect';
@@ -5396,10 +5397,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Runtime not found dialog */}
             {runtimeDialog.show && (
-                <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-                    onMouseDown={e => { if (e.target === e.currentTarget) setRuntimeDialog({ show: false }); }}
-                >
+                <OverlayBackdrop onClose={() => setRuntimeDialog({ show: false })} className="z-50">
                     <div
                         className="mx-4 w-full max-w-sm rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl"
                     >
@@ -5439,7 +5437,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             )}
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Bug Report Overlay */}
