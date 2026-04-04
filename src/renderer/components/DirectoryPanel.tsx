@@ -514,6 +514,7 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
     const startY = e.clientY;
     const startRatio = capRatioRef.current;
     const containerHeight = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect().height;
+    if (containerHeight <= 0) return; // Guard against zero-height container (collapsed/hidden)
 
     const onMouseMove = (ev: MouseEvent) => {
       if (!isDraggingCapRef.current) return;
@@ -541,12 +542,14 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
     document.body.style.userSelect = 'none';
   }, []); // stable — uses refs
 
-  // Cleanup cap drag listeners on unmount
+  // Cleanup cap drag listeners on unmount (match Chat.tsx pattern: reset body styles too)
   useEffect(() => {
     return () => {
       if (capDragMoveRef.current) document.removeEventListener('mousemove', capDragMoveRef.current);
       if (capDragUpRef.current) document.removeEventListener('mouseup', capDragUpRef.current);
       isDraggingCapRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
     };
   }, []);
 
