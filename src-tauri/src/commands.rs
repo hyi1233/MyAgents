@@ -874,6 +874,17 @@ pub async fn cmd_write_workspace_file(path: String, content: String) -> Result<(
         .map_err(|e| format!("Failed to write {}: {}", path, e))
 }
 
+/// Delete a workspace file. Returns true if deleted, false if not found.
+/// Bypasses Tauri fs plugin scope (which only covers ~/.myagents).
+#[tauri::command]
+pub async fn cmd_delete_workspace_file(path: String) -> Result<bool, String> {
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("Failed to delete {}: {}", path, e)),
+    }
+}
+
 /// Read a local file and return its contents as base64.
 /// Used by the audio player to create blob URLs without asset protocol scope issues.
 #[tauri::command]

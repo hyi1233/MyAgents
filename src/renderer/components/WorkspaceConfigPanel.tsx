@@ -20,6 +20,8 @@ import type { CommandDetailPanelRef } from './CommandDetailPanel';
 import WorkspaceAgentsList from './WorkspaceAgentsList';
 import AgentDetailPanel from './AgentDetailPanel';
 import type { AgentDetailPanelRef } from './AgentDetailPanel';
+import IntroductionPanel from './IntroductionPanel';
+import type { IntroductionPanelRef } from './IntroductionPanel';
 import { WorkspaceGeneralTab } from './AgentSettings';
 
 interface WorkspaceConfigPanelProps {
@@ -31,7 +33,7 @@ interface WorkspaceConfigPanelProps {
     initialTab?: Tab;
 }
 
-export type Tab = 'general' | 'system-prompts' | 'skills' | 'agent';
+export type Tab = 'general' | 'system-prompts' | 'introduction' | 'skills' | 'agent';
 type DetailView =
     | { type: 'none' }
     | { type: 'skill'; name: string; scope: 'user' | 'project'; isNewSkill?: boolean }
@@ -41,6 +43,7 @@ type DetailView =
 const TAB_ITEMS: { key: Tab; label: string }[] = [
     { key: 'general', label: '通用' },
     { key: 'system-prompts', label: '系统提示词' },
+    { key: 'introduction', label: '使用指南' },
     { key: 'skills', label: '技能 Skills' },
 ];
 
@@ -66,6 +69,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
 
     // Refs for checking editing state
     const systemPromptsRef = useRef<SystemPromptsPanelRef>(null);
+    const introductionRef = useRef<IntroductionPanelRef>(null);
     const skillDetailRef = useRef<SkillDetailPanelRef>(null);
     const commandDetailRef = useRef<CommandDetailPanelRef>(null);
     const agentDetailRef = useRef<AgentDetailPanelRef>(null);
@@ -73,6 +77,9 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
     // Check if any component is in editing mode
     const isAnyEditing = useCallback(() => {
         if (activeTab === 'system-prompts' && systemPromptsRef.current?.isEditing()) {
+            return true;
+        }
+        if (activeTab === 'introduction' && introductionRef.current?.isEditing()) {
             return true;
         }
         if (detailView.type === 'skill' && skillDetailRef.current?.isEditing()) {
@@ -246,6 +253,9 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                             )}
                             {activeTab === 'system-prompts' && (
                                 <SystemPromptsPanel ref={systemPromptsRef} agentDir={agentDir} />
+                            )}
+                            {activeTab === 'introduction' && (
+                                <IntroductionPanel ref={introductionRef} agentDir={agentDir} />
                             )}
                             {activeTab === 'skills' && (
                                 <div className="h-full overflow-auto">

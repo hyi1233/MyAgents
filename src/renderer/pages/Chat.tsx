@@ -51,6 +51,8 @@ const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
 const LazyTerminalPanel = lazy(() => import('@/components/TerminalPanel').then(m => ({ default: m.TerminalPanel })));
 // Lazy load BrowserPanel for embedded browser
 const LazyBrowserPanel = lazy(() => import('@/components/BrowserPanel'));
+// Lazy load IntroductionOverlay for empty session welcome content
+const LazyIntroductionOverlay = lazy(() => import('@/components/IntroductionOverlay'));
 // Terminal chrome now uses CSS tokens that auto-switch with light/dark theme.
 // No need for cached theme constants — the header uses var(--paper), var(--ink), etc.
 
@@ -217,6 +219,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // In narrow mode, default workspace to hidden (overlay) — otherwise it blocks chat on startup
   const [showWorkspace, setShowWorkspace] = useState(() => typeof window === 'undefined' || window.innerWidth >= 768);
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
+  // Introduction overlay: INTRODUCTION.md content for empty session welcome
+  const [introductionContent, setIntroductionContent] = useState<string | null>(null);
   useEffect(() => {
     const breakpoint = parseInt(getComputedStyle(document.documentElement)
       .getPropertyValue('--breakpoint-mobile') || '768', 10);
@@ -258,6 +262,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // ── Embedded browser state ──
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   const [browserAlive, setBrowserAlive] = useState(false);
+
+  // ── Introduction overlay: read INTRODUCTION.md once per agentDir ──
+  useEffect(() => {
+    if (!agentDir || !isTauriEnvironment()) return;
+    let cancelled = false;
+    const sep = agentDir.includes('\\') ? '\\' : '/';
+    const filePath = `${agentDir}${sep}INTRODUCTION.md`;
+    import('@tauri-apps/api/core').then(({ invoke }) => {
+      invoke<string | null>('cmd_read_workspace_file', { path: filePath })
+        .then(content => {
+          if (!cancelled) setIntroductionContent(content && content.trim() ? content : null);
+        })
+        .catch(() => {
+          if (!cancelled) setIntroductionContent(null);
+        });
+    });
+    return () => { cancelled = true; };
+  }, [agentDir, sessionId]);
 
   // Derived: is the right split panel visible?
   const splitPanelVisible = splitFile !== null
@@ -1925,6 +1947,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onRetry={handleRetry}
               onFork={handleFork}
             />
+
+            {/* Introduction overlay — shown in empty sessions when INTRODUCTION.md exists */}
+            {introductionContent && historyMessages.length === 0 && !streamingMessage && !isSessionLoading && (
+              <Suspense fallback={null}>
+                <LazyIntroductionOverlay content={introductionContent} />
+              </Suspense>
+            )}
 
             {/* Inline cron task card — shown in message flow after creating a "新开对话" task */}
             {cronCardTask && (
