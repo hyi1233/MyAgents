@@ -893,17 +893,18 @@ code {
 }
 
 /* ── Introduction overlay — immersive welcome content for empty sessions ── */
+/* Guide-layer palette: one step back from conversation content (--ink) */
 .introduction-content {
   font-size: 16px;
   line-height: 1.7;
-  color: var(--ink-secondary);
+  color: var(--ink-muted);
 }
 
 .introduction-content h1 {
   font-size: 28px;
   font-weight: 600;
   letter-spacing: -0.02em;
-  color: var(--ink);
+  color: var(--ink-secondary);
   margin-bottom: 16px;
   text-align: center;
 }
@@ -911,7 +912,7 @@ code {
 .introduction-content h2 {
   font-size: 22px;
   font-weight: 600;
-  color: var(--ink);
+  color: var(--ink-secondary);
   margin-top: 28px;
   margin-bottom: 12px;
 }
@@ -919,7 +920,7 @@ code {
 .introduction-content h3 {
   font-size: 18px;
   font-weight: 600;
-  color: var(--ink);
+  color: var(--ink-secondary);
   margin-top: 20px;
   margin-bottom: 8px;
 }
@@ -930,6 +931,6 @@ code {
   background: var(--accent-warm-subtle);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   padding: 12px 16px;
-  color: var(--ink);
+  color: var(--ink-secondary);
   font-style: normal;
 }
