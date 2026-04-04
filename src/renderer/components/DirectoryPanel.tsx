@@ -1653,11 +1653,15 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
               )}
             </div>
 
-            {/* Vertical drag divider — tree ↔ capabilities */}
+            {/* Vertical drag divider — tree ↔ capabilities
+                Outer div: invisible hit area (py-1.5 = 12px), cursor hint
+                Inner div: thin visual line, hover changes color via group */}
             <div
-              className="mx-4 cursor-row-resize border-b border-[var(--line-subtle)] transition-colors hover:border-[var(--accent)]/30"
+              className="group/cap-divider mx-4 cursor-row-resize py-1.5"
               onMouseDown={handleCapDividerMouseDown}
-            />
+            >
+              <div className="border-b border-[var(--line-subtle)] transition-colors group-hover/cap-divider:border-[var(--accent)]/40" />
+            </div>
 
             {/* Agent Capabilities Panel */}
             <AgentCapabilitiesPanel
