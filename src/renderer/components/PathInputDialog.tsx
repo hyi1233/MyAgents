@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface PathInputDialogProps {
     isOpen: boolean;
@@ -51,7 +52,7 @@ export default function PathInputDialog({
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+        <OverlayBackdrop className="z-50">
             <div className="w-[480px] rounded-xl bg-[var(--paper-elevated)] p-6 shadow-2xl">
                 {/* Header */}
                 <div className="mb-4 flex items-center justify-between">
@@ -105,6 +106,6 @@ export default function PathInputDialog({
                     </button>
                 </div>
             </div>
-        </div>
+        </OverlayBackdrop>
     );
 }

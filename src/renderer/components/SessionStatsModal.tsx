@@ -2,12 +2,13 @@
  * SessionStatsModal - Detailed session statistics modal
  */
 import { BarChart2, Clock, Loader2, MessageSquare, Wrench, X } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 import { getSessionStats, type SessionDetailedStats } from '@/api/sessionClient';
 import { formatTokens, formatDuration } from '@/utils/formatTokens';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface SessionStatsModalProps {
     sessionId: string;
@@ -54,36 +55,13 @@ export default function SessionStatsModal({
         };
     }, [sessionId]);
 
-    // Only close on genuine clicks (mousedown + mouseup both on backdrop).
-    // Prevents closing when user drags a text selection out of the modal.
-    const mouseDownTargetRef = useRef<EventTarget | null>(null);
-
-    const handleBackdropMouseDown = useCallback((e: React.MouseEvent) => {
-        mouseDownTargetRef.current = e.target;
-    }, []);
-
-    const handleBackdropClick = useCallback(
-        (e: React.MouseEvent) => {
-            if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
-                onClose();
-            }
-        },
-        [onClose]
-    );
-
     const totalTokens =
         (stats?.summary.totalInputTokens ?? 0) + (stats?.summary.totalOutputTokens ?? 0);
 
     return (
-        <div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-            style={{ padding: '4vh 4vw' }}
-            onMouseDown={handleBackdropMouseDown}
-            onClick={handleBackdropClick}
-        >
+        <OverlayBackdrop onClose={onClose} className="z-[200]" style={{ padding: '4vh 4vw' }}>
             <div
                 className="glass-panel flex max-h-full w-full max-w-2xl select-text flex-col overflow-hidden"
-                onClick={(e) => e.stopPropagation()}
             >
                 {/* Header */}
                 <div className="flex flex-shrink-0 items-center justify-between gap-4 border-b border-[var(--line)] px-5 py-4">
@@ -302,6 +280,6 @@ export default function SessionStatsModal({
                     </button>
                 </div>
             </div>
-        </div>
+        </OverlayBackdrop>
     );
 }

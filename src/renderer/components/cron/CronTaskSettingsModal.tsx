@@ -1,7 +1,7 @@
 // Cron Task Settings Modal - Configure scheduled task parameters
 // Redesigned for v0.1.42: adds execution mode (当前对话/新开对话) + ScheduleTypeTabs (3 schedule types)
 import { X, Clock, Bell, Flag, MessageSquare, AlertCircle } from 'lucide-react';
-import { useState, useCallback, useMemo, useRef } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import type { CronEndConditions, CronRunMode, CronTaskConfig, CronSchedule } from '@/types/cronTask';
@@ -201,17 +201,9 @@ function CronTaskSettingsForm({
     });
   }, [isValid, initialPrompt, schedule, intervalMinutes, runMode, notifyEnabled, deliveryBotId, resolveDelivery, endMode, aiCanExit, useDeadline, deadline, useMaxExecutions, maxExecutions, executionTarget, isAtSchedule, onConfirm]);
 
-  // Backdrop click handling
-  const mouseDownOnBackdropRef = useRef(false);
-  const handleBackdropMouseDown = useCallback(() => { mouseDownOnBackdropRef.current = true; }, []);
-  const handleBackdropClick = useCallback(() => {
-    if (mouseDownOnBackdropRef.current) onClose();
-    mouseDownOnBackdropRef.current = false;
-  }, [onClose]);
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onMouseDown={handleBackdropMouseDown} onClick={handleBackdropClick} />
+      <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }} />
 
       <div className="relative z-10 flex h-[80vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
         {/* Header */}

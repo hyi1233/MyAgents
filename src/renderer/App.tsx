@@ -30,6 +30,7 @@ import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
@@ -1693,10 +1694,7 @@ export default function App() {
 
       {/* Warning: ~/.claude/settings.json env overrides detected */}
       {claudeEnvOverride && (
-        <div
-          className="fixed inset-0 z-[300] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm"
-          onMouseDown={(e) => { if (e.target === e.currentTarget && !claudeEnvClearing) setClaudeEnvOverride(null); }}
-        >
+        <OverlayBackdrop onClose={claudeEnvClearing ? undefined : () => setClaudeEnvOverride(null)} className="z-[300] px-4">
           <div className="glass-panel w-full max-w-sm">
             <div className="border-b border-[var(--line)] px-5 py-4">
               <div className="text-[14px] font-semibold text-[var(--ink)]">检测到全局配置覆盖</div>
@@ -1749,7 +1747,7 @@ export default function App() {
               </div>
             </div>
           </div>
-        </div>
+        </OverlayBackdrop>
       )}
 
       {/* Bug report overlay triggered from titlebar feedback button */}

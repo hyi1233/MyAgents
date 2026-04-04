@@ -29,6 +29,7 @@ import {
     formatNextExecution,
 } from '@/types/cronTask';
 import TaskCreateModal from '@/components/scheduled-tasks/TaskCreateModal';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface TaskCenterOverlayProps {
     projects: Project[];
@@ -181,17 +182,10 @@ export default memo(function TaskCenterOverlay({
     }, []);
 
     return (
-        <div
-            className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-            style={{ animation: 'overlayFadeIn 200ms ease-out' }}
-            onMouseDown={(e) => {
-                if (e.target === e.currentTarget) onClose();
-            }}
-        >
+        <OverlayBackdrop onClose={onClose} className="z-40" style={{ animation: 'overlayFadeIn 200ms ease-out' }}>
             <div
                 className="glass-panel flex h-[85vh] w-full max-w-5xl flex-col"
                 style={{ padding: '2vh 2vw', animation: 'overlayPanelIn 250ms ease-out' }}
-                onClick={e => e.stopPropagation()}
             >
                 {/* Header */}
                 <div className="mb-4 flex items-center justify-between">
@@ -418,6 +412,6 @@ export default memo(function TaskCenterOverlay({
                     onClose={() => setShowCreateModal(false)}
                 />
             )}
-        </div>
+        </OverlayBackdrop>
     );
 });

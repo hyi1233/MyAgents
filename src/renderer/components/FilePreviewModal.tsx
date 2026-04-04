@@ -23,6 +23,7 @@ import { shortenPathForDisplay } from '@/utils/pathDetection';
 import ConfirmDialog from './ConfirmDialog';
 import Markdown from './Markdown';
 import { useToast } from './Toast';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 // Lazy load Monaco Editor: the ~3MB bundle is only loaded when user first opens a file
 const MonacoEditor = lazy(() => import('./MonacoEditor'));
@@ -364,18 +365,6 @@ export default function FilePreviewModal({
         }
     }, [isDirectEdit, hasMdUnsavedChanges, flushAndClose, onClose]);
 
-    // Handle backdrop click — only close on genuine clicks (mousedown + mouseup both on backdrop).
-    const mouseDownTargetRef = useRef<EventTarget | null>(null);
-
-    const handleBackdropMouseDown = useCallback((e: React.MouseEvent) => {
-        mouseDownTargetRef.current = e.target;
-    }, []);
-
-    const handleBackdropClick = useCallback((e: React.MouseEvent) => {
-        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
-            handleClose();
-        }
-    }, [handleClose]);
 
     const handleOpenInFinder = useCallback(async () => {
         if (!canReveal) return;
@@ -550,17 +539,11 @@ export default function FilePreviewModal({
     return createPortal(
         <>
             {/* Modal backdrop */}
-            <div
-                className="fixed inset-0 z-[210] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-                style={{ padding: '3vh 3vw' }}
-                onMouseDown={handleBackdropMouseDown}
-                onClick={handleBackdropClick}
-                onWheel={(e) => e.stopPropagation()}
-            >
+            <OverlayBackdrop onClose={handleClose} className="z-[210]" style={{ padding: '3vh 3vw' }}>
                 {/* Modal content */}
                 <div
                     className="glass-panel flex h-full w-full max-w-7xl flex-col overflow-hidden"
-                    onClick={(e) => e.stopPropagation()}
+                    onWheel={(e) => e.stopPropagation()}
                 >
                     {/* Header */}
                     <div
@@ -658,7 +641,7 @@ export default function FilePreviewModal({
                         {renderPreviewContent()}
                     </div>
                 </div>
-            </div>
+            </OverlayBackdrop>
 
             {/* Unsaved changes confirmation dialog (Markdown only) */}
             {showUnsavedConfirm && (

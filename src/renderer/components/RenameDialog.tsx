@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface RenameDialogProps {
     currentName: string;
@@ -58,7 +59,7 @@ export default function RenameDialog({
     };
 
     return createPortal(
-        <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
+        <OverlayBackdrop className="z-[250] px-4">
             <div className="glass-panel w-full max-w-sm">
                 <form onSubmit={handleSubmit}>
                     <div className="border-b border-[var(--line)] px-5 py-4">
@@ -97,7 +98,7 @@ export default function RenameDialog({
                     </div>
                 </form>
             </div>
-        </div>,
+        </OverlayBackdrop>,
         document.body
     );
 }

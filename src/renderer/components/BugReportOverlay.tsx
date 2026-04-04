@@ -10,6 +10,7 @@ import type { ImageAttachment } from './SimpleChatInput';
 import { ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { isProviderAvailable } from '@/config/configService';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 const MAX_IMAGES = 5;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
@@ -178,10 +179,7 @@ export default function BugReportOverlay({
     };
 
     return (
-        <div
-            className="fixed inset-0 z-[250] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm"
-            onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
-        >
+        <OverlayBackdrop onClose={onClose} className="z-[250] px-4">
             <div className="glass-panel w-full max-w-md">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
@@ -345,6 +343,6 @@ export default function BugReportOverlay({
                     </div>
                 </div>
             </div>
-        </div>
+        </OverlayBackdrop>
     );
 }

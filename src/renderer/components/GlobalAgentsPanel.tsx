@@ -13,6 +13,7 @@ import type { AgentDetailPanelRef } from './AgentDetailPanel';
 import { AgentCard } from './AgentCards';
 import { CreateDialog } from './SkillDialogs';
 import type { AgentItem } from '../../shared/agentTypes';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 type ViewState =
     | { type: 'list' }
@@ -299,7 +300,7 @@ export default function GlobalAgentsPanel({ onDetailChange }: { onDetailChange?:
 
             {/* Sync conflict dialog */}
             {showSyncConflictDialog && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="w-[420px] rounded-xl border border-[var(--line)] bg-[var(--paper)] p-6 shadow-xl">
                         <h3 className="text-base font-semibold text-[var(--ink)]">同步冲突</h3>
                         <p className="mt-2 text-sm text-[var(--ink-muted)]">
@@ -331,7 +332,7 @@ export default function GlobalAgentsPanel({ onDetailChange }: { onDetailChange?:
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             <p className="text-center text-xs text-[var(--ink-muted)]">

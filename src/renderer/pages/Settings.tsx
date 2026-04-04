@@ -3176,7 +3176,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Builtin MCP Settings Modal */}
             {builtinMcpSettings && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -3376,12 +3376,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Gemini Image Settings Modal */}
             {geminiImageSettings && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -3573,12 +3573,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Playwright Settings Modal */}
             {playwrightSettings && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -3943,12 +3943,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Edge TTS Settings Modal */}
             {edgeTtsSettings && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -4180,12 +4180,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Add MCP Modal */}
             {showMcpForm && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-50">
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
@@ -4803,12 +4803,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         </div>
                         )}
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Custom Provider Modal */}
             {showCustomForm && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm overflow-y-auto py-8">
+                <OverlayBackdrop className="z-50 overflow-y-auto py-8">
                     <div className="mx-4 w-full max-w-md flex max-h-[90vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
                         <div className="flex-shrink-0 px-6 pt-6 pb-4">
                             <div className="flex items-center justify-between">
@@ -5035,12 +5035,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </div>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Provider Management Modal */}
             {editingProvider && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm overflow-y-auto py-8">
+                <OverlayBackdrop className="z-50 overflow-y-auto py-8">
                     <div className="mx-4 w-full max-w-md flex max-h-[90vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
                         <div className="flex-shrink-0 px-6 pt-6 pb-4">
                             <div className="flex items-center justify-between">
@@ -5340,7 +5340,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </div>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Model Management Panel */}
@@ -5366,7 +5366,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Delete Confirmation Modal */}
             {deleteConfirmProvider && (
-                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                <OverlayBackdrop className="z-[60]">
                     <div className="mx-4 w-full max-w-sm rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
                         <div className="mb-4 flex items-center gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--error-bg)]">
@@ -5392,7 +5392,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </button>
                         </div>
                     </div>
-                </div>
+                </OverlayBackdrop>
             )}
 
             {/* Runtime not found dialog */}

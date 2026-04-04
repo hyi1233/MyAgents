@@ -18,6 +18,7 @@ import {
   type DiscoveredModel,
 } from '@/config/services/modelDiscoveryService';
 import { atomicModifyConfig } from '@/config/configService';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface ModelManagementPanelProps {
   provider: Provider;
@@ -194,13 +195,9 @@ export default function ModelManagementPanel({
   const allAdded = discoveredModels.length > 0 && discoveredModels.every(m => activeModelIds.has(m.id));
 
   return createPortal(
-    <div
-      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
+    <OverlayBackdrop onClose={onClose} className="z-[200]">
       <div
         className="relative flex h-[85vh] w-[620px] max-w-[90vw] flex-col overflow-hidden rounded-2xl bg-[var(--paper-elevated)] shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] px-5 py-3.5">
@@ -367,7 +364,7 @@ export default function ModelManagementPanel({
           </button>
         </div>
       </div>
-    </div>,
+    </OverlayBackdrop>,
     document.body,
   );
 }

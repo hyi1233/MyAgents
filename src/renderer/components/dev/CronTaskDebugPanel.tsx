@@ -104,7 +104,7 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }} />
 
       {/* Panel */}
       <div className="relative z-10 w-full max-w-2xl rounded-xl bg-[var(--paper-elevated)] shadow-xl">
