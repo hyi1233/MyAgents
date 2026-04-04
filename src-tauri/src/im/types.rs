@@ -878,7 +878,13 @@ impl ChannelConfigRust {
         let overrides = self.overrides.as_ref();
         ImConfig {
             platform: self.channel_type.clone(),
-            name: self.name.clone().or_else(|| Some(agent.name.clone())),
+            // For OpenClaw channels, self.name is the npm package name (e.g., "larksuite/openclaw-lark")
+            // which is meaningless as a bot display name. Prefer agent name in that case.
+            name: if self.channel_type.to_string().starts_with("openclaw:") {
+                Some(agent.name.clone())
+            } else {
+                self.name.clone().or_else(|| Some(agent.name.clone()))
+            },
             bot_token: self.bot_token.clone().unwrap_or_default(),
             allowed_users: self.allowed_users.clone(),
             permission_mode: overrides.and_then(|o| o.permission_mode.clone()).unwrap_or_else(|| agent.permission_mode.clone()),
