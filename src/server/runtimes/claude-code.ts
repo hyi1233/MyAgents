@@ -7,8 +7,8 @@
 // Session: --session-id / --resume
 
 import { spawn, type Subprocess } from 'bun';
-import { writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
-import { join, dirname } from 'path';
+import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback } from './types';
@@ -16,59 +16,59 @@ import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, U
 // ─── SessionStart Hook settings generator ───
 // CC's hooks fire on session lifecycle events. We inject a SessionStart hook
 // that POSTs the session_id to our Sidecar HTTP endpoint for reliable tracking.
-// This avoids relying on parsing stdout for session ID (which can race).
 
-const HOOK_SETTINGS_DIR = join(
+const HOOK_DIR = join(
   process.env.HOME || process.env.USERPROFILE || '/tmp',
   '.myagents', 'tmp', 'cc-hooks',
 );
 
+// Forwarder script content — inlined to avoid production bundle issues
+// (bun build doesn't copy companion .cjs files into the output)
+const FORWARDER_SCRIPT = `#!/usr/bin/env node
+const http = require('http');
+const port = parseInt(process.argv[2], 10);
+if (!port || isNaN(port)) process.exit(0);
+const chunks = [];
+process.stdin.on('data', (c) => chunks.push(c));
+process.stdin.on('end', () => {
+  const body = Buffer.concat(chunks);
+  const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/hook/session-start',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': body.length } }, (r) => r.resume());
+  req.on('error', () => {});
+  req.end(body);
+});
+process.stdin.resume();
+`;
+
 /**
- * Generate a temporary CC settings file with a SessionStart hook
- * that forwards the session ID to our Sidecar's HTTP server.
+ * Generate temporary hook settings + forwarder script for CC SessionStart hook.
+ * Both files are written to ~/.myagents/tmp/cc-hooks/ (outside the project).
  */
 function generateHookSettings(sidecarPort: number): string | null {
   try {
-    // Path to the forwarder script (bundled alongside this module)
-    const forwarderScript = join(dirname(new URL(import.meta.url).pathname), 'cc-session-hook-forwarder.cjs');
-    if (!existsSync(forwarderScript)) {
-      console.warn('[claude-code] Hook forwarder script not found at', forwarderScript);
-      return null;
+    mkdirSync(HOOK_DIR, { recursive: true });
+
+    // Write forwarder script (idempotent)
+    const forwarderPath = join(HOOK_DIR, 'forwarder.cjs');
+    if (!existsSync(forwarderPath)) {
+      writeFileSync(forwarderPath, FORWARDER_SCRIPT, { mode: 0o755 });
     }
 
-    mkdirSync(HOOK_SETTINGS_DIR, { recursive: true });
-    const settingsPath = join(HOOK_SETTINGS_DIR, `session-hook-${process.pid}.json`);
-
-    const settings = {
+    // Write settings JSON (per-process to avoid collisions)
+    const settingsPath = join(HOOK_DIR, `settings-${process.pid}.json`);
+    writeFileSync(settingsPath, JSON.stringify({
       hooks: {
-        SessionStart: [
-          {
-            matcher: '*',
-            hooks: [
-              {
-                type: 'command',
-                command: `node "${forwarderScript}" ${sidecarPort}`,
-              },
-            ],
-          },
-        ],
+        SessionStart: [{
+          matcher: '*',
+          hooks: [{ type: 'command', command: `node "${forwarderPath}" ${sidecarPort}` }],
+        }],
       },
-    };
-
-    writeFileSync(settingsPath, JSON.stringify(settings), 'utf-8');
+    }));
     return settingsPath;
   } catch (err) {
     console.warn('[claude-code] Failed to generate hook settings:', err);
     return null;
   }
-}
-
-/** Clean up the temporary hook settings file */
-function cleanupHookSettings(): void {
-  try {
-    const settingsPath = join(HOOK_SETTINGS_DIR, `session-hook-${process.pid}.json`);
-    if (existsSync(settingsPath)) unlinkSync(settingsPath);
-  } catch { /* ignore */ }
 }
 
 // ─── RuntimeProcess wrapper ───

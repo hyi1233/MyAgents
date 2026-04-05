@@ -314,6 +314,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'thinking_stop':
+      // Emit content-block-stop so frontend closes the thinking block
+      broadcast('chat:content-block-stop', { index: event.index, type: 'thinking' });
       break;
 
     case 'tool_use_start':

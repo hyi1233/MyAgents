@@ -580,23 +580,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     || (currentRuntime === 'claude-code' ? 'default' : 'full-auto')
   );
 
-  // CC static model list and permission modes (from shared types)
-  const ccModels: import('../../shared/types/runtime').RuntimeModelInfo[] = useMemo(() => [
-    { value: 'sonnet', displayName: 'Sonnet', isDefault: true },
-    { value: 'opus', displayName: 'Opus' },
-    { value: 'haiku', displayName: 'Haiku' },
-    { value: 'sonnet[1m]', displayName: 'Sonnet (1M context)' },
-    { value: 'opus[1m]', displayName: 'Opus (1M context)' },
-  ], []);
+  // CC models and permission modes — imported from shared canonical definitions
+  const ccModels = useMemo(() => {
+    // Dynamic import to avoid circular dependency at module level
+    const { CC_MODELS } = require('../../shared/types/runtime');
+    return CC_MODELS as import('../../shared/types/runtime').RuntimeModelInfo[];
+  }, []);
 
   const ccPermissionModes = useMemo(() => {
-    // Import statically from shared types (CC permission modes are constants)
-    return [
-      { value: 'default', label: 'Default', icon: '\u{1F6E1}', description: '每次工具调用都需要确认' },
-      { value: 'plan', label: 'Plan', icon: '\u{1F4CB}', description: '规划模式，只读不执行' },
-      { value: 'acceptEdits', label: 'Accept Edits', icon: '\u{1F4DD}', description: '自动接受文件编辑，其他需确认' },
-      { value: 'bypassPermissions', label: 'Bypass', icon: '\u26A1', description: '跳过所有权限确认' },
-    ] as import('../../shared/types/runtime').RuntimePermissionMode[];
+    const { CC_PERMISSION_MODES } = require('../../shared/types/runtime');
+    return CC_PERMISSION_MODES as import('../../shared/types/runtime').RuntimePermissionMode[];
   }, []);
 
   // Effective model/permission based on runtime
@@ -1441,7 +1434,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
       // sendMessage is fire-and-forget (returns true immediately for optimistic UI).
       // Error handling is done inside sendMessage's .then()/.catch() in TabProvider.
-      await sendMessage(text, images, permissionMode, selectedModel, providerEnv);
+      // Use effective model/permission (runtime-aware) — not the builtin values
+      await sendMessage(text, images, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv);
     } catch (error) {
       const errorMessage = {
         id: `error-${crypto.randomUUID()}`,
@@ -1457,7 +1451,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef/currentProviderRef/apiKeysRef/cronStateRef are refs (stable); scrollToBottom/setMessages/setIsLoading/setSessionState are stable
-  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, permissionMode, selectedModel, scrollToBottom]);
+  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, isExternalRuntime, scrollToBottom]);
 
   // Ref-stabilize handleSendMessage for handleRetry (avoids frequent re-creation)
   const handleSendMessageRef = useRef(handleSendMessage);

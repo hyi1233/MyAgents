@@ -131,6 +131,16 @@ export function getRuntimePermissionModes(runtime: RuntimeType): RuntimePermissi
   }
 }
 
+// ─── Claude Code model list (canonical, shared) ───
+
+export const CC_MODELS: RuntimeModelInfo[] = [
+  { value: 'sonnet', displayName: 'Sonnet', isDefault: true },
+  { value: 'opus', displayName: 'Opus' },
+  { value: 'haiku', displayName: 'Haiku' },
+  { value: 'sonnet[1m]', displayName: 'Sonnet (1M context)' },
+  { value: 'opus[1m]', displayName: 'Opus (1M context)' },
+];
+
 /**
  * Get default permission mode for a given runtime type
  */
