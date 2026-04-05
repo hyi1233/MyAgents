@@ -4,6 +4,9 @@
 import { memo, useCallback, useRef, useState } from 'react';
 import { ChevronUp } from 'lucide-react';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
+
+// Runtime types that have backend implementations (not just type definitions)
+const IMPLEMENTED_RUNTIMES = new Set<RuntimeType>(['builtin', 'claude-code']);
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 // ─── Runtime display metadata ───
@@ -92,7 +95,7 @@ export default memo(function RuntimeSelector({
             <div className="absolute left-0 bottom-full z-20 mb-1 w-56 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
               {RUNTIME_OPTIONS.map((opt) => {
                 const detection = detections[opt.type];
-                const installed = opt.type === 'builtin' || detection?.installed;
+                const installed = opt.type === 'builtin' || (detection?.installed && IMPLEMENTED_RUNTIMES.has(opt.type));
                 return (
                   <button
                     key={opt.type}
@@ -116,7 +119,9 @@ export default memo(function RuntimeSelector({
                       <span className="text-[var(--accent)] text-xs">✓</span>
                     )}
                     {!installed && (
-                      <span className="text-[var(--ink-subtle)] text-xs">未安装</span>
+                      <span className="text-[var(--ink-subtle)] text-xs">
+                        {detection?.installed && !IMPLEMENTED_RUNTIMES.has(opt.type) ? '即将支持' : '未安装'}
+                      </span>
                     )}
                   </button>
                 );
@@ -150,7 +155,7 @@ export default memo(function RuntimeSelector({
           <div className="absolute left-0 bottom-full z-20 mb-1 w-56 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
             {RUNTIME_OPTIONS.map((opt) => {
               const detection = detections[opt.type];
-              const installed = opt.type === 'builtin' || detection?.installed;
+              const installed = opt.type === 'builtin' || (detection?.installed && IMPLEMENTED_RUNTIMES.has(opt.type));
               return (
                 <button
                   key={opt.type}
