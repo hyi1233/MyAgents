@@ -1524,25 +1524,15 @@ async function main() {
             const runtimeType = getActiveRuntimeType();
             console.log(`[chat] send via ${runtimeType}: text="${text.slice(0, 200)}"`);
 
-            if (!isExternalSessionActive()) {
-              // First message — start the external session
-              // NOTE: Don't pass MyAgents' model (e.g. "glm-5.1") to external CLI.
-              // External runtimes use their own model configuration.
-              // Only pass runtimeConfig.model if explicitly set for this runtime.
-              await startExternalSession({
-                sessionId: getSessionId(),
-                workspacePath: agentDir,
-                initialMessage: text,
-                // model is intentionally omitted — CC/Codex use their own defaults
-                permissionMode: permissionMode,
-                scenario: { type: 'desktop' },
-              });
-              return jsonResponse({ success: true, queued: true });
-            } else {
-              // Follow-up message — send to active session
-              const result = await sendExternalMessage(text, images, permissionMode, model ?? undefined);
-              return jsonResponse({ success: result.queued, error: result.error });
-            }
+            // Unified send: sendExternalMessage handles both first message and follow-ups.
+            // CC's -p mode exits after each turn; sendExternalMessage detects this
+            // and spawns a new process with --resume for multi-turn continuity.
+            const result = await sendExternalMessage(
+              text, images, permissionMode, model ?? undefined,
+              // Pass session context for first-time start
+              { sessionId: getSessionId(), workspacePath: agentDir, scenario: { type: 'desktop' as const }, permissionMode },
+            );
+            return jsonResponse({ success: result.queued, error: result.error });
           } catch (error) {
             return jsonResponse(
               { success: false, error: error instanceof Error ? error.message : 'Unknown error' },

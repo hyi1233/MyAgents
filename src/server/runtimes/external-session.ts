@@ -129,47 +129,76 @@ export async function startExternalSession(options: {
 }
 
 /**
- * Send a user message to the active external session.
- * For CC's `-p` mode: each turn spawns a new process with `--resume`.
- * The previous process has already exited after the first turn.
+ * Session context for first-time initialization (passed from index.ts)
+ */
+export interface ExternalSendContext {
+  sessionId: string;
+  workspacePath: string;
+  scenario: InteractionScenario;
+  permissionMode?: string;
+}
+
+/**
+ * Send a user message via external runtime.
+ * Handles three cases:
+ * 1. No previous session → start a new one (first message)
+ * 2. Previous process exited → resume with --resume (CC -p mode multi-turn)
+ * 3. Process still running → send via stdin (shouldn't happen in -p mode)
  */
 export async function sendExternalMessage(
   text: string,
   _images?: unknown[],
   _permissionMode?: string,
   _model?: string,
+  context?: ExternalSendContext,
 ): Promise<{ queued: boolean; error?: string }> {
-  if (!activeRuntime) {
-    return { queued: false, error: 'No active external runtime session' };
+  // Case 1: No previous session — start fresh
+  if (!lastCcSessionId && !isRunning) {
+    if (!context) {
+      return { queued: false, error: 'No session context for first message' };
+    }
+    try {
+      await startExternalSession({
+        sessionId: context.sessionId,
+        workspacePath: context.workspacePath,
+        initialMessage: text,
+        permissionMode: context.permissionMode,
+        scenario: context.scenario,
+      });
+      return { queued: true };
+    } catch (err) {
+      return { queued: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
-  // CC's -p mode exits after each turn. For follow-up messages,
-  // start a new process with --resume to continue the conversation.
+  // Case 2: Previous process exited — resume (CC -p mode multi-turn)
   if (!activeProcess || activeProcess.exited) {
-    console.log(`[external-session] Previous process exited, resuming session for follow-up`);
+    console.log(`[external-session] Previous process exited, resuming session ${lastCcSessionId}`);
     try {
       await startExternalSession({
         sessionId: lastSessionId,
         workspacePath: lastWorkspacePath,
         initialMessage: text,
+        permissionMode: context?.permissionMode,
         scenario: lastScenario,
-        resumeSessionId: lastCcSessionId, // Resume CC's session
+        resumeSessionId: lastCcSessionId, // --resume to continue conversation
       });
       return { queued: true };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { queued: false, error: message };
+      return { queued: false, error: err instanceof Error ? err.message : String(err) };
     }
   }
 
-  // Process still running (shouldn't happen in -p mode, but handle it)
+  // Case 3: Process still running — send via stdin
+  if (!activeRuntime) {
+    return { queued: false, error: 'No active runtime' };
+  }
   try {
     broadcast('chat:status', { sessionState: 'running' });
     await activeRuntime.sendMessage(activeProcess, text);
     return { queued: true };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { queued: false, error: message };
+    return { queued: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
