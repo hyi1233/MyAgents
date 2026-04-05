@@ -12,6 +12,7 @@ import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback } from './types';
+import { augmentedProcessEnv } from './env-utils';
 
 // ─── SessionStart Hook settings generator ───
 // CC's hooks fire on session lifecycle events. We inject a SessionStart hook
@@ -116,29 +117,6 @@ class ClaudeCodeProcess implements RuntimeProcess {
       sink.end();
     } catch { /* ignore */ }
   }
-}
-
-// ─── PATH augmentation for GUI apps ───
-
-/** Build an augmented env with user-level binary directories in PATH */
-function augmentedProcessEnv(): Record<string, string | undefined> {
-  const env = { ...process.env };
-  const home = env.HOME || env.USERPROFILE || '';
-  if (!home) return env;
-  const sep = process.platform === 'win32' ? ';' : ':';
-  const extraDirs = [
-    `${home}/.local/bin`,   // Claude Code CLI global install
-    `${home}/.bun/bin`,     // Bun global installs
-    '/opt/homebrew/bin',    // macOS Apple Silicon homebrew
-    '/usr/local/bin',       // macOS Intel homebrew / Linux
-  ];
-  const currentPath = env.PATH || '';
-  const pathParts = currentPath ? currentPath.split(sep) : [];
-  for (const dir of extraDirs) {
-    if (!pathParts.includes(dir)) pathParts.push(dir);
-  }
-  env.PATH = pathParts.join(sep);
-  return env;
 }
 
 // ─── Model cache ───

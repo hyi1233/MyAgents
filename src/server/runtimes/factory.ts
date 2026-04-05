@@ -3,13 +3,14 @@
 import type { RuntimeType } from '../../shared/types/runtime';
 import type { AgentRuntime } from './types';
 import { ClaudeCodeRuntime } from './claude-code';
+import { CodexRuntime } from './codex';
 
 // ─── Runtime registry ───
 
 const runtimes: Partial<Record<RuntimeType, AgentRuntime>> = {};
 
 // Runtime types that have actual implementations
-const SUPPORTED_EXTERNAL_RUNTIMES = new Set<RuntimeType>(['claude-code']);
+const SUPPORTED_EXTERNAL_RUNTIMES = new Set<RuntimeType>(['claude-code', 'codex']);
 
 function ensureRuntime(type: RuntimeType): AgentRuntime {
   if (!runtimes[type]) {
@@ -17,7 +18,9 @@ function ensureRuntime(type: RuntimeType): AgentRuntime {
       case 'claude-code':
         runtimes[type] = new ClaudeCodeRuntime();
         break;
-      // 'codex' will be added in v2 — for now, throw a clear error
+      case 'codex':
+        runtimes[type] = new CodexRuntime();
+        break;
       default:
         throw new Error(`Runtime "${type}" is not yet supported. Available: ${[...SUPPORTED_EXTERNAL_RUNTIMES].join(', ')}`);
     }

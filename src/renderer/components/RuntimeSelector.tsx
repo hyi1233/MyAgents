@@ -6,7 +6,7 @@ import { ChevronUp, Settings } from 'lucide-react';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 
 // Runtime types that have backend implementations (not just type definitions)
-const IMPLEMENTED_RUNTIMES = new Set<RuntimeType>(['builtin', 'claude-code']);
+const IMPLEMENTED_RUNTIMES = new Set<RuntimeType>(['builtin', 'claude-code', 'codex']);
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 // ─── Runtime icon assets ───

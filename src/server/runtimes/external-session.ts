@@ -26,7 +26,7 @@ let turnCompleted = false;
 let lastSessionId = '';
 let lastWorkspacePath = '';
 let lastScenario: InteractionScenario = { type: 'desktop' };
-let lastCcSessionId = '';  // CC's internal session ID (from hook or system.init)
+let lastRuntimeSessionId = '';  // Runtime's session ID (CC: from hook/init; Codex: threadId)
 
 // Message accumulation for SessionStore persistence
 // allSessionMessages grows across turns — saveSessionMessages expects the FULL cumulative array
@@ -51,18 +51,18 @@ function fireImCallback(event: 'delta' | 'block-end' | 'complete' | 'error' | 'p
 }
 
 /**
- * Set CC's session ID (called from hook endpoint or system.init event).
- * Used for --resume in multi-turn conversations.
+ * Set the runtime's session ID (CC: from hook/system.init; Codex: from thread/start).
+ * Used for session resume in multi-turn conversations.
  */
-export function setCcSessionId(id: string): void {
-  lastCcSessionId = id;
-  console.log(`[external-session] CC session ID set: ${id}`);
+export function setRuntimeSessionId(id: string): void {
+  lastRuntimeSessionId = id;
+  console.log(`[external-session] Runtime session ID set: ${id}`);
 }
 
 /**
  * Restore module-level state after Sidecar restart (session resume).
- * Called from index.ts when a CC session is reopened from history.
- * Sets lastCcSessionId so sendExternalMessage uses --resume instead of --session-id.
+ * Called from index.ts when an external runtime session is reopened from history.
+ * Sets lastRuntimeSessionId so sendExternalMessage uses resume instead of new session.
  */
 export function restoreExternalSessionState(
   sessionId: string,
@@ -72,7 +72,7 @@ export function restoreExternalSessionState(
   lastSessionId = sessionId;
   lastWorkspacePath = workspacePath;
   lastScenario = scenario;
-  lastCcSessionId = sessionId; // CC session ID === our session ID
+  lastRuntimeSessionId = sessionId; // Runtime session ID === our session ID
 
   // Load existing messages for correct incremental save
   const data = getSessionData(sessionId);
@@ -116,7 +116,10 @@ export function getActiveRuntimeType(): RuntimeType {
 }
 
 /**
- * Wait for external session to become idle (CC -p process exits after each turn).
+ * Wait for external session to become idle.
+ * Detects two idle patterns:
+ * - CC -p mode: process exits after each turn → !isRunning && !activeProcess
+ * - Codex app-server: process stays alive, turn completes → turnCompleted flag
  * Returns true if completed within timeout, false otherwise.
  */
 export async function waitForExternalSessionIdle(timeoutMs: number, pollMs = 500): Promise<boolean> {
@@ -129,8 +132,9 @@ export async function waitForExternalSessionIdle(timeoutMs: number, pollMs = 500
     if (!isRunning && !activeProcess) return true; // genuinely idle
   }
   while (Date.now() < deadline) {
-    if (!isRunning && !activeProcess) return true;
-    if (activeProcess?.exited) return true;
+    if (!isRunning && !activeProcess) return true;  // CC: process exited
+    if (activeProcess?.exited) return true;          // CC: process exited (alt check)
+    if (turnCompleted) return true;                  // Codex: turn done, process alive
     await new Promise(r => setTimeout(r, pollMs));
   }
   return false;
@@ -274,7 +278,7 @@ export async function sendExternalMessage(
   context?: ExternalSendContext,
 ): Promise<{ queued: boolean; error?: string }> {
   // Case 1: No previous session — start fresh
-  if (!lastCcSessionId && !isRunning) {
+  if (!lastRuntimeSessionId && !isRunning) {
     if (!context) {
       return { queued: false, error: 'No session context for first message' };
     }
@@ -295,7 +299,7 @@ export async function sendExternalMessage(
 
   // Case 2: Previous process exited — resume (CC -p mode multi-turn)
   if (!activeProcess || activeProcess.exited) {
-    console.log(`[external-session] Previous process exited, resuming session ${lastCcSessionId}`);
+    console.log(`[external-session] Previous process exited, resuming session ${lastRuntimeSessionId}`);
     try {
       await startExternalSession({
         sessionId: lastSessionId,
@@ -303,7 +307,7 @@ export async function sendExternalMessage(
         initialMessage: text,
         permissionMode: context?.permissionMode,
         scenario: lastScenario,
-        resumeSessionId: lastCcSessionId, // --resume to continue conversation
+        resumeSessionId: lastRuntimeSessionId, // --resume to continue conversation
       });
       return { queued: true };
     } catch (err) {
@@ -311,11 +315,25 @@ export async function sendExternalMessage(
     }
   }
 
-  // Case 3: Process still running — send via stdin
+  // Case 3: Process still running — send via runtime.sendMessage
+  // This is the normal path for persistent-process runtimes like Codex app-server.
   if (!activeRuntime) {
     return { queued: false, error: 'No active runtime' };
   }
   try {
+    // Broadcast user message + record for persistence (same as startExternalSession)
+    const userMsg: SessionMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: text,
+      timestamp: new Date().toISOString(),
+    };
+    broadcast('chat:message-replay', { message: userMsg });
+    allSessionMessages.push(userMsg);
+    turnCompleted = false;
+    currentAssistantText = '';
+    currentTurnStartTime = Date.now();
+
     broadcast('chat:status', { sessionState: 'running' });
     await activeRuntime.sendMessage(activeProcess, text);
     return { queued: true };
@@ -472,7 +490,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'session_init':
       // Capture CC's session ID for multi-turn resume
-      if (event.sessionId) lastCcSessionId = event.sessionId;
+      if (event.sessionId) lastRuntimeSessionId = event.sessionId;
       broadcast('chat:system-init', {
         info: {
           sessionId: event.sessionId,
@@ -524,8 +542,38 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'session_complete':
       if (event.subtype === 'success') {
+        // CC slash commands (e.g. /context, /cost) return output in `result` field
+        // without streaming text_delta events. Broadcast as assistant message if present.
+        if (event.result && !currentAssistantText.trim()) {
+          broadcast('chat:message-chunk', event.result);
+          currentAssistantText += event.result;
+        }
         // Only broadcast if turn_complete didn't already
         if (!turnCompleted) {
+          // Persist the result text as an assistant message
+          if (currentAssistantText.trim()) {
+            const assistantMsg: SessionMessage = {
+              id: `assistant-${Date.now()}`,
+              role: 'assistant',
+              content: currentAssistantText,
+              timestamp: new Date().toISOString(),
+              durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
+            };
+            allSessionMessages.push(assistantMsg);
+            currentAssistantText = '';
+
+            if (allSessionMessages.length > 0 && lastSessionId) {
+              try {
+                saveSessionMessages(lastSessionId, allSessionMessages);
+                updateSessionMetadata(lastSessionId, {
+                  lastActiveAt: new Date().toISOString(),
+                  lastMessagePreview: allSessionMessages[allSessionMessages.length - 1]?.content?.slice(0, 100),
+                });
+              } catch (err) {
+                console.error('[external-session] Failed to save session messages:', err);
+              }
+            }
+          }
           broadcast('chat:message-complete', {});
           fireImCallback('complete', '');
         }

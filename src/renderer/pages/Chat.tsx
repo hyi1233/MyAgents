@@ -42,7 +42,7 @@ import {
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
-import { CC_MODELS, CC_PERMISSION_MODES } from '../../shared/types/runtime';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
@@ -582,9 +582,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     || (currentRuntime === 'claude-code' ? 'default' : 'full-auto')
   );
 
-  // CC models and permission modes — imported from shared canonical definitions
-  const ccModels = CC_MODELS;
-  const ccPermissionModes = CC_PERMISSION_MODES;
+  // Runtime-specific models and permission modes
+  const runtimePermissionModes = currentRuntime === 'claude-code' ? CC_PERMISSION_MODES
+    : currentRuntime === 'codex' ? CODEX_PERMISSION_MODES : undefined;
+
+  // Codex models are dynamic (fetched from app-server); CC models are static
+  const [codexModels, setCodexModels] = useState<typeof CC_MODELS>([]);
+  useEffect(() => {
+    if (currentRuntime !== 'codex') return;
+    let cancelled = false;
+    apiGet('/api/runtime/models?type=codex').then((res: unknown) => {
+      const data = res as { models?: typeof CC_MODELS } | undefined;
+      if (!cancelled && data?.models?.length) setCodexModels(data.models);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [currentRuntime, apiGet]);
+
+  const runtimeModels = currentRuntime === 'claude-code' ? CC_MODELS
+    : currentRuntime === 'codex' ? codexModels : undefined;
 
   // Effective model/permission based on runtime
   const effectiveModel = isExternalRuntime ? runtimeModel : selectedModel;
@@ -2141,8 +2156,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             runtime={currentRuntime}
             runtimeDetections={runtimeDetections}
             onRuntimeChange={handleRuntimeChange}
-            runtimeModels={isExternalRuntime ? ccModels : undefined}
-            runtimePermissionModes={isExternalRuntime ? ccPermissionModes : undefined}
+            runtimeModels={isExternalRuntime ? runtimeModels : undefined}
+            runtimePermissionModes={isExternalRuntime ? runtimePermissionModes : undefined}
             queuedMessages={queuedMessages}
             onCancelQueued={handleCancelQueuedVoid}
             onForceExecuteQueued={handleForceExecuteQueuedVoid}

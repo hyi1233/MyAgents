@@ -1644,8 +1644,8 @@ async function main() {
           if (ccSessionId) {
             console.log(`[hook] CC SessionStart: session_id=${ccSessionId}, source=${hookData.source}`);
             // Import and update the external session's CC session ID
-            const { setCcSessionId } = await import('./runtimes/external-session');
-            setCcSessionId(ccSessionId);
+            const { setRuntimeSessionId } = await import('./runtimes/external-session');
+            setRuntimeSessionId(ccSessionId);
           }
           return jsonResponse({ ok: true });
         } catch {
