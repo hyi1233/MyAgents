@@ -1465,17 +1465,34 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   const handleOpenAgentSettings = useCallback(() => setShowWorkspaceConfig(true), []);
 
-  // Runtime change handler (v0.1.59) — save to config, inform user
-  const handleRuntimeChange = useCallback(async (runtime: import('../../shared/types/runtime').RuntimeType) => {
-    if (!currentAgent) return;
+  // Runtime change — show confirm dialog, then open new Tab (v0.1.59)
+  const [pendingRuntimeChange, setPendingRuntimeChange] = useState<import('../../shared/types/runtime').RuntimeType | null>(null);
+
+  const handleRuntimeChange = useCallback((runtime: import('../../shared/types/runtime').RuntimeType) => {
+    if (!currentAgent || runtime === currentRuntime) return;
+    setPendingRuntimeChange(runtime);
+  }, [currentAgent, currentRuntime]);
+
+  const confirmRuntimeChange = useCallback(async () => {
+    const runtime = pendingRuntimeChange;
+    setPendingRuntimeChange(null);
+    if (!runtime || !currentAgent) return;
     try {
+      // 1. Save runtime to agent config
       await patchAgentConfig(currentAgent.id, { runtime });
-      await refreshProviderData(); // refresh config state
-      toast.info('Runtime 变更将在新建会话时生效');
+      await refreshProviderData();
+      // 2. Create a new session and open in new Tab
+      if (onForkSession && agentDir) {
+        const { createSession } = await import('@/api/sessionClient');
+        const session = await createSession(agentDir);
+        const runtimeLabel = runtime === 'claude-code' ? 'Claude Code' : runtime === 'codex' ? 'Codex' : 'MyAgents';
+        onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
+      }
     } catch (err) {
-      console.error('[chat] Failed to change runtime:', err);
+      console.error('[chat] Failed to switch runtime:', err);
+      toast.error('切换 Runtime 失败');
     }
-  }, [currentAgent, refreshProviderData, toast]);
+  }, [pendingRuntimeChange, currentAgent, refreshProviderData, onForkSession, agentDir, toast]);
   const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
   const handleOpenCronSettings = useCallback(() => setShowCronSettings(true), []);
 
@@ -2405,6 +2422,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           }}
           refreshKey={workspaceRefreshKey}
           initialTab={workspaceConfigInitialTab}
+        />
+      )}
+
+      {/* Runtime Switch Confirm Dialog (v0.1.59) */}
+      {pendingRuntimeChange && (
+        <ConfirmDialog
+          title="切换 Runtime"
+          message={`切换到 ${pendingRuntimeChange === 'claude-code' ? 'Claude Code' : pendingRuntimeChange === 'codex' ? 'Codex' : 'MyAgents'} 将新开一个会话。当前会话保留不变。`}
+          confirmText="确认切换"
+          cancelText="取消"
+          onConfirm={confirmRuntimeChange}
+          onCancel={() => setPendingRuntimeChange(null)}
         />
       )}
 
