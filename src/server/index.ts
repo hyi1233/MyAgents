@@ -1530,7 +1530,7 @@ async function main() {
             const result = await sendExternalMessage(
               text, images, permissionMode, model ?? undefined,
               // Pass session context for first-time start
-              { sessionId: getSessionId(), workspacePath: agentDir, scenario: { type: 'desktop' as const }, permissionMode },
+              { sessionId: getSessionId(), workspacePath: agentDir, scenario: { type: 'desktop' as const }, permissionMode, model: model ?? undefined },
             );
             return jsonResponse({ success: result.queued, error: result.error });
           } catch (error) {

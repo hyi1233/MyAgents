@@ -225,6 +225,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     options: SessionStartOptions,
     onEvent: UnifiedEventCallback,
   ): Promise<RuntimeProcess> {
+    // Clear stale state from previous sessions (singleton instance, maps persist)
+    this.blockIndexToToolUseId.clear();
+    this.blockIndexToType.clear();
+
     const args: string[] = [
       '-p',
       '--output-format', 'stream-json',
@@ -311,7 +315,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // NOTE: Initial message is sent via stdin (not positional arg) because
     // --input-format stream-json mode ignores positional prompts and waits for stdin.
 
-    console.log(`[claude-code] Starting session: claude ${args.slice(0, 6).join(' ')} ... (${args.length} args)`);
+    // Log ALL args for debugging (don't truncate — user needs to see full command)
+    console.log(`[claude-code] Starting session: claude ${args.join(' ')}`);
 
     // Augment PATH with user-level directories (e.g. ~/.local/bin where `claude` lives).
     // NOTE: Also inherits NO_PROXY from Sidecar (injected by proxy_config::apply_to_subprocess()).
@@ -458,7 +463,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           lineCount++;
           // Log first few lines and then periodically for diagnostics
           if (lineCount <= 5 || lineCount % 50 === 0) {
-            const preview = line.length > 200 ? line.slice(0, 200) + '...' : line;
+            const preview = line.length > 500 ? line.slice(0, 500) + '...' : line;
             console.log(`[claude-code] stdout line #${lineCount}: ${preview}`);
           }
           const event = this.parseLine(line);
@@ -547,7 +552,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         if (request?.subtype === 'can_use_tool') {
           return {
             kind: 'permission_request',
-            requestId: (request.request_id as string) || '',
+            // request_id is at the TOP level of control_request, not inside .request
+            requestId: (msg.request_id as string) || '',
             toolName: (request.tool_name as string) || '',
             toolUseId: (request.tool_use_id as string) || '',
             input: (request.input as Record<string, unknown>) || {},

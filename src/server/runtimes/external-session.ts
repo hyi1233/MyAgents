@@ -28,7 +28,9 @@ let lastScenario: InteractionScenario = { type: 'desktop' };
 let lastCcSessionId = '';  // CC's internal session ID (from hook or system.init)
 
 // Message accumulation for SessionStore persistence
-let pendingMessages: SessionMessage[] = [];
+// allSessionMessages grows across turns — saveSessionMessages expects the FULL cumulative array
+// (it uses messages.slice(existingCount) internally to find new messages to append)
+let allSessionMessages: SessionMessage[] = [];
 let currentAssistantText = '';  // Accumulate streaming text for the current assistant message
 let currentTurnStartTime = 0;
 
@@ -84,6 +86,12 @@ export async function startExternalSession(options: {
 
   console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}`);
   turnCompleted = false;
+  currentAssistantText = '';
+  currentTurnStartTime = 0;
+  // Only clear message history for new sessions, not resumes
+  if (!options.resumeSessionId) {
+    allSessionMessages = [];
+  }
 
   // Broadcast user message so frontend displays it in the chat
   // Also record it for SessionStore persistence
@@ -95,7 +103,7 @@ export async function startExternalSession(options: {
       timestamp: new Date().toISOString(),
     };
     broadcast('chat:message-replay', { message: userMsg });
-    pendingMessages.push(userMsg);
+    allSessionMessages.push(userMsg);
     currentAssistantText = '';
     currentTurnStartTime = Date.now();
   }
@@ -146,6 +154,7 @@ export interface ExternalSendContext {
   workspacePath: string;
   scenario: InteractionScenario;
   permissionMode?: string;
+  model?: string;  // Runtime-specific model (e.g., "sonnet", "opus")
 }
 
 /**
@@ -172,6 +181,7 @@ export async function sendExternalMessage(
         sessionId: context.sessionId,
         workspacePath: context.workspacePath,
         initialMessage: text,
+        model: context.model,
         permissionMode: context.permissionMode,
         scenario: context.scenario,
       });
@@ -376,19 +386,19 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           timestamp: new Date().toISOString(),
           durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
         };
-        pendingMessages.push(assistantMsg);
+        allSessionMessages.push(assistantMsg);
         currentAssistantText = '';
       }
 
-      // Save all pending messages to disk
-      if (pendingMessages.length > 0 && lastSessionId) {
+      // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append)
+      // Do NOT clear allSessionMessages — it must grow across turns for the contract to work
+      if (allSessionMessages.length > 0 && lastSessionId) {
         try {
-          saveSessionMessages(lastSessionId, pendingMessages);
+          saveSessionMessages(lastSessionId, allSessionMessages);
           updateSessionMetadata(lastSessionId, {
             lastActiveAt: new Date().toISOString(),
-            lastMessagePreview: pendingMessages[pendingMessages.length - 1]?.content?.slice(0, 100),
+            lastMessagePreview: allSessionMessages[allSessionMessages.length - 1]?.content?.slice(0, 100),
           });
-          pendingMessages = [];
         } catch (err) {
           console.error('[external-session] Failed to save session messages:', err);
         }
