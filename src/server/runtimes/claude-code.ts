@@ -170,6 +170,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       '--output-format', 'stream-json',
       '--input-format', 'stream-json',
       '--verbose',
+      '--include-partial-messages',  // Required to receive stream_event (text/thinking/tool deltas)
     ];
 
     // System Prompt injection
@@ -185,6 +186,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // Permission mode
     if (isImOrChannel || options.scenario.type === 'cron') {
       // IM/Cron: no human to approve → bypass
+      // MUST pass --allow-dangerously-skip-permissions BEFORE --dangerously-skip-permissions
+      args.push('--allow-dangerously-skip-permissions');
       args.push('--permission-mode', 'bypassPermissions');
       args.push('--dangerously-skip-permissions');
     } else {
@@ -291,14 +294,33 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     approved: boolean,
     reason?: string,
   ): Promise<void> {
-    const response = {
-      type: 'control_response',
-      response: {
-        request_id: requestId,
-        subtype: 'success',
-        response: { approved, reason },
-      },
-    };
+    // CC expects { behavior: "allow"/"deny" }, NOT { approved: true/false }
+    // See specs/research/claude_code_cli_reference.md Section 4.4.2
+    const response = approved
+      ? {
+        type: 'control_response' as const,
+        response: {
+          request_id: requestId,
+          subtype: 'success' as const,
+          response: {
+            behavior: 'allow' as const,
+            decisionClassification: 'user_temporary' as const,
+          },
+        },
+      }
+      : {
+        type: 'control_response' as const,
+        response: {
+          request_id: requestId,
+          subtype: 'success' as const,
+          response: {
+            behavior: 'deny' as const,
+            message: reason || 'User denied the request',
+            interrupt: false,
+            decisionClassification: 'user_reject' as const,
+          },
+        },
+      };
     await process.writeLine(JSON.stringify(response));
   }
 
