@@ -11,6 +11,8 @@ import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent } from './types';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import type { RuntimeType } from '../../shared/types/runtime';
+import { saveSessionMessages, updateSessionMetadata } from '../SessionStore';
+import type { SessionMessage } from '../types/session';
 
 // ─── Module state ───
 
@@ -24,6 +26,11 @@ let lastSessionId = '';
 let lastWorkspacePath = '';
 let lastScenario: InteractionScenario = { type: 'desktop' };
 let lastCcSessionId = '';  // CC's internal session ID (from hook or system.init)
+
+// Message accumulation for SessionStore persistence
+let pendingMessages: SessionMessage[] = [];
+let currentAssistantText = '';  // Accumulate streaming text for the current assistant message
+let currentTurnStartTime = 0;
 
 /**
  * Set CC's session ID (called from hook endpoint or system.init event).
@@ -79,15 +86,18 @@ export async function startExternalSession(options: {
   turnCompleted = false;
 
   // Broadcast user message so frontend displays it in the chat
+  // Also record it for SessionStore persistence
   if (options.initialMessage) {
-    broadcast('chat:message-replay', {
-      message: {
-        id: `user-${Date.now()}`,
-        role: 'user',
-        content: options.initialMessage,
-        timestamp: new Date().toISOString(),
-      },
-    });
+    const userMsg: SessionMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: options.initialMessage,
+      timestamp: new Date().toISOString(),
+    };
+    broadcast('chat:message-replay', { message: userMsg });
+    pendingMessages.push(userMsg);
+    currentAssistantText = '';
+    currentTurnStartTime = Date.now();
   }
 
   broadcast('chat:status', { sessionState: 'running' });
@@ -277,6 +287,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
   switch (event.kind) {
     case 'text_delta':
       broadcast('chat:message-chunk', event.text);
+      currentAssistantText += event.text;
       break;
 
     case 'text_stop':
@@ -350,12 +361,40 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       broadcast('chat:status', { sessionState: event.state === 'running' ? 'running' : 'idle' });
       break;
 
-    case 'turn_complete':
+    case 'turn_complete': {
       // Mark turn complete — session_complete will follow for -p mode
       turnCompleted = true;
       broadcast('chat:message-complete', {});
       broadcast('chat:status', { sessionState: 'idle' });
+
+      // Persist assistant message to SessionStore
+      if (currentAssistantText.trim()) {
+        const assistantMsg: SessionMessage = {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          content: currentAssistantText,
+          timestamp: new Date().toISOString(),
+          durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
+        };
+        pendingMessages.push(assistantMsg);
+        currentAssistantText = '';
+      }
+
+      // Save all pending messages to disk
+      if (pendingMessages.length > 0 && lastSessionId) {
+        try {
+          saveSessionMessages(lastSessionId, pendingMessages);
+          updateSessionMetadata(lastSessionId, {
+            lastActiveAt: new Date().toISOString(),
+            lastMessagePreview: pendingMessages[pendingMessages.length - 1]?.content?.slice(0, 100),
+          });
+          pendingMessages = [];
+        } catch (err) {
+          console.error('[external-session] Failed to save session messages:', err);
+        }
+      }
       break;
+    }
 
     case 'session_complete':
       if (event.subtype === 'success') {
