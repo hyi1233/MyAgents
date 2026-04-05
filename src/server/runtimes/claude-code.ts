@@ -58,6 +58,29 @@ class ClaudeCodeProcess implements RuntimeProcess {
   }
 }
 
+// ─── PATH augmentation for GUI apps ───
+
+/** Build an augmented env with user-level binary directories in PATH */
+function augmentedProcessEnv(): Record<string, string | undefined> {
+  const env = { ...process.env };
+  const home = env.HOME || env.USERPROFILE || '';
+  if (!home) return env;
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const extraDirs = [
+    `${home}/.local/bin`,   // Claude Code CLI global install
+    `${home}/.bun/bin`,     // Bun global installs
+    '/opt/homebrew/bin',    // macOS Apple Silicon homebrew
+    '/usr/local/bin',       // macOS Intel homebrew / Linux
+  ];
+  const currentPath = env.PATH || '';
+  const pathParts = currentPath ? currentPath.split(sep) : [];
+  for (const dir of extraDirs) {
+    if (!pathParts.includes(dir)) pathParts.push(dir);
+  }
+  env.PATH = pathParts.join(sep);
+  return env;
+}
+
 // ─── Model cache ───
 
 let modelCache: { models: RuntimeModelInfo[]; timestamp: number } | null = null;
@@ -79,6 +102,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         stdout: 'pipe',
         stderr: 'pipe',
         stdin: 'ignore',
+        env: augmentedProcessEnv(),
       });
       const text = await new Response(proc.stdout).text();
       const code = await proc.exited;
@@ -191,11 +215,11 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
     console.log(`[claude-code] Starting session: claude ${args.slice(0, 6).join(' ')} ... (${args.length} args)`);
 
-    // NOTE: Inherits process.env from the Bun Sidecar, which has NO_PROXY injected
-    // by proxy_config::apply_to_subprocess() in Rust. CC's internal localhost
-    // MCP traffic is protected by this inherited NO_PROXY.
+    // Augment PATH with user-level directories (e.g. ~/.local/bin where `claude` lives).
+    // NOTE: Also inherits NO_PROXY from Sidecar (injected by proxy_config::apply_to_subprocess()).
     const proc = spawn(['claude', ...args], {
       cwd: options.workspacePath,
+      env: augmentedProcessEnv(),
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',
