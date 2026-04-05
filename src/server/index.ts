@@ -1630,6 +1630,25 @@ async function main() {
         }
       }
 
+      // CC SessionStart hook receiver (v0.1.59)
+      // CC fires this hook when a session starts/resumes/compacts.
+      // The forwarder script (cc-session-hook-forwarder.cjs) POSTs the hook input here.
+      if (pathname === '/hook/session-start' && request.method === 'POST') {
+        try {
+          const hookData = (await request.json()) as Record<string, unknown>;
+          const ccSessionId = (hookData.session_id as string) || (hookData.sessionId as string) || '';
+          if (ccSessionId) {
+            console.log(`[hook] CC SessionStart: session_id=${ccSessionId}, source=${hookData.source}`);
+            // Import and update the external session's CC session ID
+            const { setCcSessionId } = await import('./runtimes/external-session');
+            setCcSessionId(ccSessionId);
+          }
+          return jsonResponse({ ok: true });
+        } catch {
+          return jsonResponse({ ok: false }, 500);
+        }
+      }
+
       // Rewind session to a specific user message (time travel)
       if (pathname === '/chat/rewind' && request.method === 'POST') {
         const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;

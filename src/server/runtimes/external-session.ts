@@ -23,7 +23,16 @@ let turnCompleted = false;
 let lastSessionId = '';
 let lastWorkspacePath = '';
 let lastScenario: InteractionScenario = { type: 'desktop' };
-let lastCcSessionId = '';  // CC's internal session ID (from system.init)
+let lastCcSessionId = '';  // CC's internal session ID (from hook or system.init)
+
+/**
+ * Set CC's session ID (called from hook endpoint or system.init event).
+ * Used for --resume in multi-turn conversations.
+ */
+export function setCcSessionId(id: string): void {
+  lastCcSessionId = id;
+  console.log(`[external-session] CC session ID set: ${id}`);
+}
 
 // ─── Public API ───
 

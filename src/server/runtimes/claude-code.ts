@@ -7,9 +7,69 @@
 // Session: --session-id / --resume
 
 import { spawn, type Subprocess } from 'bun';
+import { writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { join, dirname } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback } from './types';
+
+// ─── SessionStart Hook settings generator ───
+// CC's hooks fire on session lifecycle events. We inject a SessionStart hook
+// that POSTs the session_id to our Sidecar HTTP endpoint for reliable tracking.
+// This avoids relying on parsing stdout for session ID (which can race).
+
+const HOOK_SETTINGS_DIR = join(
+  process.env.HOME || process.env.USERPROFILE || '/tmp',
+  '.myagents', 'tmp', 'cc-hooks',
+);
+
+/**
+ * Generate a temporary CC settings file with a SessionStart hook
+ * that forwards the session ID to our Sidecar's HTTP server.
+ */
+function generateHookSettings(sidecarPort: number): string | null {
+  try {
+    // Path to the forwarder script (bundled alongside this module)
+    const forwarderScript = join(dirname(new URL(import.meta.url).pathname), 'cc-session-hook-forwarder.cjs');
+    if (!existsSync(forwarderScript)) {
+      console.warn('[claude-code] Hook forwarder script not found at', forwarderScript);
+      return null;
+    }
+
+    mkdirSync(HOOK_SETTINGS_DIR, { recursive: true });
+    const settingsPath = join(HOOK_SETTINGS_DIR, `session-hook-${process.pid}.json`);
+
+    const settings = {
+      hooks: {
+        SessionStart: [
+          {
+            matcher: '*',
+            hooks: [
+              {
+                type: 'command',
+                command: `node "${forwarderScript}" ${sidecarPort}`,
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    writeFileSync(settingsPath, JSON.stringify(settings), 'utf-8');
+    return settingsPath;
+  } catch (err) {
+    console.warn('[claude-code] Failed to generate hook settings:', err);
+    return null;
+  }
+}
+
+/** Clean up the temporary hook settings file */
+function cleanupHookSettings(): void {
+  try {
+    const settingsPath = join(HOOK_SETTINGS_DIR, `session-hook-${process.pid}.json`);
+    if (existsSync(settingsPath)) unlinkSync(settingsPath);
+  } catch { /* ignore */ }
+}
 
 // ─── RuntimeProcess wrapper ───
 
@@ -230,6 +290,17 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // IM: disable interactive-only tools
     if (isImOrChannel) {
       args.push('--disallowed-tools', 'AskUserQuestion');
+    }
+
+    // Inject SessionStart hook settings for reliable session ID tracking
+    // Read the sidecar's HTTP port from the --port CLI arg
+    const portArgIdx = process.argv.indexOf('--port');
+    const sidecarPort = portArgIdx >= 0 ? parseInt(process.argv[portArgIdx + 1], 10) : 0;
+    if (sidecarPort > 0) {
+      const hookSettingsPath = generateHookSettings(sidecarPort);
+      if (hookSettingsPath) {
+        args.push('--settings', hookSettingsPath);
+      }
     }
 
     // Additional args from config
