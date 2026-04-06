@@ -591,14 +591,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Codex models are dynamic (fetched from app-server); CC models are static
   const [codexModels, setCodexModels] = useState<typeof CC_MODELS>([]);
   useEffect(() => {
-    if (currentRuntime !== 'codex') return;
+    if (!multiAgentRuntimeEnabled || currentRuntime !== 'codex') return;
     let cancelled = false;
     apiGet('/api/runtime/models?type=codex').then((res: unknown) => {
       const data = res as { models?: typeof CC_MODELS } | undefined;
       if (!cancelled && data?.models?.length) setCodexModels(data.models);
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [currentRuntime, apiGet]);
+  }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
 
   const runtimeModels = currentRuntime === 'claude-code' ? CC_MODELS
     : currentRuntime === 'codex' ? codexModels : undefined;

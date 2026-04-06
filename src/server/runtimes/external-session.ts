@@ -221,6 +221,12 @@ export async function startExternalSession(options: {
 
   broadcast('chat:status', { sessionState: 'running' });
 
+  // Set session context BEFORE startSession so that events fired during startup
+  // (e.g., Codex's synchronous session_init) can reference lastSessionId for persistence.
+  lastSessionId = options.sessionId;
+  lastWorkspacePath = options.workspacePath;
+  lastScenario = options.scenario;
+
   try {
     const process = await runtime.startSession(
       {
@@ -239,10 +245,6 @@ export async function startExternalSession(options: {
     // Atomically set both process and running flag
     activeProcess = process;
     isRunning = true;
-    // Track for multi-turn resume
-    lastSessionId = options.sessionId;
-    lastWorkspacePath = options.workspacePath;
-    lastScenario = options.scenario;
     console.log(`[external-session] ${runtimeType} process started, pid=${activeProcess.pid}`);
   } catch (err) {
     isRunning = false;
