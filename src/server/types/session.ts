@@ -42,6 +42,9 @@ export interface SessionMetadata {
     };
     /** Which runtime created this session. Absent = 'builtin' (backward compatible) */
     runtime?: RuntimeType;
+    /** Runtime's own session/thread ID (Codex: threadId, CC: session_id from hook).
+     *  Different from our session `id` — used for resume across Sidecar restarts. */
+    runtimeSessionId?: string;
 }
 
 /**
