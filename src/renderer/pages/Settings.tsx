@@ -272,6 +272,14 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
     const [showCustomForm, setShowCustomForm] = useState(false);
     const [customForm, setCustomForm] = useState<CustomProviderForm>(EMPTY_CUSTOM_FORM);
+    const customModelInputRef = useRef<HTMLInputElement>(null);
+    const addCustomModelFromInput = () => {
+        const val = customModelInputRef.current?.value.trim();
+        if (val && !customForm.models.includes(val)) {
+            setCustomForm((p) => ({ ...p, models: [...p.models, val] }));
+            if (customModelInputRef.current) customModelInputRef.current.value = '';
+        }
+    };
     // Provider edit/manage panel state
     const [editingProvider, setEditingProvider] = useState<ProviderEditForm | null>(null);
     // 删除确认弹窗状态
@@ -5055,20 +5063,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 )}
                                 <div className="flex gap-2">
                                     <input
+                                        ref={customModelInputRef}
                                         type="text"
                                         placeholder="输入模型 ID，回车添加"
                                         className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors placeholder:text-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none"
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter') {
                                                 e.preventDefault();
-                                                const val = (e.target as HTMLInputElement).value.trim();
-                                                if (val && !customForm.models.includes(val)) {
-                                                    setCustomForm((p) => ({ ...p, models: [...p.models, val] }));
-                                                    (e.target as HTMLInputElement).value = '';
-                                                }
+                                                addCustomModelFromInput();
                                             }
                                         }}
                                     />
+                                    <button
+                                        type="button"
+                                        onClick={addCustomModelFromInput}
+                                        className="rounded-lg bg-[var(--paper-inset)] px-2.5 py-1.5 text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                                    >
+                                        <Plus className="h-4 w-4" />
+                                    </button>
                                 </div>
                             </div>
 
