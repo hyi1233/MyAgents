@@ -1822,6 +1822,10 @@ async function main() {
       if (pathname === '/chat/reset' && request.method === 'POST') {
         try {
           console.log('[chat] reset (new conversation)');
+          // Stop external runtime subprocess if active (prevents orphaned processes)
+          if (shouldUseExternalRuntime() && isExternalSessionActive()) {
+            await stopExternalSession();
+          }
           await resetSession();
           return jsonResponse({ success: true });
         } catch (error) {
@@ -2530,9 +2534,19 @@ async function main() {
           return jsonResponse({ success: false, error: 'sessionId is required.' }, 400);
         }
 
+        // Stop external runtime subprocess before switching (prevents orphaned processes)
+        if (shouldUseExternalRuntime() && isExternalSessionActive()) {
+          await stopExternalSession();
+        }
+
         const success = await switchToSession(payload.sessionId);
         if (!success) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
+        }
+
+        // Restore external runtime state for the target session (enables --resume on next message)
+        if (shouldUseExternalRuntime()) {
+          restoreExternalSessionState(payload.sessionId, agentDir, { type: 'desktop' });
         }
 
         console.log(`[sessions] Switched to session: ${payload.sessionId}`);
@@ -7445,6 +7459,10 @@ description: >
       // POST /api/im/session/new — Start a new session (preserving workspace)
       if (pathname === '/api/im/session/new' && request.method === 'POST') {
         try {
+          // Stop external runtime subprocess if active
+          if (shouldUseExternalRuntime() && isExternalSessionActive()) {
+            await stopExternalSession();
+          }
           await resetSession();
           return jsonResponse({
             sessionId: getSessionId(),

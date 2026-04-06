@@ -7,7 +7,7 @@
 // Session: --session-id / --resume
 
 import { spawn, type Subprocess } from 'bun';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
@@ -398,6 +398,12 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
     await process.waitForExit().catch(() => { });
     clearTimeout(timeout);
+
+    // Clean up per-process hook settings file
+    try {
+      const settingsPath = join(HOOK_DIR, `settings-${process.pid}.json`);
+      if (existsSync(settingsPath)) unlinkSync(settingsPath);
+    } catch { /* best-effort cleanup */ }
   }
 
   // ─── Private: NDJSON event stream reader ───

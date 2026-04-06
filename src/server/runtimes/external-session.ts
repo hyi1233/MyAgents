@@ -32,8 +32,101 @@ let lastRuntimeSessionId = '';  // Runtime's session ID (CC: from hook/init; Cod
 // allSessionMessages grows across turns — saveSessionMessages expects the FULL cumulative array
 // (it uses messages.slice(existingCount) internally to find new messages to append)
 let allSessionMessages: SessionMessage[] = [];
-let currentAssistantText = '';  // Accumulate streaming text for the current assistant message
+let currentAssistantText = '';  // Accumulate streaming text for the current assistant message (also used by getLastExternalAssistantText)
 let currentTurnStartTime = 0;
+
+// ─── Structured content block accumulation ───
+// Mirrors the builtin runtime's ContentBlock[] pattern so that session history
+// preserves thinking, tool_use, and text blocks (not just flattened text).
+// The frontend's JSON parse path (TabProvider.tsx:1969) handles this format.
+interface PersistContentBlock {
+  type: 'text' | 'tool_use' | 'thinking';
+  text?: string;
+  tool?: {
+    id: string;
+    name: string;
+    input: Record<string, unknown>;
+    inputJson?: string;
+    result?: string;
+    isError?: boolean;
+    streamIndex: number;
+  };
+  thinking?: string;
+  thinkingStreamIndex?: number;
+}
+
+let currentContentBlocks: PersistContentBlock[] = [];
+let pendingTextBuffer = '';         // text_delta accumulator between block boundaries
+let pendingThinkingText = '';       // thinking_delta accumulator for current thinking block
+let pendingThinkingIndex = 0;       // index of current thinking block
+const pendingToolInputs = new Map<string, { name: string; inputJson: string }>(); // toolUseId → input accumulator
+
+/** Flush accumulated text into a text content block */
+function flushPendingText(): void {
+  if (pendingTextBuffer) {
+    currentContentBlocks.push({ type: 'text', text: pendingTextBuffer });
+    pendingTextBuffer = '';
+  }
+}
+
+/** Flush any incomplete blocks (thinking/tool) at turn boundary — handles interrupts */
+function flushAllPending(): void {
+  flushPendingText();
+  if (pendingThinkingText) {
+    currentContentBlocks.push({
+      type: 'thinking',
+      thinking: pendingThinkingText,
+      thinkingStreamIndex: pendingThinkingIndex,
+    });
+    pendingThinkingText = '';
+  }
+  // Flush any uncompleted tool uses (interrupted mid-stream)
+  for (const [toolId, entry] of pendingToolInputs) {
+    let parsedInput: Record<string, unknown> = {};
+    try { parsedInput = JSON.parse(entry.inputJson); } catch { /* keep empty */ }
+    currentContentBlocks.push({
+      type: 'tool_use',
+      tool: {
+        id: toolId,
+        name: entry.name,
+        input: parsedInput,
+        inputJson: entry.inputJson,
+        streamIndex: currentContentBlocks.length,
+      },
+    });
+  }
+  pendingToolInputs.clear();
+}
+
+/** Reset all per-turn accumulators */
+function resetTurnAccumulators(): void {
+  currentAssistantText = '';
+  currentContentBlocks = [];
+  pendingTextBuffer = '';
+  pendingThinkingText = '';
+  pendingThinkingIndex = 0;
+  pendingToolInputs.clear();
+}
+
+/** Check if content looks like JSON ContentBlock[] (matches frontend heuristic in TabProvider.tsx:1969) */
+function isContentBlockJson(content: string): boolean {
+  return content.startsWith('[') && content.includes('"type"');
+}
+
+/** Extract plain text preview from content (handles both JSON ContentBlock[] and plain text) */
+function extractTextPreview(content: string, maxLen = 100): string {
+  if (isContentBlockJson(content)) {
+    try {
+      const blocks = JSON.parse(content) as PersistContentBlock[];
+      const text = blocks
+        .filter((b) => b.type === 'text' && b.text)
+        .map((b) => b.text)
+        .join('');
+      return text.slice(0, maxLen);
+    } catch { /* fall through */ }
+  }
+  return content.slice(0, maxLen);
+}
 
 // IM stream callback — mirrors agent-session.ts pattern for IM Bot relay
 type ImStreamCallback = (
@@ -155,12 +248,25 @@ export async function waitForExternalSessionIdle(timeoutMs: number, pollMs = 500
 
 /**
  * Get the last assistant message text from the current session.
- * Used by Cron handler to extract CC response after completion.
+ * Used by Cron handler and IM heartbeat to extract response text.
+ * Handles both JSON ContentBlock[] and plain text formats.
  */
 export function getLastExternalAssistantText(): string {
   for (let i = allSessionMessages.length - 1; i >= 0; i--) {
-    if (allSessionMessages[i].role === 'assistant') {
-      return allSessionMessages[i].content ?? '';
+    const msg = allSessionMessages[i];
+    if (msg.role === 'assistant') {
+      const content = msg.content ?? '';
+      // If stored as JSON ContentBlock[], extract text blocks
+      if (isContentBlockJson(content)) {
+        try {
+          const blocks = JSON.parse(content) as PersistContentBlock[];
+          return blocks
+            .filter((b) => b.type === 'text' && b.text)
+            .map((b) => b.text)
+            .join('');
+        } catch { /* fall through to plain text */ }
+      }
+      return content;
     }
   }
   return '';
@@ -193,7 +299,7 @@ export async function startExternalSession(options: {
 
   console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}`);
   turnCompleted = false;
-  currentAssistantText = '';
+  resetTurnAccumulators();
   currentTurnStartTime = 0;
   // Only clear message history for new sessions, not resumes
   if (!options.resumeSessionId) {
@@ -211,7 +317,7 @@ export async function startExternalSession(options: {
     };
     broadcast('chat:message-replay', { message: userMsg });
     allSessionMessages.push(userMsg);
-    currentAssistantText = '';
+    resetTurnAccumulators();
     currentTurnStartTime = Date.now();
 
     // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
@@ -235,6 +341,10 @@ export async function startExternalSession(options: {
   lastWorkspacePath = options.workspacePath;
   lastScenario = options.scenario;
 
+  // Set isRunning BEFORE spawning — prevents waitForExternalSessionIdle from
+  // seeing the pre-start state and returning true prematurely. Reset in catch.
+  isRunning = true;
+
   try {
     const process = await runtime.startSession(
       {
@@ -250,9 +360,7 @@ export async function startExternalSession(options: {
       handleUnifiedEvent,
     );
 
-    // Atomically set both process and running flag
     activeProcess = process;
-    isRunning = true;
     console.log(`[external-session] ${runtimeType} process started, pid=${activeProcess.pid}`);
   } catch (err) {
     isRunning = false;
@@ -346,7 +454,7 @@ export async function sendExternalMessage(
     broadcast('chat:message-replay', { message: userMsg });
     allSessionMessages.push(userMsg);
     turnCompleted = false;
-    currentAssistantText = '';
+    resetTurnAccumulators();
     currentTurnStartTime = Date.now();
 
     broadcast('chat:status', { sessionState: 'running' });
@@ -435,30 +543,47 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     case 'text_delta':
       broadcast('chat:message-chunk', event.text);
       currentAssistantText += event.text;
+      pendingTextBuffer += event.text;
       fireImCallback('delta', event.text);
       break;
 
     case 'text_stop':
-      // Text block ended
+      // Text block ended — flush accumulated text into a content block
+      flushPendingText();
       fireImCallback('block-end', '');
       break;
 
     case 'thinking_start':
+      flushPendingText();  // Close any open text block before thinking
+      pendingThinkingText = '';
+      pendingThinkingIndex = event.index;
       broadcast('chat:thinking-start', { index: event.index });
       fireImCallback('activity', '');
       break;
 
     case 'thinking_delta':
+      pendingThinkingText += event.text;
       // Frontend expects { index, delta } — match builtin SSE shape
       broadcast('chat:thinking-chunk', { index: event.index, delta: event.text });
       break;
 
     case 'thinking_stop':
+      // Finalize thinking block
+      if (pendingThinkingText) {
+        currentContentBlocks.push({
+          type: 'thinking',
+          thinking: pendingThinkingText,
+          thinkingStreamIndex: pendingThinkingIndex,
+        });
+        pendingThinkingText = '';
+      }
       // Emit content-block-stop so frontend closes the thinking block
       broadcast('chat:content-block-stop', { index: event.index, type: 'thinking' });
       break;
 
     case 'tool_use_start':
+      flushPendingText();  // Close any open text block before tool use
+      pendingToolInputs.set(event.toolUseId, { name: event.toolName, inputJson: '' });
       broadcast('chat:tool-use-start', {
         id: event.toolUseId,
         name: event.toolName,
@@ -467,21 +592,52 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       fireImCallback('activity', '');
       break;
 
-    case 'tool_input_delta':
+    case 'tool_input_delta': {
+      const toolEntry = pendingToolInputs.get(event.toolUseId);
+      if (toolEntry) {
+        toolEntry.inputJson += event.delta;
+      }
       broadcast('chat:tool-input-delta', {
         toolId: event.toolUseId,
         delta: event.delta,
       });
       break;
+    }
 
-    case 'tool_use_stop':
+    case 'tool_use_stop': {
+      // Finalize tool use block from accumulated input
+      const entry = pendingToolInputs.get(event.toolUseId);
+      if (entry) {
+        let parsedInput: Record<string, unknown> = {};
+        try { parsedInput = JSON.parse(entry.inputJson); } catch { /* keep empty */ }
+        currentContentBlocks.push({
+          type: 'tool_use',
+          tool: {
+            id: event.toolUseId,
+            name: entry.name,
+            input: parsedInput,
+            inputJson: entry.inputJson,
+            streamIndex: currentContentBlocks.length,
+          },
+        });
+        pendingToolInputs.delete(event.toolUseId);
+      }
       broadcast('chat:content-block-stop', {
         type: 'tool_use',
         toolId: event.toolUseId,
       });
       break;
+    }
 
     case 'tool_result':
+      // Update the matching tool_use block's result
+      for (let i = currentContentBlocks.length - 1; i >= 0; i--) {
+        if (currentContentBlocks[i].type === 'tool_use' && currentContentBlocks[i].tool?.id === event.toolUseId) {
+          currentContentBlocks[i].tool!.result = event.content;
+          currentContentBlocks[i].tool!.isError = event.isError ?? false;
+          break;
+        }
+      }
       broadcast('chat:tool-result-start', {
         toolUseId: event.toolUseId,
         content: event.content,
@@ -494,7 +650,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         requestId: event.requestId,
         toolName: event.toolName,
         toolUseId: event.toolUseId,
-        input: event.input,
+        input: typeof event.input === 'object' ? JSON.stringify(event.input).slice(0, 500) : String(event.input ?? '').slice(0, 500),
       });
       fireImCallback('permission-request', JSON.stringify({
         requestId: event.requestId,
@@ -522,9 +678,12 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       });
       break;
 
-    case 'status_change':
-      broadcast('chat:status', { sessionState: event.state === 'running' ? 'running' : 'idle' });
+    case 'status_change': {
+      // Map runtime states to frontend session states (match builtin runtime behavior)
+      const stateMap: Record<string, string> = { running: 'running', error: 'error', waiting_permission: 'running' };
+      broadcast('chat:status', { sessionState: stateMap[event.state ?? ''] ?? 'idle' });
       break;
+    }
 
     case 'turn_complete': {
       // Mark turn complete — session_complete will follow for -p mode
@@ -533,8 +692,23 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       broadcast('chat:status', { sessionState: 'idle' });
       fireImCallback('complete', '');
 
-      // Persist assistant message to SessionStore
-      if (currentAssistantText.trim()) {
+      // Flush any pending blocks (text, thinking, tool) and persist structured content
+      flushAllPending();
+
+      if (currentContentBlocks.length > 0) {
+        // Persist as JSON ContentBlock[] — matches builtin runtime format
+        const content = JSON.stringify(currentContentBlocks);
+        const assistantMsg: SessionMessage = {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          content,
+          timestamp: new Date().toISOString(),
+          durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
+        };
+        allSessionMessages.push(assistantMsg);
+        resetTurnAccumulators();
+      } else if (currentAssistantText.trim()) {
+        // Fallback: no structured blocks, just plain text (e.g. CC slash commands)
         const assistantMsg: SessionMessage = {
           id: `assistant-${Date.now()}`,
           role: 'assistant',
@@ -543,7 +717,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
         };
         allSessionMessages.push(assistantMsg);
-        currentAssistantText = '';
+        resetTurnAccumulators();
       }
 
       // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append)
@@ -551,9 +725,10 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       if (allSessionMessages.length > 0 && lastSessionId) {
         try {
           saveSessionMessages(lastSessionId, allSessionMessages);
+          const lastMsg = allSessionMessages[allSessionMessages.length - 1];
           updateSessionMetadata(lastSessionId, {
             lastActiveAt: new Date().toISOString(),
-            lastMessagePreview: allSessionMessages[allSessionMessages.length - 1]?.content?.slice(0, 100),
+            lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
           });
         } catch (err) {
           console.error('[external-session] Failed to save session messages:', err);
@@ -570,11 +745,26 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         if (event.result && !turnCompleted && !currentAssistantText.trim()) {
           broadcast('chat:message-chunk', event.result);
           currentAssistantText += event.result;
+          pendingTextBuffer += event.result;
         }
         // Only broadcast if turn_complete didn't already
         if (!turnCompleted) {
-          // Persist the result text as an assistant message
-          if (currentAssistantText.trim()) {
+          // Flush and persist structured content
+          flushAllPending();
+
+          if (currentContentBlocks.length > 0) {
+            const content = JSON.stringify(currentContentBlocks);
+            const assistantMsg: SessionMessage = {
+              id: `assistant-${Date.now()}`,
+              role: 'assistant',
+              content,
+              timestamp: new Date().toISOString(),
+              durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
+            };
+            allSessionMessages.push(assistantMsg);
+            resetTurnAccumulators();
+          } else if (currentAssistantText.trim()) {
+            // Fallback: plain text (CC slash commands)
             const assistantMsg: SessionMessage = {
               id: `assistant-${Date.now()}`,
               role: 'assistant',
@@ -583,18 +773,19 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
               durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
             };
             allSessionMessages.push(assistantMsg);
-            currentAssistantText = '';
+            resetTurnAccumulators();
+          }
 
-            if (allSessionMessages.length > 0 && lastSessionId) {
-              try {
-                saveSessionMessages(lastSessionId, allSessionMessages);
-                updateSessionMetadata(lastSessionId, {
-                  lastActiveAt: new Date().toISOString(),
-                  lastMessagePreview: allSessionMessages[allSessionMessages.length - 1]?.content?.slice(0, 100),
-                });
-              } catch (err) {
-                console.error('[external-session] Failed to save session messages:', err);
-              }
+          if (allSessionMessages.length > 0 && lastSessionId) {
+            try {
+              saveSessionMessages(lastSessionId, allSessionMessages);
+              const lastMsg = allSessionMessages[allSessionMessages.length - 1];
+              updateSessionMetadata(lastSessionId, {
+                lastActiveAt: new Date().toISOString(),
+                lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
+              });
+            } catch (err) {
+              console.error('[external-session] Failed to save session messages:', err);
             }
           }
           broadcast('chat:message-complete', {});
@@ -603,6 +794,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       } else {
         broadcast('chat:message-error', event.result || 'Session ended with error');
         fireImCallback('error', event.result || 'Session ended with error');
+        resetTurnAccumulators(); // Prevent stale content leaking into next turn
       }
       broadcast('chat:status', { sessionState: 'idle' });
       // Clean up module state — prevents stuck sessions on CC crash

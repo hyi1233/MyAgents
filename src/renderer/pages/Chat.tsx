@@ -1530,9 +1530,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
     } catch (err) {
       console.error('[chat] Failed to switch runtime:', err);
-      toast.error('切换 Runtime 失败');
+      toastRef.current.error('切换 Runtime 失败');
     }
-  }, [pendingRuntimeChange, currentAgent, refreshProviderData, onForkSession, agentDir, toast]);
+  }, [pendingRuntimeChange, currentAgent, refreshProviderData, onForkSession, agentDir]);
   const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
   const handleOpenCronSettings = useCallback(() => setShowCronSettings(true), []);
 
