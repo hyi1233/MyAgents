@@ -365,6 +365,10 @@ export class CodexRuntime implements AgentRuntime {
 
     // Wire up notification handler to emit UnifiedEvents
     codexProc.rpc.setNotificationHandler((method, params) => {
+      // Log all v2 notifications for debugging (skip noisy legacy codex/event/* duplicates)
+      if (!method.startsWith('codex/event/') && !method.startsWith('account/')) {
+        console.log(`[codex] notification: ${method}`);
+      }
       const result = this.parseNotification(method, params);
       if (!result) return;
       // parseNotification may return one event or an array (e.g., tool_use_stop + tool_result)
@@ -460,6 +464,7 @@ export class CodexRuntime implements AgentRuntime {
         const turnResult = await codexProc.rpc.call('turn/start', {
           threadId: codexProc.threadId,
           input: [{ type: 'text', text: options.initialMessage, text_elements: [] }],
+          summary: 'concise', // Enable reasoning summary streaming for thinking UI
         }, 15_000) as { turn: { id: string } };
         codexProc.currentTurnId = turnResult.turn.id;
       }
@@ -480,6 +485,7 @@ export class CodexRuntime implements AgentRuntime {
     const turnResult = await codexProc.rpc.call('turn/start', {
       threadId: codexProc.threadId,
       input: [{ type: 'text', text: message, text_elements: [] }],
+      summary: 'concise',
     }, 15_000) as { turn: { id: string } };
     codexProc.currentTurnId = turnResult.turn.id;
   }
@@ -603,23 +609,32 @@ export class CodexRuntime implements AgentRuntime {
 
       // ── Tool/item lifecycle ──
       case 'item/started': {
-        const item = p.item as { type: string; id: string; command?: string; tool?: string; server?: string; text?: string } | undefined;
+        const item = p.item as { type: string; id: string; command?: string; cwd?: string; tool?: string; server?: string; text?: string; query?: string; arguments?: unknown } | undefined;
         if (!item) return null;
         switch (item.type) {
-          case 'commandExecution':
-            return { kind: 'tool_use_start', toolUseId: item.id, toolName: 'Shell' };
+          case 'commandExecution': {
+            // Emit start + initial input (command text) so frontend shows what's being run
+            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'Shell' }];
+            if (item.command) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: item.command });
+            return events;
+          }
           case 'fileChange':
             return { kind: 'tool_use_start', toolUseId: item.id, toolName: 'FileEdit' };
-          case 'mcpToolCall':
-            return { kind: 'tool_use_start', toolUseId: item.id, toolName: item.tool || 'MCP Tool' };
+          case 'mcpToolCall': {
+            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: item.tool || 'MCP Tool' }];
+            if (item.arguments) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: JSON.stringify(item.arguments) });
+            return events;
+          }
           case 'dynamicToolCall':
             return { kind: 'tool_use_start', toolUseId: item.id, toolName: item.tool || 'Tool' };
-          case 'webSearch':
-            return { kind: 'tool_use_start', toolUseId: item.id, toolName: 'WebSearch' };
+          case 'webSearch': {
+            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'WebSearch' }];
+            if (item.query) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: item.query });
+            return events;
+          }
           case 'reasoning':
             return { kind: 'thinking_start', index: 0 };
           case 'agentMessage':
-            // Agent message started — no specific event needed
             return null;
           case 'userMessage':
           case 'plan':
@@ -643,6 +658,8 @@ export class CodexRuntime implements AgentRuntime {
           error?: { message: string };
           text?: string;
           summary?: string[];
+          query?: string;
+          action?: { type: string; url?: string; queries?: string[] };
         } | undefined;
         if (!item) return null;
 
@@ -669,11 +686,16 @@ export class CodexRuntime implements AgentRuntime {
               { kind: 'tool_use_stop', toolUseId: item.id },
               { kind: 'tool_result', toolUseId: item.id, content: JSON.stringify(item.result ?? '') },
             ];
-          case 'webSearch':
+          case 'webSearch': {
+            // Include query and URL in result for display
+            const parts: string[] = [];
+            if (item.query) parts.push(`Query: ${item.query}`);
+            if (item.action?.url) parts.push(`URL: ${item.action.url}`);
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
-              { kind: 'tool_result', toolUseId: item.id, content: 'Search completed' },
+              { kind: 'tool_result', toolUseId: item.id, content: parts.join('\n') || 'Search completed' },
             ];
+          }
           case 'reasoning':
             return { kind: 'thinking_stop', index: 0 };
           case 'agentMessage':
