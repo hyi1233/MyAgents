@@ -1319,12 +1319,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Track provider_switch event
     track('provider_switch', { provider_id: providerId });
 
+    const newProvider = providers.find(p => p.id === providerId);
+    const model = targetModel ?? newProvider?.primaryModel;
+
+    // Cross-protocol guard: third-party (OpenAI bridge) → Anthropic native.
+    // Anthropic validates thinking block signatures that third-party providers don't,
+    // so session history is incompatible. Show confirm dialog instead of switching inline.
+    // Only guard when there are existing messages (fresh sessions can switch freely).
+    const currentIsThirdParty = currentProvider && (currentProvider.apiProtocol === 'openai' || !!currentProvider.config.baseUrl);
+    const newIsAnthropicNative = newProvider && !newProvider.config.baseUrl && newProvider.apiProtocol !== 'openai';
+    if (currentIsThirdParty && newIsAnthropicNative && messages.length > 0) {
+      setPendingProviderSwitch({ providerId, model });
+      return;  // Don't update state — dialog will handle it
+    }
+
     // Update local state — explicitly set both provider and model.
     // Don't rely on the provider-change effect for model cascade, because
     // providerInitRef may be stale (re-armed by one-time sync) and suppress it.
     setSelectedProviderId(providerId);
-    const newProvider = providers.find(p => p.id === providerId);
-    const model = targetModel ?? newProvider?.primaryModel;
     if (model) {
       setSelectedModel(model);
     }
@@ -1340,7 +1352,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps
-  }, [selectedProviderId, currentProject?.id, patchProject, providers]);
+  }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider, messages.length]);
 
   // Handle model change with analytics tracking and project write-back
   const handleModelChange = useCallback((model: string) => {
@@ -1523,6 +1535,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   const handleOpenAgentSettings = useCallback(() => setShowWorkspaceConfig(true), []);
 
+  // Cross-protocol provider switch: third-party (OpenAI bridge) → Anthropic native.
+  // Anthropic validates thinking block signatures that third-party providers don't,
+  // so we can't resume — show confirm dialog, then open new Tab. See: #68
+  const [pendingProviderSwitch, setPendingProviderSwitch] = useState<{
+    providerId: string;
+    model?: string;
+  } | null>(null);
+
   // Runtime change — show confirm dialog, then open new Tab (v0.1.59)
   const [pendingRuntimeChange, setPendingRuntimeChange] = useState<RuntimeType | null>(null);
 
@@ -1551,6 +1571,31 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       toastRef.current.error('切换 Runtime 失败');
     }
   }, [pendingRuntimeChange, currentAgent, refreshConfig, onForkSession, agentDir]);
+
+  // Cross-protocol provider switch confirm: save new provider to project, create new session in new tab.
+  // Current tab stays unchanged (preserving the third-party session). See: #68
+  const confirmProviderSwitch = useCallback(async () => {
+    const pending = pendingProviderSwitch;
+    setPendingProviderSwitch(null);
+    if (!pending || !agentDir || !onForkSession) return;
+    try {
+      // 1. Save provider + model to project config so the new tab picks it up
+      if (currentProject) {
+        await patchProject(currentProject.id, { providerId: pending.providerId, model: pending.model ?? null });
+        if (currentProject?.agentId) {
+          await patchAgentConfig(currentProject.agentId, { providerId: pending.providerId, model: pending.model ?? undefined });
+        }
+      }
+      // 2. Create a new session and open in new Tab
+      const { createSession } = await import('@/api/sessionClient');
+      const session = await createSession(agentDir);
+      const newProvider = providers.find(p => p.id === pending.providerId);
+      onForkSession(session.id, agentDir, `${newProvider?.name ?? 'Claude'} 会话`);
+    } catch (err) {
+      console.error('[chat] Failed to create cross-provider session:', err);
+      toastRef.current.error('创建新会话失败');
+    }
+  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject, patchProject, providers]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {
@@ -2528,6 +2573,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           cancelText="取消"
           onConfirm={confirmRuntimeChange}
           onCancel={() => setPendingRuntimeChange(null)}
+        />
+      )}
+
+      {/* Cross-Protocol Provider Switch Confirm Dialog (#68) */}
+      {pendingProviderSwitch && (
+        <ConfirmDialog
+          title="切换到 Claude 模型"
+          message="Claude 模型会验证会话历史中的签名信息，无法继续使用其他供应商的会话记录。将为你新开一个会话。"
+          confirmText="创建新会话"
+          cancelText="取消"
+          onConfirm={confirmProviderSwitch}
+          onCancel={() => setPendingProviderSwitch(null)}
         />
       )}
 

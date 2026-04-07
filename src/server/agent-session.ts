@@ -1078,15 +1078,8 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   // Full equality check — all ProviderEnv fields affect subprocess env (authType, apiProtocol, etc.)
   if (providerEnvEqual(currentProviderEnv, providerEnv)) return;
 
-  // Resume safety: switching FROM third-party (has baseUrl) TO Anthropic official (no baseUrl)
-  // requires a fresh session. Anthropic validates thinking block signatures that third-party
-  // providers don't, so resuming with third-party messages causes signature errors.
-  // Must check BEFORE updating currentProviderEnv.
-  const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !providerEnv?.baseUrl;
-  if (switchingFromThirdPartyToAnthropic) {
-    sessionRegistered = false;
-    console.log('[agent] provider switch: third-party → Anthropic — will create fresh session (signature incompatible)');
-  }
+  // Note: third-party → Anthropic cross-protocol switch is now handled by the frontend.
+  // Chat.tsx shows a ConfirmDialog and creates a new session in a new tab. See: #68
 
   currentProviderEnv = providerEnv;
   console.log(`[agent] session provider env set: ${oldLabel} → ${newLabel}`);
@@ -4036,20 +4029,9 @@ export async function enqueueUserMessage(
     const toLabel = effectiveProviderEnv?.baseUrl ?? 'anthropic';
     if (isDebugMode) console.log(`[agent] provider changed from ${fromLabel} to ${toLabel}, restarting session`);
 
-    // Resume logic: Anthropic official validates thinking block signatures, third-party providers don't.
-    // Only skip resume when switching FROM third-party (has baseUrl) TO Anthropic official (no baseUrl).
-    // All other transitions (official→third-party, third-party→third-party, official→official) can safely resume.
-    const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !effectiveProviderEnv?.baseUrl;
-    if (switchingFromThirdPartyToAnthropic) {
-      // Anthropic 官方验证 thinking block 签名，第三方不验证，必须新建 session
-      sessionRegistered = false;
-      sessionId = randomUUID();
-      hasInitialPrompt = false;   // 确保新 session 创建 metadata
-      messages.length = 0;        // 清除旧 provider 不兼容的消息
-      systemInitInfo = null;      // 清除旧 init info
-      console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
-    }
-    // 其他 provider 切换：sessionRegistered 保持不变，自动走正确路径
+    // Note: third-party → Anthropic cross-protocol switch is now handled by the frontend.
+    // Chat.tsx shows a ConfirmDialog and creates a new session in a new tab,
+    // so this backend path is no longer reached for that case. See: #68
 
     // Update provider env BEFORE terminating so the new session picks it up
     currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
