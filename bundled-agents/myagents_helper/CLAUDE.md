@@ -134,6 +134,19 @@ myagents CLI ──> Bun Admin API ──> Rust Management API
 ```
 如果用户遇到运行时相关问题，建议用户自行安装 Node.js 或 Bun 作为系统级兜底。
 
+### Multi-Agent Runtime（v0.1.60+）
+
+除内置 AI Runtime（Claude Agent SDK）外，支持使用外部 Runtime 驱动 Agent 对话：
+
+| Runtime | CLI 工具 | 协议 | 安装方式 |
+|---------|---------|------|---------|
+| **内置**（默认） | — | Claude Agent SDK 直接调用 | 无需安装 |
+| **Claude Code** | `claude` | NDJSON over stdio | 用户自行安装（`npm i -g @anthropic-ai/claude-code`） |
+| **Codex** | `codex` | JSON-RPC 2.0 over stdio | 用户自行安装（`npm i -g @openai/codex`） |
+
+**功能门控**：设置 → 关于 → 实验室 → 「更多 Agent Runtime」开关。默认关闭。
+**用户遇到 Runtime 相关问题时**：先确认开关状态，检查对应 CLI 是否已安装（`claude --version` / `codex --version`），查看日志中 `[external-session]` 或 `[external-runtime]` 标记。
+
 ### Agent 架构（v0.1.41+）
 
 v0.1.41 将 IM Bot 升级为 **Agent** 实体，Channel 为可插拔的 IM 连接：
