@@ -660,7 +660,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
         // 2. Compute effective values BEFORE setState (avoid stale closure)
         const effectivePermission = initialMessage.permissionMode ?? permissionMode;
-        const effectiveModel = initialMessage.model ?? selectedModel;
+        // External runtime uses runtimeModel as fallback (not selectedModel which is the builtin model).
+        // When both are undefined (user picked "默认"), pass undefined to let the CLI use its own default.
+        const effectiveModel = initialMessage.model ?? (isExternalRuntime ? runtimeModel : selectedModel);
 
         // 3. Update local UI state to reflect Launcher choices
         if (initialMessage.permissionMode) setPermissionMode(initialMessage.permissionMode);
@@ -692,7 +694,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           initialMessage.images,
           effectivePermission,
           effectiveModel,
-          providerEnv
+          isExternalRuntime ? undefined : providerEnv
         );
 
         // 6. Hide overlay
