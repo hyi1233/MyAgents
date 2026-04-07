@@ -173,7 +173,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const toast = useToast();
 
   // Get config to find current project provider
-  const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData } = useConfig();
+  const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData, refreshConfig } = useConfig();
   const currentProject = projects.find((p) => p.path === agentDir);
   // AgentConfig is source of truth for AI settings, Project is fallback for non-agent workspaces
   const currentAgent = currentProject?.agentId ? getAgentById(config, currentProject.agentId) : undefined;
@@ -1536,9 +1536,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setPendingRuntimeChange(null);
     if (!runtime || !currentAgent) return;
     try {
-      // 1. Save runtime to agent config
+      // 1. Save runtime to agent config + refresh React state so new tab sees updated runtime
       await patchAgentConfig(currentAgent.id, { runtime });
-      await refreshProviderData();
+      await refreshConfig();  // Must use refreshConfig (not refreshProviderData) to update config.agents
       // 2. Create a new session and open in new Tab
       if (onForkSession && agentDir) {
         const { createSession } = await import('@/api/sessionClient');
@@ -1550,7 +1550,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       console.error('[chat] Failed to switch runtime:', err);
       toastRef.current.error('切换 Runtime 失败');
     }
-  }, [pendingRuntimeChange, currentAgent, refreshProviderData, onForkSession, agentDir]);
+  }, [pendingRuntimeChange, currentAgent, refreshConfig, onForkSession, agentDir]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {
