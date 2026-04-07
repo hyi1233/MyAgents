@@ -9,6 +9,7 @@ import { memo, useCallback, useMemo } from 'react';
 import SimpleChatInput, { type ImageAttachment } from '@/components/SimpleChatInput';
 import WorkspaceSelector from './WorkspaceSelector';
 import { type Project, type Provider, type PermissionMode, type ProviderVerifyStatus } from '@/config/types';
+import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../../../shared/types/runtime';
 
 interface BrandSectionProps {
     // Workspace
@@ -38,6 +39,10 @@ interface BrandSectionProps {
     onRefreshProviders?: () => void;
     // Navigation
     onGoToSettings?: () => void;
+    // Runtime (external runtimes adapt model/permission selectors)
+    runtime?: RuntimeType;
+    runtimeModels?: RuntimeModelInfo[];
+    runtimePermissionModes?: RuntimePermissionMode[];
 }
 
 export default memo(function BrandSection({
@@ -63,6 +68,9 @@ export default memo(function BrandSection({
     onWorkspaceMcpToggle,
     onRefreshProviders,
     onGoToSettings,
+    runtime,
+    runtimeModels,
+    runtimePermissionModes,
 }: BrandSectionProps) {
     const handleSend = useCallback((text: string, images?: ImageAttachment[]) => {
         onSend(text, images);
@@ -114,6 +122,9 @@ export default memo(function BrandSection({
                         mcpServers={mcpServers}
                         onWorkspaceMcpToggle={onWorkspaceMcpToggle}
                         onRefreshProviders={onRefreshProviders}
+                        runtime={runtime}
+                        runtimeModels={runtimeModels}
+                        runtimePermissionModes={runtimePermissionModes}
                         toolbarPrefix={
                             <WorkspaceSelector
                                 projects={projects}

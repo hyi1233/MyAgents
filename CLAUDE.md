@@ -128,6 +128,18 @@ npm run typecheck && npm run lint  # 代码质量检查
 - 新增配置同步端点时，确保 `currentXxx` 变量在 pre-warm 前已设置
 - **MCP 配置权威来源分离**：Tab 会话的 MCP 由前端 `/api/mcp/set` 配置（`initializeAgent` 中 MUST NOT self-resolve MCP），IM/Cron 会话的 MCP 由 self-resolve 从磁盘读取。混用会导致 fingerprint 差异 → abort → 30s 重启循环
 
+### Multi-Agent Runtime (v0.1.60)
+
+除 builtin（Claude Agent SDK）外，支持 Claude Code CLI（NDJSON/stdio）和 Codex CLI（JSON-RPC 2.0/stdio）作为外部 Runtime。功能门控：`config.multiAgentRuntime`（默认关闭）。
+
+- **抽象层**：`src/server/runtimes/` — `AgentRuntime` 接口 + `UnifiedEvent` 统一事件 + `external-session.ts` 会话管理
+- **门控链路**：Rust `sidecar.rs` 注入 `MYAGENTS_RUNTIME` 环境变量 → Bun `factory.ts` 读取 → `shouldUseExternalRuntime()` 分流。前端 `Chat.tsx` 的 `currentRuntime` 在定义处门控（`multiAgentRuntimeEnabled ? agent.runtime : 'builtin'`），下游派生自动安全
+- **Config 变更**：Model/Permission 变更 → `setExternalModel()`/`setExternalPermissionMode()` → 停进程 → 下次消息以新配置 resume
+- **跨 Runtime Session 保护**：`initializeAgent` 检测 `meta.runtime !== 'builtin'` → 跳过 SDK resume → 前端弹确认框引导新开会话
+- **`schedulePreWarm()` 已内置 external runtime 跳过守卫**（agent-session.ts:1145），外部 runtime 不走 SDK pre-warm
+- 新增 config 同步端点时，MUST 检查 `shouldUseExternalRuntime()` 并分流到 `external-session.ts` 对应函数
+- 详见 @specs/tech_docs/multi_agent_runtime.md
+
 ### 定时任务系统
 
 Rust `CronTaskManager` 统一管理所有定时任务（Chat 定时、独立创建、AI 工具调用、IM Cron、Heartbeat），支持三种调度：固定间隔 / Cron 表达式 / 一次性。Cron Tool（`im-cron` MCP server）已泛化为**所有 Session 可用**（不仅 IM Bot），始终信任。新增 `CronTask` 字段 MUST 带 `#[serde(default)]`。详见 @specs/tech_docs/architecture.md 的「定时任务系统」节。
@@ -236,4 +248,5 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 - Session ID 架构：@specs/tech_docs/session_id_architecture.md
 - 代理配置：@specs/tech_docs/proxy_config.md
 - Windows 平台适配：@specs/tech_docs/windows_platform_guide.md
+- Multi-Agent Runtime（CC/Codex 协议、会话管理、门控链路）：@specs/tech_docs/multi_agent_runtime.md
 - 设计系统（Token/组件/页面规范）：@specs/guides/design_guide.md

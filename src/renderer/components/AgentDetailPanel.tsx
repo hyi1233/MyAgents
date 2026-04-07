@@ -14,6 +14,8 @@ import { apiGetJson as globalApiGet, apiPutJson as globalApiPut, apiDelete as gl
 import { useTabApiOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import CustomSelect from '@/components/CustomSelect';
+import type { SelectOption } from '@/components/CustomSelect';
 import Markdown from '@/components/Markdown';
 import MonacoEditor from '@/components/MonacoEditor';
 import type { AgentFrontmatter, AgentDetail } from '../../shared/agentTypes';
@@ -265,6 +267,43 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
 
         const nameInputRef = useRef<HTMLInputElement>(null);
         const [focusField, setFocusField] = useState<'name' | 'description' | 'body' | null>(null);
+
+        // Available skills for suggestion dropdown
+        const [availableSkills, setAvailableSkills] = useState<string[]>([]);
+        useEffect(() => {
+            const fetchSkills = async () => {
+                try {
+                    // Workspace context: project + user skills; Global context: user only
+                    const scopeParam = scope === 'project' ? 'all' : 'user';
+                    const agentDirParam = (!isInTabContext && scope === 'project' && agentDir)
+                        ? `&agentDir=${encodeURIComponent(agentDir)}` : '';
+                    const res = await api.get<{ success: boolean; skills: Array<{ name: string; folderName: string; enabled?: boolean }> }>(
+                        `/api/skills?scope=${scopeParam}${agentDirParam}`
+                    );
+                    if (res.success && res.skills) {
+                        setAvailableSkills(res.skills.filter(s => s.enabled !== false).map(s => s.folderName));
+                    }
+                } catch { /* ignore — suggestions are optional */ }
+            };
+            void fetchSkills();
+        }, [api, scope, isInTabContext, agentDir]);
+
+        // Model options for CustomSelect
+        const modelOptions = useMemo<SelectOption[]>(() => [
+            { value: '', label: '继承主模型 (inherit)' },
+            { value: 'sonnet', label: 'Sonnet' },
+            { value: 'opus', label: 'Opus' },
+            { value: 'haiku', label: 'Haiku' },
+        ], []);
+
+        // Permission mode options for CustomSelect
+        const permissionModeOptions = useMemo<SelectOption[]>(() => [
+            { value: '', label: '默认' },
+            ...PERMISSION_MODES.map(m => ({
+                value: m.sdkValue,
+                label: `${m.icon} ${m.label} (${m.sdkValue})`,
+            })),
+        ], []);
 
         useImperativeHandle(ref, () => ({
             isEditing: () => isEditing
@@ -561,7 +600,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                 {/* Edit Header */}
                 <div className="border-b border-[var(--line)] px-6 py-3">
                     <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium text-[var(--ink-muted)]">编辑 Agent</span>
+                        <span className="text-sm font-medium text-[var(--ink-muted)]">编辑子 Agent</span>
                         <div className="flex items-center gap-2">
                             <button
                                 onClick={handleCancel}
@@ -619,16 +658,12 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                     {isAnthropicProvider && (
                         <div>
                             <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">模型</label>
-                            <select
+                            <CustomSelect
                                 value={model}
-                                onChange={e => setModel(e.target.value)}
-                                className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                            >
-                                <option value="">继承主模型 (inherit)</option>
-                                <option value="sonnet">Sonnet</option>
-                                <option value="opus">Opus</option>
-                                <option value="haiku">Haiku</option>
-                            </select>
+                                options={modelOptions}
+                                onChange={setModel}
+                                placeholder="继承主模型 (inherit)"
+                            />
                         </div>
                     )}
 
@@ -681,13 +716,14 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                                     />
                                 </div>
 
-                                {/* Skills - Tag input */}
+                                {/* Skills - Tag input with available skills suggestions */}
                                 <div>
                                     <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">预加载 Skills</label>
                                     <TagInput
                                         tags={skillsTags}
                                         onChange={setSkillsTags}
-                                        placeholder="输入 Skill 名称"
+                                        suggestions={availableSkills}
+                                        placeholder="输入 Skill 名称或从列表选择"
                                         emptyHint="留空则不预加载 Skill。添加后 Skill 完整内容将注入 Agent 上下文"
                                     />
                                 </div>
@@ -695,18 +731,12 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                                 {/* Permission Mode */}
                                 <div>
                                     <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">权限模式</label>
-                                    <select
+                                    <CustomSelect
                                         value={permissionMode}
-                                        onChange={e => setPermissionMode(e.target.value)}
-                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                                    >
-                                        <option value="">默认</option>
-                                        {PERMISSION_MODES.map(m => (
-                                            <option key={m.sdkValue} value={m.sdkValue}>
-                                                {m.icon} {m.label} ({m.sdkValue})
-                                            </option>
-                                        ))}
-                                    </select>
+                                        options={permissionModeOptions}
+                                        onChange={setPermissionMode}
+                                        placeholder="默认"
+                                    />
                                 </div>
 
                                 {/* Max Turns */}

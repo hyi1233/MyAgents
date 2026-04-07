@@ -15,9 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 - **自定义供应商模型输入**：添加模型时新增「+」按钮，除回车外多一种添加方式
+- **子 Agent 设置面板**：模型和权限选择器改为自定义下拉框，Skills 输入支持从可用列表选择
+- **启动页 Runtime 适配**：工作区配置了外部 Runtime 时，启动页输入栏自动显示对应 Runtime 的模型和权限选项
+- **三方供应商切换保护**：从三方供应商切换到 Anthropic 原生时，弹窗确认并新开 Tab，避免历史消息不兼容
 
 ### Fixed
+- **AI 思考状态卡住**：AI 思考指示器可能卡住数十分钟不消失（实际后台已完成）。修复了子 Agent 思考块未正确关闭、turn 边界遗漏清理等多个根因
 - **QR 登录空白页**：OpenClaw 插件扫码登录时，wizard 步骤冲突导致页面空白
+- **三方供应商思考签名污染**：使用 Gemini 等思考模型时，签名字段污染 SDK 历史导致后续请求报错
 
 ---
 

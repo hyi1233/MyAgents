@@ -430,6 +430,7 @@ let postInterruptTurnEndResolve: (() => void) | null = null;
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
 const streamIndexToToolId: Map<number, string> = new Map();
+const streamIndexToBlockType: Map<number, string> = new Map(); // Positive block type tracking for subagent content_block_stop
 const toolResultIndexToId: Map<number, string> = new Map();
 
 // IM Draft Stream: callback for streaming text to Telegram
@@ -1081,6 +1082,8 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   // requires a fresh session. Anthropic validates thinking block signatures that third-party
   // providers don't, so resuming with third-party messages causes signature errors.
   // Must check BEFORE updating currentProviderEnv.
+  // Note: Desktop Chat also shows a ConfirmDialog for this case (see Chat.tsx), but this
+  // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
   const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !providerEnv?.baseUrl;
   if (switchingFromThirdPartyToAnthropic) {
     sessionRegistered = false;
@@ -3056,6 +3059,7 @@ function handleMessageComplete(): void {
   // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
   // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
   streamIndexToToolId.clear();
+  streamIndexToBlockType.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
   imTextBlockIndices.clear();
@@ -3065,6 +3069,29 @@ function handleMessageComplete(): void {
   // /api/im/chat call). Clearing it between turns causes im-media to be missing from
   // buildSdkMcpServers() if the session restarts (MCP change, error recovery, etc.).
   // It is still cleared on full session termination (see below).
+
+  // Force-close any unclosed thinking blocks (parity with handleMessageStopped).
+  // If content_block_stop was lost (transport issue, subagent edge case, or API error),
+  // the thinking block stays incomplete and the frontend timer runs indefinitely.
+  // This safety net ensures thinking state is always consistent at turn boundary.
+  const lastMsg = messages[messages.length - 1];
+  if (lastMsg?.role === 'assistant' && typeof lastMsg.content !== 'string') {
+    let patched = false;
+    lastMsg.content = lastMsg.content.map((block) => {
+      if (block.type === 'thinking' && !block.isComplete) {
+        patched = true;
+        return {
+          ...block,
+          isComplete: true,
+          thinkingDurationMs: block.thinkingStartedAt ? Date.now() - block.thinkingStartedAt : undefined
+        };
+      }
+      return block;
+    });
+    if (patched) {
+      console.warn('[agent] Force-closed orphaned thinking block(s) in handleMessageComplete');
+    }
+  }
 
   // Transition to idle only when no queued messages remain.
   // With mid-turn injection, the generator is always at waitForMessage() after yield
@@ -3099,6 +3126,7 @@ function handleMessageStopped(): void {
   }
   // 跨回合状态清理（与 handleMessageComplete 保持一致）
   streamIndexToToolId.clear();
+  streamIndexToBlockType.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
   imTextBlockIndices.clear();
@@ -3476,6 +3504,7 @@ function clearMessageState(): void {
   messageQueue.length = 0;
   pendingMidTurnQueue.length = 0;
   streamIndexToToolId.clear();
+  streamIndexToBlockType.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
   imTextBlockIndices.clear();
@@ -4012,17 +4041,17 @@ export async function enqueueUserMessage(
     // Resume logic: Anthropic official validates thinking block signatures, third-party providers don't.
     // Only skip resume when switching FROM third-party (has baseUrl) TO Anthropic official (no baseUrl).
     // All other transitions (official→third-party, third-party→third-party, official→official) can safely resume.
+    // Note: Desktop Chat also shows a ConfirmDialog for this case (see Chat.tsx), but this
+    // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
     const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !effectiveProviderEnv?.baseUrl;
     if (switchingFromThirdPartyToAnthropic) {
-      // Anthropic 官方验证 thinking block 签名，第三方不验证，必须新建 session
       sessionRegistered = false;
       sessionId = randomUUID();
-      hasInitialPrompt = false;   // 确保新 session 创建 metadata
-      messages.length = 0;        // 清除旧 provider 不兼容的消息
-      systemInitInfo = null;      // 清除旧 init info
+      hasInitialPrompt = false;
+      messages.length = 0;
+      systemInitInfo = null;
       console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
     }
-    // 其他 provider 切换：sessionRegistered 保持不变，自动走正确路径
 
     // Update provider env BEFORE terminating so the new session picks it up
     currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
@@ -4785,6 +4814,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   let abortedByTimeout = false; // Distinguishes timeout abort from config-change abort
   let detectedAlreadyInUse = false; // stderr reported "Session ID already in use"
   streamIndexToToolId.clear();
+  streamIndexToBlockType.clear();
   imTextBlockIndices.clear();
 
   // Don't broadcast 'running' during pre-warm — session is invisible to frontend
@@ -5448,6 +5478,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             }
           }
         } else if (streamEvent.type === 'content_block_start') {
+          // Implicit thinking close: when a non-thinking content block starts (text, tool_use),
+          // force-close any unclosed thinking blocks in backend state.
+          // Frontend does its own implicit close, so this keeps backend state consistent.
+          if (streamEvent.content_block.type !== 'thinking') {
+            const lastAssistant = messages.length > 0 ? messages[messages.length - 1] : null;
+            if (lastAssistant?.role === 'assistant' && typeof lastAssistant.content !== 'string') {
+              for (const block of lastAssistant.content) {
+                if (block.type === 'thinking' && !block.isComplete) {
+                  block.isComplete = true;
+                  block.thinkingDurationMs = block.thinkingStartedAt ? Date.now() - block.thinkingStartedAt : undefined;
+                  console.log('[agent] Implicitly closed orphaned thinking block on new content_block_start');
+                }
+              }
+            }
+          }
           // IM stream: track text block indices (non-subagent only, cross-turn guard)
           // Flush pending mid-turn queue at non-subagent text content_block_start.
           // thinking/tool_use/server_tool_use are covered by their start handlers.
@@ -5463,6 +5508,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               imStreamCallback('activity', streamEvent.content_block.type);
             }
           }
+          // Track block type by stream index for precise subagent content_block_stop handling
+          streamIndexToBlockType.set(streamEvent.index, streamEvent.content_block.type);
           if (streamEvent.content_block.type === 'thinking') {
             // Handler first: ensureAssistantMessage() may flush pendingMidTurnQueue
             // (broadcasting queue:started). The thinking-start broadcast must come AFTER
@@ -5471,14 +5518,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             broadcast('chat:thinking-start', { index: streamEvent.index });
           } else if (streamEvent.content_block.type === 'tool_use') {
             streamIndexToToolId.set(streamEvent.index, streamEvent.content_block.id);
-            // Extract thought_signature from content block (Gemini thinking models)
-            const contentBlock = streamEvent.content_block as { id: string; name: string; input?: Record<string, unknown>; thought_signature?: string };
+            // Note: thought_signature is no longer extracted here. The bridge strips it from
+            // Anthropic-format events to prevent SDK transcript pollution (see #68). The bridge
+            // handler caches thought_signatures separately and re-injects on outgoing requests.
+            const contentBlock = streamEvent.content_block as { id: string; name: string; input?: Record<string, unknown> };
             const toolPayload = {
               id: contentBlock.id,
               name: contentBlock.name,
               input: contentBlock.input || {},
               streamIndex: streamEvent.index,
-              ...(contentBlock.thought_signature ? { thought_signature: contentBlock.thought_signature } : {}),
             };
             if (sdkMessage.parent_tool_use_id) {
               handleSubagentToolUseStart(sdkMessage.parent_tool_use_id, toolPayload);
@@ -5586,6 +5634,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         } else if (streamEvent.type === 'content_block_stop') {
           const toolId = streamIndexToToolId.get(streamEvent.index);
           if (sdkMessage.parent_tool_use_id) {
+            // Subagent thinking/text blocks: broadcast content-block-stop so frontend can close
+            // the thinking timer. Without this, subagent thinking blocks stay "incomplete"
+            // and the timer runs for the entire remaining duration of the parent tool call.
+            const blockType = streamIndexToBlockType.get(streamEvent.index);
+            if (blockType === 'thinking' || blockType === 'text') {
+              broadcast('chat:content-block-stop', {
+                index: streamEvent.index,
+              });
+              handleContentBlockStop(streamEvent.index, undefined);
+            }
             if (toolId) {
               finalizeSubagentToolInput(sdkMessage.parent_tool_use_id, toolId);
             }

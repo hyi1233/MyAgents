@@ -27,6 +27,9 @@ import {
     resolveProvider,
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
+import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../../shared/types/runtime';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
+import { apiGetJson } from '@/api/apiFetch';
 import { deleteCronTask, stopCronTask, startCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
@@ -125,6 +128,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [launcherProviderId, setLauncherProviderId] = useState<string | undefined>();
     const [launcherSelectedModel, setLauncherSelectedModel] = useState<string | undefined>();
 
+    // Runtime state — adapts model/permission selectors when workspace uses external runtime
+    const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
+
     // MCP state
     const [launcherMcpServers, setLauncherMcpServers] = useState<McpServerDefinition[]>([]);
     const [launcherGlobalMcpEnabled, setLauncherGlobalMcpEnabled] = useState<string[]>([]);
@@ -135,6 +141,31 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (!selectedWorkspace?.agentId) return undefined;
         return getAgentById(config, selectedWorkspace.agentId);
     }, [selectedWorkspace?.agentId, config]);
+
+    // Ref for runtimeConfig — avoids stale closure in rapid write-back handlers
+    const runtimeConfigRef = useRef(selectedAgent?.runtimeConfig);
+    runtimeConfigRef.current = selectedAgent?.runtimeConfig;
+
+    // Runtime-aware model/permission lists — adapts input bar for external runtimes
+    const launcherRuntime: RuntimeType = multiAgentRuntimeEnabled
+        ? ((selectedAgent?.runtime as RuntimeType) || 'builtin') : 'builtin';
+    const isExternalRuntime = launcherRuntime !== 'builtin';
+
+    // Codex models are dynamic (fetched from app-server); CC models are static
+    const [codexModels, setCodexModels] = useState<RuntimeModelInfo[]>([]);
+    useEffect(() => {
+        if (!multiAgentRuntimeEnabled || launcherRuntime !== 'codex') { setCodexModels([]); return; }
+        let cancelled = false;
+        apiGetJson<{ models?: RuntimeModelInfo[] }>('/api/runtime/models?type=codex')
+            .then(res => { if (!cancelled && res?.models?.length) setCodexModels(res.models); })
+            .catch(() => {});
+        return () => { cancelled = true; };
+    }, [multiAgentRuntimeEnabled, launcherRuntime]);
+
+    const launcherRuntimeModels: RuntimeModelInfo[] | undefined = launcherRuntime === 'claude-code' ? CC_MODELS
+        : launcherRuntime === 'codex' ? codexModels : undefined;
+    const launcherRuntimePermissionModes: RuntimePermissionMode[] | undefined = launcherRuntime === 'claude-code'
+        ? CC_PERMISSION_MODES : launcherRuntime === 'codex' ? CODEX_PERMISSION_MODES : undefined;
 
     // Derive provider for launcher — only select providers with valid credentials
     const launcherProvider = useMemo(() => {
@@ -210,42 +241,67 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (lastUsed.mcpEnabledServers) setLauncherWorkspaceMcpEnabled(lastUsed.mcpEnabledServers);
     }, [isLoading, config.launcherLastUsed]);
 
+    // Extract runtimeConfig primitives for stable useEffect deps (avoid object reference)
+    const agentRuntimeModel = (selectedAgent?.runtimeConfig as { model?: string } | undefined)?.model;
+    const agentRuntimePermMode = (selectedAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode;
+
     // Sync launcher settings from selected workspace's per-project config.
     // Declared AFTER launcherLastUsed effect so project settings take priority on initial load.
     // Priority: project setting > global default (launcherLastUsed is global, not per-workspace)
     // Depends on individual fields (not just .id) so it re-runs when Chat's patchProject updates them.
     useEffect(() => {
         if (isLoading || !selectedWorkspace) return;
-        setLauncherPermissionMode((selectedAgent?.permissionMode as PermissionMode | undefined) ?? selectedWorkspace.permissionMode ?? config.defaultPermissionMode);
-        setLauncherSelectedModel(selectedAgent?.model ?? selectedWorkspace.model ?? undefined);
+        // For external runtimes, model and permission come from runtimeConfig.
+        // Branch on isExternalRuntime alone — empty runtimeConfig is valid (uses runtime defaults).
+        if (isExternalRuntime) {
+            setLauncherSelectedModel(agentRuntimeModel ?? undefined);
+            setLauncherPermissionMode((agentRuntimePermMode as PermissionMode | undefined) ?? config.defaultPermissionMode);
+        } else {
+            setLauncherPermissionMode((selectedAgent?.permissionMode as PermissionMode | undefined) ?? selectedWorkspace.permissionMode ?? config.defaultPermissionMode);
+            setLauncherSelectedModel(selectedAgent?.model ?? selectedWorkspace.model ?? undefined);
+        }
         setLauncherProviderId(selectedAgent?.providerId ?? selectedWorkspace.providerId ?? undefined);
         setLauncherWorkspaceMcpEnabled(selectedAgent?.mcpEnabledServers ?? selectedWorkspace.mcpEnabledServers ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depend on specific agent/project fields, not object ref
-    }, [isLoading, selectedWorkspace?.id, selectedAgent?.permissionMode, selectedAgent?.model, selectedAgent?.providerId, selectedAgent?.mcpEnabledServers, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode]);
+    }, [isLoading, selectedWorkspace?.id, selectedAgent?.permissionMode, selectedAgent?.model, selectedAgent?.providerId, selectedAgent?.mcpEnabledServers, selectedAgent?.runtime, agentRuntimeModel, agentRuntimePermMode, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode, multiAgentRuntimeEnabled, isExternalRuntime]);
 
     // Write-back handlers: persist Launcher setting changes to the selected project
 
     const handleLauncherPermissionModeChange = useCallback((mode: PermissionMode) => {
         setLauncherPermissionMode(mode);
         if (selectedWorkspace) {
-            void patchProject(selectedWorkspace.id, { permissionMode: mode });
-            if (selectedWorkspace.agentId) {
-                void patchAgentConfig(selectedWorkspace.agentId, { permissionMode: mode });
+            if (isExternalRuntime && selectedWorkspace.agentId) {
+                // External runtime: persist to runtimeConfig via ref (avoids stale closure on rapid changes)
+                void patchAgentConfig(selectedWorkspace.agentId, {
+                    runtimeConfig: { ...runtimeConfigRef.current, permissionMode: mode },
+                });
+            } else {
+                void patchProject(selectedWorkspace.id, { permissionMode: mode });
+                if (selectedWorkspace.agentId) {
+                    void patchAgentConfig(selectedWorkspace.agentId, { permissionMode: mode });
+                }
             }
         }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes
-    }, [selectedWorkspace?.id, patchProject]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; runtimeConfigRef is a ref
+    }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
 
     const handleLauncherModelChange = useCallback((model: string | undefined) => {
         setLauncherSelectedModel(model);
         if (selectedWorkspace) {
-            void patchProject(selectedWorkspace.id, { model: model ?? null });
-            if (selectedWorkspace.agentId) {
-                void patchAgentConfig(selectedWorkspace.agentId, { model: model ?? undefined });
+            if (isExternalRuntime && selectedWorkspace.agentId) {
+                // External runtime: persist to runtimeConfig via ref (avoids stale closure on rapid changes)
+                void patchAgentConfig(selectedWorkspace.agentId, {
+                    runtimeConfig: { ...runtimeConfigRef.current, model: model ?? undefined },
+                });
+            } else {
+                void patchProject(selectedWorkspace.id, { model: model ?? null });
+                if (selectedWorkspace.agentId) {
+                    void patchAgentConfig(selectedWorkspace.agentId, { model: model ?? undefined });
+                }
             }
         }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes
-    }, [selectedWorkspace?.id, patchProject]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; runtimeConfigRef is a ref
+    }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
 
     const handleLauncherProviderChange = useCallback((providerId: string | undefined, targetModel?: string) => {
         setLauncherProviderId(providerId);
@@ -570,6 +626,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         onWorkspaceMcpToggle={handleWorkspaceMcpToggle}
                         onRefreshProviders={refreshProviderData}
                         onGoToSettings={handleGoToSettings}
+                        runtime={isExternalRuntime ? launcherRuntime : undefined}
+                        runtimeModels={isExternalRuntime ? launcherRuntimeModels : undefined}
+                        runtimePermissionModes={isExternalRuntime ? launcherRuntimePermissionModes : undefined}
                     />
                 </section>
 
