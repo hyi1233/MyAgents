@@ -42,6 +42,20 @@ import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTas
 /** Minimum QA rounds before triggering AI title generation */
 const AUTO_TITLE_MIN_ROUNDS = 3;
 
+/**
+ * Force-complete any unclosed thinking blocks in a content array.
+ * Used as a safety net at multiple points: when new content arrives (text/tool/thinking),
+ * the previous thinking block must have ended. Returns the original array if no changes needed.
+ */
+function closeOpenThinkingBlocks(content: ContentBlock[]): ContentBlock[] {
+    if (!content.some(b => b.type === 'thinking' && !b.isComplete)) return content;
+    return content.map(b =>
+        b.type === 'thinking' && !b.isComplete
+            ? { ...b, isComplete: true, thinkingDurationMs: b.thinkingStartedAt ? Date.now() - b.thinkingStartedAt : undefined }
+            : b
+    );
+}
+
 // File-modifying tools that should trigger workspace refresh
 // These tools can create, modify, or delete files in the workspace
 const FILE_MODIFYING_TOOLS = new Set([
@@ -746,16 +760,7 @@ export default function TabProvider({
                         if (typeof prev.content === 'string') {
                             return { ...prev, content: prev.content + chunk };
                         }
-                        // Implicit close: force-complete any unclosed thinking blocks
-                        // when text content arrives (thinking must have ended)
-                        let contentArray = prev.content;
-                        if (contentArray.some(b => b.type === 'thinking' && !b.isComplete)) {
-                            contentArray = contentArray.map(b =>
-                                b.type === 'thinking' && !b.isComplete
-                                    ? { ...b, isComplete: true, thinkingDurationMs: b.thinkingStartedAt ? Date.now() - b.thinkingStartedAt : undefined }
-                                    : b
-                            );
-                        }
+                        const contentArray = closeOpenThinkingBlocks(prev.content);
                         const lastBlock = contentArray[contentArray.length - 1];
                         if (lastBlock?.type === 'text') {
                             return {
@@ -796,21 +801,18 @@ export default function TabProvider({
                         thinkingStartedAt: Date.now()
                     };
                     if (prev?.role === 'assistant') {
-                        let content = typeof prev.content === 'string'
-                            ? [{ type: 'text' as const, text: prev.content }]
-                            : prev.content;
-                        // Deduplicate: skip if a thinking block with this index already exists
-                        if (content.some(b => b.type === 'thinking' && b.thinkingStreamIndex === index)) {
+                        // Implicit close FIRST: force-complete any unclosed thinking blocks.
+                        // Must run before dedup check — a stale orphaned block with the same
+                        // reused index should be closed, not block the new block from being added.
+                        const content = closeOpenThinkingBlocks(
+                            typeof prev.content === 'string'
+                                ? [{ type: 'text' as const, text: prev.content }]
+                                : prev.content
+                        );
+                        // Deduplicate: skip only if an ACTIVE (incomplete) thinking block with this index exists
+                        if (content.some(b => b.type === 'thinking' && b.thinkingStreamIndex === index && !b.isComplete)) {
                             return prev;
                         }
-                        // Implicit close: force-complete any previously unclosed thinking blocks.
-                        // SDK stream indices reset per-turn, so a new thinking-start means the
-                        // previous thinking block (from the same or prior turn) must have ended.
-                        content = content.map(b =>
-                            b.type === 'thinking' && !b.isComplete
-                                ? { ...b, isComplete: true, thinkingDurationMs: b.thinkingStartedAt ? Date.now() - b.thinkingStartedAt : undefined }
-                                : b
-                        );
                         return { ...prev, content: [...content, thinkingBlock] };
                     }
                     isStreamingRef.current = true;
@@ -861,15 +863,10 @@ export default function TabProvider({
                         tool: toolSimple
                     };
                     if (prev?.role === 'assistant') {
-                        // Implicit close: force-complete any unclosed thinking blocks
-                        // when a tool_use block arrives (thinking must have ended)
-                        let content = typeof prev.content === 'string'
-                            ? [{ type: 'text' as const, text: prev.content }]
-                            : prev.content;
-                        content = content.map(b =>
-                            b.type === 'thinking' && !b.isComplete
-                                ? { ...b, isComplete: true, thinkingDurationMs: b.thinkingStartedAt ? Date.now() - b.thinkingStartedAt : undefined }
-                                : b
+                        const content = closeOpenThinkingBlocks(
+                            typeof prev.content === 'string'
+                                ? [{ type: 'text' as const, text: prev.content }]
+                                : prev.content
                         );
                         return { ...prev, content: [...content, toolBlock] };
                     }
@@ -905,9 +902,11 @@ export default function TabProvider({
                         tool: toolSimple
                     };
                     if (prev?.role === 'assistant') {
-                        const content = typeof prev.content === 'string'
-                            ? [{ type: 'text' as const, text: prev.content }]
-                            : prev.content;
+                        const content = closeOpenThinkingBlocks(
+                            typeof prev.content === 'string'
+                                ? [{ type: 'text' as const, text: prev.content }]
+                                : prev.content
+                        );
                         return { ...prev, content: [...content, toolBlock] };
                     }
                     isStreamingRef.current = true;

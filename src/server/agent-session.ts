@@ -430,6 +430,7 @@ let postInterruptTurnEndResolve: (() => void) | null = null;
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
 const streamIndexToToolId: Map<number, string> = new Map();
+const streamIndexToBlockType: Map<number, string> = new Map(); // Positive block type tracking for subagent content_block_stop
 const toolResultIndexToId: Map<number, string> = new Map();
 
 // IM Draft Stream: callback for streaming text to Telegram
@@ -3056,6 +3057,7 @@ function handleMessageComplete(): void {
   // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
   // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
   streamIndexToToolId.clear();
+  streamIndexToBlockType.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
   imTextBlockIndices.clear();
@@ -3122,6 +3124,7 @@ function handleMessageStopped(): void {
   }
   // 跨回合状态清理（与 handleMessageComplete 保持一致）
   streamIndexToToolId.clear();
+  streamIndexToBlockType.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
   imTextBlockIndices.clear();
@@ -3499,6 +3502,7 @@ function clearMessageState(): void {
   messageQueue.length = 0;
   pendingMidTurnQueue.length = 0;
   streamIndexToToolId.clear();
+  streamIndexToBlockType.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
   imTextBlockIndices.clear();
@@ -4808,6 +4812,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   let abortedByTimeout = false; // Distinguishes timeout abort from config-change abort
   let detectedAlreadyInUse = false; // stderr reported "Session ID already in use"
   streamIndexToToolId.clear();
+  streamIndexToBlockType.clear();
   imTextBlockIndices.clear();
 
   // Don't broadcast 'running' during pre-warm — session is invisible to frontend
@@ -5501,6 +5506,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               imStreamCallback('activity', streamEvent.content_block.type);
             }
           }
+          // Track block type by stream index for precise subagent content_block_stop handling
+          streamIndexToBlockType.set(streamEvent.index, streamEvent.content_block.type);
           if (streamEvent.content_block.type === 'thinking') {
             // Handler first: ensureAssistantMessage() may flush pendingMidTurnQueue
             // (broadcasting queue:started). The thinking-start broadcast must come AFTER
@@ -5625,10 +5632,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         } else if (streamEvent.type === 'content_block_stop') {
           const toolId = streamIndexToToolId.get(streamEvent.index);
           if (sdkMessage.parent_tool_use_id) {
-            // Subagent thinking blocks: broadcast content-block-stop so frontend can close
+            // Subagent thinking/text blocks: broadcast content-block-stop so frontend can close
             // the thinking timer. Without this, subagent thinking blocks stay "incomplete"
             // and the timer runs for the entire remaining duration of the parent tool call.
-            if (!toolId && !toolResultIndexToId.has(streamEvent.index)) {
+            const blockType = streamIndexToBlockType.get(streamEvent.index);
+            if (blockType === 'thinking' || blockType === 'text') {
               broadcast('chat:content-block-stop', {
                 index: streamEvent.index,
               });

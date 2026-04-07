@@ -242,4 +242,4 @@ config.multiAgentRuntime (磁盘/React state)
 | `src/server/runtimes/env-utils.ts` | 环境变量增强（PATH 补全） |
 | `src/shared/types/runtime.ts` | 共享类型（RuntimeType、模型列表、权限模式） |
 | `src/renderer/components/RuntimeSelector.tsx` | 前端 Runtime 选择器组件 |
-| `src/server/runtimes/cc-session-hook-forwarder.cjs` | CC SessionStart hook 转发脚本 |
+| `src/server/runtimes/claude-code.ts` → `FORWARDER_SCRIPT` | CC SessionStart hook 转发脚本（运行时生成至 `~/.myagents/.cc-hooks/forwarder.cjs`） |
