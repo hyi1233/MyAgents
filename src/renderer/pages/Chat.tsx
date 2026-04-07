@@ -1164,6 +1164,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Without this, backend currentModel stays undefined until the first message,
   // causing a blocking setModel() call during pre-warm → active transition.
   useEffect(() => {
+    // Skip when external runtime is active — runtimeModel has its own sync effect below.
+    // Without this guard, selectedModel (initialized from agent.model, e.g. "glm-5.1")
+    // would be pushed to setExternalModel(), overriding the runtime's own model. See: #71
+    if (isExternalRuntime) return;
     if (selectedModel) {
       // Skip push when joining existing sidecar — adoption effect will set the correct model
       if (joinedExistingSidecarRef.current) {
@@ -1176,7 +1180,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         console.error('[Chat] Failed to sync model to backend:', err);
       });
     }
-  }, [selectedModel, apiPost]);
+  }, [selectedModel, apiPost, isExternalRuntime]);
 
   // Sync external runtime model to backend — same pattern as selectedModel above.
   // /api/model/set routes to setExternalModel() when shouldUseExternalRuntime() is true.

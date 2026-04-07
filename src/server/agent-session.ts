@@ -3784,7 +3784,10 @@ export async function initializeAgent(
         currentProviderEnv = resolved.providerEnv;
         console.log(`[agent] self-resolved provider: ${resolved.providerEnv.baseUrl ?? 'anthropic'}`);
       }
-      if (!currentModel && resolved.model) {
+      // Only self-resolve model for builtin runtime. External runtimes (CC/Codex) should use
+      // their own model (set via /api/model/set from frontend runtimeModel effect).
+      // agent.model is the builtin model (e.g. "glm-5.1") and must NOT be sent to CC/Codex. See: #71
+      if (!currentModel && resolved.model && !isExternalRuntime(getCurrentRuntimeType())) {
         currentModel = resolved.model;
         console.log(`[agent] self-resolved model: ${resolved.model}`);
       }
