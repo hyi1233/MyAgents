@@ -664,7 +664,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
         // 3. Update local UI state to reflect Launcher choices
         if (initialMessage.permissionMode) setPermissionMode(initialMessage.permissionMode);
-        if (initialMessage.model) setSelectedModel(initialMessage.model);
+        if (initialMessage.model) {
+          // External runtime (Codex/CC) uses runtimeModel; builtin uses selectedModel.
+          // Setting the wrong one causes the model from Launcher to be ignored on subsequent messages.
+          if (isExternalRuntime) {
+            setRuntimeModel(initialMessage.model);
+          } else {
+            setSelectedModel(initialMessage.model);
+          }
+        }
         if (initialMessage.providerId) {
           setSelectedProviderId(initialMessage.providerId);
           providerInitRef.current = true; // suppress deferred provider-change effect
@@ -1169,6 +1177,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       });
     }
   }, [selectedModel, apiPost]);
+
+  // Sync external runtime model to backend — same pattern as selectedModel above.
+  // /api/model/set routes to setExternalModel() when shouldUseExternalRuntime() is true.
+  useEffect(() => {
+    if (isExternalRuntime && runtimeModel) {
+      if (joinedExistingSidecarRef.current) return;
+      apiPost('/api/model/set', { model: runtimeModel }).catch(err => {
+        console.error('[Chat] Failed to sync runtime model to backend:', err);
+      });
+    }
+  }, [isExternalRuntime, runtimeModel, apiPost]);
 
   // Adopt sidecar config when joining an existing sidecar (e.g. IM Bot session).
   // Reads the sidecar's current model and applies it to React state so the Tab
