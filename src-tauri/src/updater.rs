@@ -24,6 +24,9 @@ use tauri_plugin_updater::UpdaterExt;
 /// Global flag to prevent concurrent update checks/downloads
 static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
+/// Track the version of the latest downloaded update (latest-wins: skip re-download if same)
+static DOWNLOADED_VERSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// Metadata persisted to disk alongside the update binary
 #[cfg(target_os = "windows")]
 #[derive(Serialize, serde::Deserialize)]
@@ -258,6 +261,32 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
         return Ok(None);
     }
 
+    // Latest-wins: skip re-download if we already have this exact version ready.
+    // A newer version (e.g., 0.1.61 after 0.1.60) WILL be downloaded and replace the old one.
+    {
+        let downloaded_ver = DOWNLOADED_VERSION.lock().unwrap();
+        if let Some(ref dv) = *downloaded_ver {
+            if dv == &version {
+                logger::info(
+                    app,
+                    format!("[Updater] v{} already downloaded, skipping re-download", version),
+                );
+                return Ok(None);
+            }
+            if !is_version_greater(&version, dv) {
+                logger::info(
+                    app,
+                    format!("[Updater] v{} not newer than already downloaded v{}, skipping", version, dv),
+                );
+                return Ok(None);
+            }
+            logger::info(
+                app,
+                format!("[Updater] Newer v{} available (replacing downloaded v{})", version, dv),
+            );
+        }
+    }
+
     logger::info(
         app,
         format!("[Updater] Found update v{}, starting silent download...", version),
@@ -351,6 +380,9 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
             .await
             .map_err(|e| format!("Silent download failed: {}", e))?;
     }
+
+    // Track this version as the latest downloaded (latest-wins protocol)
+    *DOWNLOADED_VERSION.lock().unwrap() = Some(version.clone());
 
     Ok(Some(version))
 }

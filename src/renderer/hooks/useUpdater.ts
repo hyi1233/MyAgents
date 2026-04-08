@@ -281,8 +281,10 @@ export function useUpdater(): UseUpdaterResult {
         if (!isTauriEnvironment()) return;
 
         const doCheck = async () => {
-            // Use ref to get current value without dependency
-            if (updateReadyRef.current) return;
+            // Always check — even if an update is already ready.
+            // The Rust backend tracks the downloaded version and only re-downloads
+            // if the server has something NEWER (latest-wins protocol).
+            // This ensures v0.1.61 replaces a cached v0.1.60 seamlessly.
             try {
                 await invoke('check_and_download_update');
                 // Track update_check event only after successful check
