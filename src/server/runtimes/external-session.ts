@@ -948,25 +948,61 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'message_replay': {
-      // Skip assistant message replays during active streaming — CC sends both
-      // stream_event deltas AND a complete assistant message, causing duplication.
-      // Only replay user messages (for session resume scenarios).
+      // CC's --include-partial-messages outputs complete message objects alongside streaming.
+      // Three categories:
+      //   1. role=assistant — partial snapshots (SKIP: stream_event deltas already delivered content)
+      //   2. role=user, content=string — real user message echo (SKIP if duplicate, REPLAY for resume)
+      //   3. role=user, content=array — CC tool_result containers (SKIP as user msg, EXTRACT tool results)
       const replayRole = event.message.role;
-      const replayContentPreview = typeof event.message.content === 'string'
-        ? event.message.content.slice(0, 100)
-        : JSON.stringify(event.message.content).slice(0, 100);
-      console.log(`[external-session] message_replay: role=${replayRole}, id=${event.message.id || '(none)'}, content=${replayContentPreview}`);
+      const replayContent = event.message.content;
+
+      if (replayRole === 'user' && Array.isArray(replayContent)) {
+        // CC sends tool results as type='user' messages with content=[{type:'tool_result',...}].
+        // Don't broadcast as user message (creates ghost empty bubbles).
+        // Instead, extract tool_result blocks and emit proper tool-result-complete events
+        // so the frontend can close tool loading indicators.
+        for (const block of replayContent as Array<Record<string, unknown>>) {
+          if (block.type === 'tool_result' && block.tool_use_id) {
+            const resultText = typeof block.content === 'string'
+              ? block.content
+              : Array.isArray(block.content)
+                ? (block.content as Array<Record<string, unknown>>).map(b => (b.text as string) || '').join('\n')
+                : JSON.stringify(block.content);
+            broadcast('chat:tool-result-complete', {
+              id: block.tool_use_id,
+              content: resultText.slice(0, 2000),  // Truncate for SSE
+              isError: block.is_error === true,
+            });
+            // Also feed into persistence accumulator
+            const toolEntry = pendingToolInputs.get(block.tool_use_id as string);
+            if (toolEntry) {
+              currentContentBlocks.push({
+                type: 'tool_use',
+                tool: {
+                  id: block.tool_use_id as string,
+                  name: toolEntry.name,
+                  input: {},
+                  inputJson: toolEntry.inputJson,
+                  result: resultText.slice(0, 5000),
+                  isError: block.is_error === true,
+                  streamIndex: currentContentBlocks.length,
+                },
+              });
+              pendingToolInputs.delete(block.tool_use_id as string);
+            }
+            resetWatchdog();
+          }
+        }
+        break;
+      }
 
       if (replayRole === 'user') {
-        // Guard: skip CC-echoed user messages — we already broadcast the user message
-        // when sendExternalMessage is called. CC's --include-partial-messages echoes
-        // user messages back, which would create duplicates in the frontend.
-        if (isRunning && allSessionMessages.some(m => m.role === 'user' && m.content === event.message.content)) {
-          console.log('[external-session] Skipping duplicate user message replay');
+        // Real user message replay (for session resume scenarios).
+        // Skip during active streaming — we already broadcast user message from sendExternalMessage.
+        if (isRunning && allSessionMessages.length > 0) {
           break;
         }
-        // Ensure timestamp exists — CC replay messages don't include it,
-        // and frontend does new Date(msg.timestamp) → Invalid Date → NaN display
+        // Ensure timestamp exists for frontend rendering
         const replayMsg = event.message.timestamp
           ? event.message
           : { ...event.message, timestamp: new Date().toISOString() };
