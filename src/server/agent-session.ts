@@ -30,6 +30,7 @@ import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './A
 import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
+import type { ImagePayload } from './runtimes/types';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -3933,12 +3934,6 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   }
 }
 
-type ImagePayload = {
-  name: string;
-  mimeType: string;
-  data: string; // base64
-};
-
 /**
  * Apply runtime configuration changes to the active session.
  * Calls SDK setModel/setPermissionMode if config has changed.
@@ -5211,49 +5206,27 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Detects hung API connections AND hung MCP tool calls.
     // Heartbeat (15s ping) keeps the SSE alive, so Rust's 60s read_timeout
     // never fires. Without this watchdog, the session hangs indefinitely.
-    //
-    // Two detection modes:
-    // 1. API hang: pendingTools === 0, no SDK events for 15 minutes → abort
-    // 2. MCP tool hang: pendingTools > 0, no SDK events for 2 minutes → abort (#60)
-    //    MCP tools communicate with external server processes that can hang indefinitely
-    //    (e.g., Playwright screenshot on a heavy page). The 2-minute timeout is generous
-    //    enough for legitimate long-running tools but catches truly hung processes.
+    // Unified 10-minute timeout for both API hang and MCP tool hang.
     let pendingTools = 0;
     let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
-    const API_WATCHDOG_TIMEOUT_MS = 15 * 60 * 1000;
-    const MCP_TOOL_HANG_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes for hung MCP tools
+    const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — unified for API and MCP tools
     let watchdogFired = false;
     apiWatchdogId = setInterval(() => {
       // Only check during active turns (not pre-warm, not idle between turns)
       if (!isStreamingMessage || isPreWarming) return;
-      const now = Date.now();
-      const turnRunningLongEnough = currentTurnStartTime && now - currentTurnStartTime > API_WATCHDOG_TIMEOUT_MS;
-      const noRecentSdkEvents = now - lastSdkEventAt > API_WATCHDOG_TIMEOUT_MS;
-      const toolHangDetected = pendingTools > 0 && (now - lastSdkEventAt > MCP_TOOL_HANG_TIMEOUT_MS);
-
       if (watchdogFired) return;
+      const now = Date.now();
+      const noRecentSdkEvents = now - lastSdkEventAt > WATCHDOG_TIMEOUT_MS;
 
-      // Mode 1: API hang — no pending tools, no SDK events for 15 minutes
-      if (turnRunningLongEnough && pendingTools === 0 && noRecentSdkEvents) {
+      if (noRecentSdkEvents) {
         watchdogFired = true;
-        console.error(`[agent] API watchdog: no SDK event for ${API_WATCHDOG_TIMEOUT_MS / 1000}s with no pending tools — aborting`);
+        const toolInfo = pendingTools > 0 ? `（${pendingTools} 个工具执行中）` : '';
+        console.error(`[agent] Watchdog: no SDK event for ${WATCHDOG_TIMEOUT_MS / 1000}s${toolInfo} — aborting`);
         broadcast('chat:agent-error', {
-          message: 'API 响应超时（15 分钟无活动），已自动终止。请重试。'
+          message: `响应超时（10 分钟无活动${toolInfo}），已自动终止。请重试。`
         });
-        broadcast('chat:message-error', 'API 响应超时');
-        abortPersistentSession();
-        return;
-      }
-
-      // Mode 2: MCP tool hang — tools pending but no SDK events for 2 minutes
-      if (toolHangDetected) {
-        watchdogFired = true;
-        console.error(`[agent] MCP tool watchdog: ${pendingTools} tool(s) pending, no SDK event for ${MCP_TOOL_HANG_TIMEOUT_MS / 1000}s — aborting (#60)`);
-        broadcast('chat:agent-error', {
-          message: `MCP 工具调用超时（${pendingTools} 个工具执行超过 10 分钟无响应），已自动终止。请重试或检查 MCP 工具配置。`
-        });
-        broadcast('chat:message-error', 'MCP 工具调用超时');
+        broadcast('chat:message-error', '响应超时');
         abortPersistentSession();
       }
     }, API_WATCHDOG_INTERVAL_MS);
