@@ -431,7 +431,7 @@ export default function FilePreviewModal({
             }
             return (
                 <div className="h-full overflow-auto overscroll-contain p-6 bg-[var(--paper-elevated)]">
-                    <div className="prose prose-stone max-w-none dark:prose-invert">
+                    <div className="prose prose-stone mx-auto max-w-3xl dark:prose-invert">
                         <Markdown raw basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined}>{savedContent}</Markdown>
                     </div>
                 </div>
