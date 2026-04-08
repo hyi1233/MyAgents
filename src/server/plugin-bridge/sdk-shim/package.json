@@ -1,6 +1,6 @@
 {
   "name": "openclaw",
-  "version": "2026.3.27-shim",
+  "version": "2026.4.9-shim",
   "exports": {
     "./plugin-sdk": "./plugin-sdk/index.js",
     "./plugin-sdk/account-helpers": "./plugin-sdk/account-helpers.js",

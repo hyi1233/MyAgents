@@ -857,29 +857,29 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         .map(|v| v.to_string())
         .unwrap_or_else(|| "{}".to_string());
 
-    // ── Shim integrity check ──
-    // If node_modules/openclaw/ exists but is the real npm package (not our shim),
-    // the bridge will crash with "Cannot find module 'openclaw/plugin-sdk/...'".
-    // This happens when a previous install's npm/bun overwrote the shim.
-    // Auto-repair by re-copying the shim before spawning.
+    // ── Shim integrity + freshness check ──
+    // 1. If node_modules/openclaw/ is the real npm package (not our shim) → re-install
+    // 2. If shim version doesn't match SHIM_COMPAT_VERSION → re-install (shim content updated)
     {
         let openclaw_pkg = std::path::Path::new(plugin_dir)
             .join("node_modules").join("openclaw").join("package.json");
         let needs_repair = if openclaw_pkg.exists() {
-            // Parse JSON and check version field specifically (not raw string search)
             std::fs::read_to_string(&openclaw_pkg)
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .map(|v| !v.get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .contains("-shim"))
+                .map(|v| {
+                    let version = v.get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    // Must be our shim AND match current compat version
+                    !version.contains("-shim") || !version.starts_with(SHIM_COMPAT_VERSION)
+                })
                 .unwrap_or(true)
         } else {
             true // Missing entirely
         };
         if needs_repair {
-            ulog_warn!("[bridge] Shim integrity check failed for {}, re-installing", plugin_dir);
+            ulog_warn!("[bridge] Shim integrity/freshness check failed for {}, re-installing", plugin_dir);
             let _ = install_sdk_shim(app_handle, &std::path::PathBuf::from(plugin_dir)).await;
         }
     }
@@ -1436,7 +1436,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
 }
 
 /// Our shim's OpenClaw compat version. Must match sdk-shim/package.json and compat-runtime.ts.
-const SHIM_COMPAT_VERSION: &str = "2026.3.27";
+const SHIM_COMPAT_VERSION: &str = "2026.4.9";
 
 /// Check if installed plugin's peerDependencies.openclaw is compatible with our shim.
 /// Returns a warning message if incompatible, None if OK.
