@@ -197,8 +197,8 @@ const UlComponent: Components['ul'] = ({ children }) => (
   </ul>
 );
 
-const OlComponent: Components['ol'] = ({ children }) => (
-  <ol className="my-3 ml-6 block list-outside list-decimal space-y-1.5 text-[var(--ink)] marker:text-[var(--ink-muted)]">
+const OlComponent: Components['ol'] = ({ children, start }) => (
+  <ol start={start} className="my-3 ml-6 block list-outside list-decimal space-y-1.5 text-[var(--ink)] marker:text-[var(--ink-muted)]">
     {children}
   </ol>
 );

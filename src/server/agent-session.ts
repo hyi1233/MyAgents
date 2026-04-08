@@ -93,11 +93,11 @@ startTokenRefreshScheduler();
 const LOG_STRING_MAX_LEN = 500;
 
 /** JSON.stringify with long string truncation (e.g. base64 image data) for logging. */
-function logStringify(obj: unknown): string {
+function logStringify(obj: unknown, maxLen = LOG_STRING_MAX_LEN): string {
   try {
     return JSON.stringify(obj, (_key, value) => {
-      if (typeof value === 'string' && value.length > LOG_STRING_MAX_LEN) {
-        return value.slice(0, LOG_STRING_MAX_LEN) + `...(${value.length} chars)`;
+      if (typeof value === 'string' && value.length > maxLen) {
+        return value.slice(0, maxLen) + `...(${value.length} chars)`;
       }
       return value;
     });
@@ -5261,19 +5261,39 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     for await (const sdkMessage of querySession) {
       messageCount++;
       lastSdkEventAt = Date.now();
-      // stream_event is high-frequency (per token delta) — skip logging entirely;
-      // other types (user/assistant/result/system_init) are low-frequency and important.
-      // Log only a compact summary to console (unified log). Full JSON is persisted
-      // to the session log file via appendLogLine below AND captured by Rust bun-out.
-      // Logging full JSON here caused double-write: [BUN] + [RUST][bun-out] both contain it.
-      if (sdkMessage.type !== 'stream_event' && sdkMessage.type !== 'rate_limit_event') {
+      // stream_event is high-frequency (per token delta) — skip logging entirely.
+      // All other types are low-frequency and logged with type-specific detail:
+      //   system/init  — full JSON dump (once per session, all fields for diagnostics)
+      //   result       — full JSON dump, long strings truncated to 100 chars
+      //   rate_limit   — key fields (was previously silenced)
+      //   others       — compact one-line summary
+      if (sdkMessage.type !== 'stream_event') {
         const msg = sdkMessage as Record<string, unknown>;
-        const model = (msg.message as Record<string, unknown>)?.model ?? '';
-        const stopReason = (msg.message as Record<string, unknown>)?.stop_reason ?? '';
-        const subtype = msg.subtype ?? '';
-        const extra = subtype ? ` subtype=${subtype}` : model ? ` model=${model}` : '';
-        const stop = stopReason ? ` stop=${stopReason}` : '';
-        console.log(`[agent][sdk] message #${messageCount} type=${sdkMessage.type}${extra}${stop}`);
+
+        if (sdkMessage.type === 'system' && msg.subtype === 'init') {
+          // Full system_init — all fields visible for diagnostics (MCP status, tools, model, etc.)
+          console.log(`[agent][sdk] system_init: ${logStringify(sdkMessage)}`);
+        } else if (sdkMessage.type === 'result') {
+          // Full result — truncate long strings to 100 chars (e.g. result text)
+          console.log(`[agent][sdk] result: ${logStringify(sdkMessage, 100)}`);
+        } else if (sdkMessage.type === 'rate_limit_event') {
+          const rli = msg.rate_limit_info as Record<string, unknown> | undefined;
+          if (rli) {
+            const pct = typeof rli.utilization === 'number' ? Math.round(rli.utilization * 100) : '?';
+            const resets = typeof rli.resetsAt === 'number'
+              ? new Date((rli.resetsAt as number) * 1000).toISOString()
+              : 'n/a';
+            console.log(`[agent][sdk] rate_limit: status=${rli.status} utilization=${pct}% type=${rli.rateLimitType} overage=${rli.isUsingOverage} threshold=${rli.surpassedThreshold} resets=${resets}`);
+          }
+        } else {
+          // Compact summary for other types (assistant, user, system/session_state_changed, etc.)
+          const model = (msg.message as Record<string, unknown>)?.model ?? '';
+          const stopReason = (msg.message as Record<string, unknown>)?.stop_reason ?? '';
+          const subtype = msg.subtype ?? '';
+          const extra = subtype ? ` subtype=${subtype}` : model ? ` model=${model}` : '';
+          const stop = stopReason ? ` stop=${stopReason}` : '';
+          console.log(`[agent][sdk] message #${messageCount} type=${sdkMessage.type}${extra}${stop}`);
+        }
       }
       try {
         const line = `${localTimestamp()} ${logStringify(sdkMessage)}`;
@@ -5394,10 +5414,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // SDK emits these when the Anthropic API returns rate_limit or transient errors
         // and the SDK is automatically retrying. Without handling, user sees "stuck" behavior.
         // Field names match SDKAPIRetryMessage type: attempt, max_retries, retry_delay_ms
-        const retryMsg = sdkMessage as { subtype?: string; attempt?: number; max_retries?: number; retry_delay_ms?: number; error?: unknown };
+        const retryMsg = sdkMessage as { subtype?: string; attempt?: number; max_retries?: number; retry_delay_ms?: number; error?: unknown; error_status?: number | null };
         if (retryMsg.subtype === 'api_retry') {
           isApiRetrying = true;
-          console.log(`[agent] API retry: attempt=${retryMsg.attempt}/${retryMsg.max_retries}, delay=${retryMsg.retry_delay_ms}ms`);
+          const errorStr = typeof retryMsg.error === 'string' ? retryMsg.error : JSON.stringify(retryMsg.error ?? null);
+          console.log(`[agent] API retry: attempt=${retryMsg.attempt}/${retryMsg.max_retries}, delay=${retryMsg.retry_delay_ms}ms, error=${errorStr}, status=${retryMsg.error_status ?? 'null'}`);
           broadcast('chat:api-retry', {
             attempt: retryMsg.attempt,
             maxRetries: retryMsg.max_retries,
@@ -5406,10 +5427,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         }
       }
 
-      const agentError = extractAgentError(sdkMessage);
-      if (agentError) {
-        lastAgentError = agentError;
-        broadcast('chat:agent-error', { message: agentError });
+      // Skip error extraction for api_retry — its .error field describes why the SDK
+      // is retrying (e.g. "unknown", "overloaded"), NOT an agent-level error.
+      // api_retry is already handled by the dedicated handler above (chat:api-retry).
+      const isApiRetry = sdkMessage.type === 'system' &&
+        (sdkMessage as { subtype?: string }).subtype === 'api_retry';
+      if (!isApiRetry) {
+        const agentError = extractAgentError(sdkMessage);
+        if (agentError) {
+          lastAgentError = agentError;
+          broadcast('chat:agent-error', { message: agentError });
+        }
       }
       if (shouldAbortSession) {
         break;
