@@ -2604,7 +2604,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       {pendingCrossRuntimeMessage && (
         <ConfirmDialog
           title="跨 Runtime 会话"
-          message={`此会话由 ${sessionRuntime === 'codex' ? 'Codex' : sessionRuntime === 'claude-code' ? 'Claude Code' : sessionRuntime === 'builtin' ? '内置 SDK' : sessionRuntime} 创建，当前 Runtime 为 ${currentRuntime === 'codex' ? 'Codex' : currentRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'}，新消息将使用当前 Runtime 新开会话。`}
+          message={`此会话由 ${effectiveSessionRuntime === 'codex' ? 'Codex' : effectiveSessionRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'} 创建，当前 Runtime 为 ${currentRuntime === 'codex' ? 'Codex' : currentRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'}，新消息将使用当前 Runtime 新开会话。`}
           confirmText="新开会话并发送"
           cancelText="取消"
           onConfirm={confirmCrossRuntimeSend}

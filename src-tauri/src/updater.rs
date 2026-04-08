@@ -264,7 +264,7 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
     // Latest-wins: skip re-download if we already have this exact version ready.
     // A newer version (e.g., 0.1.61 after 0.1.60) WILL be downloaded and replace the old one.
     {
-        let downloaded_ver = DOWNLOADED_VERSION.lock().unwrap();
+        let downloaded_ver = DOWNLOADED_VERSION.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref dv) = *downloaded_ver {
             if dv == &version {
                 logger::info(
@@ -382,7 +382,7 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
     }
 
     // Track this version as the latest downloaded (latest-wins protocol)
-    *DOWNLOADED_VERSION.lock().unwrap() = Some(version.clone());
+    *DOWNLOADED_VERSION.lock().unwrap_or_else(|e| e.into_inner()) = Some(version.clone());
 
     Ok(Some(version))
 }
@@ -438,7 +438,7 @@ pub fn check_pending_update(app: AppHandle) -> Option<String> {
                 // Reject stale pending updates (e.g., user manually upgraded past the cached version)
                 let current = app.package_info().version.to_string();
                 if !is_version_greater(&version, &current) {
-                    log::info!("[Updater] Clearing stale pending update v{} (current v{})", version, current);
+                    logger::info(&app, format!("[Updater] Clearing stale pending update v{} (current v{})", version, current));
                     clear_pending_update_from_disk();
                     return None;
                 }

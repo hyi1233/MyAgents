@@ -627,6 +627,7 @@ export async function stopExternalSession(): Promise<boolean> {
     activeProcess = null;
     activeRuntime = null;
     isRunning = false;
+    pendingPermissionSuggestions.clear();  // Prevent stale suggestions leaking across sessions
     // Notify IM stream callback if active (prevents orphaned SSE streams on user-stop)
     fireImCallback('error', 'Session stopped');
     broadcast('chat:status', { sessionState: 'idle' });
@@ -967,28 +968,21 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
               ? block.content
               : Array.isArray(block.content)
                 ? (block.content as Array<Record<string, unknown>>).map(b => (b.text as string) || '').join('\n')
-                : JSON.stringify(block.content);
+                : (block.content != null ? JSON.stringify(block.content) : '');
             broadcast('chat:tool-result-complete', {
-              id: block.tool_use_id,
+              toolUseId: block.tool_use_id,
               content: resultText.slice(0, 2000),  // Truncate for SSE
               isError: block.is_error === true,
             });
-            // Also feed into persistence accumulator
-            const toolEntry = pendingToolInputs.get(block.tool_use_id as string);
-            if (toolEntry) {
-              currentContentBlocks.push({
-                type: 'tool_use',
-                tool: {
-                  id: block.tool_use_id as string,
-                  name: toolEntry.name,
-                  input: {},
-                  inputJson: toolEntry.inputJson,
-                  result: resultText.slice(0, 5000),
-                  isError: block.is_error === true,
-                  streamIndex: currentContentBlocks.length,
-                },
-              });
-              pendingToolInputs.delete(block.tool_use_id as string);
+            // Update the already-persisted tool_use block with its result.
+            // tool_use_stop already consumed pendingToolInputs and pushed to currentContentBlocks,
+            // so we find the existing block and add the result (same pattern as tool_result handler).
+            const toolBlockIdx = currentContentBlocks.findIndex(
+              b => b.type === 'tool_use' && b.tool?.id === block.tool_use_id
+            );
+            if (toolBlockIdx >= 0 && currentContentBlocks[toolBlockIdx].tool) {
+              currentContentBlocks[toolBlockIdx].tool!.result = resultText.slice(0, 5000);
+              currentContentBlocks[toolBlockIdx].tool!.isError = block.is_error === true;
             }
             resetWatchdog();
           }
