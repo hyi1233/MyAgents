@@ -27,14 +27,18 @@ function getFallbackPaths(): string[] {
         ].filter(Boolean);
     }
 
-    // macOS/Linux paths
+    // macOS/Linux paths — cover common package managers and version managers.
+    // GUI apps don't inherit shell PATH, so we enumerate known binary directories.
+    const home = process.env.HOME;
     const paths = [
-        '/opt/homebrew/bin',
-        '/usr/local/bin',
-        process.env.HOME ? `${process.env.HOME}/.local/bin` : '',   // Claude Code / pipx / user-local installs
-        process.env.HOME ? `${process.env.HOME}/.bun/bin` : '',
-        process.env.HOME ? `${process.env.HOME}/.npm-global/bin` : '',
-        process.env.HOME ? `${process.env.HOME}/Library/pnpm` : '',
+        '/opt/homebrew/bin',        // macOS Apple Silicon homebrew
+        '/usr/local/bin',           // macOS Intel homebrew / Linux system
+        home ? `${home}/.local/bin` : '',          // Claude Code / pipx / XDG user-local
+        home ? `${home}/.bun/bin` : '',            // Bun global installs
+        home ? `${home}/.npm-global/bin` : '',     // npm custom global prefix
+        home ? `${home}/.cargo/bin` : '',          // Rust / cargo installs
+        home ? `${home}/.volta/bin` : '',          // Volta (Node version manager)
+        home ? `${home}/Library/pnpm` : '',        // pnpm (macOS)
     ];
 
     // Attempt to resolve NVM path manually if exists
@@ -55,6 +59,20 @@ function getFallbackPaths(): string[] {
                 console.warn('[shell] Failed to resolve NVM paths:', e);
             }
         }
+
+        const homeDir = process.env.HOME!; // narrowed by if-guard above
+
+        // fnm (Fast Node Manager) — ~/.local/share/fnm/aliases/default/bin
+        const fnmDir = join(homeDir, '.local', 'share', 'fnm', 'aliases', 'default', 'bin');
+        if (existsSync(fnmDir)) paths.push(fnmDir);
+
+        // asdf version manager — ~/.asdf/shims
+        const asdfDir = join(homeDir, '.asdf', 'shims');
+        if (existsSync(asdfDir)) paths.push(asdfDir);
+
+        // mise (formerly rtx) — ~/.local/share/mise/shims
+        const miseDir = join(homeDir, '.local', 'share', 'mise', 'shims');
+        if (existsSync(miseDir)) paths.push(miseDir);
     }
 
     return paths.filter(Boolean);
