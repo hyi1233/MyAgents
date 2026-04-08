@@ -1239,8 +1239,12 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
   }
 
   // Case 3: User enabled specific MCP - check if this tool's server is enabled
-  // Check if this server is in the enabled list
-  const isEnabled = currentMcpServers.some(s => s.id === serverId);
+  // The SDK sanitizes server names in tool prefixes: replace non-[a-zA-Z0-9_-] with '_'.
+  // Config IDs are usually already clean, but compare sanitized forms for robustness.
+  // Example: config id "my.server" → SDK tool prefix uses "my_server".
+  const sanitize = (name: string) => name.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const sanitizedServerId = sanitize(serverId);
+  const isEnabled = currentMcpServers.some(s => sanitize(s.id) === sanitizedServerId);
   if (isEnabled) {
     return { allowed: true };
   }
@@ -2463,6 +2467,12 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   // that survives session restarts, supports IM delivery, and uses wall-clock scheduling.
   // The SDK's cron is session-scoped/in-memory, would conflict and confuse users.
   env.CLAUDE_CODE_DISABLE_CRON = '1';
+  // Disable SDK auto-loading of claude.ai proxy MCP servers.
+  // MyAgents manages MCP servers through its own UI (buildSdkMcpServers).
+  // SDK auto-loaded servers use "claude.ai <DisplayName>" format (sanitized to "claude_ai_<Name>"),
+  // which mismatches our config IDs → checkMcpToolPermission blocks the tools.
+  // See: https://github.com/hAcKlyc/MyAgents/issues/73
+  env.ENABLE_CLAUDEAI_MCP_SERVERS = 'false';
   // SDK 0.2.83+: Emit session_state_changed events (idle/running/requires_action).
   // Currently used for diagnostic logging only (parallel data collection).
   // Future: may replace self-built sessionState tracking for more accurate turn boundary detection.
