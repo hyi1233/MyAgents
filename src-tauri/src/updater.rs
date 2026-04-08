@@ -89,6 +89,25 @@ fn read_pending_update_version() -> Option<String> {
     Some(meta.version)
 }
 
+/// Compare semver-like version strings: returns true if `remote` > `current`
+fn is_version_greater(remote: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split('.')
+            .filter_map(|s| s.parse::<u64>().ok())
+            .collect()
+    };
+    let r = parse(remote);
+    let c = parse(current);
+    for i in 0..r.len().max(c.len()) {
+        let rv = r.get(i).copied().unwrap_or(0);
+        let cv = c.get(i).copied().unwrap_or(0);
+        if rv > cv { return true; }
+        if rv < cv { return false; }
+    }
+    false // equal
+}
+
 /// RAII guard to reset UPDATE_IN_PROGRESS on drop
 struct UpdateGuard;
 
@@ -225,6 +244,20 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
     };
 
     let version = update.version.clone();
+
+    // Defensive guard: reject downgrades even if server/CDN returns a stale version.
+    // Tauri's check() should handle this, but CDN caching or proxy issues can slip through.
+    if !is_version_greater(&version, &current_version) {
+        logger::info(
+            app,
+            format!(
+                "[Updater] Ignoring stale update v{} (current v{} is same or newer)",
+                version, current_version
+            ),
+        );
+        return Ok(None);
+    }
+
     logger::info(
         app,
         format!("[Updater] Found update v{}, starting silent download...", version),
@@ -357,18 +390,28 @@ pub fn restart_app(app: AppHandle) {
 }
 
 /// Command: Check if a pending update exists on disk (for Windows startup prompt)
-/// Returns the version string if a pending update is ready, None otherwise
+/// Returns the version string if a pending update is ready AND newer than current, None otherwise
 #[tauri::command]
-pub fn check_pending_update() -> Option<String> {
+pub fn check_pending_update(app: AppHandle) -> Option<String> {
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = app;
         return None;
     }
 
     #[cfg(target_os = "windows")]
     {
         match read_pending_update_version() {
-            Some(version) => Some(version),
+            Some(version) => {
+                // Reject stale pending updates (e.g., user manually upgraded past the cached version)
+                let current = app.package_info().version.to_string();
+                if !is_version_greater(&version, &current) {
+                    log::info!("[Updater] Clearing stale pending update v{} (current v{})", version, current);
+                    clear_pending_update_from_disk();
+                    return None;
+                }
+                Some(version)
+            }
             None => {
                 // If metadata is corrupt/missing but bin exists, clean up
                 clear_pending_update_from_disk();
