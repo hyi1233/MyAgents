@@ -15,6 +15,7 @@ import { memo, useContext, useEffect, useMemo, useState } from 'react';
 import type { Components } from 'react-markdown';
 import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
+import rehypeRaw from 'rehype-raw';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -30,7 +31,7 @@ import { useTabApiOptional } from '@/context/TabContext';
 // Static plugin arrays to avoid recreation on every render
 const REMARK_PLUGINS_DEFAULT = [remarkGfm, remarkMath];
 const REMARK_PLUGINS_WITH_BREAKS = [remarkGfm, remarkMath, remarkBreaks];
-const REHYPE_PLUGINS = [rehypeKatex];
+const REHYPE_PLUGINS = [rehypeRaw, rehypeKatex];
 
 // Custom link component that opens links in embedded browser panel (if available)
 // or falls back to system browser. Supports text selection for copying.
@@ -120,7 +121,7 @@ const PreComponent: Components['pre'] = ({ children }) => {
 // Custom table components for better styling
 const TableComponent: Components['table'] = ({ children }) => (
   <div className="my-4 overflow-x-auto rounded-lg border border-[var(--line)]">
-    <table className="min-w-full divide-y divide-[var(--line)]">
+    <table className="m-0 min-w-full divide-y divide-[var(--line)]">
       {children}
     </table>
   </div>
@@ -204,7 +205,7 @@ const OlComponent: Components['ol'] = ({ children, start }) => (
 );
 
 const LiComponent: Components['li'] = ({ children }) => (
-  <li className="pl-1" style={{ display: 'list-item' }}>{children}</li>
+  <li className="pl-1 [&>p]:my-0" style={{ display: 'list-item' }}>{children}</li>
 );
 
 // Paragraph component
