@@ -15,6 +15,8 @@ import { memo, useContext, useEffect, useMemo, useState } from 'react';
 import type { Components } from 'react-markdown';
 import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -27,10 +29,32 @@ import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
 import { useTabApiOptional } from '@/context/TabContext';
 
+// Sanitize schema: allow safe HTML tags from rehype-raw, strip scripts/iframes/event handlers.
+// Extends the default GitHub-flavored schema with additional tags used in AI-generated content.
+const SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  tagNames: [
+    ...(defaultSchema.tagNames ?? []),
+    'details', 'summary',  // collapsible sections
+    'mark', 'ins', 'del',  // text highlighting
+    'sub', 'sup',           // subscript/superscript
+    'kbd', 'var', 'samp',  // technical inline elements
+  ],
+  attributes: {
+    ...defaultSchema.attributes,
+    // Allow class on code/span for syntax highlighting
+    code: [...(defaultSchema.attributes?.code ?? []), 'className'],
+    span: [...(defaultSchema.attributes?.span ?? []), 'className', 'style'],
+    // Allow KaTeX-generated markup
+    div: [...(defaultSchema.attributes?.div ?? []), 'className', 'style'],
+  },
+};
+
 // Static plugin arrays to avoid recreation on every render
 const REMARK_PLUGINS_DEFAULT = [remarkGfm, remarkMath];
 const REMARK_PLUGINS_WITH_BREAKS = [remarkGfm, remarkMath, remarkBreaks];
-const REHYPE_PLUGINS = [rehypeKatex];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- rehype plugin tuple typing
+const REHYPE_PLUGINS = [rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA], rehypeKatex] as any[];
 
 // Custom link component that opens links in embedded browser panel (if available)
 // or falls back to system browser. Supports text selection for copying.
@@ -120,14 +144,14 @@ const PreComponent: Components['pre'] = ({ children }) => {
 // Custom table components for better styling
 const TableComponent: Components['table'] = ({ children }) => (
   <div className="my-4 overflow-x-auto rounded-lg border border-[var(--line)]">
-    <table className="min-w-full divide-y divide-[var(--line)]">
+    <table className="m-0 min-w-full divide-y divide-[var(--line)]">
       {children}
     </table>
   </div>
 );
 
 const TableHeadComponent: Components['thead'] = ({ children }) => (
-  <thead className="bg-[var(--paper-inset)]/80">{children}</thead>
+  <thead className="bg-[var(--paper-inset)]/40">{children}</thead>
 );
 
 const TableRowComponent: Components['tr'] = ({ children }) => (
@@ -148,68 +172,68 @@ const TableHeaderComponent: Components['th'] = ({ children }) => (
 
 // Custom blockquote for better styling
 const BlockquoteComponent: Components['blockquote'] = ({ children }) => (
-  <blockquote className="my-4 border-l-4 border-[var(--warning)]/60 bg-[var(--warning-bg)]/50 py-2 pl-4 pr-3 italic text-[var(--ink-muted)]">
+  <blockquote className="my-4 border-l-2 border-[var(--line-strong)] py-1 pl-4 pr-3 text-[var(--ink-muted)]">
     {children}
   </blockquote>
 );
 
 // Custom heading components - H1:22px H2:20px H3:18px H4-H6:16px
 const H1Component: Components['h1'] = ({ children }) => (
-  <h1 className="mb-4 mt-6 text-[22px] font-bold text-[var(--ink)]">
+  <h1 className="mb-4 mt-6 text-[22px] leading-[1.3] font-bold text-[var(--ink)]">
     {children}
   </h1>
 );
 
 const H2Component: Components['h2'] = ({ children }) => (
-  <h2 className="mb-3 mt-5 text-[20px] font-semibold text-[var(--ink)]">
+  <h2 className="mb-3 mt-5 text-[20px] leading-[1.4] font-semibold text-[var(--ink)]">
     {children}
   </h2>
 );
 
 const H3Component: Components['h3'] = ({ children }) => (
-  <h3 className="mb-2 mt-4 text-[18px] font-semibold text-[var(--ink)]">
+  <h3 className="mb-2 mt-4 text-[18px] leading-[1.5] font-semibold text-[var(--ink)]">
     {children}
   </h3>
 );
 
 const H4Component: Components['h4'] = ({ children }) => (
-  <h4 className="mb-2 mt-3 text-[16px] font-semibold text-[var(--ink-secondary)]">
+  <h4 className="mb-2 mt-3 text-[16px] leading-[1.5] font-semibold text-[var(--ink-secondary)]">
     {children}
   </h4>
 );
 
 const H5Component: Components['h5'] = ({ children }) => (
-  <h5 className="mb-2 mt-3 text-[16px] font-medium text-[var(--ink-secondary)]">
+  <h5 className="mb-2 mt-3 text-[16px] leading-[1.5] font-medium text-[var(--ink-secondary)]">
     {children}
   </h5>
 );
 
 const H6Component: Components['h6'] = ({ children }) => (
-  <h6 className="mb-2 mt-3 text-[16px] font-medium text-[var(--ink-muted)]">
+  <h6 className="mb-2 mt-3 text-[16px] leading-[1.5] font-medium text-[var(--ink-muted)]">
     {children}
   </h6>
 );
 
 // Custom list components
 const UlComponent: Components['ul'] = ({ children }) => (
-  <ul className="my-3 ml-6 block list-outside list-disc space-y-1.5 text-[var(--ink)] marker:text-[var(--ink-muted)]">
+  <ul className="my-3 ml-6 block list-outside list-disc space-y-2.5 text-[var(--ink)] marker:text-[var(--ink-muted)]">
     {children}
   </ul>
 );
 
-const OlComponent: Components['ol'] = ({ children }) => (
-  <ol className="my-3 ml-6 block list-outside list-decimal space-y-1.5 text-[var(--ink)] marker:text-[var(--ink-muted)]">
+const OlComponent: Components['ol'] = ({ children, start }) => (
+  <ol start={start} className="my-3 ml-6 block list-outside list-decimal space-y-2.5 text-[var(--ink)] marker:text-[var(--ink-muted)]">
     {children}
   </ol>
 );
 
 const LiComponent: Components['li'] = ({ children }) => (
-  <li className="pl-1" style={{ display: 'list-item' }}>{children}</li>
+  <li className="pl-1 [&>p]:my-0" style={{ display: 'list-item' }}>{children}</li>
 );
 
 // Paragraph component
 const ParagraphComponent: Components['p'] = ({ children }) => (
-  <p className="my-2 leading-relaxed">{children}</p>
+  <p className="my-4 leading-relaxed">{children}</p>
 );
 
 // Horizontal rule
@@ -413,20 +437,26 @@ function preprocessContent(content: string): string {
 
   // Step 2: Apply format fixes to unprotected content
 
-  // 2a. Ensure headers have a blank line before them (except at the start)
+  // 2a. Escape currency dollar signs ($100, $3,000, $1.50 etc.)
+  // remark-math treats $...$ as inline LaTeX, causing false positives like
+  // "$3000 亿...$1880 亿" being rendered as a math expression.
+  // Pattern: $ followed by digit, not preceded by another $ (preserves $$...$$)
+  processed = processed.replace(/(?<!\$)\$(?=\d)/g, '\\$');
+
+  // 2b. Ensure headers have a blank line before them (except at the start)
   // "text## Header" -> "text\n\n## Header"
   // But NOT "## Title" (already correct - don't break multi-hash headers)
   processed = processed.replace(/([^\n#])(#{1,6}\s+)(?=\S)/g, '$1\n\n$2');
 
-  // 2b. Ensure headers at the start of lines have a space after # (if missing)
+  // 2c. Ensure headers at the start of lines have a space after # (if missing)
   // "##Title" -> "## Title" (only at line start)
   processed = processed.replace(/^(#{1,6})([^\s#\n])/gm, '$1 $2');
 
-  // 2c. Fix unordered list items at LINE START ONLY
+  // 2d. Fix unordered list items at LINE START ONLY
   // "-item" -> "- item"
   processed = processed.replace(/^-([^\s\-\n])/gm, '- $1');
 
-  // 2d. Fix ordered list items at LINE START ONLY
+  // 2e. Fix ordered list items at LINE START ONLY
   // "1.item" -> "1. item"
   processed = processed.replace(/^(\d+\.)([^\s\n])/gm, '$1 $2');
 

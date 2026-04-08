@@ -741,7 +741,11 @@ export default function TabProvider({
                     const retryKey = `api_retry:${payload.attempt ?? 1}:${payload.maxRetries ?? '?'}`;
                     setSystemStatus(retryKey);
                 } else {
+                    // Retry resolved — streaming resumed. Clear both the retry indicator
+                    // and any error banner from the failed attempt (e.g. api_retry's
+                    // informational .error field that was surfaced as agent-error).
                     setSystemStatus(null);
+                    setAgentError(null);
                 }
                 break;
             }
@@ -1049,6 +1053,7 @@ export default function TabProvider({
                     setIsLoading(false);
                     setSessionState('idle');  // Reset session state to idle
                     setSystemStatus(null);  // Clear system status (e.g., 'compacting') when message completes
+                    setAgentError(null);  // Clear any transient error banner (e.g., api_retry that recovered)
                 });
 
                 // Send system notification if user is not focused on the app
