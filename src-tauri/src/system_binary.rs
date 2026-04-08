@@ -83,7 +83,94 @@ pub fn augmented_path() -> std::ffi::OsString {
                 }
             }
         }
+
+        // Shell-detected PATH: covers custom directories from .zshrc/.bashrc
+        // (NVM, fnm, Codex.app, custom PATHs, etc.) that the fixed list above misses.
+        if let Some(shell_path) = detect_shell_path() {
+            for dir in shell_path.split(':') {
+                let d = dir.to_string();
+                if !d.is_empty() && !parts.contains(&d) {
+                    parts.push(d);
+                }
+            }
+        }
     }
 
     std::env::join_paths(parts).unwrap_or_default()
+}
+
+/// Detect the user's full shell PATH by spawning an interactive login shell.
+///
+/// GUI apps (Tauri/Finder) inherit a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`).
+/// Tools installed via NVM, fnm, app bundles (e.g., `/Applications/Codex.app/...`),
+/// or custom PATH entries in .zshrc are invisible to the hardcoded directory list.
+///
+/// This mirrors the TypeScript `getShellPath()` in `src/server/utils/shell.ts`:
+/// spawns `$SHELL -i -l -c 'echo $PATH'` with marker extraction to handle
+/// noisy .zshrc output (p10k, oh-my-zsh banners, conda, etc.).
+///
+/// Cached via `OnceLock` — only spawns once per process lifetime.
+#[cfg(not(target_os = "windows"))]
+fn detect_shell_path() -> Option<String> {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Option<String>> = OnceLock::new();
+
+    CACHED.get_or_init(|| {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let marker = format!("__MYAGENTS_PATH_{}__", std::process::id());
+        // NOTE: ${PATH} (braced) is required — unbraced $PATH__MARKER__ would be
+        // parsed as a single variable name because underscores are valid identifiers.
+        let script = format!("echo \"{marker}${{PATH}}{marker}\"");
+
+        // Spawn with timeout to guard against .zshrc that launches tmux/screen.
+        let mut child = match crate::process_cmd::new(&shell)
+            .args(["-i", "-l", "-c", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return None,
+        };
+
+        // 3-second timeout (matches TypeScript getShellPath)
+        let output = {
+            use std::time::{Duration, Instant};
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break child.wait_with_output(),
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return None;
+                    }
+                }
+            }
+        };
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                // Extract PATH from between markers (immune to noisy shell output)
+                let start_tag = &marker;
+                let end_tag = &marker;
+                if let Some(start) = stdout.find(start_tag) {
+                    let after_start = start + start_tag.len();
+                    if let Some(end) = stdout[after_start..].find(end_tag) {
+                        let path = &stdout[after_start..after_start + end];
+                        if path.len() > 10 {
+                            return Some(path.to_string());
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }).clone()
 }
