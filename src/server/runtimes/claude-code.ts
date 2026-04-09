@@ -344,12 +344,19 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       onEvent(event);
     };
 
-    // Start reading stdout NDJSON in background (uses wrappedOnEvent)
-    this.readEvents(proc.stdout, wrappedOnEvent, handle);
+    // Start reading stdout NDJSON in background (uses wrappedOnEvent).
+    // Capture the promise so the exit handler can wait for the reader to drain
+    // all buffered data before deciding whether to emit a fallback session_complete.
+    const readerDone = this.readEvents(proc.stdout, wrappedOnEvent, handle);
 
-    proc.exited.then((code) => {
+    proc.exited.then(async (code) => {
       handle.exited = true;
       console.log(`[claude-code] Process exited with code ${code}`);
+      // CRITICAL: Wait for the NDJSON reader to finish processing all buffered stdout.
+      // Without this, the exit handler races with the reader — on short responses,
+      // proc.exited resolves before the reader processes the 'result' NDJSON line,
+      // causing a premature session_complete with empty result.
+      await readerDone;
       if (!sessionCompleteEmitted) {
         onEvent({
           kind: 'session_complete',

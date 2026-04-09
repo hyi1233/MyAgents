@@ -1044,8 +1044,28 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           : { ...event.message, timestamp: new Date().toISOString() };
         broadcast('chat:message-replay', { message: replayMsg });
       }
-      // Assistant replays are intentionally dropped — the stream_event deltas
-      // already delivered the content to the frontend incrementally.
+      // Assistant replay: normally dropped because stream_event deltas already delivered
+      // the content. But if stream deltas were missing (short response, rate limiting,
+      // API truncation), the replay is the only source of truth. Use it as fallback.
+      if (replayRole === 'assistant' && !currentAssistantText.trim()) {
+        const content = replayContent;
+        let text = '';
+        if (typeof content === 'string') {
+          text = content;
+        } else if (Array.isArray(content)) {
+          text = (content as Array<Record<string, unknown>>)
+            .filter(b => b.type === 'text')
+            .map(b => (b.text as string) || '')
+            .join('');
+        }
+        if (text.trim()) {
+          console.log(`[external-session] Assistant message_replay fallback: stream had no text, using replay (${text.length} chars)`);
+          broadcast('chat:message-chunk', text);
+          currentAssistantText += text;
+          pendingTextBuffer += text;
+          resetWatchdog();
+        }
+      }
       break;
     }
 
