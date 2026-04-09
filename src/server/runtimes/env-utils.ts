@@ -27,16 +27,18 @@ export function augmentedProcessEnv(): Record<string, string | undefined> {
 /**
  * Resolve an external CLI command to its full executable path.
  *
- * On Windows, npm global installs create `.cmd` wrappers (e.g., `claude.cmd`).
- * Bun.spawn() uses libuv's uv_spawn which does NOT resolve PATH extensions
- * (.CMD, .BAT, .PS1) like cmd.exe does. Spawning bare `claude` → ENOENT.
+ * Uses Bun.which() with the augmented PATH (from getShellPath()) on ALL platforms.
  *
- * This function uses Bun.which() with the augmented PATH to find the real path
- * (e.g., `C:\Users\xxx\AppData\Roaming\npm\claude.cmd`), then spawns that directly.
- * On macOS/Linux, returns the command as-is (Unix doesn't have this issue). See: #70
+ * Why this is needed everywhere (not just Windows):
+ * - Windows: npm global installs create `.cmd` wrappers; Bun.spawn() via libuv
+ *   doesn't resolve PATH extensions (.CMD/.BAT) → ENOENT. See: #70
+ * - macOS/Linux: Bun.spawn() uses posix_spawnp which searches the CALLER's PATH,
+ *   not the env passed to the child. GUI apps (Tauri/Finder) have minimal PATH
+ *   that lacks NVM/fnm/volta/asdf paths. Even though augmentedProcessEnv() builds
+ *   a correct PATH, the bare command name won't be found by posix_spawnp.
+ *   Pre-resolving to a full path bypasses PATH lookup entirely.
  */
 export function resolveCommand(command: string): string {
-  if (!isWindows) return command;
   const resolved = which(command, { PATH: getShellPath() });
   if (resolved) return resolved;
   // Fallback: return as-is and let spawn fail with a clear error
