@@ -606,8 +606,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const runtimeModels = currentRuntime === 'claude-code' ? CC_MODELS
     : currentRuntime === 'codex' ? codexModels : undefined;
 
-  // Effective model/permission based on runtime
-  const effectiveModel = isExternalRuntime ? runtimeModel : selectedModel;
+  // Effective model/permission based on runtime.
+  // For external runtimes: if user hasn't explicitly selected a model (runtimeModel=undefined),
+  // use the default model from the runtime's model list — this matches what the UI displays.
+  const effectiveModel = isExternalRuntime
+    ? (runtimeModel ?? runtimeModels?.find(m => m.isDefault)?.value)
+    : selectedModel;
   const effectivePermissionMode = isExternalRuntime
     ? runtimePermissionMode as PermissionMode
     : permissionMode;

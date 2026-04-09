@@ -23,7 +23,7 @@ import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
-import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage } from './types/session';
+import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
 import { broadcast } from './sse';
 import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
@@ -362,7 +362,7 @@ export type MessageWire = {
     isImage?: boolean;
   }[];
   metadata?: {
-    source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
+    source: SessionSource;
     sourceId?: string;
     senderName?: string;
   };
@@ -3723,14 +3723,14 @@ export async function initializeAgent(
     // is absent — yet the SDK session directory already exists on disk.
     const meta = getSessionMetadata(initialSessionId);
     if (meta) {
-      // Cross-runtime guard: if session was created by an external runtime (Codex/CC)
-      // but current runtime is builtin, the SDK will NOT recognize this session ID.
-      // Attempting to resume would cause "No conversation found" → auto-reset → data loss.
-      // Instead, treat as NOT registered so the builtin SDK creates a fresh session on first message.
-      const isCrossRuntime = meta.runtime && meta.runtime !== 'builtin' && !isExternalRuntime(getCurrentRuntimeType());
+      // Cross-runtime guard: if session was created by a DIFFERENT runtime than the current one,
+      // attempting to resume would fail (SDK: "No conversation found", CC/Codex: unknown session ID).
+      // Covers all mismatch combinations: builtin↔CC, builtin↔Codex, CC↔Codex.
+      const currentRuntimeType = getCurrentRuntimeType();
+      const isCrossRuntime = meta.runtime && meta.runtime !== currentRuntimeType;
       if (isCrossRuntime) {
         sessionRegistered = false;
-        console.log(`[agent] initializeAgent: cross-runtime session ${initialSessionId} (created by ${meta.runtime}), will NOT resume with builtin SDK`);
+        console.log(`[agent] initializeAgent: cross-runtime session ${initialSessionId} (created by ${meta.runtime}, current=${currentRuntimeType}), will NOT resume`);
       } else {
         sessionRegistered = true;
         console.log(`[agent] initializeAgent: will resume session ${initialSessionId} (sdkSessionId=${meta.sdkSessionId ?? 'unknown'})`);
@@ -3985,7 +3985,7 @@ export async function enqueueUserMessage(
   permissionMode?: PermissionMode,
   model?: string,
   providerEnv?: ProviderEnv | 'subscription',
-  metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group'; sourceId?: string; senderName?: string },
+  metadata?: { source: SessionSource; sourceId?: string; senderName?: string },
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
   // 这些函数是异步的（await sessionTerminationPromise 需要数秒），

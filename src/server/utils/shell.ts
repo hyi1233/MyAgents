@@ -41,7 +41,11 @@ function getFallbackPaths(): string[] {
         home ? `${home}/Library/pnpm` : '',        // pnpm (macOS)
     ];
 
-    // Attempt to resolve NVM path manually if exists
+    // Attempt to resolve NVM paths manually if exists.
+    // Add ALL installed versions (sorted highest-first so the newest takes PATH priority).
+    // Why all versions: `zsh -l -c` doesn't source .zshrc (non-interactive), so shell PATH
+    // detection misses NVM. If we only add the highest version but the user installed
+    // claude/codex on a different version, detection fails.
     if (process.env.HOME) {
         const nvmDir = join(process.env.HOME, '.nvm', 'versions', 'node');
         if (existsSync(nvmDir)) {
@@ -50,10 +54,11 @@ function getFallbackPaths(): string[] {
                     .filter(v => v.startsWith('v'))
                     .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
 
+                for (const v of versions) {
+                    paths.push(join(nvmDir, v, 'bin'));
+                }
                 if (versions.length > 0) {
-                    const nvmBin = join(nvmDir, versions[0], 'bin');
-                    paths.push(nvmBin);
-                    console.log('[shell] Found NVM node path:', nvmBin);
+                    console.log('[shell] Found NVM node versions:', versions.join(', '));
                 }
             } catch (e) {
                 console.warn('[shell] Failed to resolve NVM paths:', e);
@@ -97,23 +102,40 @@ export function getShellPath(): string {
         return cachedPath;
     }
 
-    // macOS/Linux: Try to detect shell PATH
+    // macOS/Linux: Detect shell PATH by spawning an interactive login shell.
+    //
+    // Why `-i` (interactive) is required:
+    //   zsh -l -c  → non-interactive login → sources .zprofile but NOT .zshrc
+    //   zsh -i -l -c → interactive login  → sources .zprofile AND .zshrc
+    // NVM/fnm/pnpm etc. are almost always loaded in .zshrc, so without `-i` their
+    // paths are missing — exactly the user's bug report (claude/codex "not installed").
+    //
+    // Marker extraction: `-i` can produce extra output (MOTD, prompt frameworks like
+    // p10k/oh-my-zsh, conda banners). We wrap $PATH in unique markers and extract
+    // only the content between them, making us immune to noisy .zshrc output.
+    //
+    // Safety: stdin is /dev/null (interactive shell gets EOF → exits), timeout guards
+    // against .zshrc that launches tmux/screen. Fallback paths provide a safety net.
     try {
         const shell = process.env.SHELL || '/bin/zsh';
-        const detectedPath = execSync(`${shell} -l -c 'echo $PATH'`, {
+        const marker = `__MYAGENTS_PATH_${process.pid}__`;
+        // NOTE: Must use ${PATH} (braced) — unbraced $PATH__MARKER__ is parsed as one
+        // variable name by the shell because underscores are valid in identifiers.
+        const raw = execSync(`${shell} -i -l -c 'echo "${marker}\${PATH}${marker}"'`, {
             encoding: 'utf-8',
-            timeout: 2000,
+            timeout: 3000,
             stdio: ['ignore', 'pipe', 'ignore']
-        }).trim();
+        });
 
-        if (detectedPath && detectedPath.length > 10) {
-            console.log('[shell] Detected user PATH via shell');
+        const match = raw.match(new RegExp(`${marker}(.+?)${marker}`));
+        if (match && match[1].length > 10) {
+            const detectedPath = match[1];
+            console.log('[shell] Detected user PATH via interactive shell');
             cachedPath = `${fallback}${PATH_SEPARATOR}${detectedPath}`;
-            console.log('[shell] Final Merged PATH:', cachedPath);
             return cachedPath;
         }
     } catch (error) {
-        console.warn('[shell] Failed to detect shell PATH via spawn:', error);
+        console.warn('[shell] Failed to detect shell PATH via interactive shell:', error);
     }
 
     // Fallback

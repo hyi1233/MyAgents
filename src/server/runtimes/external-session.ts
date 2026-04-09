@@ -65,6 +65,28 @@ let pendingThinkingText = '';       // thinking_delta accumulator for current th
 let pendingThinkingIndex = 0;       // index of current thinking block
 const pendingToolInputs = new Map<string, { name: string; inputJson: string }>(); // toolUseId → input accumulator
 
+/** Reset all module-level state for a clean session transition.
+ *  Prevents cross-session contamination when Sidecar is reused (Handover scenario 4). */
+function resetModuleState(): void {
+  activeProcess = null;
+  activeRuntime = null;
+  isRunning = false;
+  turnCompleted = false;
+  startingPromise = null;
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  lastRuntimeSessionId = '';
+  lastModel = '';
+  lastPermissionMode = '';
+  allSessionMessages = [];
+  currentAssistantText = '';
+  currentTurnStartTime = 0;
+  currentContentBlocks = [];
+  pendingTextBuffer = '';
+  pendingThinkingText = '';
+  pendingThinkingIndex = 0;
+  pendingToolInputs.clear();
+}
+
 /** Flush accumulated text into a text content block */
 function flushPendingText(): void {
   if (pendingTextBuffer) {
@@ -196,29 +218,42 @@ export function restoreExternalSessionState(
   workspacePath: string,
   scenario: InteractionScenario,
 ): void {
+  // If switching to a different session, reset all accumulated state to prevent contamination
+  if (sessionId !== lastSessionId) {
+    resetModuleState();
+  }
   lastSessionId = sessionId;
   lastWorkspacePath = workspacePath;
   lastScenario = scenario;
 
   // Restore the runtime's own session ID from persisted metadata.
-  // Three cases:
+  // Four cases:
+  // 0. Cross-runtime mismatch (session created by different external runtime) → fresh start
   // 1. Codex session with runtimeSessionId persisted → use it (threadId)
   // 2. CC session (no runtimeSessionId, but has runtime + messages) → sessionId (CC uses our ID)
-  // 3. Brand new session (no metadata) → empty string → sendExternalMessage hits Case 1 (fresh start)
+  // 3. Brand new session (no messages, or no metadata) → empty string → sendExternalMessage hits Case 1 (fresh start)
   const meta = getSessionMetadata(sessionId);
-  if (meta?.runtimeSessionId) {
+  const data = getSessionData(sessionId);
+  const hasExistingMessages = !!(data?.messages?.length);
+  const currentRuntimeType = getCurrentRuntimeType();
+
+  // Cross-runtime guard: session created by a different runtime (e.g., Codex session in CC Sidecar).
+  // The other runtime's session ID / threadId is meaningless here — must start fresh.
+  const isCrossRuntime = meta?.runtime && meta.runtime !== currentRuntimeType;
+
+  if (isCrossRuntime) {
+    lastRuntimeSessionId = ''; // Different runtime — cannot resume
+    console.log(`[external-session] Cross-runtime session: meta.runtime=${meta!.runtime}, current=${currentRuntimeType}, will start fresh`);
+  } else if (meta?.runtimeSessionId) {
     lastRuntimeSessionId = meta.runtimeSessionId;
-  } else if (meta?.runtime && meta.runtime !== 'builtin') {
+  } else if (meta?.runtime && meta.runtime !== 'builtin' && hasExistingMessages) {
     lastRuntimeSessionId = sessionId; // CC: session ID === runtime session ID
   } else {
     lastRuntimeSessionId = ''; // New session: nothing to resume
   }
 
-  // Load existing messages for correct incremental save
-  const data = getSessionData(sessionId);
-  if (data?.messages?.length) {
-    allSessionMessages = data.messages;
-  }
+  // Load existing messages for correct incremental save (or clear stale in-memory state)
+  allSessionMessages = hasExistingMessages ? data!.messages : [];
   console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages)`);
 }
 
@@ -750,6 +785,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'text_stop':
       // Text block ended — flush accumulated text into a content block
+      console.log(`[external-session] text_stop: accumulated ${currentAssistantText.length} chars`);
       flushPendingText();
       fireImCallback('block-end', '');
       break;
@@ -906,12 +942,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       turnCompleted = true;
       lastTurnSucceeded = true;
       clearWatchdog();
+      console.log(`[external-session] turn_complete: text=${currentAssistantText.length}chars, blocks=${currentContentBlocks.length}, elapsed=${currentTurnStartTime ? Date.now() - currentTurnStartTime : 0}ms`);
       persistTurnResult();
       break;
     }
 
     case 'session_complete':
       clearWatchdog();
+      console.log(`[external-session] session_complete: subtype=${event.subtype}, result=${(event.result || '').length > 0 ? `${(event.result || '').length}chars` : 'empty'}, turnCompleted=${turnCompleted}, assistantText=${currentAssistantText.length}chars`);
       if (event.subtype === 'success') {
         // CC slash commands (e.g. /context, /cost) return output directly in `result`
         // without streaming text_delta events. Only broadcast if NO turn completed
@@ -1009,8 +1047,28 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           : { ...event.message, timestamp: new Date().toISOString() };
         broadcast('chat:message-replay', { message: replayMsg });
       }
-      // Assistant replays are intentionally dropped — the stream_event deltas
-      // already delivered the content to the frontend incrementally.
+      // Assistant replay: normally dropped because stream_event deltas already delivered
+      // the content. But if stream deltas were missing (short response, rate limiting,
+      // API truncation), the replay is the only source of truth. Use it as fallback.
+      if (replayRole === 'assistant' && !currentAssistantText.trim()) {
+        const content = replayContent;
+        let text = '';
+        if (typeof content === 'string') {
+          text = content;
+        } else if (Array.isArray(content)) {
+          text = (content as Array<Record<string, unknown>>)
+            .filter(b => b.type === 'text')
+            .map(b => (b.text as string) || '')
+            .join('');
+        }
+        if (text.trim()) {
+          console.log(`[external-session] Assistant message_replay fallback: stream had no text, using replay (${text.length} chars)`);
+          broadcast('chat:message-chunk', text);
+          currentAssistantText += text;
+          pendingTextBuffer += text;
+          resetWatchdog();
+        }
+      }
       break;
     }
 
