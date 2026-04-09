@@ -1649,8 +1649,10 @@ pub fn start_tab_sidecar<R: Runtime>(
     }
 
     // Inject runtime type for Agent Runtime selection (v0.1.59)
-    // Session sidecars resolve runtime from agent config; global sidecar always uses builtin.
-    // This env var is read by the Bun sidecar to decide which runtime to use.
+    // This path is used by start_sidecar (generic, IM/Agent channels).
+    // Session sidecars created via ensure_session_sidecar use resolve_session_runtime()
+    // for authoritative per-session runtime. This fallback uses agent config for cases
+    // without a session_id (global sidecar, IM initial start).
     if !is_global {
         if let Some(ref dir) = agent_dir {
             if let Some(runtime) = resolve_agent_runtime_from_config(dir) {
@@ -2466,8 +2468,14 @@ fn create_new_session_sidecar<R: Runtime>(
         cmd.env("MYAGENTS_MANAGEMENT_PORT", mgmt_port.to_string());
     }
 
-    // Inject runtime type for Agent Runtime selection (v0.1.59)
-    if let Some(runtime) = resolve_agent_runtime_from_config(workspace_path) {
+    // Inject runtime type for Agent Runtime selection (v0.1.59, v0.1.62: session-sourced)
+    // Priority: session metadata (stable, records what runtime created this session)
+    //         → agent config (fallback for pending/new sessions without metadata yet)
+    // This ensures existing sessions always get the correct runtime, even after the user
+    // changes the agent's default runtime in settings.
+    let resolved_runtime = resolve_session_runtime(session_id)
+        .or_else(|| resolve_agent_runtime_from_config(workspace_path));
+    if let Some(runtime) = resolved_runtime {
         cmd.env("MYAGENTS_RUNTIME", &runtime);
     }
 
@@ -3742,6 +3750,8 @@ pub async fn cmd_propagate_proxy(
 
 /// Look up the `runtime` field from the agent config in ~/.myagents/config.json
 /// matching the given workspace path. Returns None for "builtin" (the default).
+/// Used for NEW sessions (the agent config decides the default runtime for new conversations)
+/// and for IM/Agent sidecar paths that don't have a session_id yet.
 fn resolve_agent_runtime_from_config(workspace_path: &std::path::Path) -> Option<String> {
     let config_path = dirs::home_dir()?.join(".myagents").join("config.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
@@ -3759,6 +3769,40 @@ fn resolve_agent_runtime_from_config(workspace_path: &std::path::Path) -> Option
         let agent_path = agent.get("workspacePath")?.as_str()?;
         if agent_path == workspace_str.as_ref() {
             if let Some(runtime) = agent.get("runtime").and_then(|v| v.as_str()) {
+                if runtime != "builtin" {
+                    return Some(runtime.to_string());
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// Look up the `runtime` field from session metadata in ~/.myagents/sessions.json.
+/// Returns None for "builtin" or if the session is not found.
+///
+/// This is the authoritative source for EXISTING sessions — the session's own metadata
+/// records which runtime created it, regardless of the current agent config.
+/// Agent config (resolve_agent_runtime_from_config) decides the default for NEW sessions;
+/// session metadata is stable once created.
+fn resolve_session_runtime(session_id: &str) -> Option<String> {
+    // Gate: multi-agent runtime feature must be enabled
+    let config_path = dirs::home_dir()?.join(".myagents").join("config.json");
+    let config_content = std::fs::read_to_string(&config_path).ok()?;
+    let cfg: serde_json::Value = serde_json::from_str(&config_content).ok()?;
+    if !cfg.get("multiAgentRuntime").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return None;
+    }
+
+    let sessions_path = dirs::home_dir()?.join(".myagents").join("sessions.json");
+    let content = std::fs::read_to_string(&sessions_path).ok()?;
+    let sessions: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let sessions_arr = sessions.as_array()?;
+
+    for session in sessions_arr {
+        if session.get("id").and_then(|v| v.as_str()) == Some(session_id) {
+            if let Some(runtime) = session.get("runtime").and_then(|v| v.as_str()) {
                 if runtime != "builtin" {
                     return Some(runtime.to_string());
                 }

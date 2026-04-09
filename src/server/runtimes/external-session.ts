@@ -201,15 +201,24 @@ export function restoreExternalSessionState(
   lastScenario = scenario;
 
   // Restore the runtime's own session ID from persisted metadata.
-  // Three cases:
+  // Four cases:
+  // 0. Cross-runtime mismatch (session created by different external runtime) → fresh start
   // 1. Codex session with runtimeSessionId persisted → use it (threadId)
   // 2. CC session (no runtimeSessionId, but has runtime + messages) → sessionId (CC uses our ID)
   // 3. Brand new session (no messages, or no metadata) → empty string → sendExternalMessage hits Case 1 (fresh start)
   const meta = getSessionMetadata(sessionId);
   const data = getSessionData(sessionId);
   const hasExistingMessages = !!(data?.messages?.length);
+  const currentRuntimeType = getCurrentRuntimeType();
 
-  if (meta?.runtimeSessionId) {
+  // Cross-runtime guard: session created by a different runtime (e.g., Codex session in CC Sidecar).
+  // The other runtime's session ID / threadId is meaningless here — must start fresh.
+  const isCrossRuntime = meta?.runtime && meta.runtime !== currentRuntimeType;
+
+  if (isCrossRuntime) {
+    lastRuntimeSessionId = ''; // Different runtime — cannot resume
+    console.log(`[external-session] Cross-runtime session: meta.runtime=${meta!.runtime}, current=${currentRuntimeType}, will start fresh`);
+  } else if (meta?.runtimeSessionId) {
     lastRuntimeSessionId = meta.runtimeSessionId;
   } else if (meta?.runtime && meta.runtime !== 'builtin' && hasExistingMessages) {
     lastRuntimeSessionId = sessionId; // CC: session ID === runtime session ID
