@@ -2067,7 +2067,7 @@ export default function TabProvider({
                 }
             }
 
-            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }> } }>(`/sessions/${targetSessionId}`);
+            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }> } }>(`/sessions/${targetSessionId}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -2112,6 +2112,26 @@ export default function TabProvider({
                     metadata: msg.metadata,
                 };
             });
+
+            let liveStreamingMessage: Message | null = null;
+            const liveMsg = response.session.liveStreamingMessage;
+            if (liveMsg?.content) {
+                let parsedLiveContent: string | ContentBlock[] = liveMsg.content;
+                if (typeof liveMsg.content === 'string' && liveMsg.content.length > 0 && liveMsg.content.startsWith('[') && liveMsg.content.includes('"type"')) {
+                    try {
+                        parsedLiveContent = JSON.parse(liveMsg.content) as ContentBlock[];
+                    } catch {
+                        parsedLiveContent = liveMsg.content;
+                    }
+                }
+                liveStreamingMessage = {
+                    id: liveMsg.id,
+                    role: 'assistant',
+                    content: parsedLiveContent,
+                    timestamp: new Date(liveMsg.timestamp),
+                    sdkUuid: liveMsg.sdkUuid,
+                };
+            }
 
             // Reset auto-title state when switching sessions
             // Skip auto-title only if already has an AI-generated or user-renamed title
@@ -2170,15 +2190,22 @@ export default function TabProvider({
             isLoadingSessionRef.current = false;
             setIsSessionLoading(false);
             setHistoryMessages(loadedMessages);
-            setStreamingMessage(null);
+            if (liveStreamingMessage && response.session.liveSessionState === 'running') {
+                isStreamingRef.current = true;
+                isSessionActiveRef.current = true;
+                setStreamingMessage(liveStreamingMessage);
+            } else {
+                setStreamingMessage(null);
+            }
             // Old sessions (pre-v0.1.60) have no runtime field → treat as 'builtin'.
             // null is reserved strictly for "session not loaded yet" (initial state).
             setSessionRuntime(response.session.runtime || 'builtin');
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
             if (!options?.skipLoadingReset) {
-                setIsLoading(false);
-                setSessionState('idle');  // Reset session state when loading historical session
+                const isLiveRunning = response.session.liveSessionState === 'running';
+                setIsLoading(isLiveRunning);
+                setSessionState(isLiveRunning ? 'running' : 'idle');  // Preserve live external session state when reopening mid-turn
             }
             setSystemStatus(null);
             setAgentError(null);
