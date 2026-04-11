@@ -643,8 +643,8 @@ async function _doStartExternalSession(options: {
   resetWatchdog();  // Start watchdog — will kill process if no activity for 10 min
   currentTurnStartTime = 0;
   // Track latest config for resume
-  if (options.model) lastModel = options.model;
-  if (options.permissionMode) lastPermissionMode = options.permissionMode;
+  if (options.model !== undefined) lastModel = options.model;
+  if (options.permissionMode !== undefined) lastPermissionMode = options.permissionMode;
   // Only clear message history for new sessions, not resumes
   if (!options.resumeSessionId) {
     allSessionMessages = [];
@@ -779,6 +779,9 @@ export async function sendExternalMessage(
     // Codex doesn't support custom IDs — resume with Codex's own threadId (lastRuntimeSessionId).
     const runtimeType = getCurrentRuntimeType();
     const resumeId = runtimeType === 'claude-code' ? lastSessionId : lastRuntimeSessionId;
+    const nextScenario = context?.scenario ?? lastScenario;
+    const nextModel = context ? context.model : lastModel;
+    const nextPermissionMode = context ? context.permissionMode : lastPermissionMode;
     console.log(`[external-session] Previous process exited, resuming ${runtimeType} session ${resumeId}`);
     try {
       await startExternalSession({
@@ -786,9 +789,9 @@ export async function sendExternalMessage(
         workspacePath: lastWorkspacePath,
         initialMessage: text,
         initialImages: hasImages ? images : undefined,
-        model: lastModel || context?.model,
-        permissionMode: lastPermissionMode || context?.permissionMode,
-        scenario: lastScenario,
+        model: nextModel,
+        permissionMode: nextPermissionMode,
+        scenario: nextScenario,
         resumeSessionId: resumeId, // CC: --resume <myagents-session-id>; Codex: --resume <threadId>
       });
       return { queued: true };

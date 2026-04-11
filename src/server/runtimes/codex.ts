@@ -519,7 +519,7 @@ export class CodexRuntime implements AgentRuntime {
 
       // 2. Determine permission mode
       const isImOrCron = options.scenario.type === 'im' || options.scenario.type === 'agent-channel' || options.scenario.type === 'cron';
-      const permMode = isImOrCron ? 'no-restrictions' : (options.permissionMode || 'full-auto');
+      const permMode = options.permissionMode || (isImOrCron ? 'no-restrictions' : 'full-auto');
       const { approval, sandbox } = mapPermissionMode(permMode);
 
       // 3. Start or resume thread

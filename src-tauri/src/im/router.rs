@@ -622,10 +622,27 @@ impl SessionRouter {
     pub async fn sync_ai_config(
         &self,
         port: u16,
+        runtime: &str,
+        runtime_config: Option<&serde_json::Value>,
         model: Option<&str>,
         mcp_servers_json: Option<&str>,
         provider_env: Option<&serde_json::Value>,
     ) {
+        if matches!(runtime, "codex" | "claude-code") {
+            let runtime_model = runtime_config
+                .and_then(|v| v.get("model"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("(default)");
+            ulog_info!(
+                "[im-router] Runtime {} owns provider/model/MCP, skipped Builtin config sync to port {} (runtimeModel={})",
+                runtime,
+                port,
+                runtime_model
+            );
+            return;
+        }
+
         // 1. Provider env (sync BEFORE model so pre-warm uses the correct provider)
         if let Some(penv) = provider_env {
             let url = format!("http://127.0.0.1:{}/api/provider/set", port);
@@ -666,10 +683,27 @@ impl SessionRouter {
     pub async fn sync_ai_config_with_client(
         client: &Client,
         port: u16,
+        runtime: &str,
+        runtime_config: Option<&serde_json::Value>,
         model: Option<&str>,
         mcp_servers_json: Option<&str>,
         provider_env: Option<&serde_json::Value>,
     ) {
+        if matches!(runtime, "codex" | "claude-code") {
+            let runtime_model = runtime_config
+                .and_then(|v| v.get("model"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("(default)");
+            ulog_info!(
+                "[im-router] Runtime {} owns provider/model/MCP, skipped Builtin config sync to port {} (runtimeModel={})",
+                runtime,
+                port,
+                runtime_model
+            );
+            return;
+        }
+
         if let Some(penv) = provider_env {
             let url = format!("http://127.0.0.1:{}/api/provider/set", port);
             match client.post(&url).json(&json!({ "providerEnv": penv })).send().await {

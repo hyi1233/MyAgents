@@ -240,14 +240,14 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     }
 
     // Permission mode
-    if (isImOrChannel || options.scenario.type === 'cron') {
+    if ((isImOrChannel || options.scenario.type === 'cron') && !options.permissionMode) {
       // IM/Cron: no human to approve → bypass
       // MUST pass --allow-dangerously-skip-permissions BEFORE --dangerously-skip-permissions
       args.push('--allow-dangerously-skip-permissions');
       args.push('--permission-mode', 'bypassPermissions');
       args.push('--dangerously-skip-permissions');
     } else {
-      // Desktop: delegate permission prompts to MyAgents UI
+      // Desktop and explicit runtime permission mode: delegate or bypass based on mode.
       const ccMode = options.permissionMode ? mapPermissionModeToCc(options.permissionMode) : 'default';
 
       if (ccMode === 'bypassPermissions') {
