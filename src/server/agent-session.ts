@@ -3715,6 +3715,73 @@ export async function resetSession(): Promise<void> {
 }
 
 /**
+ * Recover from a stale SDK session without wiping the user's view.
+ *
+ * Trigger: SDK returned `is_error` with "No conversation found" while trying
+ * to `--resume` a session that exists in SessionStore. The conversation data
+ * on the SDK side is gone (external claude binary, old build, user ran
+ * `claude /clear`, or the project file was never there for sessions created
+ * by a different tool), but our SessionStore JSONL is intact and the user
+ * is already looking at the loaded history.
+ *
+ * The default recovery path (`resetSession`) is too aggressive for this
+ * scenario — it generates a fresh sessionId and broadcasts `chat:init`,
+ * which on the frontend wipes the visible message list and effectively
+ * "loses" the session the user just opened. This recovery keeps sessionId
+ * and the in-memory / on-disk message history intact, tears down the
+ * failed SDK subprocess, and pre-warms a new one that will reuse the same
+ * sessionId without `--resume` on its next query. User-visible effect:
+ * the 28 loaded messages stay on screen, next user message starts a brand
+ * new conversation inside the same session timeline. AI won't remember the
+ * earlier turns — accepted trade-off vs. silently destroying the view.
+ *
+ * Subset of resetSession's cleanup: subprocess teardown, resume disarm,
+ * pre-warm reset, pre-warm reschedule. NO sessionId change, NO chat:init
+ * broadcast, NO clearMessageState, NO permission reset.
+ */
+async function recoverFromStaleSession(): Promise<void> {
+  const endReset = beginReset();
+  try {
+    // 1. Terminate the failed SDK subprocess (same pattern as resetSession).
+    //    Without this, the next user message would reuse the same broken
+    //    subprocess and hit the same "No conversation found" on its next
+    //    internal SDK turn.
+    if (querySession || sessionTerminationPromise) {
+      console.log('[agent] recoverFromStaleSession: terminating failed SDK subprocess');
+      abortPersistentSession();
+      messageQueue.length = 0;
+      await awaitSessionTermination(10_000, 'recoverFromStaleSession');
+      querySession = null;
+    }
+
+    // 2. Disarm resume so the pre-warm / next query starts a fresh SDK
+    //    conversation. effectiveSdkSessionId still resolves to the current
+    //    sessionId (see startStreamingSession UUID path), so the session
+    //    identity is preserved end-to-end.
+    sessionRegistered = false;
+    pendingResumeSessionAt = undefined;
+
+    // 3. Reset SDK ready signal + pre-warm bookkeeping (mirrors resetSession
+    //    steps 5-7 but does NOT clear messages/permissions/sessionId).
+    _sdkReadyResolve = null;
+    _sdkReadyPromise = null;
+    isPreWarming = false;
+    preWarmFailCount = 0;
+    if (preWarmTimer) { clearTimeout(preWarmTimer); preWarmTimer = null; }
+    shouldAbortSession = false;
+    isProcessing = false;
+    setSessionState('idle');
+
+    // 4. Pre-warm a fresh SDK session with the same sessionId, no --resume.
+    schedulePreWarm();
+
+    console.log(`[agent] recoverFromStaleSession: complete, sessionId=${sessionId} preserved`);
+  } finally {
+    endReset();
+  }
+}
+
+/**
  * Initialize agent with a new working directory
  * Called when switching to a different project/workspace
  */
@@ -6186,21 +6253,37 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
         handleMessageComplete();
 
-        // Auto-reset session after unrecoverable errors (image content in history,
-        // stale "No conversation found", etc.) — generates new session ID so next
-        // message starts fresh without trying --resume on broken conversation data.
-        // Desktop sessions: skip auto-reset for image errors — let the frontend error
-        // banner guide the user to time-rewind (preserves conversation context).
-        // IM/cron sessions: always auto-reset (no UI to interact with).
+        // Post-turn error recovery. Three policies based on scenario × reason:
+        //
+        // 1. desktop + 'image': skip reset. Frontend surfaces an error banner that
+        //    guides the user to time-rewind (preserves conversation context).
+        //
+        // 2. desktop + 'stale' ("No conversation found"): SessionStore still has
+        //    the history but SDK's project data was wiped (old build, external
+        //    clear, etc.). Do NOT call resetSession — that generates a new
+        //    sessionId, broadcasts chat:init, and wipes the frontend's loaded
+        //    view. Instead, recover in place: tear down the failed SDK
+        //    subprocess, disarm resume, and pre-warm a fresh SDK session reusing
+        //    the same sessionId. The user keeps seeing their history, next
+        //    message starts a brand-new conversation inside the same session
+        //    timeline. Data/UX never appears to "vanish".
+        //
+        // 3. everything else (IM, cron, sub-agent, unknown reason): full
+        //    resetSession. IM/cron has no UI to confirm against.
         if (shouldResetSessionAfterError) {
           shouldResetSessionAfterError = false;
-          const isDesktopImageError = currentScenario.type === 'desktop' && shouldResetReason === 'image';
+          const reason = shouldResetReason;
           shouldResetReason = undefined;
-          if (!isDesktopImageError) {
+          const isDesktop = currentScenario.type === 'desktop';
+
+          if (isDesktop && reason === 'image') {
+            console.warn('[agent] Desktop image error — skipping auto-reset, frontend will offer rewind');
+          } else if (isDesktop && reason === 'stale') {
+            console.warn('[agent] Desktop stale session — recovering in place, sessionId + history preserved');
+            recoverFromStaleSession().catch(e => console.error('[agent] Stale recovery failed:', e));
+          } else {
             console.warn('[agent] Auto-resetting session due to unrecoverable conversation error');
             resetSession().catch(e => console.error('[agent] Auto-reset failed:', e));
-          } else {
-            console.warn('[agent] Desktop image error — skipping auto-reset, frontend will offer rewind');
           }
         }
 

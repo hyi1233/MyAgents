@@ -2225,9 +2225,25 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
           {/* Message list with max-width */}
           <BrowserPanelContext.Provider value={browserPanelCtx}>
+          {/*
+            FileActionProvider.refreshTrigger intentionally excludes
+            toolCompleteCount. toolCompleteCount bumps on every
+            workspace:files-changed SSE event, which fires on a 500ms
+            debounce from the Bun file watcher whenever *anything* in the
+            workspace changes (tsc/vite output, git index, log files, …).
+            Tying the path-existence cache to that signal caused a full
+            wipe-and-requery storm — on an active dev workspace, a POST
+            /agent/check-paths every ~600ms for an idle historical session.
+
+            The path cache is safe to keep across file changes: inline-code
+            path annotations are rendered once from history and rarely
+            become stale in a way the user notices. Explicit UI refreshes
+            (workspaceRefreshTrigger — drag-drop, tab activate, save-config
+            callbacks) still clear the cache.
+          */}
           <FileActionProvider
             onInsertReference={handleInsertReference}
-            refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
+            refreshTrigger={workspaceRefreshTrigger}
             onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
           >
             <MessageList

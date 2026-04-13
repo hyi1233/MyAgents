@@ -708,18 +708,24 @@ export default function TabProvider({
                     break;
                 }
 
-                // When loadSession REST API is in-flight, skip the message clear —
-                // loadSession will overwrite historyMessages with the full batch.
-                // Still sync sessionState below so isLoading stays correct.
-                if (!isLoadingSessionRef.current) {
+                // Clear local state only if:
+                //   1. loadSession is not in flight (it would overwrite anyway), AND
+                //   2. we don't already have loaded history to protect.
+                //
+                // Rationale: chat:init is broadcast whenever the backend's session
+                // state transitions — on first SSE connect (legitimate clear point),
+                // on frontend-initiated resetSession (already cleared by the caller),
+                // AND on backend-initiated auto-reset (e.g. stale SDK conversation).
+                // The last case used to destroy the user's just-loaded history
+                // because the old unconditional clear ran after loadSession had
+                // already finished setting isLoadingSessionRef back to false.
+                // With the history-length guard, any session the user can see
+                // on screen stays on screen; the only scenario that still clears
+                // is "first-ever chat:init before any history loaded", which is
+                // exactly the case where the clear is correct (no-op on empty).
+                if (!isLoadingSessionRef.current && historyMessagesRef.current.length === 0) {
                     seenIdsRef.current.clear();
                     setHistoryMessages([]);
-                    // Mirror the reset-pagination behaviour: clearing history
-                    // without a follow-up loadSession (e.g. SSE reconnect on a
-                    // fresh session) would otherwise leave firstItemIndex at
-                    // whatever value the previous older-page fetches left it,
-                    // and could let hasMoreBefore=true fire startReached against
-                    // an empty list.
                     resetPaginationState();
                     setStreamingMessage(null);
                     setAgentError(null);
