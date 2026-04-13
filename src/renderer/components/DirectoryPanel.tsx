@@ -394,7 +394,7 @@ const DirectoryPanel = memo(
           );
           console.error("[DirectoryPanel] Failed to refresh:", err);
         });
-    }, [apiGet, agentDir]);
+    }, [apiGet]);
 
     // Debounced refresh — coalesces rapid triggers (file watcher + tool completion
     // can fire within 500ms of each other) into a single API call.

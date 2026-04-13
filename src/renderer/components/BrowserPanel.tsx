@@ -53,10 +53,12 @@ export default function BrowserPanel({
   const creatingRef = useRef(false);
 
   // Toast accessed via ref so the create effect doesn't list it as a dep
-  // (project convention — see CLAUDE.md react_stability_rules).
+  // (project convention — see CLAUDE.md react_stability_rules). Ref is
+  // updated in a post-commit effect rather than during render to satisfy
+  // react-hooks/refs.
   const toast = useToast();
   const toastRef = useRef(toast);
-  toastRef.current = toast;
+  useEffect(() => { toastRef.current = toast; }, [toast]);
 
   // ── Editable URL bar state ──
   const [urlEditing, setUrlEditing] = useState(false);
