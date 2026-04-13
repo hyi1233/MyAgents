@@ -29,6 +29,8 @@ import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar } from '@/api/tauriClient';
+import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
+import { refreshWorkspaceFileIndex } from '@/api/searchClient';
 import type { PermissionMode } from '@/config/types';
 import type { QueuedMessageInfo } from '@/types/queue';
 import {
@@ -239,6 +241,12 @@ export default function TabProvider({
 
     // ── Split message state: history (stable during streaming) + streaming (updates on every SSE event)
     const [historyMessages, setHistoryMessages] = useState<Message[]>([]);
+    // Mirror of historyMessages for async listeners (cron incremental sync) that
+    // need to read "what's on screen right now" without retriggering effects.
+    // Eventual-consistency is fine — Tauri event handlers run in microtasks,
+    // after the latest render commit.
+    const historyMessagesRef = useRef<Message[]>(historyMessages);
+    useEffect(() => { historyMessagesRef.current = historyMessages; }, [historyMessages]);
     const [streamingMessage, rawSetStreamingMessage] = useState<Message | null>(null);
     const streamingMessageRef = useRef<Message | null>(null);
 
@@ -285,6 +293,19 @@ export default function TabProvider({
 
     const [isLoading, setIsLoading] = useState(false);
     const [isSessionLoading, setIsSessionLoading] = useState(false);
+    // Pagination state for large sessions. firstItemIndex is Virtuoso's
+    // mechanism for maintaining visible scroll position when items are
+    // prepended — on prepend we decrement it by the number of added items.
+    // Starts at a large constant so it can decrement without ever going
+    // negative (even for sessions with millions of historical messages).
+    const PAGINATION_START_INDEX = 1_000_000;
+    const INITIAL_PAGE_SIZE = 80;
+    const OLDER_PAGE_SIZE = 80;
+    const [firstItemIndex, setFirstItemIndex] = useState(PAGINATION_START_INDEX);
+    const [hasMoreBefore, setHasMoreBefore] = useState(false);
+    const hasMoreBeforeRef = useRef(false);
+    hasMoreBeforeRef.current = hasMoreBefore;
+    const loadingOlderRef = useRef(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
     const [sessionRuntime, setSessionRuntime] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
@@ -413,11 +434,25 @@ export default function TabProvider({
         clearAllBackgroundTaskStatuses();
     }, []);
 
+    // Reset pagination state (firstItemIndex + hasMoreBefore + in-flight guard)
+    // on any boundary where historyMessages is cleared or replaced without a
+    // subsequent loadSession: resetSession, chat:init SSE-reconnect clear path,
+    // and as a fallback for places that drop history. loadSession has its own
+    // inline reset that uses the server's `hasMoreBefore` value from the
+    // response, so it deliberately does not call this helper.
+    const resetPaginationState = useCallback(() => {
+        setFirstItemIndex(PAGINATION_START_INDEX);
+        setHasMoreBefore(false);
+        hasMoreBeforeRef.current = false;
+        loadingOlderRef.current = false;
+    }, []);
+
     const resetSession = useCallback(async (): Promise<boolean> => {
         console.log(`[TabProvider ${tabId}] resetSession: starting...`);
 
         // 1. Clear frontend state immediately for responsive UI
         setHistoryMessages([]);
+        resetPaginationState();
         setStreamingMessage(null);
         seenIdsRef.current.clear();
         isNewSessionRef.current = true;
@@ -465,7 +500,7 @@ export default function TabProvider({
             console.error(`[TabProvider ${tabId}] resetSession error:`, error);
             return false;
         }
-    }, [tabId, postJson, setStreamingMessage, clearInteractiveState]);
+    }, [tabId, postJson, setStreamingMessage, clearInteractiveState, clearSessionActive, resetPaginationState]);
 
     // Append log
     const appendLog = useCallback((line: string) => {
@@ -649,7 +684,7 @@ export default function TabProvider({
             streamingMessageRef.current = null;
             return null;
         });
-    }, [flushPendingChunks]);
+    }, [flushPendingChunks, clearSessionActive]);
 
     const recoverStreamingUi = useCallback((status: 'stopped' | 'failed') => {
         moveStreamingToHistory(status);
@@ -679,6 +714,13 @@ export default function TabProvider({
                 if (!isLoadingSessionRef.current) {
                     seenIdsRef.current.clear();
                     setHistoryMessages([]);
+                    // Mirror the reset-pagination behaviour: clearing history
+                    // without a follow-up loadSession (e.g. SSE reconnect on a
+                    // fresh session) would otherwise leave firstItemIndex at
+                    // whatever value the previous older-page fetches left it,
+                    // and could let hasMoreBefore=true fire startReached against
+                    // an empty list.
+                    resetPaginationState();
                     setStreamingMessage(null);
                     setAgentError(null);
                     clearInteractiveState();
@@ -1301,6 +1343,11 @@ export default function TabProvider({
                     const newSessionId = payload.sessionId;
                     if (newSessionId && currentSessionIdRef.current !== newSessionId) {
                         console.log(`[TabProvider ${tabId}] Auto-syncing sessionId from system_init: ${newSessionId}`);
+                        // Update the ref synchronously alongside the state dispatch so that
+                        // async handlers (cron sync, loadOlderMessages) running their
+                        // post-await session-match guard see the new id immediately, rather
+                        // than waiting until the next render commits line 233's assignment.
+                        currentSessionIdRef.current = newSessionId;
                         setCurrentSessionId(newSessionId);
                         // Notify parent (App.tsx) to update Tab.sessionId for Session singleton constraint
                         // This ensures history dropdown can detect if this session is already open
@@ -1577,7 +1624,7 @@ export default function TabProvider({
                         role: 'user';
                         content: string;
                         timestamp: string;
-                        attachments?: Array<{ id: string; name: string; size: number; mimeType: string; previewUrl?: string; isImage?: boolean }>;
+                        attachments?: Array<{ id: string; name: string; size: number; mimeType: string; relativePath?: string; savedPath?: string; previewUrl?: string; isImage?: boolean }>;
                     };
                 } | null;
                 if (payload?.queueId) {
@@ -1604,10 +1651,19 @@ export default function TabProvider({
                                 q => q.queueId.startsWith('opt-') && q.images?.length
                             );
                             if (attachments?.length && queuedMsg?.images?.length) {
-                                // Merge: enrich server attachments with frontend previewUrl
+                                // Merge: prefer frontend's local blob/data URL, fall back to
+                                // the Tauri custom-protocol URL resolved from relativePath.
                                 attachments = attachments.map(att => {
                                     const match = queuedMsg.images!.find(img => img.name === att.name);
-                                    return match?.preview ? { ...att, previewUrl: match.preview } : att;
+                                    const previewUrl = match?.preview ?? resolveAttachmentUrl(att);
+                                    return previewUrl ? { ...att, previewUrl } : att;
+                                });
+                            } else if (attachments?.length) {
+                                // Sibling tab / reconnect case: no local upload state,
+                                // resolve previews from the persisted attachment paths.
+                                attachments = attachments.map(att => {
+                                    const previewUrl = resolveAttachmentUrl(att);
+                                    return previewUrl ? { ...att, previewUrl } : att;
                                 });
                             } else if (!attachments?.length && queuedMsg?.images?.length) {
                                 // Fallback: server sent no attachments, use frontend snapshot
@@ -1702,7 +1758,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, clearSessionActive, resetPaginationState]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -1713,6 +1769,17 @@ export default function TabProvider({
     // Unmount guard for async recovery
     const isMountedRef = useRef(true);
     useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
+
+    // Warm the workspace file search index on tab open. Cold cache → full
+    // build; warm cache → metadata-only walk + diff. Fire-and-forget — the
+    // user's search UX doesn't depend on the result, and the Rust side is
+    // serialized by an internal mutex so duplicate calls across tabs of the
+    // same workspace are safe. Search-mode entry triggers a second refresh
+    // (see DirectoryPanel) to catch anything written after tab open.
+    useEffect(() => {
+        if (!isTauri() || !agentDir) return;
+        refreshWorkspaceFileIndex(agentDir).catch(() => {});
+    }, [agentDir]);
 
     // Recover a dead Session Sidecar: re-ensure + reconnect SSE.
     // Called when SSE retries exhaust OR when Rust health monitor restarts the sidecar.
@@ -2075,7 +2142,11 @@ export default function TabProvider({
                 }
             }
 
-            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }> } }>(`/sessions/${targetSessionId}`);
+            // Load only the last INITIAL_PAGE_SIZE messages. MessageList's
+            // startReached handler pulls older history lazily via `?before=<id>`
+            // as the user scrolls up. Keeps first-paint JSON body tiny on 600+
+            // message sessions.
+            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }>; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -2114,7 +2185,9 @@ export default function TabProvider({
                         mimeType: att.mimeType,
                         savedPath: att.path,
                         relativePath: att.path,
-                        previewUrl: att.previewUrl,
+                        // Server no longer embeds base64 previews — resolve to
+                        // `myagents://` (Tauri) or `/api/attachment/*` (dev).
+                        previewUrl: resolveAttachmentUrl({ savedPath: att.path, previewUrl: att.previewUrl }),
                         isImage: att.mimeType.startsWith('image/'),
                     })),
                     metadata: msg.metadata,
@@ -2197,6 +2270,15 @@ export default function TabProvider({
             clearSessionActive();  // Stop any streaming/active state
             isLoadingSessionRef.current = false;
             setIsSessionLoading(false);
+            // Reset pagination for the new session. Virtuoso sees this as a
+            // full data replacement; firstItemIndex snaps back to the start
+            // constant so subsequent prepends decrement into a fresh range.
+            setFirstItemIndex(PAGINATION_START_INDEX);
+            setHasMoreBefore(response.session.hasMoreBefore ?? false);
+            hasMoreBeforeRef.current = response.session.hasMoreBefore ?? false;
+            loadingOlderRef.current = false;
+            // Preload seen IDs so SSE replays / cron sync don't re-append them.
+            for (const m of loadedMessages) seenIdsRef.current.add(m.id);
             setHistoryMessages(loadedMessages);
             if (liveStreamingMessage && response.session.liveSessionState === 'running') {
                 isStreamingRef.current = true;
@@ -2218,7 +2300,13 @@ export default function TabProvider({
             setSystemStatus(null);
             setAgentError(null);
             clearInteractiveState();
-            // Update current session ID to reflect the loaded session
+            // Update current session ID to reflect the loaded session.
+            // Ref is updated synchronously so that any in-flight async handler
+            // (cron incremental sync, loadOlderMessages) checking `currentSessionIdRef`
+            // after its await resolves sees the new id immediately — otherwise
+            // its post-await guard would pass against the old id and dispatch a
+            // stale setHistoryMessages onto the already-switched session.
+            currentSessionIdRef.current = targetSessionId;
             setCurrentSessionId(targetSessionId);
 
             // Update tab title from session metadata (fixes title not showing after session switch)
@@ -2245,6 +2333,98 @@ export default function TabProvider({
         // eslint-disable-next-line react-hooks/exhaustive-deps -- apiGetJson and postJson are stable
     }, [tabId, clearInteractiveState]);
 
+    // Fetch the page of messages immediately older than the one currently at
+    // the top of the history. Called by MessageList when Virtuoso's
+    // startReached fires. Safe to call repeatedly — the loadingOlderRef guard
+    // coalesces concurrent triggers, and hasMoreBefore short-circuits once
+    // the earliest message on disk is loaded.
+    const loadOlderMessages = useCallback(async (): Promise<void> => {
+        if (loadingOlderRef.current || !hasMoreBeforeRef.current) return;
+        const sid = currentSessionIdRef.current;
+        if (!sid) return;
+        const oldest = historyMessagesRef.current[0];
+        if (!oldest) return;
+
+        loadingOlderRef.current = true;
+        try {
+            const resp = await apiGetJson<{
+                success: boolean;
+                session?: {
+                    messages: Array<{
+                        id: string;
+                        role: 'user' | 'assistant';
+                        content: string;
+                        timestamp: string;
+                        sdkUuid?: string;
+                        attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
+                        metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string };
+                    }>;
+                    hasMoreBefore?: boolean;
+                };
+            }>(`/sessions/${encodeURIComponent(sid)}?limit=${OLDER_PAGE_SIZE}&before=${encodeURIComponent(oldest.id)}`);
+
+            // Session may have switched while the request was in flight.
+            if (currentSessionIdRef.current !== sid) return;
+            if (!resp.success || !resp.session) return;
+
+            const older: Message[] = resp.session.messages.map((msg) => {
+                let parsedContent: string | ContentBlock[] = msg.content ?? '';
+                if (typeof msg.content === 'string' && msg.content.length > 0 && msg.content.startsWith('[') && msg.content.includes('"type"')) {
+                    try {
+                        parsedContent = JSON.parse(msg.content) as ContentBlock[];
+                    } catch {
+                        parsedContent = msg.content;
+                    }
+                }
+                return {
+                    id: msg.id,
+                    role: msg.role,
+                    content: parsedContent,
+                    timestamp: new Date(msg.timestamp),
+                    sdkUuid: msg.sdkUuid,
+                    attachments: msg.attachments?.map((att) => ({
+                        id: att.id,
+                        name: att.name,
+                        size: 0,
+                        mimeType: att.mimeType,
+                        savedPath: att.path,
+                        relativePath: att.path,
+                        previewUrl: resolveAttachmentUrl({ savedPath: att.path }),
+                        isImage: att.mimeType.startsWith('image/'),
+                    })),
+                    metadata: msg.metadata,
+                };
+            });
+
+            if (older.length === 0) {
+                setHasMoreBefore(false);
+                hasMoreBeforeRef.current = false;
+                return;
+            }
+
+            // Prepend in a single React commit. Decrementing firstItemIndex by
+            // the prepend count is Virtuoso's contract for keeping the visible
+            // scroll position stable — the items the user is looking at retain
+            // their absolute index and stay pinned on screen.
+            setHistoryMessages(prev => {
+                const known = new Set(prev.map(m => m.id));
+                const fresh = older.filter(m => !known.has(m.id));
+                if (fresh.length === 0) return prev;
+                for (const m of fresh) seenIdsRef.current.add(m.id);
+                setFirstItemIndex(idx => idx - fresh.length);
+                return [...fresh, ...prev];
+            });
+            const nextHasMore = resp.session.hasMoreBefore ?? false;
+            setHasMoreBefore(nextHasMore);
+            hasMoreBeforeRef.current = nextHasMore;
+        } catch (err) {
+            console.warn(`[TabProvider ${tabId}] loadOlderMessages failed:`, err);
+        } finally {
+            loadingOlderRef.current = false;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- apiGetJson is stable
+    }, [tabId]);
+
     // Auto-refresh session when a cron task completes and writes data to the session
     // we're currently viewing. This handles the case where a Tab opens a cron session
     // during/after execution on a different Sidecar — the Tab won't get SSE streaming,
@@ -2261,13 +2441,98 @@ export default function TabProvider({
             const { listen } = await import('@tauri-apps/api/event');
             unlisten = await listen<{ taskId: string; success: boolean; executionCount: number; internalSessionId?: string }>(
                 'cron:execution-complete',
-                (event) => {
+                async (event) => {
                     const { internalSessionId } = event.payload;
                     const currentSid = currentSessionIdRef.current;
+                    if (!internalSessionId || !currentSid || internalSessionId !== currentSid) return;
 
-                    // If this Tab is viewing the cron task's internal session, reload to show AI response
-                    if (internalSessionId && currentSid && internalSessionId === currentSid) {
-                        console.log(`[TabProvider ${tabId}] Cron execution complete for viewed session ${internalSessionId}, reloading`);
+                    // Don't disturb an in-flight turn. If the user is still streaming
+                    // or actively loading this session, let the normal SSE path
+                    // deliver new messages — appending mid-turn would compete with
+                    // the streaming message's final move-to-history step.
+                    if (isStreamingRef.current || isLoadingSessionRef.current) {
+                        return;
+                    }
+
+                    const last = historyMessagesRef.current.at(-1);
+                    if (!last) {
+                        // Empty tab view — fall through to a full load (first-time open).
+                        console.log(`[TabProvider ${tabId}] Cron complete on empty view, full load`);
+                        loadSessionRef.current(internalSessionId);
+                        return;
+                    }
+
+                    try {
+                        const resp = await apiGetJson<{
+                            success: boolean;
+                            fromIndex: number;
+                            messages: Array<{
+                                id: string;
+                                role: 'user' | 'assistant';
+                                content: string;
+                                timestamp: string;
+                                sdkUuid?: string;
+                                attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
+                                metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string };
+                            }>;
+                        }>(`/sessions/${encodeURIComponent(internalSessionId)}/since/${encodeURIComponent(last.id)}`);
+
+                        if (!resp.success) return;
+
+                        // Server couldn't locate our baseline (rewind / compaction /
+                        // JSONL rewrite). Fall back to a full reload — still better
+                        // than stale data.
+                        if (resp.fromIndex === -1) {
+                            console.log(`[TabProvider ${tabId}] Cron complete, baseline lost, full reload`);
+                            loadSessionRef.current(internalSessionId);
+                            return;
+                        }
+
+                        if (resp.messages.length === 0) return;
+
+                        const appended: Message[] = resp.messages.map((msg) => {
+                            let parsedContent: string | ContentBlock[] = msg.content ?? '';
+                            if (typeof msg.content === 'string' && msg.content.length > 0 && msg.content.startsWith('[') && msg.content.includes('"type"')) {
+                                try {
+                                    parsedContent = JSON.parse(msg.content) as ContentBlock[];
+                                } catch {
+                                    parsedContent = msg.content;
+                                }
+                            }
+                            return {
+                                id: msg.id,
+                                role: msg.role,
+                                content: parsedContent,
+                                timestamp: new Date(msg.timestamp),
+                                sdkUuid: msg.sdkUuid,
+                                attachments: msg.attachments?.map((att) => ({
+                                    id: att.id,
+                                    name: att.name,
+                                    size: 0,
+                                    mimeType: att.mimeType,
+                                    savedPath: att.path,
+                                    relativePath: att.path,
+                                    previewUrl: resolveAttachmentUrl({ savedPath: att.path }),
+                                    isImage: att.mimeType.startsWith('image/'),
+                                })),
+                                metadata: msg.metadata,
+                            };
+                        });
+
+                        // Dedupe against any IDs already in history — guards against
+                        // the rare race where SSE delivered the same message moments
+                        // before cron:execution-complete fired.
+                        setHistoryMessages(prev => {
+                            const known = new Set(prev.map(m => m.id));
+                            const fresh = appended.filter(m => !known.has(m.id));
+                            if (fresh.length === 0) return prev;
+                            // Mark seen so any subsequent SSE replay skips them.
+                            for (const m of fresh) seenIdsRef.current.add(m.id);
+                            return [...prev, ...fresh];
+                        });
+                        console.log(`[TabProvider ${tabId}] Cron incremental sync appended ${appended.length} message(s)`);
+                    } catch (err) {
+                        console.warn(`[TabProvider ${tabId}] Incremental sync failed, falling back to full reload:`, err);
                         loadSessionRef.current(internalSessionId);
                     }
                 }
@@ -2277,6 +2542,7 @@ export default function TabProvider({
         return () => {
             unlisten?.();
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- apiGetJson is stable via useMemo
     }, [tabId]);
 
     // Track whether initial session has been loaded
@@ -2462,6 +2728,8 @@ export default function TabProvider({
         messages,
         historyMessages,
         streamingMessage,
+        firstItemIndex,
+        hasMoreBefore,
         isLoading,
         isSessionLoading,
         sessionState,
@@ -2491,6 +2759,7 @@ export default function TabProvider({
         sendMessage,
         stopResponse,
         loadSession,
+        loadOlderMessages,
         resetSession,
         // Tab-scoped API functions
         apiGet: apiGetJson,
@@ -2505,9 +2774,9 @@ export default function TabProvider({
         // Cron task exit handler ref (mutable, no need in deps)
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
-        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, isLoading, isSessionLoading, sessionState, sessionRuntime,
+        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
-        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, resetSession,
+        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 

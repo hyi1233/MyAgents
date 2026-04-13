@@ -149,7 +149,7 @@ import {
   getSessionMetadata,
   getSessionsByAgentDir,
   updateSessionMetadata,
-  getAttachmentDataUrl,
+  getAttachmentPath,
 } from './SessionStore';
 import { initLogger, getLoggerDiagnostics } from './logger';
 import { cleanupOldLogs } from './AgentLogger';
@@ -1423,6 +1423,35 @@ async function main() {
         return jsonResponse({ status: 'ok', timestamp: Date.now() });
       }
 
+      // Browser dev-mode fallback for attachment files.
+      // Production uses the Tauri `myagents://attachment/<path>` custom protocol
+      // (`src-tauri/src/attachment_protocol.rs`) which serves bytes directly
+      // through WebKit without round-tripping JSON. In dev (vite + browser) the
+      // custom scheme isn't registered, so this route serves the same bytes
+      // via a plain HTTP GET. `Bun.file()` is a lazy handle — no main-loop read.
+      if (pathname.startsWith('/api/attachment/') && request.method === 'GET') {
+        const rel = decodeURIComponent(pathname.replace('/api/attachment/', ''));
+        // Reject path traversal: no `..` segments and no absolute paths.
+        if (rel.includes('..') || rel.startsWith('/')) {
+          return new Response('Forbidden', { status: 403 });
+        }
+        const absolute = getAttachmentPath(rel);
+        try {
+          const file = Bun.file(absolute);
+          if (!(await file.exists())) {
+            return new Response('Not Found', { status: 404 });
+          }
+          return new Response(file, {
+            headers: {
+              'Cache-Control': 'public, max-age=31536000, immutable',
+              'Access-Control-Allow-Origin': '*',
+            },
+          });
+        } catch {
+          return new Response('Not Found', { status: 404 });
+        }
+      }
+
       // Session state endpoint - used by Rust background completion polling
       if (pathname === '/api/session-state' && request.method === 'GET') {
         const sessionState = shouldUseExternalRuntime()
@@ -2424,6 +2453,39 @@ async function main() {
         return jsonResponse({ success: true, session });
       }
 
+      // GET /sessions/:id/since/:lastMessageId - Incremental tail fetch
+      // Called by the cron:execution-complete handler to pull only the messages
+      // appended by a background task, instead of reloading the whole session.
+      // This is what keeps a foreground tab responsive after a background cron
+      // task completes: the old full-reload path bundled P0+P1 penalties
+      // (base64 attachments + Virtuoso remount) into a single freeze spike.
+      // Must be BEFORE the generic /sessions/:id route.
+      if (pathname.match(/^\/sessions\/[^/]+\/since\/[^/]+$/) && request.method === 'GET') {
+        const match = pathname.match(/^\/sessions\/([^/]+)\/since\/([^/]+)$/);
+        if (!match) {
+          return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
+        }
+        const sessionId = decodeURIComponent(match[1]);
+        const lastMessageId = decodeURIComponent(match[2]);
+
+        const session = getSessionData(sessionId);
+        if (!session) {
+          return jsonResponse({ success: false, error: 'Session not found.' }, 404);
+        }
+
+        const idx = session.messages.findIndex(m => m.id === lastMessageId);
+        // idx === -1 signals "caller's baseline is gone" (session was rewound,
+        // compacted, or otherwise rewritten). Caller falls back to full reload.
+        if (idx === -1) {
+          return jsonResponse({ success: true, fromIndex: -1, messages: [] });
+        }
+
+        const tail = session.messages.slice(idx + 1);
+        // Same metadata-only shape as GET /sessions/:id (P0) — previews are
+        // resolved via the myagents:// custom protocol on the client.
+        return jsonResponse({ success: true, fromIndex: idx, messages: tail });
+      }
+
       // GET /sessions/:id/stats - Get detailed session statistics
       // NOTE: This route must be BEFORE /sessions/:id to avoid being caught by the generic route
       if (pathname.match(/^\/sessions\/[^/]+\/stats$/) && request.method === 'GET') {
@@ -2543,6 +2605,18 @@ async function main() {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
 
+        // Pagination: `?limit=N` returns only the most recent N messages,
+        // keeping the first-paint JSON body tiny even for 600-message sessions.
+        // `?before=<messageId>` loads the N messages immediately older than the
+        // given id, used by the MessageList startReached handler to lazily
+        // fetch history as the user scrolls up.
+        //
+        // Clamp limit to [1, 500]. 0 / missing means "full load" (preserved for
+        // callers that genuinely need all messages, e.g. sessions/fork UI).
+        const rawLimit = parseInt(url.searchParams.get('limit') ?? '0', 10);
+        const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 0;
+        const before = url.searchParams.get('before');
+
         let liveStreamingMessage: {
           id: string;
           role: 'assistant';
@@ -2593,22 +2667,45 @@ async function main() {
           }
         }
 
-        // Add previewUrl for image attachments
+        // Apply pagination slice. hasMoreBefore tells the client whether there
+        // are older messages on disk that it could fetch with ?before=.
+        const totalCount = mergedMessages.length;
+        let paginatedMessages = mergedMessages;
+        let hasMoreBefore = false;
+        if (limit > 0) {
+          if (before) {
+            const beforeIdx = mergedMessages.findIndex(m => m.id === before);
+            // beforeIdx < 0 is a stale cursor — the client's baseline is gone,
+            // so return an empty page and let the client fall back to full load.
+            if (beforeIdx < 0) {
+              paginatedMessages = [];
+              hasMoreBefore = false;
+            } else {
+              const start = Math.max(0, beforeIdx - limit);
+              paginatedMessages = mergedMessages.slice(start, beforeIdx);
+              hasMoreBefore = start > 0;
+            }
+          } else {
+            const start = Math.max(0, totalCount - limit);
+            paginatedMessages = mergedMessages.slice(start);
+            hasMoreBefore = start > 0;
+          }
+        }
+
+        // Attachments ship as metadata only. Binary previews are served by the
+        // Tauri `myagents://attachment/<path>` custom protocol (zero-copy, no JSON
+        // round-trip), keeping the JSON body small even for sessions with dozens
+        // of screenshots. Browser dev mode uses the /api/attachment/* fallback
+        // route below.
         const sessionWithPreview = {
           ...session,
           liveStreamingMessage,
           liveSessionState: shouldUseExternalRuntime() && sessionId === getExternalSessionId()
             ? getExternalSessionState()
             : undefined,
-          messages: mergedMessages.map((msg) => ({
-            ...msg,
-            attachments: msg.attachments?.map((att) => ({
-              ...att,
-              previewUrl: att.mimeType.startsWith('image/')
-                ? getAttachmentDataUrl(att.path, att.mimeType)
-                : undefined,
-            })),
-          })),
+          messages: paginatedMessages,
+          totalCount,
+          hasMoreBefore,
         };
 
         return jsonResponse({ success: true, session: sessionWithPreview });

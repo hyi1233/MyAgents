@@ -227,8 +227,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
   // Ref for current provider availability — used in handleKeyDown without adding deps
   const isCurrentProviderAvailable = provider ? isProviderAvailable(provider, apiKeys, providerVerifyStatus) : false;
-  const isCurrentProviderAvailableRef = useRef(isCurrentProviderAvailable);
-  isCurrentProviderAvailableRef.current = isCurrentProviderAvailable;
+  // External runtimes (Claude Code / Codex) authenticate via their own CLI — no MyAgents provider required.
+  const canSendMessage = isExternalRuntime || isCurrentProviderAvailable;
+  const canSendMessageRef = useRef(canSendMessage);
+  canSendMessageRef.current = canSendMessage;
 
   // Get Tab-scoped API functions (for @file search and file operations)
   const tabApiContext = useTabApiOptional();
@@ -1091,7 +1093,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // Check both event.nativeEvent.isComposing (standard) and event.keyCode === 229 (legacy)
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
       event.preventDefault();
-      if ((inputValue.trim() || images.length > 0) && isCurrentProviderAvailableRef.current) {
+      if ((inputValue.trim() || images.length > 0) && canSendMessageRef.current) {
         handleSend();
       }
     }
@@ -1742,9 +1744,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 <button
                   type="button"
                   onClick={handleSend}
-                  disabled={!isCurrentProviderAvailable || (!inputValue.trim() && images.length === 0)}
+                  disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
                   className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-                  title={!isCurrentProviderAvailable ? '请前往设置页面设置模型供应商' : '发送'}
+                  title={!canSendMessage ? '请前往设置页面设置模型供应商' : '发送'}
                 >
                   <Send className="h-4 w-4" />
                 </button>

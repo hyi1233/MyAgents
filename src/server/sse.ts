@@ -272,7 +272,60 @@ const SILENT_EVENTS = new Set([
   'workspace:files-changed', // File watcher fires frequently — skip console.log
 ]);
 
-export function broadcast(event: string, data: unknown): void {
+// Time-window coalescing for high-frequency streaming deltas.
+//
+// Background: each SDK token emits a `chat:message-chunk` (string delta) at
+// ~60Hz. With N concurrent sidecars (one per Tab) all streaming at once, the
+// Rust sse_proxy fires N × 60 = 300+ Tauri `emit()` calls per second — every
+// one of them round-trips JSON through the single WebKit IPC channel. On macOS
+// that thread is the same one running the React renderer, so the backlog
+// materializes as UI jank in every tab simultaneously.
+//
+// Solution: buffer consecutive `chat:message-chunk` string deltas in a 40ms
+// window per process, then flush as a single concatenated chunk. 40ms ≈ 25fps,
+// far above the ~15fps threshold below which streaming text feels choppy, and
+// it cuts IPC traffic by ~58% in the steady state. Any non-chunk event
+// (tool-use-start, message-complete, permission prompts, …) flushes the
+// pending buffer first to keep strict event ordering.
+//
+// Only `chat:message-chunk` is coalesced. `chat:thinking-chunk` carries
+// `{index, delta}` payloads where different index values can't legally merge,
+// and its frequency is lower to begin with; tool-input-delta is also low
+// frequency and flows through already. Keeping the rule narrow avoids
+// semantic surprises.
+const CHUNK_COALESCE_MS = 40;
+const chunkBuffers = new Map<string, { merged: string; timer: ReturnType<typeof setTimeout> }>();
+
+// Events that don't carry ordering semantics with the text stream and must
+// NOT cause a pending-chunk buffer drain. `chat:log` fires from inside the
+// text-delta handler on verbose providers; treating it as a flush boundary
+// would defeat coalescing entirely under heavy logging. Anything else
+// (tool-use-start, message-complete, permission prompts, …) must still
+// flush so the consumer's strict ordering invariants hold.
+const NON_FLUSHING_EVENTS = new Set<string>(['chat:log']);
+
+// Coalesce buffer scope: module-level Map. Each Sidecar is one Bun process
+// serving a single session under the project's Tab-scoped Sidecar isolation
+// (see specs/tech_docs/architecture.md § "Tab-scoped 隔离"), so cross-session
+// mixing cannot happen here. If that invariant ever changes, key the buffer
+// by client id instead.
+
+function flushCoalescedChunk(event: string): void {
+  const entry = chunkBuffers.get(event);
+  if (!entry) return;
+  chunkBuffers.delete(event);
+  clearTimeout(entry.timer);
+  broadcastImmediate(event, entry.merged);
+}
+
+function flushAllCoalesced(): void {
+  if (chunkBuffers.size === 0) return;
+  // Copy keys — flushCoalescedChunk deletes entries as it runs.
+  const keys = Array.from(chunkBuffers.keys());
+  for (const k of keys) flushCoalescedChunk(k);
+}
+
+function broadcastImmediate(event: string, data: unknown): void {
   if (AGGREGATED_EVENTS.has(event)) {
     recordStreamingLog(event, data);
   } else {
@@ -288,6 +341,30 @@ export function broadcast(event: string, data: unknown): void {
   for (const client of clients) {
     client.send(event, data);
   }
+}
+
+export function broadcast(event: string, data: unknown): void {
+  if (event === 'chat:message-chunk' && typeof data === 'string') {
+    let entry = chunkBuffers.get(event);
+    if (!entry) {
+      entry = {
+        merged: data,
+        timer: setTimeout(() => flushCoalescedChunk(event), CHUNK_COALESCE_MS),
+      };
+      chunkBuffers.set(event, entry);
+    } else {
+      entry.merged += data;
+    }
+    return;
+  }
+  // Every non-coalesced event flushes pending chunk buffers first so that
+  // a tool-use-start or message-complete never lands before the text delta
+  // that preceded it — except for events declared non-ordering above, which
+  // pass through without disturbing the in-flight coalesce window.
+  if (chunkBuffers.size > 0 && !NON_FLUSHING_EVENTS.has(event)) {
+    flushAllCoalesced();
+  }
+  broadcastImmediate(event, data);
 }
 
 /**

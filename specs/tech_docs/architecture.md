@@ -382,6 +382,31 @@ Cmd+W 层级关闭：Overlay → 分屏面板 → Tab，高 z-index 优先。
 - **App 集成**: `App.tsx` 的 Cmd+W handler：`if (!dismissTopmost()) closeCurrentTab()`
 - **浏览器联动**: `hasOverlayLayer()` 导出给 `useBrowserOverlayGuard`，当有 z-index > 0 的注册层时自动隐藏原生 Webview
 
+### 14. 全文搜索引擎 (`src-tauri/src/search/` + `src/renderer/components/search/`) (v0.1.65)
+
+基于 Tantivy + tantivy-jieba 的 Rust 层搜索子系统。`SearchEngine` 作为 Tauri managed state 单例，与 `SidecarManager` / `CronTaskManager` 同层，为两类查询提供全文检索：Session 历史（跨工作区）与工作区文件内容。
+
+**仅 Tauri 可用**：前端通过 `invoke('cmd_search_*')` 直接调 Rust，不经 Bun Sidecar。浏览器开发模式不提供 fallback — UI 入口按 Tauri 环境守卫。
+
+**关键设计**：
+
+| 项 | 说明 |
+|----|------|
+| **Session 索引** | 单一全局索引 `~/.myagents/search_index/sessions/`，启动时全量重建，之后由文件系统 watcher 增量维护 |
+| **Session watcher** | `notify-debouncer-full` 5s 滑动去抖观察 `~/.myagents/sessions/`，**任何**写入者（Sidecar/CLI/迁移）的变更都自动流入索引 — pit-of-success 模式 |
+| **初始化时序** | `tauri::async_runtime::spawn`（不能用 `tokio::spawn`）→ `index_all_sessions` → watcher 启动。watcher MUST 在全量索引后启动，否则首个 tick 会把所有已索引 session 当新增再 reindex 一遍 |
+| **读写并发** | `Arc<SessionIndex>`（无外层 mutex），读路径 lock-free，写路径 `StdMutex<IndexWriter>`。用户搜索永远不被后台索引阻塞 |
+| **文件索引** | `FileIndexManager` 按工作区懒加载。冷路径全量扫描，热路径 `(rel_path → mtime_ms/size)` diff 只 re-index 变更文件。进入文件搜索模式时调 `cmd_refresh_workspace_index` |
+| **工作区目录命名** | FNV-1a 64-bit 稳定哈希（**禁止** `DefaultHasher`，无稳定性保证会静默孤立历史索引） |
+| **中文分词** | `tantivy-jieba`（~37 万词词典），字段 MUST 显式引用 `"chinese"` tokenizer；**禁止**裸 `TEXT`（默认英文分词器会把中文切单字然后丢失） |
+| **Schema 版本门控** | `SCHEMA_VERSION` + `.schema_version` 磁盘 marker，不一致时自动删除重建。修改任意 schema 字段/分词器时 MUST bump |
+| **高亮传输** | Rust 用 `util::byte_to_utf16` 把 UTF-8 字节 offset 转成 UTF-16 code unit offset，前端 `SearchHighlight.tsx` 用 `String.slice()` 直接消费 `[start, end][]`，零 `dangerouslySetInnerHTML` |
+| **Char boundary 安全** | snippet 构建通过 `util::floor/ceil_char_boundary` 夹紧到 codepoint 边界，防止中文/emoji 字节切片 panic |
+
+**与 Pit-of-Success 模块的关系**：搜索子系统不发 HTTP、不启动子进程、无 outbound 网络，与 `local_http` / `process_cmd` / `proxy_config` 均无交集。但 session watcher 自身就是第四个 pit-of-success 典范 — 把"每个 writer 都必须记得通知索引"替换成"观察结果目录"。
+
+详见 [全文搜索架构](./search_architecture.md)。
+
 ## 通信流程
 
 ### SSE 流式事件
@@ -524,4 +549,5 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 | [三方供应商](./third_party_providers.md) | 环境变量、认证模式、Bridge 原理 |
 | [Windows 平台适配](./windows_platform_guide.md) | PATH 问题、控制台窗口、npm 兼容 |
 | [Multi-Agent Runtime](./multi_agent_runtime.md) | 外部 Runtime 抽象层、CC/Codex 协议、会话管理、门控链路 |
+| [全文搜索架构](./search_architecture.md) | Tantivy + jieba、session watcher、懒加载文件索引、UTF-16 高亮 |
 | [设计系统](../guides/design_guide.md) | Token/组件/页面规范 |

@@ -2,6 +2,7 @@
 // Main entry point with sidecar lifecycle management
 
 pub mod app_dirs;
+pub mod attachment_protocol;
 pub mod cli;
 mod commands;
 pub mod cron_task;
@@ -16,6 +17,7 @@ mod sidecar;
 mod sse_proxy;
 pub mod terminal;
 pub mod browser;
+pub mod search;
 mod tray;
 mod updater;
 
@@ -111,6 +113,7 @@ pub fn run() {
     // Build the app first, then run with event handler
     // This allows us to handle RunEvent::ExitRequested for Cmd+Q and Dock quit
     let app = tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("myagents", attachment_protocol::handle)
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Another instance was launched — bring the existing window to the foreground
             if let Some(window) = app.get_webview_window("main") {
@@ -132,6 +135,7 @@ pub fn run() {
         .manage(agent_state)
         .manage(terminal_state)
         .manage(browser_state)
+        // SearchEngine will be added as managed state in .setup()
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
             commands::cmd_start_sidecar,
@@ -268,6 +272,12 @@ pub fn run() {
             commands::cmd_delete_workspace_file,
             commands::cmd_read_file_base64,
             commands::cmd_open_file,
+            // Full-text search commands
+            search::cmd_search_sessions,
+            search::cmd_search_workspace_files,
+            search::cmd_search_index_status,
+            search::cmd_invalidate_workspace_index,
+            search::cmd_refresh_workspace_index,
         ])
         .setup(|app| {
             // Initialize logging FIRST — acquire_lock() and cleanup_stale_sidecars()
@@ -474,6 +484,20 @@ pub fn run() {
                 cron_task::initialize_cron_manager(cron_app_handle).await;
             });
             ulog_info!("[App] Cron task manager initialization scheduled");
+
+            // Initialize SearchEngine (full-text search)
+            if let Some(data_dir) = app_dirs::myagents_data_dir() {
+                match search::SearchEngine::new(data_dir) {
+                    Ok(engine) => {
+                        engine.start_background_indexing();
+                        app.manage(Arc::new(engine));
+                        ulog_info!("[App] SearchEngine initialized");
+                    }
+                    Err(e) => {
+                        ulog_error!("[App] Failed to create SearchEngine: {}", e);
+                    }
+                }
+            }
 
             // Auto-start IM Bot if previously enabled (3s delay)
             im::schedule_auto_start(app.handle().clone());

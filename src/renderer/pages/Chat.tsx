@@ -143,6 +143,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     messages,
     historyMessages,
     streamingMessage,
+    firstItemIndex,
+    hasMoreBefore: _hasMoreBefore,
+    loadOlderMessages,
     isLoading,
     isSessionLoading,
     sessionState,
@@ -2230,6 +2233,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             <MessageList
               historyMessages={historyMessages}
               streamingMessage={streamingMessage}
+              firstItemIndex={firstItemIndex}
+              onLoadOlder={loadOlderMessages}
               isLoading={isLoading}
               isSessionLoading={isSessionLoading}
               sessionId={sessionId}

@@ -5056,6 +5056,31 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
+        // Headless IM fast-path: IM bridges (Telegram/Dingtalk builtin + all OpenClaw plugins
+        // like weixin/feishu) have no permission approval UI. Routing Bash/WebSearch/etc. through
+        // checkToolPermission would forward a permission-request to imStreamCallback that no
+        // bridge can answer → 10-minute timeout per tool call → user sees endless loading.
+        //
+        // Sticky by design: `currentScenario = 'im'` is set at IM request entry (index.ts:7116)
+        // and intentionally never reset — if the SSE stream closes mid-turn (heartbeat/network),
+        // the SDK subprocess keeps executing subsequent tools and we want them to auto-approve
+        // rather than hang.
+        //
+        // USER_INTERACTION_TOOLS guard is defensive only: disallowedToolsList (see line ~4940)
+        // already blocks them at SDK level for scenario.type === 'im', so canUseTool won't see
+        // them in practice. Kept for resilience against future refactors.
+        //
+        // Runs AFTER the MCP enable check so user-disabled MCP servers still get properly denied.
+        // Does NOT include scenario.type === 'agent-channel' because external runtimes (CC/Codex)
+        // don't route through canUseTool — they have their own external-session.ts flow.
+        if (currentScenario.type === 'im' && !USER_INTERACTION_TOOLS.includes(toolName)) {
+          console.debug(`[permission] im fast-path: auto-approved ${toolName}`);
+          return {
+            behavior: 'allow' as const,
+            updatedInput: input as Record<string, unknown>
+          };
+        }
+
         // Special handling for AskUserQuestion - always requires user interaction
         if (toolName === 'AskUserQuestion') {
           console.log('[canUseTool] AskUserQuestion detected, prompting user');
