@@ -169,6 +169,10 @@ Chat 分屏右侧面板的 URL 预览器（Tauri Multi-Webview）。Rust `browse
 
 Cmd+W 层级关闭：Overlay → 分屏面板 → Tab。`closeLayer.ts` 模块级注册表，`useCloseLayer(handler, zIndex)` 一行集成。新增 Overlay 组件 MUST 调用 `useCloseLayer`，z-index 与 CSS 保持一致。详见 @specs/tech_docs/architecture.md 的「层级关闭系统」节。
 
+### 全文搜索引擎
+
+Rust `SearchEngine` 单例（Tantivy + jieba），提供 Session 历史与工作区文件全文检索，仅 Tauri 可用。修改搜索相关代码前 MUST 读 @specs/tech_docs/search_architecture.md。
+
 ### Plugin Bridge（OpenClaw 插件）
 
 - Bridge 是独立 Bun 进程，MUST 与 Sidecar 保持同等待遇：环境变量注入（`proxy_config`、`NO_PROXY`）、日志宏（`ulog_*` 不是 `log::*`）、config 查询范围（`imBotConfigs` + `agents[].channels[]`）

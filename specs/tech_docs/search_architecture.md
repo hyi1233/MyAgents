@@ -1,0 +1,261 @@
+# 全文搜索架构
+
+> 最后更新：v0.1.65 (2026-04-14)
+
+## 概述
+
+MyAgents 的全文搜索由一个 Rust 层单例 `SearchEngine` 提供，构建在 [Tantivy](https://github.com/quickwit-oss/tantivy)（Rust 原生全文搜索引擎，BM25 评分）+ [tantivy-jieba](https://github.com/jiegec/tantivy-jieba)（中文分词，~37 万词词典）之上。对外暴露两类能力：
+
+1. **Session 搜索** — 跨所有工作区检索会话标题与消息内容
+2. **工作区文件搜索** — 检索单个工作区内的文件名与文件内容
+
+**仅 Tauri 可用**：搜索直接走 Tauri IPC（`invoke('cmd_search_*')`）到 Rust 层，不经 Bun Sidecar。浏览器开发模式（`start_dev.sh`）没有 fallback — UI 入口在非 Tauri 环境下不出现。
+
+`SearchEngine` 与 `SidecarManager`、`CronTaskManager` 处于同层，作为 Tauri managed state 注入到命令处理器。
+
+## 架构总览
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     React Frontend                              │
+│  ┌────────────────────────┐   ┌──────────────────────────────┐ │
+│  │ TaskCenterOverlay      │   │ DirectoryPanel               │ │
+│  │  (Session 搜索)         │   │  (工作区文件搜索)              │ │
+│  └──────────┬─────────────┘   └────────────┬─────────────────┘ │
+│             │                               │                   │
+│             ▼                               ▼                   │
+│        searchClient.ts (Tauri invoke wrapper)                   │
+└─────────────┬───────────────────────────────────────────────────┘
+              │ invoke('cmd_search_*')
+              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Rust SearchEngine                          │
+│                                                                 │
+│   ┌──────────────────┐       ┌─────────────────────────────┐  │
+│   │ SessionIndex     │       │ FileIndexManager            │  │
+│   │  (单例, 全局)     │       │  HashMap<workspace, index>  │  │
+│   │  Arc, 无外锁      │       │  按需懒加载                   │  │
+│   │  StdMutex<Writer>│       │                             │  │
+│   └────────┬─────────┘       └──────────────┬──────────────┘  │
+│            │                                 │                 │
+│            ▼                                 ▼                 │
+│   ┌──────────────────┐       ┌─────────────────────────────┐  │
+│   │ session_indexer  │       │ file_indexer                │  │
+│   │ + watcher        │       │ (lazy + mtime/size diff)    │  │
+│   └────────┬─────────┘       └──────────────┬──────────────┘  │
+│            │                                 │                 │
+│            └─────────────┬───────────────────┘                 │
+│                          ▼                                     │
+│            schema / tokenizer(jieba) / util                    │
+└─────────────┬───────────────────────────────────────────────────┘
+              ▼
+    ~/.myagents/search_index/
+        ├── sessions/        (单一全局索引)
+        └── workspaces/
+            ├── <fnv-hash-1>/
+            └── <fnv-hash-2>/
+```
+
+## 模块布局 (`src-tauri/src/search/`)
+
+| 文件 | 职责 |
+|------|------|
+| `mod.rs` | `SearchEngine` 单例 + 5 个 Tauri IPC 命令，无业务逻辑 |
+| `schema.rs` | Tantivy Schema 定义 + `SCHEMA_VERSION` 版本号 |
+| `tokenizer.rs` | 中英混合分词器：jieba + `LowerCaser` + `RemoveLongFilter(40)` |
+| `session_indexer.rs` | Session 索引构建、reindex、delete、查询 |
+| `file_indexer.rs` | 工作区文件索引：懒加载 + 增量刷新 |
+| `watcher.rs` | `notify-debouncer-full` 文件系统观察者（5s 滑动去抖） |
+| `searcher.rs` | 序列化类型（`SessionSearchHit`/`FileSearchHit`/`FileMatchLine`） |
+| `util.rs` | UTF-8 ↔ UTF-16 offset 转换 + char boundary 安全夹紧 |
+
+## Tauri IPC 命令 (`src-tauri/src/lib.rs`)
+
+| 命令 | 返回 | 说明 |
+|------|------|------|
+| `cmd_search_sessions(query, limit?)` | `SessionSearchResult` | 全局会话搜索（标题 + 内容） |
+| `cmd_search_workspace_files(query, workspace, limit?, maxMatchesPerFile?)` | `FileSearchResult` | 工作区文件搜索 |
+| `cmd_search_index_status()` | `IndexStatus` | 索引文档数 + 存储目录（调试用） |
+| `cmd_invalidate_workspace_index(workspace)` | `()` | 硬失效一个工作区索引（下次从零重建） |
+| `cmd_refresh_workspace_index(workspace)` | `(total, changed)` | 增量刷新当前工作区索引 |
+
+前端 wrapper: `src/renderer/api/searchClient.ts`。
+
+## Schema 与分词
+
+### Session Schema (`schema::session_schema`)
+
+存储字段（`STORED` 回取）：`session_id`、`message_id`、`agent_dir`、`role`、`timestamp`、`last_active_at`、`source`、`message_count`。
+索引字段（用于全文匹配，走 `"chinese"` 分词器）：`title`、`content`。
+
+### File Schema (`schema::file_schema`)
+
+存储：`path`、`ext`。索引：`name`、`content`。
+
+### Schema 版本门控
+
+`SCHEMA_VERSION` 常量 + `.schema_version` 磁盘 marker。版本不一致时自动删除目录重建，防止 Tantivy 因 schema 不匹配 panic。**修改任意 schema 字段、分词器、indexing option 时 MUST bump 版本号**。
+
+### 中文分词
+
+`tokenizer::TOKENIZER_NAME = "chinese"`。构建链：`JiebaTokenizer → RemoveLongFilter(40) → LowerCaser`。
+
+**致命陷阱**：schema 字段 MUST 显式引用该分词器名（通过 `chinese_text_options()`），**禁止**使用 Tantivy 裸 `TEXT`。裸 `TEXT` 走默认英文分词器，把中文按单字切分后又因长度过滤丢失，最终零命中。
+
+**注册时机**：`index.tokenizers().register(...)` MUST 在 `IndexWriter` 创建之前，Tantivy 会在 writer 创建时快照 tokenizer manager。
+
+## Session 索引策略
+
+### 初始化时序（MUST 严格遵守）
+
+```
+Tauri setup()
+  └─> SearchEngine::new(data_dir)          // 打开/创建 tantivy index
+  └─> start_background_indexing()
+        └─> tauri::async_runtime::spawn    // ← 不能用 tokio::spawn
+              └─> index_all_sessions()     // 全量扫描 sessions.json + JSONL
+                    (tokio::task::spawn_blocking, CPU/IO 重)
+              └─> spawn_session_watcher()  // ← MUST 在 index 完成后才启动
+```
+
+- **`tauri::async_runtime::spawn` 不是 `tokio::spawn`**：`.setup()` 回调在 macOS 上经 ObjC 调用，panic 无法跨 FFI 栈展开会 abort 进程。
+- **Watcher MUST 在 `index_all_sessions` 后启动**：watcher 的基线 snapshot（来自 `sessions.json`）必须与已构建的 index 状态一致，否则第一次 tick 会把所有已索引的 session 当"新增"再全量 reindex 一遍。
+
+### 读写并发模型
+
+`SessionIndex` 作为 `Arc<SessionIndex>` 持有（**不是** `Arc<Mutex<SessionIndex>>`）：
+
+- 读路径（`search` / `doc_count`）完全 lock-free，Tantivy `IndexReader` 原生支持并发读
+- 写路径通过 `StdMutex<IndexWriter>` 序列化单写者不变性
+- 后果：用户搜索永远不会被后台索引阻塞
+
+### Stale Writer Lock 恢复
+
+进程崩溃可能留下 `.tantivy-writer.lock`，导致下次启动永远打不开 writer。`SessionIndex::new` 检测到错误时主动删除锁文件并重试。
+
+## 文件系统观察者 (`watcher.rs`)
+
+### 为什么选 watcher 而不是 writer 主动通知
+
+Session 文件由 Bun Sidecar 写入，索引在 Rust。两个显而易见的替代方案都有问题：
+
+1. **Bun → Rust 反向调用**：Rust 只做 Bun 的 HTTP 代理，没有反向通道；为一个 cross-cutting concern 新增进程耦合得不偿失
+2. **每个写入方都记得调通知**：今天只有 Sidecar，明天是 CLI、迁移脚本、崩溃恢复 — 任何一个忘记通知就静默孤立索引
+
+**Watcher 让正确行为成为默认路径**：任何进程接触 `~/.myagents/sessions/` 都会自动流入索引，与 `local_http` / `process_cmd` 同属 pit-of-success 模式。
+
+### 去抖策略
+
+`notify-debouncer-full`，5s 滑动窗口。每次新事件重置计时器，仅在空闲 5s 后批量 flush。在活跃对话期间，消息追加每条都写 JSONL，去抖让 reindex 成本按"会话数"缩放而不是按"消息数"。
+
+### 事件处理
+
+1. **路径分类（结构匹配，非绝对路径相等）**：
+   - `.../sessions/<id>.jsonl` → `SessionFile(id)`
+   - `.../sessions.json` → `SessionsJson`
+   - 其他 → 忽略
+   - **陷阱**：macOS 上 `notify` 可能汇报 APFS firmlink 路径（`/System/Volumes/Data/Users/...`），绝对路径相等会静默失配所有事件
+2. **每个 tick 内 dedup**：`HashSet` 合并同一会话的多次事件（create + modify 常见于某些平台）
+3. **sessions.json diff**：检测仅元数据变更的场景（标题编辑、手工 JSON 编辑），这些不会触发任何 JSONL 写事件
+4. **先应用 delete 再 reindex**：处理 rename 等 delete+readd 序列时不让陈旧 delete 覆盖新索引
+
+### 监听范围
+
+- `sessions_dir`（非递归）— 捕获 JSONL 写入/删除
+- `data_dir`（非递归）— 捕获 `sessions.json` 变更（大多数平台不允许监听单个文件）
+
+## 工作区文件索引策略
+
+### 懒加载 + 增量刷新
+
+核心函数 `FileIndexManager::refresh_or_create`：
+
+- **冷路径**（首次访问该工作区）：全量扫描 → 构建 Tantivy 索引（~20s on 1000+ files）
+- **热路径**（后续进入搜索模式）：仅遍历元数据 → 按 `(rel_path → (mtime_ms, size))` diff → 只对变更文件执行 `delete_term + add_document`
+
+触发点：用户在 `DirectoryPanel` 进入文件搜索模式时前端调 `refreshWorkspaceFileIndex(workspace)`。命中冷缓存慢，命中热缓存便宜（几百 ms / 数千文件），无变更时零写入。
+
+### 工作区目录命名 — FNV-1a 64-bit
+
+```rust
+// file_indexer.rs
+fn simple_hash(s: &str) -> String {
+    let mut hash = FNV_OFFSET_BASIS;  // 0xcbf29ce484222325
+    for byte in s.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);  // 0x100000001b3
+    }
+    format!("{:016x}", hash)
+}
+```
+
+**禁止**使用 `std::collections::hash_map::DefaultHasher` — 其哈希算法没有稳定性保证，不同进程/版本可能产出不同值，静默孤立所有历史索引。也不用 sha256（过重，对此场景没意义）。
+
+### 扫描过滤
+
+- **跳过目录**：`node_modules`, `.git`, `__pycache__`, `.next`, `dist`, `build`, `.turbo`, `.cache`, `target`, `.venv`, `venv`, `.myagents`, `.claude`
+- **跳过二进制扩展名**：图片/视频/音频/压缩包/字体/可执行/office 文档等
+- **最大文件大小**：1 MB
+
+### 失效路径
+
+`cmd_invalidate_workspace_index` 硬删内存中的 `WorkspaceFileIndex`，下次 `refresh_or_create` 触发冷路径。保留为硬重置出口（schema 迁移、索引损坏恢复），常规场景走 `refresh_or_create`。
+
+## 高亮渲染
+
+### UTF-16 offset 跨边界传输
+
+Rust `str` 是 UTF-8 字节索引，JavaScript `String` 是 UTF-16 代码单元索引。直接把 Rust 字节 offset 传给 JS，中文内容会产出严重偏移的高亮位置（3 UTF-8 字节 vs 1 UTF-16 unit / CJK 字符）。
+
+**约定**：所有越过 Rust → JS 边界的 offset MUST 用 `util::byte_to_utf16` 转换。前端 `SearchHighlight.tsx` 用 `String.prototype.slice()` 直接消费 `[start, end]` 对。
+
+### Char boundary 安全夹紧
+
+snippet 构建常见 "取匹配位置前后各 N 字符" 的近似切片。裸 `str.get(a..b)` 对中文/emoji 会在 codepoint 中间 panic。`util::floor_char_boundary` / `ceil_char_boundary` 提供夹紧方法，配合 `char_indices() + c.len_utf8()` 迭代是字节安全的。
+
+### XSS 安全
+
+高亮以 `[start, end]` 数组形式传输，不是 `<mark>` HTML 字符串。`SearchHighlight.tsx` 用 React children 拼接 `<mark>` 节点，零 `dangerouslySetInnerHTML`。同时合并重叠高亮、按 start 排序，避免重复渲染。
+
+## 前端集成入口
+
+| 入口 | 文件 | 触发路径 |
+|------|------|---------|
+| **Session 搜索 Overlay** | `TaskCenterOverlay.tsx` | Launcher 搜索按钮 → `initialMode='search'` 自动聚焦输入框 |
+| **文件搜索模式** | `DirectoryPanel.tsx` | 侧边栏搜索按钮切换 mode → `refreshWorkspaceFileIndex` → `searchWorkspaceFiles` |
+| **工作区自动预热** | `TabProvider.tsx` | Tab mount useEffect 调 `refreshWorkspaceFileIndex(agentDir)` 温启动索引 |
+| **结果项** | `search/SessionSearchItem.tsx`, `search/FileSearchResults.tsx` | 渲染 hit，点击跳转 session / 预览文件 |
+| **文件跳转定位行** | `FilePreviewModal.tsx` + `MonacoEditor.tsx` | 从 FileSearchResults 传 `initialLineNumber` → `editor.revealLineInCenter()` |
+| **高亮渲染** | `search/SearchHighlight.tsx` | 消费 `[start, end][]` UTF-16 offsets |
+
+## 与 Pit-of-Success 模块的关系
+
+**搜索子系统与 `local_http` / `process_cmd` / `proxy_config` 三驾马车无关**：
+
+- 不发 HTTP（纯 Rust 内部 + Tauri IPC）
+- 不启动子进程（Tantivy + jieba 都是 in-process Rust crate）
+- 不与代理相关（无任何 outbound 网络调用）
+
+**但搜索的 watcher 自身是第四个 pit-of-success 典范**：把"任何写入者都必须记得通知索引"这条必然会被违反的隐性契约，替换成"watcher 观察结果目录"的可靠模式。这一设计本身就是 MyAgents 长期架构延续性原则的案例（见 CLAUDE.md 核心架构约束第一原则）。
+
+## 已知陷阱速查
+
+| 场景 | 症状 | 根因 | 解决 |
+|------|------|------|------|
+| 修改 schema 后启动崩溃 | Tantivy panic | schema 不匹配 | `SCHEMA_VERSION` bump 触发自动重建 |
+| 中文搜索零命中 | 空结果 | 字段未引用 `"chinese"` tokenizer 或 writer 在 register 之前 | `chinese_text_options()` + register 先于 writer |
+| 所有 session 反复被当新增 reindex | 启动后 CPU 飙高 | watcher 先于 `index_all_sessions` 启动 | 保持 `start_background_indexing` 内的顺序 |
+| macOS 上 watcher 零事件 | 搜索不自动刷新 | APFS firmlink 路径不等于监听路径 | `classify_path` 结构匹配 |
+| 多字节字符 panic | snippet 构建时 abort | 裸字节切片落在 codepoint 中间 | `floor/ceil_char_boundary` + `char_indices()` |
+| 升级版本后历史索引全丢 | 工作区索引全量重建 | 换了不稳定的 hasher | FNV-1a 64-bit 稳定哈希 |
+| 浏览器 dev 模式报错 | `invoke is not defined` | 搜索只存在于 Tauri 路径 | UI 入口按 Tauri 环境守卫 |
+| Writer 打不开 | `tantivy-writer.lock` 冲突 | 上次进程崩溃留下锁文件 | `SessionIndex::new` 自动清理并重试 |
+
+## 相关代码索引
+
+- 后端入口：`src-tauri/src/search/mod.rs`
+- Tauri 注册：`src-tauri/src/lib.rs`（`invoke_handler` + `.setup()` 初始化）
+- 前端 API：`src/renderer/api/searchClient.ts`
+- 前端组件：`src/renderer/components/search/`
+- 文件预览跳转：`src/renderer/components/FilePreviewModal.tsx`, `MonacoEditor.tsx`
+- 产品需求：`specs/prd/prd_0.1.65_full_text_search.md`
