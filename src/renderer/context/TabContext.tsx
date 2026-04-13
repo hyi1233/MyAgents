@@ -37,6 +37,10 @@ export interface TabState {
     messages: Message[];           // Combined view (history + streaming) for backward compat
     historyMessages: Message[];    // Immutable during streaming — zero re-render for history
     streamingMessage: Message | null;  // Only this updates during streaming
+    // Pagination (session-load-time): initial load pulls the last N messages;
+    // older pages load lazily as the user scrolls up.
+    firstItemIndex: number;        // Absolute index of historyMessages[0] in the virtual list
+    hasMoreBefore: boolean;        // True if there are older messages available on disk
     isLoading: boolean;
     isSessionLoading: boolean;  // true while loadSession REST API is in-flight
     sessionState: SessionState;
@@ -101,6 +105,8 @@ export interface TabContextValue extends TabState {
     sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' }, isCron?: boolean) => Promise<boolean>;
     stopResponse: () => Promise<boolean>;
     loadSession: (sessionId: string, options?: { skipLoadingReset?: boolean }) => Promise<boolean>;
+    /** Prepend the next page of older messages. Safe to call repeatedly — guarded internally. */
+    loadOlderMessages: () => Promise<void>;
     resetSession: () => Promise<boolean>;
 
     // Tab-scoped API functions (use this Tab's Sidecar)
@@ -136,6 +142,8 @@ const defaultContextValue: TabContextValue = {
     messages: [],
     historyMessages: [],
     streamingMessage: null,
+    firstItemIndex: 0,
+    hasMoreBefore: false,
     isLoading: false,
     isSessionLoading: false,
     sessionState: 'idle',
@@ -165,6 +173,7 @@ const defaultContextValue: TabContextValue = {
     sendMessage: async () => false,
     stopResponse: async () => false,
     loadSession: async () => false,
+    loadOlderMessages: async () => { },
     resetSession: async () => false,
     apiGet: async () => { throw new Error('Not in TabProvider'); },
     apiPost: async () => { throw new Error('Not in TabProvider'); },

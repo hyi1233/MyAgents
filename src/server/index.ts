@@ -2605,6 +2605,18 @@ async function main() {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
 
+        // Pagination: `?limit=N` returns only the most recent N messages,
+        // keeping the first-paint JSON body tiny even for 600-message sessions.
+        // `?before=<messageId>` loads the N messages immediately older than the
+        // given id, used by the MessageList startReached handler to lazily
+        // fetch history as the user scrolls up.
+        //
+        // Clamp limit to [1, 500]. 0 / missing means "full load" (preserved for
+        // callers that genuinely need all messages, e.g. sessions/fork UI).
+        const rawLimit = parseInt(url.searchParams.get('limit') ?? '0', 10);
+        const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 0;
+        const before = url.searchParams.get('before');
+
         let liveStreamingMessage: {
           id: string;
           role: 'assistant';
@@ -2655,6 +2667,31 @@ async function main() {
           }
         }
 
+        // Apply pagination slice. hasMoreBefore tells the client whether there
+        // are older messages on disk that it could fetch with ?before=.
+        const totalCount = mergedMessages.length;
+        let paginatedMessages = mergedMessages;
+        let hasMoreBefore = false;
+        if (limit > 0) {
+          if (before) {
+            const beforeIdx = mergedMessages.findIndex(m => m.id === before);
+            // beforeIdx < 0 is a stale cursor — the client's baseline is gone,
+            // so return an empty page and let the client fall back to full load.
+            if (beforeIdx < 0) {
+              paginatedMessages = [];
+              hasMoreBefore = false;
+            } else {
+              const start = Math.max(0, beforeIdx - limit);
+              paginatedMessages = mergedMessages.slice(start, beforeIdx);
+              hasMoreBefore = start > 0;
+            }
+          } else {
+            const start = Math.max(0, totalCount - limit);
+            paginatedMessages = mergedMessages.slice(start);
+            hasMoreBefore = start > 0;
+          }
+        }
+
         // Attachments ship as metadata only. Binary previews are served by the
         // Tauri `myagents://attachment/<path>` custom protocol (zero-copy, no JSON
         // round-trip), keeping the JSON body small even for sessions with dozens
@@ -2666,7 +2703,9 @@ async function main() {
           liveSessionState: shouldUseExternalRuntime() && sessionId === getExternalSessionId()
             ? getExternalSessionState()
             : undefined,
-          messages: mergedMessages,
+          messages: paginatedMessages,
+          totalCount,
+          hasMoreBefore,
         };
 
         return jsonResponse({ success: true, session: sessionWithPreview });

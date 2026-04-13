@@ -293,6 +293,19 @@ export default function TabProvider({
 
     const [isLoading, setIsLoading] = useState(false);
     const [isSessionLoading, setIsSessionLoading] = useState(false);
+    // Pagination state for large sessions. firstItemIndex is Virtuoso's
+    // mechanism for maintaining visible scroll position when items are
+    // prepended — on prepend we decrement it by the number of added items.
+    // Starts at a large constant so it can decrement without ever going
+    // negative (even for sessions with millions of historical messages).
+    const PAGINATION_START_INDEX = 1_000_000;
+    const INITIAL_PAGE_SIZE = 80;
+    const OLDER_PAGE_SIZE = 80;
+    const [firstItemIndex, setFirstItemIndex] = useState(PAGINATION_START_INDEX);
+    const [hasMoreBefore, setHasMoreBefore] = useState(false);
+    const hasMoreBeforeRef = useRef(false);
+    hasMoreBeforeRef.current = hasMoreBefore;
+    const loadingOlderRef = useRef(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
     const [sessionRuntime, setSessionRuntime] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
@@ -2103,7 +2116,11 @@ export default function TabProvider({
                 }
             }
 
-            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }> } }>(`/sessions/${targetSessionId}`);
+            // Load only the last INITIAL_PAGE_SIZE messages. MessageList's
+            // startReached handler pulls older history lazily via `?before=<id>`
+            // as the user scrolls up. Keeps first-paint JSON body tiny on 600+
+            // message sessions.
+            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }>; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -2227,6 +2244,15 @@ export default function TabProvider({
             clearSessionActive();  // Stop any streaming/active state
             isLoadingSessionRef.current = false;
             setIsSessionLoading(false);
+            // Reset pagination for the new session. Virtuoso sees this as a
+            // full data replacement; firstItemIndex snaps back to the start
+            // constant so subsequent prepends decrement into a fresh range.
+            setFirstItemIndex(PAGINATION_START_INDEX);
+            setHasMoreBefore(response.session.hasMoreBefore ?? false);
+            hasMoreBeforeRef.current = response.session.hasMoreBefore ?? false;
+            loadingOlderRef.current = false;
+            // Preload seen IDs so SSE replays / cron sync don't re-append them.
+            for (const m of loadedMessages) seenIdsRef.current.add(m.id);
             setHistoryMessages(loadedMessages);
             if (liveStreamingMessage && response.session.liveSessionState === 'running') {
                 isStreamingRef.current = true;
@@ -2274,6 +2300,98 @@ export default function TabProvider({
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps -- apiGetJson and postJson are stable
     }, [tabId, clearInteractiveState]);
+
+    // Fetch the page of messages immediately older than the one currently at
+    // the top of the history. Called by MessageList when Virtuoso's
+    // startReached fires. Safe to call repeatedly — the loadingOlderRef guard
+    // coalesces concurrent triggers, and hasMoreBefore short-circuits once
+    // the earliest message on disk is loaded.
+    const loadOlderMessages = useCallback(async (): Promise<void> => {
+        if (loadingOlderRef.current || !hasMoreBeforeRef.current) return;
+        const sid = currentSessionIdRef.current;
+        if (!sid) return;
+        const oldest = historyMessagesRef.current[0];
+        if (!oldest) return;
+
+        loadingOlderRef.current = true;
+        try {
+            const resp = await apiGetJson<{
+                success: boolean;
+                session?: {
+                    messages: Array<{
+                        id: string;
+                        role: 'user' | 'assistant';
+                        content: string;
+                        timestamp: string;
+                        sdkUuid?: string;
+                        attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
+                        metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string };
+                    }>;
+                    hasMoreBefore?: boolean;
+                };
+            }>(`/sessions/${encodeURIComponent(sid)}?limit=${OLDER_PAGE_SIZE}&before=${encodeURIComponent(oldest.id)}`);
+
+            // Session may have switched while the request was in flight.
+            if (currentSessionIdRef.current !== sid) return;
+            if (!resp.success || !resp.session) return;
+
+            const older: Message[] = resp.session.messages.map((msg) => {
+                let parsedContent: string | ContentBlock[] = msg.content ?? '';
+                if (typeof msg.content === 'string' && msg.content.length > 0 && msg.content.startsWith('[') && msg.content.includes('"type"')) {
+                    try {
+                        parsedContent = JSON.parse(msg.content) as ContentBlock[];
+                    } catch {
+                        parsedContent = msg.content;
+                    }
+                }
+                return {
+                    id: msg.id,
+                    role: msg.role,
+                    content: parsedContent,
+                    timestamp: new Date(msg.timestamp),
+                    sdkUuid: msg.sdkUuid,
+                    attachments: msg.attachments?.map((att) => ({
+                        id: att.id,
+                        name: att.name,
+                        size: 0,
+                        mimeType: att.mimeType,
+                        savedPath: att.path,
+                        relativePath: att.path,
+                        previewUrl: resolveAttachmentUrl({ savedPath: att.path }),
+                        isImage: att.mimeType.startsWith('image/'),
+                    })),
+                    metadata: msg.metadata,
+                };
+            });
+
+            if (older.length === 0) {
+                setHasMoreBefore(false);
+                hasMoreBeforeRef.current = false;
+                return;
+            }
+
+            // Prepend in a single React commit. Decrementing firstItemIndex by
+            // the prepend count is Virtuoso's contract for keeping the visible
+            // scroll position stable — the items the user is looking at retain
+            // their absolute index and stay pinned on screen.
+            setHistoryMessages(prev => {
+                const known = new Set(prev.map(m => m.id));
+                const fresh = older.filter(m => !known.has(m.id));
+                if (fresh.length === 0) return prev;
+                for (const m of fresh) seenIdsRef.current.add(m.id);
+                setFirstItemIndex(idx => idx - fresh.length);
+                return [...fresh, ...prev];
+            });
+            const nextHasMore = resp.session.hasMoreBefore ?? false;
+            setHasMoreBefore(nextHasMore);
+            hasMoreBeforeRef.current = nextHasMore;
+        } catch (err) {
+            console.warn(`[TabProvider ${tabId}] loadOlderMessages failed:`, err);
+        } finally {
+            loadingOlderRef.current = false;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- apiGetJson is stable
+    }, [tabId]);
 
     // Auto-refresh session when a cron task completes and writes data to the session
     // we're currently viewing. This handles the case where a Tab opens a cron session
@@ -2578,6 +2696,8 @@ export default function TabProvider({
         messages,
         historyMessages,
         streamingMessage,
+        firstItemIndex,
+        hasMoreBefore,
         isLoading,
         isSessionLoading,
         sessionState,
@@ -2607,6 +2727,7 @@ export default function TabProvider({
         sendMessage,
         stopResponse,
         loadSession,
+        loadOlderMessages,
         resetSession,
         // Tab-scoped API functions
         apiGet: apiGetJson,
@@ -2621,9 +2742,9 @@ export default function TabProvider({
         // Cron task exit handler ref (mutable, no need in deps)
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
-        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, isLoading, isSessionLoading, sessionState, sessionRuntime,
+        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
-        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, resetSession,
+        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 

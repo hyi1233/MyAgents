@@ -25,6 +25,11 @@ interface MessageListProps {
   isLoading: boolean;
   isSessionLoading?: boolean;
   sessionId?: string | null;
+  // Pagination: Virtuoso maintains the visible scroll position across
+  // prepended items by the absolute index of data[0]. Default 0 = no pagination.
+  firstItemIndex?: number;
+  /** Fires when Virtuoso reaches the top — time to load an older page. */
+  onLoadOlder?: () => void;
   virtuosoRef: React.RefObject<VirtuosoHandle | null>;
   onScrollerRef?: (el: HTMLElement | Window | null) => void;
   followEnabledRef: React.MutableRefObject<boolean | 'force'>;
@@ -140,6 +145,8 @@ const MessageList = memo(function MessageList({
   isLoading,
   isSessionLoading,
   sessionId,
+  firstItemIndex,
+  onLoadOlder,
   virtuosoRef,
   onScrollerRef,
   followEnabledRef,
@@ -365,6 +372,8 @@ const MessageList = memo(function MessageList({
         scrollerRef={onScrollerRef}
         data={allMessages}
         computeItemKey={computeItemKey}
+        firstItemIndex={firstItemIndex}
+        startReached={onLoadOlder}
         followOutput={handleFollowOutput}
         atBottomStateChange={handleAtBottomChange}
         atBottomThreshold={50}
