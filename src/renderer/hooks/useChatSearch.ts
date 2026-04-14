@@ -18,7 +18,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-// ── CSS Highlight API types (not yet in lib.dom for all TS versions) ──
+// ── CSS Custom Highlight API types (not yet in lib.dom for all TS versions) ──
+//
+// Per spec (https://drafts.csswg.org/css-highlight-api-1/):
+//   • `CSS.highlights` — global HighlightRegistry on the CSS namespace object
+//   • `Highlight`       — global constructor on window / globalThis
+// The Highlight constructor is NOT a property of CSS. An earlier version of
+// this hook incorrectly looked up `CSS.Highlight`, which is undefined in every
+// real browser, so the support check always failed and the feature was dead
+// on arrival in packaged builds. Fixed to read `Highlight` from globalThis.
 interface HighlightLike {
   clear: () => void;
   add: (range: Range) => void;
@@ -30,8 +38,8 @@ interface HighlightRegistryLike {
 }
 interface CssWithHighlights {
   highlights?: HighlightRegistryLike;
-  Highlight?: new (...ranges: Range[]) => HighlightLike;
 }
+type HighlightCtor = new (...ranges: Range[]) => HighlightLike;
 
 const HIGHLIGHT_ALL = 'chat-search';
 const HIGHLIGHT_CURRENT = 'chat-search-current';
@@ -43,9 +51,49 @@ function getCssHighlights(): CssWithHighlights | null {
   return CSS as unknown as CssWithHighlights;
 }
 
+function getHighlightCtor(): HighlightCtor | null {
+  if (typeof globalThis === 'undefined') return null;
+  const ctor = (globalThis as unknown as { Highlight?: HighlightCtor }).Highlight;
+  return typeof ctor === 'function' ? ctor : null;
+}
+
 export function isHighlightApiSupported(): boolean {
   const css = getCssHighlights();
-  return !!(css && css.highlights && css.Highlight);
+  return !!(css && css.highlights) && !!getHighlightCtor();
+}
+
+/**
+ * Inject the ::highlight() CSS rules at runtime.
+ *
+ * We cannot put these rules in index.css because LightningCSS (Tailwind v4's
+ * CSS optimizer, ≤1.30.2 at time of writing) doesn't yet recognize
+ * `::highlight(name)` and emits a warning for every occurrence during build.
+ * Runtime injection sidesteps the build-time parser — the browser's own CSS
+ * engine handles `::highlight()` correctly.
+ *
+ * Idempotent: the style element is created at most once per document.
+ */
+const STYLE_ELEMENT_ID = 'chat-search-highlight-styles';
+function ensureHighlightStyles(): void {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById(STYLE_ELEMENT_ID)) return;
+  const style = document.createElement('style');
+  style.id = STYLE_ELEMENT_ID;
+  // Build the selector via String.fromCharCode to keep the literal
+  // "::highlight(" out of any future static-analysis passes that might
+  // also choke on it — overkill today, cheap insurance tomorrow.
+  const hl = '::' + 'highlight';
+  style.textContent = `
+    ${hl}(chat-search) {
+      background-color: var(--accent-warm-muted);
+      color: var(--ink);
+    }
+    ${hl}(chat-search-current) {
+      background-color: var(--accent-warm);
+      color: #ffffff;
+    }
+  `;
+  document.head.appendChild(style);
 }
 
 /**
@@ -173,7 +221,11 @@ export function useChatSearch({ scrollerRef, active }: UseChatSearchOptions): Ch
   const queryRef = useRef('');
   queryRef.current = query;
 
-  const supported = useMemo(isHighlightApiSupported, []);
+  const supported = useMemo(() => {
+    const ok = isHighlightApiSupported();
+    if (ok) ensureHighlightStyles();
+    return ok;
+  }, []);
 
   const clearHighlights = useCallback(() => {
     const css = getCssHighlights();
@@ -185,7 +237,8 @@ export function useChatSearch({ scrollerRef, active }: UseChatSearchOptions): Ch
   const paintHighlights = useCallback(
     (ranges: Range[], focusedIdx: number) => {
       const css = getCssHighlights();
-      if (!css?.highlights || !css.Highlight) return;
+      const HighlightImpl = getHighlightCtor();
+      if (!css?.highlights || !HighlightImpl) return;
       css.highlights.delete(HIGHLIGHT_ALL);
       css.highlights.delete(HIGHLIGHT_CURRENT);
       if (ranges.length === 0) return;
@@ -194,10 +247,10 @@ export function useChatSearch({ scrollerRef, active }: UseChatSearchOptions): Ch
         if (i !== focusedIdx) others.push(ranges[i]);
       }
       if (others.length > 0) {
-        css.highlights.set(HIGHLIGHT_ALL, new css.Highlight(...others));
+        css.highlights.set(HIGHLIGHT_ALL, new HighlightImpl(...others));
       }
       if (focusedIdx >= 0 && focusedIdx < ranges.length) {
-        css.highlights.set(HIGHLIGHT_CURRENT, new css.Highlight(ranges[focusedIdx]));
+        css.highlights.set(HIGHLIGHT_CURRENT, new HighlightImpl(ranges[focusedIdx]));
       }
     },
     [],

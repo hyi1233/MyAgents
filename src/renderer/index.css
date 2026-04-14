@@ -985,14 +985,11 @@ code {
   font-style: normal;
 }
 
-/* ── In-page text finder (Cmd/Ctrl+F in Chat) ── */
-/* Non-focused matches use the muted warm accent background */
-::highlight(chat-search) {
-  background-color: var(--accent-warm-muted);
-  color: var(--ink);
-}
-/* Currently focused match — stronger warm accent with white text */
-::highlight(chat-search-current) {
-  background-color: var(--accent-warm);
-  color: #ffffff;
-}
+/*
+ * The CSS Highlight API styles for the in-page text finder (Cmd/Ctrl+F)
+ * live in useChatSearch.ts and are injected at runtime via a <style> tag.
+ * LightningCSS (Tailwind v4's CSS optimizer, ≤1.30.2 as of 2026-04)
+ * does not yet recognize `::highlight(name)` as a valid pseudo-element
+ * and emits build-time warnings when it sees the literal in a static
+ * stylesheet. Runtime injection keeps the build clean.
+ */
