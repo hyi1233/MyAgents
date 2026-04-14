@@ -396,6 +396,20 @@ class GeminiProcess implements RuntimeProcess {
   thinkingIndex = 0;
   thinkingActive = false;
 
+  /**
+   * When true, session/update notifications are treated as replay from session/load
+   * and are silently dropped. Set to true before session/load, flipped to false by
+   * dispatchPrompt() right before the first live session/prompt is sent.
+   *
+   * Without this flag, Gemini's replay of the loaded session's user messages,
+   * thinking chunks, tool calls, and tool results flow into external-session as
+   * NEW content blocks, causing the loaded session's previous assistant message
+   * to re-appear in the UI on resume (logged in
+   * ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt:169-173 where
+   * user_message_chunk + tool_call arrived between session/load and set_mode).
+   */
+  replayMode = false;
+
   private proc: Subprocess;
 
   constructor(proc: Subprocess) {
@@ -691,19 +705,33 @@ export class GeminiRuntime implements AgentRuntime {
         : pickDefaultMode(options.scenario.type);
 
       if (options.resumeSessionId) {
+        // Turn on replay-drop BEFORE session/load. Gemini emits the loaded session's
+        // historical content as session/update notifications (user_message_chunk,
+        // agent_thought_chunk, tool_call, tool_call_update, etc.) so clients can
+        // rebuild their UI. MyAgents has its own SessionStore and does not want
+        // these events persisted as new blocks — we drop them all until the first
+        // live session/prompt fires.
+        geminiProc.replayMode = true;
+
         const loadParams = {
           sessionId: options.resumeSessionId,
           cwd: options.workspacePath,
           mcpServers: [],
         };
         console.log(`[gemini] RPC session/load: ${JSON.stringify(loadParams)}`);
-        await geminiProc.rpc.call('session/load', loadParams, 30_000);
+        const loadResult = (await geminiProc.rpc.call('session/load', loadParams, 30_000)) as {
+          models?: { currentModelId?: string };
+        } | undefined;
         geminiProc.sessionId = options.resumeSessionId;
 
+        // Prefer the model Gemini reports as currently active on the loaded session
+        // (usually the router id like 'auto-gemini-3'), fall back to the explicit
+        // options.model the user selected, else empty string.
+        const resumedModel = loadResult?.models?.currentModelId || options.model || '';
         onEvent({
           kind: 'session_init',
           sessionId: geminiProc.sessionId,
-          model: options.model || '',
+          model: resumedModel,
           tools: [],
         });
       } else {
@@ -803,6 +831,11 @@ export class GeminiRuntime implements AgentRuntime {
     images: ImagePayload[] | undefined,
     emit: UnifiedEventCallback,
   ): void {
+    // Live events begin now. Any session/update that arrives from here on is part
+    // of the new turn, not replay from a prior session/load. See replayMode comment
+    // on GeminiProcess for the full rationale.
+    geminiProc.replayMode = false;
+
     const prompt = buildGeminiPrompt(message, images);
     geminiProc.rpc
       .call(
@@ -934,6 +967,13 @@ export class GeminiRuntime implements AgentRuntime {
     params: unknown,
   ): UnifiedEvent | UnifiedEvent[] | null {
     if (method !== 'session/update') return null;
+
+    // Replay-drop: during session/load, Gemini replays the loaded session's history
+    // as session/update notifications (user_message_chunk, tool_call, agent_thought_chunk,
+    // tool_call_update, etc.). MyAgents already has its own SessionStore for the loaded
+    // session and must not persist the replay as new content blocks. dispatchPrompt
+    // flips this back to false just before sending the first live session/prompt.
+    if (geminiProc.replayMode) return null;
 
     const p = params as { update?: Record<string, unknown> };
     const update = p.update;

@@ -1224,12 +1224,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // AgentConfig is source of truth, Project is fallback for non-agent workspaces
     const effectivePermission = (currentAgent?.permissionMode as PermissionMode | undefined) ?? currentProject.permissionMode ?? config.defaultPermissionMode;
     setPermissionMode(effectivePermission);
-    // Also sync runtime-specific permission mode from persisted runtimeConfig
-    // (without this, Chat defaults to 'full-auto'/'default' and ignores the saved value)
-    if (isExternalRuntime) {
-      const savedRuntimePerm = (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode;
-      if (savedRuntimePerm) setRuntimePermissionMode(savedRuntimePerm);
-    }
+    // Runtime-specific permission mode sync is handled by the `[currentRuntime, isExternalRuntime]`
+    // effect higher up, which validates the persisted value against the current runtime's mode
+    // set and falls back to the runtime default if stale. Don't override here without validation —
+    // doing so reintroduces the cross-runtime leak (e.g. Codex's 'no-restrictions' bleeding into
+    // a Gemini session, confirmed in ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt:174).
     // Sync provider (useState initializer runs when currentProject is still undefined).
     // Re-arm providerInitRef to suppress the deferred provider-change effect (fires next render)
     // that would otherwise override the project-stored model with provider's primaryModel.
