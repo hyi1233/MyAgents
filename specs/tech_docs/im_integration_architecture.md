@@ -1027,7 +1027,7 @@ src/shared/types/im.ts         # ImBotConfig, ImBotStatus, ImPlatform, Installed
 |------|------|
 | [OpenClaw 调研](../prd/research_openclaw_im_integration.md) | TypeScript IM 方案调研 |
 | [ZeroClaw 调研](../prd/research_zeroclaw_rust_im_integration.md) | Rust IM 方案调研 |
-| [架构总览](./architecture.md) | MyAgents 整体架构 |
+| [架构总览](../ARCHITECTURE.md) | MyAgents 整体架构 |
 | [Session ID 架构](./session_id_architecture.md) | Session 管理机制 |
 | [Sidecar 管理](./bundled_bun.md) | Bun Sidecar 生命周期 |
 

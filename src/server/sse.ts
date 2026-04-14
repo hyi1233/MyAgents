@@ -306,7 +306,7 @@ const NON_FLUSHING_EVENTS = new Set<string>(['chat:log']);
 
 // Coalesce buffer scope: module-level Map. Each Sidecar is one Bun process
 // serving a single session under the project's Tab-scoped Sidecar isolation
-// (see specs/tech_docs/architecture.md § "Tab-scoped 隔离"), so cross-session
+// (see specs/ARCHITECTURE.md § "Tab-scoped 隔离"), so cross-session
 // mixing cannot happen here. If that invariant ever changes, key the buffer
 // by client id instead.
 

@@ -1,5 +1,5 @@
 // Cron Task Overlay - Covers input area when heartbeat loop task is running
-// Follows design_guide.md: warm paper tones, elegant and unobtrusive
+// Follows specs/DESIGN.md: warm paper tones, elegant and unobtrusive
 import { useState, useEffect } from 'react';
 import { Timer, Pencil } from 'lucide-react';
 import type { CronTaskStatus, CronSchedule } from '@/types/cronTask';

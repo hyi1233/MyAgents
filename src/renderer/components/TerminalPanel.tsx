@@ -6,7 +6,7 @@ import '@xterm/xterm/css/xterm.css';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-// ── Terminal themes — aligned with design_guide.md color system ──
+// ── Terminal themes — aligned with specs/DESIGN.md color system ──
 // Two themes: dark (nighttime) and light (daytime), auto-switching with app theme.
 
 /** Dark terminal theme — warm black background, for dark mode */

@@ -58,9 +58,9 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 **每个功能都在已有架构上生长，而不是另起炉灶。** 项目已有成熟的分层设计、通信模式、安全约束和前端规范。新功能 MUST 复用现有模块和模式（如 `local_http`、`process_cmd`、`broadcast()`、`awaitSessionTermination()`），禁止为单点需求发明新的技术方案。
 
-开发前 MUST 做的三件事：
-1. **读架构文档** @specs/tech_docs/architecture.md — 理解系统分层、模块边界、数据流
-2. **读设计规范** @specs/guides/design_guide.md — 遵循 Token/组件/页面规范（前端）
+开发前 MUST 做的三件事（这两份文档是项目的全局核心规范，渐进式按需读取）：
+1. **读架构文档** @specs/ARCHITECTURE.md — 理解系统分层、模块边界、数据流；从这里再下钻到 `specs/tech_docs/*` 的专题文档
+2. **读设计规范** @specs/DESIGN.md — 前端开发 MUST 遵循 Token/组件/页面规范
 3. **搜索现有实现** — 先在代码库中搜索类似功能是否已有模式，复用而非重建
 
 如果需求确实需要架构变更（新的通信模式、新的状态管理方式、新的进程类型），MUST 先与用户讨论方案，不得自行引入。对接外部 SDK/插件时，MUST 先读源码确认接口约定（函数签名、config schema、返回值格式），再写适配层。
@@ -142,7 +142,7 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 ### 定时任务系统
 
-Rust `CronTaskManager` 统一管理所有定时任务（Chat 定时、独立创建、AI 工具调用、IM Cron、Heartbeat），支持三种调度：固定间隔 / Cron 表达式 / 一次性。Cron Tool（`im-cron` MCP server）已泛化为**所有 Session 可用**（不仅 IM Bot），始终信任。新增 `CronTask` 字段 MUST 带 `#[serde(default)]`。详见 @specs/tech_docs/architecture.md 的「定时任务系统」节。
+Rust `CronTaskManager` 统一管理所有定时任务（Chat 定时、独立创建、AI 工具调用、IM Cron、Heartbeat），支持三种调度：固定间隔 / Cron 表达式 / 一次性。Cron Tool（`im-cron` MCP server）已泛化为**所有 Session 可用**（不仅 IM Bot），始终信任。新增 `CronTask` 字段 MUST 带 `#[serde(default)]`。详见 @specs/ARCHITECTURE.md 的「定时任务系统」节。
 
 ### Config 持久化（disk-first）
 
@@ -152,7 +152,7 @@ Agent 配置通过 Rust 命令 `cmd_update_agent_config` 写盘，写盘后 MUST
 
 ### 内嵌终端（Embedded Terminal）
 
-Chat 分屏右侧面板的交互式 PTY 终端。Rust `terminal.rs`（`portable-pty`）+ 前端 `TerminalPanel.tsx`（xterm.js），通过 Tauri IPC 通信（不走 SSE/Sidecar）。终端绑定 Tab 生命周期，面板关闭不杀进程。PTY 进程由 `portable-pty` 管理，**不走** `process_cmd`；Proxy 手动复用 `proxy_config` 常量。详见 @specs/tech_docs/architecture.md 的「内嵌终端」节。
+Chat 分屏右侧面板的交互式 PTY 终端。Rust `terminal.rs`（`portable-pty`）+ 前端 `TerminalPanel.tsx`（xterm.js），通过 Tauri IPC 通信（不走 SSE/Sidecar）。终端绑定 Tab 生命周期，面板关闭不杀进程。PTY 进程由 `portable-pty` 管理，**不走** `process_cmd`；Proxy 手动复用 `proxy_config` 常量。详见 @specs/ARCHITECTURE.md 的「内嵌终端」节。
 
 ### 内嵌浏览器（Embedded Browser）
 
@@ -163,11 +163,11 @@ Chat 分屏右侧面板的 URL 预览器（Tauri Multi-Webview）。Rust `browse
 - **Overlay 协调**：原生 Webview 浮于 React DOM 之上，Overlay 出现时通过 `closeLayer.hasOverlayLayer()` 自动 hide
 - **Cookie 持久化**：同 App 所有 Webview 共享，默认持久化磁盘，关闭即销毁（不后台保活）
 
-详见 @specs/tech_docs/architecture.md 的「内嵌浏览器」节。
+详见 @specs/ARCHITECTURE.md 的「内嵌浏览器」节。
 
 ### 层级关闭系统（Close Layer）
 
-Cmd+W 层级关闭：Overlay → 分屏面板 → Tab。`closeLayer.ts` 模块级注册表，`useCloseLayer(handler, zIndex)` 一行集成。新增 Overlay 组件 MUST 调用 `useCloseLayer`，z-index 与 CSS 保持一致。详见 @specs/tech_docs/architecture.md 的「层级关闭系统」节。
+Cmd+W 层级关闭：Overlay → 分屏面板 → Tab。`closeLayer.ts` 模块级注册表，`useCloseLayer(handler, zIndex)` 一行集成。新增 Overlay 组件 MUST 调用 `useCloseLayer`，z-index 与 CSS 保持一致。详见 @specs/ARCHITECTURE.md 的「层级关闭系统」节。
 
 ### 全文搜索引擎
 
@@ -207,7 +207,7 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 | Rust 日志用 `log::info!` | 不进统一日志 | MUST 用 `ulog_info!` / `ulog_error!` |
 | 裸 `which::which()` 查找系统工具 | Finder 启动时 PATH 缺少 homebrew 等路径 | `crate::system_binary::find()` |
 | 前端 `@tauri-apps/plugin-fs` 读写工作区文件 | Tauri fs scope 仅覆盖 `~/.myagents/**` | `invoke('cmd_read_workspace_file')` / `invoke('cmd_write_workspace_file')` |
-| UI 硬编码颜色（`#fff`、`bg-blue-500`） | 破坏设计系统一致性 | 使用 CSS Token `var(--xxx)`，参考 design_guide.md |
+| UI 硬编码颜色（`#fff`、`bg-blue-500`） | 破坏设计系统一致性 | 使用 CSS Token `var(--xxx)`，参考 specs/DESIGN.md |
 | 表单用原生 `<select>` | 系统下拉框样式各平台不一致 | 使用 `<CustomSelect>` 组件（`@/components/CustomSelect`） |
 | 函数参数用 `undefined`/`null` 表示特定业务动作 | 内部调用方无意触发该动作 | 业务动作用自解释字面量（如 `'subscription'`），`undefined` 只表示"未提供 / 保持现状" |
 | 新增手写 shim 不加入 `_handwritten.json` | `generate:sdk-shims` 下次运行覆盖手写文件 | 手写 shim MUST 同步加入 `sdk-shim/plugin-sdk/_handwritten.json` |
@@ -244,7 +244,8 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 
 修改相关模块前建议先阅读：
 
-- 整体架构：@specs/tech_docs/architecture.md
+- 整体架构（全局核心规范，必读）：@specs/ARCHITECTURE.md
+- 设计系统（全局核心规范，前端必读）：@specs/DESIGN.md
 - 自配置 CLI（myagents 命令、Admin API、版本门控）：@specs/tech_docs/cli_architecture.md
 - React 稳定性规范（Context/useEffect/memo 等 5 条规则）：@specs/tech_docs/react_stability_rules.md
 - IM Bot 集成：@specs/tech_docs/im_integration_architecture.md
@@ -253,4 +254,3 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 - 代理配置：@specs/tech_docs/proxy_config.md
 - Windows 平台适配：@specs/tech_docs/windows_platform_guide.md
 - Multi-Agent Runtime（CC/Codex 协议、会话管理、门控链路）：@specs/tech_docs/multi_agent_runtime.md
-- 设计系统（Token/组件/页面规范）：@specs/guides/design_guide.md

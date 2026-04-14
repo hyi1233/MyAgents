@@ -385,6 +385,6 @@ const handleSelectSession = async (sessionId: string) => {
 
 ## 九、相关文档
 
-- [architecture.md](./architecture.md) - 整体技术架构
+- [ARCHITECTURE.md](../ARCHITECTURE.md) - 整体技术架构
 - [session_state_sync.md](./session_state_sync.md) - SSE 状态同步机制
 - [session_storage.md](./session_storage.md) - Session 存储格式

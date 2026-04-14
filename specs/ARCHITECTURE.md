@@ -189,7 +189,7 @@ export type InteractionScenario =
 
 **为什么放在 `~/.myagents/bin/` 而非 app bundle**：SDK 子进程 PATH 不含 app bundle 内部路径；shebang 执行需要可执行权限和去掉 `.ts` 后缀；`~/.myagents/bin/` 是跨平台稳定的工具投放点。
 
-详见 [CLI 架构](./cli_architecture.md)。
+详见 [CLI 架构](./tech_docs/cli_architecture.md)。
 
 ### 6. 定时任务系统 (v0.1.42)
 
@@ -277,7 +277,7 @@ IM/Cron Session 的 Provider 和 Model 从磁盘自 resolve，不依赖前端 `/
 
 **跨 Runtime Session 保护**：用户关闭功能后打开外部 Runtime 历史 session → `initializeAgent` 检测 `meta.runtime !== 'builtin'` → 跳过 SDK resume（防止 "No conversation found" 崩溃）→ 前端弹确认框引导新开会话。
 
-详见 [Multi-Agent Runtime 架构](./multi_agent_runtime.md)。
+详见 [Multi-Agent Runtime 架构](./tech_docs/multi_agent_runtime.md)。
 
 ### 10. Session 切换与持久化
 
@@ -405,7 +405,7 @@ Cmd+W 层级关闭：Overlay → 分屏面板 → Tab，高 z-index 优先。
 
 **与 Pit-of-Success 模块的关系**：搜索子系统不发 HTTP、不启动子进程、无 outbound 网络，与 `local_http` / `process_cmd` / `proxy_config` 均无交集。但 session watcher 自身就是第四个 pit-of-success 典范 — 把"每个 writer 都必须记得通知索引"替换成"观察结果目录"。
 
-详见 [全文搜索架构](./search_architecture.md)。
+详见 [全文搜索架构](./tech_docs/search_architecture.md)。
 
 ## 通信流程
 
@@ -533,21 +533,21 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 | `build_windows.ps1` | 生产构建 (NSIS + 便携版) |
 | `publish_windows.ps1` | 发布到 R2 |
 
-详见 [Windows 构建指南](../guides/windows_build_guide.md)。
+详见 [Windows 构建指南](./guides/windows_build_guide.md)。
 
 ## 深度文档索引
 
 | 文档 | 内容 |
 |------|------|
-| [CLI 架构](./cli_architecture.md) | 自配置 CLI 设计、版本门控、Admin API、PATH 注入 |
-| [IM 集成技术架构](./im_integration_architecture.md) | Agent/Channel 详细设计、适配器模型 |
-| [Plugin Bridge 架构](./plugin_bridge_architecture.md) | OpenClaw 插件加载、SDK shim、消息流转、QR 登录 |
-| [Session ID 架构](./session_id_architecture.md) | Session 生命周期、ID 格式 |
-| [React 稳定性规范](./react_stability_rules.md) | Context/useEffect/memo 等 5 条规则 |
-| [代理配置](./proxy_config.md) | 系统代理 + SOCKS5 桥接 |
-| [统一日志](./unified_logging.md) | 日志格式、来源、排查指南 |
-| [三方供应商](./third_party_providers.md) | 环境变量、认证模式、Bridge 原理 |
-| [Windows 平台适配](./windows_platform_guide.md) | PATH 问题、控制台窗口、npm 兼容 |
-| [Multi-Agent Runtime](./multi_agent_runtime.md) | 外部 Runtime 抽象层、CC/Codex 协议、会话管理、门控链路 |
-| [全文搜索架构](./search_architecture.md) | Tantivy + jieba、session watcher、懒加载文件索引、UTF-16 高亮 |
-| [设计系统](../guides/design_guide.md) | Token/组件/页面规范 |
+| [CLI 架构](./tech_docs/cli_architecture.md) | 自配置 CLI 设计、版本门控、Admin API、PATH 注入 |
+| [IM 集成技术架构](./tech_docs/im_integration_architecture.md) | Agent/Channel 详细设计、适配器模型 |
+| [Plugin Bridge 架构](./tech_docs/plugin_bridge_architecture.md) | OpenClaw 插件加载、SDK shim、消息流转、QR 登录 |
+| [Session ID 架构](./tech_docs/session_id_architecture.md) | Session 生命周期、ID 格式 |
+| [React 稳定性规范](./tech_docs/react_stability_rules.md) | Context/useEffect/memo 等 5 条规则 |
+| [代理配置](./tech_docs/proxy_config.md) | 系统代理 + SOCKS5 桥接 |
+| [统一日志](./tech_docs/unified_logging.md) | 日志格式、来源、排查指南 |
+| [三方供应商](./tech_docs/third_party_providers.md) | 环境变量、认证模式、Bridge 原理 |
+| [Windows 平台适配](./tech_docs/windows_platform_guide.md) | PATH 问题、控制台窗口、npm 兼容 |
+| [Multi-Agent Runtime](./tech_docs/multi_agent_runtime.md) | 外部 Runtime 抽象层、CC/Codex 协议、会话管理、门控链路 |
+| [全文搜索架构](./tech_docs/search_architecture.md) | Tantivy + jieba、session watcher、懒加载文件索引、UTF-16 高亮 |
+| [设计系统](./DESIGN.md) | Token/组件/页面规范 |
