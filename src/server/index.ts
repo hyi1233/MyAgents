@@ -7616,14 +7616,27 @@ async function main() {
             senderName: payload.senderName,
           };
 
-          // ─── External Runtime branch (CC/Codex) ───
+          // ─── External Runtime branch (CC/Codex/Gemini) ───
           if (shouldUseExternalRuntime()) {
             const imSource = payload.source.split('_')[0];
             const imSourceType = payload.source.includes('group') ? 'group' as const : 'private' as const;
             const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
             const runtimeConfig = payload.runtimeConfig ?? null;
+            // Hard fail on runtime drift. Rust side handles Agent-owner drift
+            // proactively (sidecar.rs v0.1.66 tears down stale Sidecars before
+            // routing), but if the drift somehow still reaches us (race during
+            // agent config hot-reload, or a bug in the priority chain), bail
+            // out with a 409 so Rust can kill this Sidecar and spawn a fresh
+            // one instead of silently serving the request with the wrong CLI.
+            //
+            // Repro: unified-2026-04-15.log line 3763 logged this mismatch as a
+            // warning and proceeded with codex, producing the "站站嘿嘿 → codex
+            // usage limit hit" bug on a workspace whose agent had already been
+            // switched to gemini.
             if (payloadRuntime !== getActiveRuntimeType()) {
-              console.warn(`[im/chat] Runtime mismatch: sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}`);
+              const msg = `Runtime mismatch: sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}. This Sidecar was spawned with a stale runtime; it will be torn down and respawned on the next message.`;
+              console.error(`[im/chat] ${msg}`);
+              return jsonResponse({ success: false, error: msg, code: 'runtime_mismatch' }, 409);
             }
             const ccResult = await sendExternalMessage(
               finalMessage, payload.images ?? undefined, undefined, undefined,

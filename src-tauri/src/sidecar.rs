@@ -384,6 +384,12 @@ pub struct SessionSidecar {
     /// Reserved for future use (e.g., TTL-based cleanup)
     #[allow(dead_code)]
     pub created_at: std::time::Instant,
+    /// MYAGENTS_RUNTIME env var value this Sidecar was spawned with.
+    /// Used for drift detection on Agent-owner reuse: when the agent's
+    /// runtime config changes (e.g. codex → gemini), subsequent IM messages
+    /// for the same peer session must not reuse a Sidecar that's still
+    /// running the old runtime. None = builtin (no env var injected).
+    pub runtime: Option<String>,
 }
 
 impl SessionSidecar {
@@ -2309,6 +2315,31 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
     // Phase 2: Do HTTP health check (without lock)
     // Phase 3: Re-acquire lock and finalize decision
 
+    // Drift detection for Agent-owner Sidecars: if the agent's runtime has been
+    // changed in Settings while this Sidecar is still alive on the old runtime,
+    // the existing process cannot serve new IM messages correctly (its
+    // MYAGENTS_RUNTIME env var is baked in at spawn time). Kill it so the spawn
+    // path below picks up the fresh runtime from agent config.
+    //
+    // We do NOT apply this check to Tab/Cron/BackgroundCompletion owners because
+    // desktop sessions preserve runtime stability by design (v0.1.62).
+    if matches!(owner, SidecarOwner::Agent(_)) {
+        let desired_runtime = runtime_override.as_ref().cloned()
+            .or_else(|| resolve_agent_runtime_from_config(workspace_path));
+        if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
+            if !sidecar.is_dead() && sidecar.runtime != desired_runtime {
+                ulog_info!(
+                    "[sidecar] Session {} Agent-owner Sidecar runtime drift detected \
+                     (sidecar={:?}, desired={:?}), killing for respawn",
+                    session_id, sidecar.runtime, desired_runtime
+                );
+                // Best-effort graceful kill; the spawn path below will create a fresh process.
+                let _ = sidecar.process.kill();
+                manager_guard.remove_sidecar(session_id);
+            }
+        }
+    }
+
     let existing_sidecar_info: Option<u16> = {
         if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
             if sidecar.is_dead() {
@@ -2499,16 +2530,40 @@ fn create_new_session_sidecar<R: Runtime>(
         cmd.env("MYAGENTS_MANAGEMENT_PORT", mgmt_port.to_string());
     }
 
-    // Inject runtime type for Agent Runtime selection (v0.1.59, v0.1.62: session-sourced)
-    // Priority: session metadata (stable, records what runtime created this session)
-    //         → agent config (fallback for pending/new sessions without metadata yet)
-    // This ensures existing sessions always get the correct runtime, even after the user
-    // changes the agent's default runtime in settings.
+    // Inject runtime type for Agent Runtime selection (v0.1.59, v0.1.62, v0.1.66).
+    //
+    // Priority rules, split by owner type:
+    //
+    //   Tab / CronTask / BackgroundCompletion (desktop-style):
+    //     runtime_override → session metadata → agent config
+    //
+    //     Session metadata is authoritative so an ongoing conversation can't
+    //     switch runtimes mid-stream just because the user tweaked the agent's
+    //     default in Settings. This is the v0.1.62 session-stability guarantee.
+    //
+    //   Agent (IM / agent-channel):
+    //     runtime_override → agent config → session metadata
+    //
+    //     The IM peer session map is keyed on (agent, channel, user), so the
+    //     user never sees individual session IDs — their mental model is "I'm
+    //     talking to my agent". When they change the agent's runtime in
+    //     Settings, they expect the next IM message to use the new runtime
+    //     regardless of which session_id the peer map happens to point at.
+    //     Without this, a codex→gemini switch leaves the WeChat bot stuck
+    //     spawning codex Sidecars forever (observed in unified-2026-04-15.log
+    //     line 3763: "Runtime mismatch: sidecar=codex payload=gemini").
     let resolved_runtime = runtime_override.map(|runtime| runtime.to_string())
-        .or_else(|| resolve_session_runtime(session_id))
-        .or_else(|| resolve_agent_runtime_from_config(workspace_path));
-    if let Some(runtime) = resolved_runtime {
-        cmd.env("MYAGENTS_RUNTIME", &runtime);
+        .or_else(|| {
+            if matches!(owner, SidecarOwner::Agent(_)) {
+                resolve_agent_runtime_from_config(workspace_path)
+                    .or_else(|| resolve_session_runtime(session_id))
+            } else {
+                resolve_session_runtime(session_id)
+                    .or_else(|| resolve_agent_runtime_from_config(workspace_path))
+            }
+        });
+    if let Some(runtime) = &resolved_runtime {
+        cmd.env("MYAGENTS_RUNTIME", runtime);
     }
 
     cmd.stdout(Stdio::piped())
@@ -2589,6 +2644,7 @@ fn create_new_session_sidecar<R: Runtime>(
         state: SidecarState::Starting,
         owners,
         created_at: std::time::Instant::now(),
+        runtime: resolved_runtime.clone(),
     };
 
     manager_guard.insert_sidecar(session_id, sidecar);
