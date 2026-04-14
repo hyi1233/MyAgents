@@ -82,14 +82,19 @@ function ensureHighlightStyles(): void {
   // Build the selector via String.fromCharCode to keep the literal
   // "::highlight(" out of any future static-analysis passes that might
   // also choke on it — overkill today, cheap insurance tomorrow.
+  // Match the file-search highlight (SearchHighlight.tsx):
+  //   bg-[var(--accent)]/30 text-[var(--ink)]
+  // font-weight/border-radius/padding from the file-search mark are not
+  // rendered inside ::highlight() — the spec restricts pseudo-elements on
+  // live ranges to color / background / text-decoration / text-shadow only.
   const hl = '::' + 'highlight';
   style.textContent = `
     ${hl}(chat-search) {
-      background-color: var(--accent-warm-muted);
+      background-color: color-mix(in srgb, var(--accent) 30%, transparent);
       color: var(--ink);
     }
     ${hl}(chat-search-current) {
-      background-color: var(--accent-warm);
+      background-color: var(--accent);
       color: #ffffff;
     }
   `;
