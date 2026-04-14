@@ -363,6 +363,14 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
     const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
     const [overwriteFolders, setOverwriteFolders] = useState<Set<string>>(new Set());
 
+    // Guard setState after unmount — user can cancel mid-fetch and the pending
+    // Promise will still resolve.
+    const isMountedRef = useRef(true);
+    useEffect(() => {
+        isMountedRef.current = true;
+        return () => { isMountedRef.current = false; };
+    }, []);
+
     // Phase rotation during a pending fetch (purely cosmetic — not driven by backend)
     useEffect(() => {
         if (!loading) return;
@@ -372,7 +380,9 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
             { at: 3000, text: '正在解包...' },
             { at: 8000, text: '正在验证 SKILL.md...' },
         ];
-        const timers = phases.map(p => setTimeout(() => setPhase(p.text), p.at));
+        const timers = phases.map(p => setTimeout(() => {
+            if (isMountedRef.current) setPhase(p.text);
+        }, p.at));
         return () => timers.forEach(clearTimeout);
     }, [loading]);
 
@@ -387,6 +397,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
         setPhase('正在解析链接...');
         try {
             const result = await onInstall(url.trim());
+            if (!isMountedRef.current) return;
             if (!result.success) {
                 setError(result.error || '安装失败');
                 return;
@@ -416,10 +427,12 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                 }
             }
         } catch (err) {
-            setError(err instanceof Error ? err.message : '安装失败');
+            if (isMountedRef.current) setError(err instanceof Error ? err.message : '安装失败');
         } finally {
-            setLoading(false);
-            setPhase('');
+            if (isMountedRef.current) {
+                setLoading(false);
+                setPhase('');
+            }
         }
     };
 
@@ -470,6 +483,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
             }
 
             const result = await onInstall(url.trim(), body);
+            if (!isMountedRef.current) return;
             if (!result.success) {
                 setError(result.error || '安装失败');
                 return;
@@ -479,10 +493,12 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                 onInstalled?.(folders);
             }
         } catch (err) {
-            setError(err instanceof Error ? err.message : '安装失败');
+            if (isMountedRef.current) setError(err instanceof Error ? err.message : '安装失败');
         } finally {
-            setLoading(false);
-            setPhase('');
+            if (isMountedRef.current) {
+                setLoading(false);
+                setPhase('');
+            }
         }
     };
 

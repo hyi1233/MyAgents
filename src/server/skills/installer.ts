@@ -11,7 +11,9 @@
  * zip-slip-protected write path in `/api/skill/upload`.
  */
 
-import { load as yamlLoad } from 'js-yaml';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { dirname, join, resolve, sep } from 'path';
+import { load as yamlLoad, FAILSAFE_SCHEMA } from 'js-yaml';
 import { parseFullSkillContent } from '../../shared/slashCommands';
 import type { ExtractedTree } from './tarball-fetcher';
 import type { ResolvedSkillSource } from './url-resolver';
@@ -144,19 +146,19 @@ export function buildInstallPayload(
 // Internal scanning
 // ---------------------------------------------------------------------------
 
+/** Matches `SKILL.md` either at the tree root or as the tail of a subdirectory.
+ *  Case-insensitive: repos sometimes use `Skill.md` / `skill.md`. */
+const SKILL_MD_REGEX = /(?:^|\/)SKILL\.md$/i;
+
 /** Walk the tree to find every SKILL.md */
 function scanForSkills(tree: ExtractedTree): SkillCandidate[] {
   const candidates: SkillCandidate[] = [];
   for (const [relPath, buf] of tree.files) {
-    if (!relPath.toLowerCase().endsWith('skill.md')) continue;
-    if (relPath.toLowerCase().endsWith('/skill.md') || relPath.toLowerCase() === 'skill.md') {
-      // ok
-    } else {
-      continue;
-    }
-    const rootPath = relPath.toLowerCase() === 'skill.md'
-      ? ''
-      : relPath.slice(0, relPath.length - '/SKILL.md'.length);
+    if (!SKILL_MD_REGEX.test(relPath)) continue;
+
+    const rootPath = relPath.includes('/')
+      ? relPath.slice(0, relPath.lastIndexOf('/'))
+      : '';
 
     const cand = buildCandidate(rootPath, buf.toString('utf-8'));
     if (cand) candidates.push(cand);
@@ -171,6 +173,14 @@ function scanForSkills(tree: ExtractedTree): SkillCandidate[] {
   return candidates;
 }
 
+/** Exact tool names that should raise the "dangerous tools" warning.
+ *  Matching is case-insensitive and only against the bare tool name (stripping
+ *  any argument filters like `Bash(ls:*)`). Keep this list tight — false
+ *  positives train the user to ignore the warning. */
+const DANGEROUS_TOOL_NAMES = new Set([
+  'bash', 'shell', 'sh', 'exec', 'run', 'cmd', 'powershell', 'pwsh', 'zsh',
+]);
+
 function buildCandidate(rootPath: string, content: string): SkillCandidate | null {
   let name = '';
   let description = '';
@@ -179,14 +189,15 @@ function buildCandidate(rootPath: string, content: string): SkillCandidate | nul
     // parseFullSkillContent is strict (string-only allowed-tools). We re-parse
     // the raw frontmatter block here because the Agent Skills spec permits
     // allowed-tools as an array — and we specifically need to surface array
-    // form to the UI as a "dangerous tools" warning.
+    // form to the UI as a "dangerous tools" warning. FAILSAFE_SCHEMA blocks
+    // YAML anchors/merge-keys/custom tags (zip-bomb / expansion-attack surface).
     const parsed = parseFullSkillContent(content);
     name = (parsed.frontmatter?.name as string) || '';
     description = (parsed.frontmatter?.description as string) || '';
 
     const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
     if (fmMatch) {
-      const raw = yamlLoad(fmMatch[1]) as Record<string, unknown> | null;
+      const raw = yamlLoad(fmMatch[1], { schema: FAILSAFE_SCHEMA }) as Record<string, unknown> | null;
       const tools = raw?.['allowed-tools'];
       if (Array.isArray(tools)) {
         allowedTools = tools.filter((x): x is string => typeof x === 'string');
@@ -203,12 +214,19 @@ function buildCandidate(rootPath: string, content: string): SkillCandidate | nul
   const suggestedFolderName = name || basename || 'unnamed-skill';
   if (!suggestedFolderName) return null;
 
+  // Extract the bare tool name from entries like `Bash(ls:*)` or `mcp__shell__*`
+  // and check against the exact-match allowlist.
+  const hasDangerousTools = allowedTools.some(t => {
+    const bare = t.replace(/\(.*\)$/, '').trim().toLowerCase();
+    return DANGEROUS_TOOL_NAMES.has(bare);
+  });
+
   return {
     rootPath,
     suggestedFolderName,
     name: name || suggestedFolderName,
     description,
-    hasDangerousTools: allowedTools.some(t => /^(bash|shell|exec|run)/i.test(t)),
+    hasDangerousTools,
   };
 }
 
@@ -275,4 +293,37 @@ function tryParseMarketplace(tree: ExtractedTree): InstallAnalysis | null {
     marketplaceDescription: parsed.metadata?.description,
     plugins,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Disk writer — single zip-slip-guarded write path reused by every skill
+// install call site (`install-from-url` single branch, confirmed branch, and
+// the legacy `/api/skill/upload` flow).
+// ---------------------------------------------------------------------------
+
+/**
+ * Materialize an in-memory file map under `skillDir`.
+ *
+ * Zip-slip defense: every resolved path must remain inside `skillDir`. Any
+ * entry that escapes is silently dropped (with a warning) so a partially
+ * malicious zip still produces a consistent partial skill rather than
+ * corrupting unrelated directories.
+ *
+ * Creates `skillDir` (recursively) and every intermediate subdirectory as it
+ * writes. Caller is responsible for conflict handling (checking `existsSync`
+ * before calling, or passing a fresh path).
+ */
+export function writeSkillFiles(skillDir: string, files: Map<string, Buffer>): void {
+  mkdirSync(skillDir, { recursive: true });
+  for (const [rel, data] of files) {
+    const fullPath = resolve(join(skillDir, rel));
+    // Zip-slip: resolved path MUST stay within skillDir
+    if (!fullPath.startsWith(skillDir + sep) && fullPath !== skillDir) {
+      console.warn(`[writeSkillFiles] Blocked zip-slip path: ${rel}`);
+      continue;
+    }
+    const dir = dirname(fullPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(fullPath, data);
+  }
 }

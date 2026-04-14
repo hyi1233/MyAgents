@@ -111,12 +111,17 @@ function stripNpxWrapper(input: string): { positional?: string; skillName?: stri
   const trimmed = input.replace(/^[`'"]+|[`'"]+$/g, '').trim();
   if (!trimmed) return {};
 
+  // Unicode whitespace split — covers ASCII space/tab, NBSP (U+00A0),
+  // ideographic space (U+3000), etc. Users copy-pasting from docs can bring
+  // any of these along.
+  const UNICODE_WS = /[\s\u00a0\u3000]+/;
+
   // Fast path: looks like a bare URL or owner/repo — no whitespace
-  if (!/\s/.test(trimmed)) {
+  if (!UNICODE_WS.test(trimmed)) {
     return { positional: trimmed };
   }
 
-  const tokens = trimmed.split(/\s+/);
+  const tokens = trimmed.split(UNICODE_WS).filter(Boolean);
   // Drop leading `npx`, `-y`, `skills`, `add` noise (all optional / in any order up front)
   const WRAPPER_TOKENS = new Set(['npx', '-y', 'skills', 'add', 'install']);
   while (tokens.length > 0 && WRAPPER_TOKENS.has(tokens[0].toLowerCase())) {
@@ -128,12 +133,21 @@ function stripNpxWrapper(input: string): { positional?: string; skillName?: stri
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     if (tok === '--skill' || tok === '-s') {
-      skillName = tokens[i + 1];
-      i++;
+      // Bounds-check: dangling flag means user truncated their paste. Silently
+      // drop the flag rather than swallowing the next positional arg as the
+      // skill name.
+      if (i + 1 < tokens.length) {
+        const next = tokens[i + 1];
+        if (next && !next.startsWith('-')) {
+          skillName = next;
+          i++;
+        }
+      }
       continue;
     }
     if (tok.startsWith('--skill=')) {
-      skillName = tok.slice('--skill='.length);
+      const v = tok.slice('--skill='.length);
+      if (v) skillName = v;
       continue;
     }
     if (tok === '-g' || tok === '--global' || tok === '--project' || tok === '--user') {
@@ -146,6 +160,12 @@ function stripNpxWrapper(input: string): { positional?: string; skillName?: stri
     if (!positional) {
       positional = tok;
     }
+  }
+
+  // Reject empty string — `skillName = ''` would make `hint.toLowerCase()` in
+  // analyseTree match every skill and cause an ambiguous install.
+  if (skillName !== undefined && skillName.trim() === '') {
+    skillName = undefined;
   }
 
   return { positional, skillName };
@@ -192,18 +212,29 @@ function normalizeSubPath(raw: string | undefined): string | undefined {
 
 /**
  * Build candidate tarball download URLs for a resolved GitHub source.
- * When no ref is specified, returns the default branch candidates (main/master).
- * Returns an array — caller should try them in order and fall back on 404.
  *
- * We use `codeload.github.com` ZIP endpoint (reused with existing AdmZip path).
+ * codeload URL forms:
+ *   - /zip/refs/heads/<branch>  — branch (explicit)
+ *   - /zip/refs/tags/<tag>      — tag (explicit)
+ *   - /zip/<ref>                — universal: accepts branches, tags, AND commit
+ *                                  SHAs; this is the form codeload itself uses
+ *                                  when serving GitHub's "Download ZIP" button
+ *
+ * Strategy:
+ *   - No ref → try /zip/refs/heads/main, then /zip/refs/heads/master
+ *     (explicit heads path avoids 302 ambiguity for the fallback case)
+ *   - Explicit ref → use the universal /zip/<ref> form. This one call handles
+ *     branches (`dev`), tags (`v1.0.0`), and commit SHAs uniformly.
+ *
+ * Returns an array — caller tries them in order, falling back on 404.
  */
 export function buildGithubZipCandidates(src: ResolvedSkillSource): string[] {
   if (src.kind !== 'github' || !src.owner || !src.repo) {
     throw new SkillUrlError('not a github source');
   }
-  const base = `https://codeload.github.com/${src.owner}/${src.repo}/zip/refs/heads`;
+  const base = `https://codeload.github.com/${src.owner}/${src.repo}/zip`;
   if (src.ref) {
     return [`${base}/${encodeURIComponent(src.ref)}`];
   }
-  return [`${base}/main`, `${base}/master`];
+  return [`${base}/refs/heads/main`, `${base}/refs/heads/master`];
 }

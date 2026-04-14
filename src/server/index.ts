@@ -18,7 +18,7 @@ import {
 import { sanitizeFolderName, isWindowsReservedName } from '../shared/utils';
 import { resolveSkillUrl } from './skills/url-resolver';
 import { fetchSkillZip, TarballFetchError } from './skills/tarball-fetcher';
-import { analyseTree, buildInstallPayload, type SkillCandidate } from './skills/installer';
+import { analyseTree, buildInstallPayload, writeSkillFiles, type SkillCandidate } from './skills/installer';
 import { isPreviewable } from '../shared/fileTypes';
 import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
@@ -6438,21 +6438,53 @@ async function main() {
               chosen = [analysis.skill];
             }
 
-            // Write each chosen skill
-            const payloadMap = buildInstallPayload(tree, chosen);
-            const installed: Array<{ folderName: string; path: string; name: string; description: string }> = [];
-
+            // ---------- Pre-validation before ANY disk writes ----------
+            // Compute the final target folder name for every chosen skill,
+            // honoring renames. Then check for:
+            //   (1) duplicates within the chosen set (two skills collapsing to
+            //       the same folder name — usually via frontmatter.name collision)
+            //   (2) existing folders that aren't in overwrite
+            //   (3) rename targets that collide with existing folders
+            // All of these MUST fail before we write anything, otherwise a
+            // partial install leaks. Pre-validation gives atomic-ish semantics
+            // without a temp-dir dance.
+            const plan: Array<{ cand: SkillCandidate; folderName: string; originalName: string }> = [];
+            const seenTargets = new Set<string>();
             for (const cand of chosen) {
-              let folderName = sanitizeFolderName(cand.suggestedFolderName);
-              if (renames[folderName]) {
-                folderName = sanitizeFolderName(renames[folderName]);
-              }
-              const files = payloadMap.get(cand.suggestedFolderName);
-              if (!files) continue;
+              const originalName = sanitizeFolderName(cand.suggestedFolderName);
+              const renameTo = renames[originalName] ?? renames[cand.suggestedFolderName];
+              const folderName = renameTo ? sanitizeFolderName(renameTo) : originalName;
 
-              const skillDir = join(baseDir, folderName);
-              const exists = existsSync(skillDir);
-              if (exists && !overwrite.has(folderName) && !renames[cand.suggestedFolderName]) {
+              if (seenTargets.has(folderName)) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: `多个 skill 解析到同一个文件夹名 "${folderName}"，请使用 renames 指定不同名称`,
+                    conflict: true,
+                    conflictFolder: folderName,
+                  },
+                  409,
+                );
+              }
+              seenTargets.add(folderName);
+
+              // If renamed, the rename target must not already exist on disk
+              // (the user's original `overwrite` set was keyed on the original
+              // name, not the rename target).
+              if (renameTo && existsSync(join(baseDir, folderName))) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: `重命名目标 "${folderName}" 已存在`,
+                    conflict: true,
+                    conflictFolder: folderName,
+                  },
+                  409,
+                );
+              }
+
+              // Non-renamed conflict must be covered by `overwrite`
+              if (!renameTo && existsSync(join(baseDir, folderName)) && !overwrite.has(folderName)) {
                 return jsonResponse(
                   {
                     success: false,
@@ -6463,22 +6495,24 @@ async function main() {
                   409,
                 );
               }
-              if (exists && overwrite.has(folderName)) {
+
+              plan.push({ cand, folderName, originalName });
+            }
+
+            // ---------- Write phase (all validations have passed) ----------
+            const payloadMap = buildInstallPayload(tree, chosen);
+            const installed: Array<{ folderName: string; path: string; name: string; description: string }> = [];
+
+            for (const { cand, folderName } of plan) {
+              const files = payloadMap.get(cand.suggestedFolderName);
+              if (!files) continue;
+
+              const skillDir = join(baseDir, folderName);
+              if (existsSync(skillDir) && overwrite.has(folderName)) {
                 rmSync(skillDir, { recursive: true, force: true });
               }
 
-              mkdirSync(skillDir, { recursive: true });
-              for (const [rel, data] of files) {
-                const fullPath = resolve(join(skillDir, rel));
-                // Zip-Slip protection
-                if (!fullPath.startsWith(skillDir + sep) && fullPath !== skillDir) {
-                  console.warn(`[install-from-url] Blocked zip-slip path: ${rel}`);
-                  continue;
-                }
-                const dir = dirname(fullPath);
-                if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-                writeFileSync(fullPath, data);
-              }
+              writeSkillFiles(skillDir, files);
 
               installed.push({
                 folderName,
@@ -6580,17 +6614,7 @@ async function main() {
             return jsonResponse({ success: false, error: '未找到可安装的文件' }, 500);
           }
 
-          mkdirSync(skillDir, { recursive: true });
-          for (const [rel, data] of files) {
-            const fullPath = resolve(join(skillDir, rel));
-            if (!fullPath.startsWith(skillDir + sep) && fullPath !== skillDir) {
-              console.warn(`[install-from-url] Blocked zip-slip path: ${rel}`);
-              continue;
-            }
-            const dir = dirname(fullPath);
-            if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-            writeFileSync(fullPath, data);
-          }
+          writeSkillFiles(skillDir, files);
 
           if (scope === 'user') {
             bumpSkillsGeneration();

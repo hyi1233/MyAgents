@@ -81,8 +81,70 @@ export async function fetchSkillZip(src: ResolvedSkillSource): Promise<Extracted
 }
 
 // ---------------------------------------------------------------------------
-// HTTP download with size + timeout enforcement
+// SSRF guard — reject any URL host that points at localhost or a private IP
 // ---------------------------------------------------------------------------
+
+/**
+ * Reject URLs whose host is a literal loopback / RFC1918 / link-local address.
+ *
+ * This is the classic blind-SSRF shape: user pastes a URL → our server follows
+ * it → lands on an internal service. We can't stop DNS rebinding attacks here
+ * without resolving ourselves, but we CAN stop the obvious cases.
+ *
+ * The GitHub path goes through codeload.github.com which is public-only, but
+ * the raw-zip passthrough accepts arbitrary user URLs, and redirects during
+ * fetch can land anywhere. We validate both the initial URL and every redirect
+ * hop.
+ */
+function assertPublicUrl(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new TarballFetchError(`非法 URL：${url}`, 400);
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new TarballFetchError(`不支持的协议：${parsed.protocol}`, 400);
+  }
+
+  const host = parsed.hostname.toLowerCase();
+
+  // String-match obvious localhost aliases first (catches `localhost`, `::1`, etc.)
+  const LOOPBACK_HOSTS = new Set([
+    'localhost', '0.0.0.0', '127.0.0.1', '::1', '[::1]', '[::]',
+    'ip6-loopback', 'ip6-localhost',
+  ]);
+  if (LOOPBACK_HOSTS.has(host)) {
+    throw new TarballFetchError(`拒绝连接到本地回环地址：${host}`, 400);
+  }
+
+  // IPv4 literal (with dotted notation) — check RFC1918 and link-local
+  const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const [a, b] = [Number(ipv4Match[1]), Number(ipv4Match[2])];
+    if (
+      a === 10 ||                                    // 10.0.0.0/8
+      (a === 172 && b >= 16 && b <= 31) ||           // 172.16.0.0/12
+      (a === 192 && b === 168) ||                    // 192.168.0.0/16
+      a === 127 ||                                   // 127.0.0.0/8
+      (a === 169 && b === 254) ||                    // 169.254.0.0/16 link-local
+      a === 0                                        // 0.0.0.0/8
+    ) {
+      throw new TarballFetchError(`拒绝连接到私有网络地址：${host}`, 400);
+    }
+  }
+
+  // IPv6 literal — reject unique local (fc00::/7) and link-local (fe80::/10)
+  if (host.startsWith('[fc') || host.startsWith('[fd') || host.startsWith('[fe80:')) {
+    throw new TarballFetchError(`拒绝连接到私有 IPv6 地址：${host}`, 400);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP download with size + timeout enforcement + manual redirect following
+// ---------------------------------------------------------------------------
+
+const MAX_REDIRECTS = 5;
 
 async function downloadZip(
   url: string,
@@ -92,14 +154,38 @@ async function downloadZip(
   const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
-    const resp = await fetch(url, {
-      signal: controller.signal,
-      redirect: 'follow',
-      headers: {
-        'User-Agent': 'MyAgents-Skill-Installer/1.0',
-        'Accept': 'application/zip, application/octet-stream',
-      },
-    });
+    // Manual redirect loop: every hop is validated against the SSRF guard,
+    // so a malicious `302 Location: http://127.0.0.1/…` cannot silently land
+    // on an internal service. Bun's native `redirect: 'follow'` gives us no
+    // hook into the intermediate URLs, so we do this by hand.
+    let currentUrl = url;
+    let resp: Response;
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      assertPublicUrl(currentUrl);
+      resp = await fetch(currentUrl, {
+        signal: controller.signal,
+        redirect: 'manual',
+        headers: {
+          'User-Agent': 'MyAgents-Skill-Installer/1.0',
+          'Accept': 'application/zip, application/octet-stream',
+        },
+      });
+      if (resp.status >= 300 && resp.status < 400) {
+        const location = resp.headers.get('location');
+        if (!location) {
+          throw new TarballFetchError(`重定向缺少 Location 头：HTTP ${resp.status}`, 502);
+        }
+        if (hop >= MAX_REDIRECTS) {
+          throw new TarballFetchError(`重定向次数过多 (>${MAX_REDIRECTS})`, 508);
+        }
+        // Resolve relative Location against current URL
+        currentUrl = new URL(location, currentUrl).href;
+        continue;
+      }
+      break;
+    }
+    // At this point resp is the terminal response (`break` above)
+    resp = resp!;
 
     if (!resp.ok) {
       if (resp.status === 404) {
@@ -128,8 +214,10 @@ async function downloadZip(
       );
     }
 
-    // Determine effective ref from successful URL
-    const refMatch = url.match(/\/refs\/heads\/([^/]+)$/);
+    // Determine effective ref from the *initial* URL we were asked to fetch
+    // (not the terminal URL after redirects). The caller passed us a codeload
+    // URL derived from src.ref via buildGithubZipCandidates.
+    const refMatch = url.match(/\/zip\/(?:refs\/(?:heads|tags)\/)?([^/?#]+)$/);
     return {
       buffer: Buffer.from(arrayBuffer),
       effectiveRef: refMatch ? decodeURIComponent(refMatch[1]) : src.ref,
