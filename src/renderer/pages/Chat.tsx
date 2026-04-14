@@ -14,6 +14,8 @@ import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import QueryNavigator from '@/components/chat/QueryNavigator';
+import ChatSearchPanel from '@/components/ChatSearchPanel';
+import { useChatSearch, isHighlightApiSupported } from '@/hooks/useChatSearch';
 import SelectionCommentMenu from '@/components/SelectionCommentMenu';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
@@ -1301,6 +1303,51 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     scrollerRef.current = el instanceof HTMLElement ? el : null;
   }, [scrollerRef]);
 
+  // ── In-page text finder (Cmd/Ctrl+F) ──
+  // Scope: already-rendered messages only (Virtuoso virtualizes the rest).
+  // Full history search lives in the global search engine on Launcher.
+  const [chatSearchOpen, setChatSearchOpen] = useState(false);
+  const chatSearch = useChatSearch({
+    scrollerRef: scrollerRef as React.RefObject<HTMLElement | null>,
+    active: chatSearchOpen,
+  });
+  const chatSearchSetQueryRef = useRef(chatSearch.setQuery);
+  chatSearchSetQueryRef.current = chatSearch.setQuery;
+  const closeChatSearch = useCallback(() => {
+    setChatSearchOpen(false);
+    chatSearchSetQueryRef.current('');
+  }, []);
+  // Esc / Cmd+W closes the panel first. z-index 100 sits between the split
+  // panel (0) and overlay layers (200+), matching the DESIGN.md layer system.
+  useCloseLayer(() => {
+    if (!chatSearchOpen) return false;
+    closeChatSearch();
+    return true;
+  }, 100);
+  // Register Cmd/Ctrl+F only while this Tab is active so background tabs don't
+  // steal the shortcut and open phantom panels.
+  useEffect(() => {
+    if (!isActive) return;
+    const handler = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      if (event.key.toLowerCase() !== 'f') return;
+      event.preventDefault();
+      if (!isHighlightApiSupported()) {
+        toast.error('当前环境不支持页内搜索（缺少 CSS Highlight API）');
+        return;
+      }
+      setChatSearchOpen(true);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [isActive, toast]);
+  // When the tab becomes inactive, close the panel so a) the global
+  // CSS.highlights registry doesn't retain stale Range objects from this tab,
+  // and b) switching back shows a fresh state rather than a rotting counter.
+  useEffect(() => {
+    if (!isActive && chatSearchOpen) closeChatSearch();
+  }, [isActive, chatSearchOpen, closeChatSearch]);
+
   // Auto-focus input when Tab becomes active
   useEffect(() => {
     if (isActive && inputRef.current) {
@@ -2155,6 +2202,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           className="relative flex flex-1 flex-col overflow-hidden"
           {...dragHandlers}
         >
+          {/* In-page text finder — Cmd/Ctrl+F */}
+          {chatSearchOpen && (
+            <ChatSearchPanel controller={chatSearch} onClose={closeChatSearch} />
+          )}
           {/* Drop zone overlay for file drag */}
           <DropZoneOverlay
             isVisible={isAnyDragActive && (!isTauriDragging || activeZoneId === 'chat-content' || activeZoneId === null)}

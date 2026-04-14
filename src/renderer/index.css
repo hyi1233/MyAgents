@@ -984,3 +984,15 @@ code {
   color: var(--ink-muted);
   font-style: normal;
 }
+
+/* ── In-page text finder (Cmd/Ctrl+F in Chat) ── */
+/* Non-focused matches use the muted warm accent background */
+::highlight(chat-search) {
+  background-color: var(--accent-warm-muted);
+  color: var(--ink);
+}
+/* Currently focused match — stronger warm accent with white text */
+::highlight(chat-search-current) {
+  background-color: var(--accent-warm);
+  color: #ffffff;
+}
