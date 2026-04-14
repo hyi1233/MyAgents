@@ -1191,7 +1191,12 @@ export default function TabProvider({
                     setIsLoading(false);
                     setSessionState('idle');  // Reset session state to idle
                     setSystemStatus(null);  // Clear system status (e.g., 'compacting') when message completes
-                    setAgentError(null);  // Clear any transient error banner (e.g., api_retry that recovered)
+                    // Do NOT clear agentError here — chat:agent-error is only emitted for terminal,
+                    // unrecoverable errors (rate_limit, auth fail, SDK is_error result, timeouts).
+                    // Clearing on message-complete would hide the banner in the race where the error
+                    // fires ~ms before the turn closes (e.g. five-hour quota hit mid-turn).
+                    // Transient recoveries use chat:api-retry, not chat:agent-error.
+                    // Banner is cleared on: new send, session load, api-retry resolved, reset.
                 });
 
                 // Send system notification if user is not focused on the app
