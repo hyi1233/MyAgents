@@ -231,10 +231,28 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
     // System Prompt injection
     const isImOrChannel = options.scenario.type === 'im' || options.scenario.type === 'agent-channel';
-    if (isImOrChannel) {
-      // IM/Channel: bare mode + full system prompt
-      args.push('--bare');
-    }
+
+    // NOTE: we used to pass `--bare` here for IM/agent-channel sessions,
+    // intending to give the bot a clean slate without CC's default preset.
+    // That silently broke OAuth users because `--bare` (per `claude --help`)
+    // explicitly disables keychain + OAuth reads and requires
+    // ANTHROPIC_API_KEY. Users logged in via `claude /login` on a
+    // subscription account would get `Not logged in · Please run /login`
+    // on every IM message while the desktop Tab (which never used --bare)
+    // worked fine. Confirmed via unified-2026-04-15.log line 4820:
+    //
+    //   {"type":"result","subtype":"success","is_error":true,
+    //    "result":"Not logged in · Please run /login",...}
+    //
+    // We drop --bare entirely. CC loads its default preset prompt + our
+    // --append-system-prompt adds the MyAgents 3-layer context on top.
+    // Keychain/OAuth auth is preserved for all IM users. The tradeoff:
+    // the AI has CC's default preset loaded in an IM context, which may
+    // leak occasional self-descriptions ("I'm Claude Code, a CLI tool…").
+    // Acceptable for now — working > perfectly branded.
+    //
+    // Note: `isImOrChannel` is still consulted below for the auto-bypass
+    // permission branch, which is a separate concern.
     if (options.systemPromptAppend) {
       args.push('--append-system-prompt', options.systemPromptAppend);
     }

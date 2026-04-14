@@ -71,18 +71,20 @@ fn normalize_runtime_type(runtime: Option<&str>) -> String {
     match runtime {
         Some("claude-code") => "claude-code".to_string(),
         Some("codex") => "codex".to_string(),
+        Some("gemini") => "gemini".to_string(),
         _ => "builtin".to_string(),
     }
 }
 
 fn is_external_runtime_type(runtime: &str) -> bool {
-    matches!(runtime, "claude-code" | "codex")
+    matches!(runtime, "claude-code" | "codex" | "gemini")
 }
 
 fn runtime_display_name(runtime: &str) -> &'static str {
     match runtime {
         "codex" => "Codex",
         "claude-code" => "Claude Code CLI",
+        "gemini" => "Gemini CLI",
         _ => "MyAgents Builtin SDK",
     }
 }
@@ -153,6 +155,12 @@ fn runtime_permission_choices(runtime: &str) -> Vec<RuntimePermissionChoice> {
             RuntimePermissionChoice { value: "plan".to_string(), label: "Plan".to_string(), description: "规划模式，只读不执行".to_string() },
             RuntimePermissionChoice { value: "acceptEdits".to_string(), label: "Accept Edits".to_string(), description: "自动接受文件编辑，其他需确认".to_string() },
             RuntimePermissionChoice { value: "bypassPermissions".to_string(), label: "Bypass Permissions".to_string(), description: "跳过所有权限确认".to_string() },
+        ],
+        "gemini" => vec![
+            RuntimePermissionChoice { value: "default".to_string(), label: "Default".to_string(), description: "每次工具调用都需要确认".to_string() },
+            RuntimePermissionChoice { value: "autoEdit".to_string(), label: "Auto Edit".to_string(), description: "自动接受文件编辑,其他需确认".to_string() },
+            RuntimePermissionChoice { value: "yolo".to_string(), label: "YOLO".to_string(), description: "跳过所有工具确认".to_string() },
+            RuntimePermissionChoice { value: "plan".to_string(), label: "Plan".to_string(), description: "规划模式,只读不执行".to_string() },
         ],
         _ => Vec::new(),
     }
@@ -2292,6 +2300,44 @@ async fn create_bot_instance<R: Runtime>(
                         // 3. ACK + typing indicator
                         task_adapter.ack_processing(&chat_id, &message_id).await;
                         task_adapter.send_typing(&chat_id).await;
+
+                        // 3b. Runtime drift check (v0.1.66): if the agent's runtime has
+                        // been changed in Settings since the current Sidecar was spawned,
+                        // kill it, regenerate the peer session_id, and notify the user with
+                        // the same format as a manual `/new`. The old session's messages
+                        // remain on disk at the old session_id and stay discoverable via
+                        // global search — the WeChat Bot chat just starts a clean thread
+                        // under the new session_id with the new runtime.
+                        {
+                            // task_runtime is already a String cloned above at the top of
+                            // this spawn (runtime_for_loop.read().await.clone()).
+                            let drift_result = task_router
+                                .lock()
+                                .await
+                                .check_and_reset_on_runtime_drift(
+                                    &session_key,
+                                    &task_runtime,
+                                    &task_manager,
+                                );
+                            if let Some((_old_id, new_id)) = drift_result {
+                                // Clear pending group history so the fresh session doesn't
+                                // get stale context carried over from the drift point.
+                                task_group_history.lock().await.clear(&session_key);
+                                let reply = format!(
+                                    "🔁 运行环境已切换为 {},已自动创建新对话 ({})",
+                                    runtime_display_name(&task_runtime),
+                                    &new_id[..8.min(new_id.len())]
+                                );
+                                if let Err(e) =
+                                    task_adapter.send_message(&chat_id, &reply).await
+                                {
+                                    ulog_warn!(
+                                        "[im-drift] send_message (runtime-drift notify) failed: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
 
                         // 4. Ensure Sidecar is running (brief router lock)
                         let (port, is_new_sidecar) = match task_router

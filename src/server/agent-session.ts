@@ -559,6 +559,11 @@ export function setSidecarPort(port: number): void {
   sidecarPort = port;
 }
 
+/** Get the current sidecar port (used by admin-api for self-loopback) */
+export function getSidecarPort(): number {
+  return sidecarPort;
+}
+
 /** Get the current OpenAI bridge config (used by bridge handler in index.ts).
  *  Model is always derived from currentModel to avoid staleness after setSessionModel().
  *  When modelAliases exist, model override is suppressed — sub-agents need distinct models. */
@@ -4293,10 +4298,14 @@ export async function enqueueUserMessage(
   }
 
   // Build multimodal content array for Claude API
-  // Images are sent as base64-encoded source blocks
+  // Images are sent as base64-encoded source blocks.
+  // media_type is narrowed to the Anthropic SDK literal union (exposed as
+  // real types since claude-agent-sdk 0.2.86 added @anthropic-ai/sdk as a
+  // direct dependency — prior versions erased it to `string`).
+  type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
   const contentBlocks: Array<
     | { type: 'text'; text: string }
-    | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+    | { type: 'image'; source: { type: 'base64'; media_type: ImageMediaType; data: string } }
   > = [];
 
   // Add images first so Claude can see them before the text query
@@ -4325,7 +4334,10 @@ export async function enqueueUserMessage(
           type: 'image',
           source: {
             type: 'base64',
-            media_type: tile.mimeType,
+            // processImage() resizes into one of these 4 formats; upstream uploaders
+            // also filter by the same set. Cast is safe because ImagePayload.mimeType
+            // is declared as generic string at the utility layer.
+            media_type: tile.mimeType as ImageMediaType,
             data: tile.data,
           },
         });
@@ -5068,6 +5080,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             s => s.id === 'playwright' && (s.args ?? []).some((a: string) => /^--caps=.*\bstorage\b/.test(a))
           ),
           generativeUiEnabled: currentScenario.type === 'desktop',
+          // agent-session.ts is the builtin Claude Agent SDK path by definition.
+          runtime: 'builtin',
         }),
       },
       cwd: agentDir,
@@ -5702,13 +5716,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             handleServerToolUseStart(toolPayload);
             broadcast('chat:server-tool-use-start', toolPayload);
           } else if (
+            // 'tool_result' was removed from the SDK's content_block.type union when
+            // claude-agent-sdk 0.2.86 added @anthropic-ai/sdk as a direct dependency
+            // (previously the union erased to `string` so the comparison type-checked).
+            // Runtime-wise this branch has always been dead for plain 'tool_result' —
+            // regular tool results arrive via user-turn content blocks, not stream events.
             (streamEvent.content_block.type === 'web_search_tool_result' ||
               streamEvent.content_block.type === 'web_fetch_tool_result' ||
               streamEvent.content_block.type === 'code_execution_tool_result' ||
               streamEvent.content_block.type === 'bash_code_execution_tool_result' ||
               streamEvent.content_block.type === 'text_editor_code_execution_tool_result' ||
-              streamEvent.content_block.type === 'mcp_tool_result' ||
-              streamEvent.content_block.type === 'tool_result') &&
+              streamEvent.content_block.type === 'mcp_tool_result') &&
             'tool_use_id' in streamEvent.content_block
           ) {
             const toolResultBlock = streamEvent.content_block as {

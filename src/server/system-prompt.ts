@@ -10,6 +10,8 @@
  * bun build hardcodes __dirname at compile time, breaking production builds.
  */
 
+import type { RuntimeType } from '../shared/types/runtime';
+
 // ===== Scenario types =====
 
 export type InteractionScenario =
@@ -18,12 +20,32 @@ export type InteractionScenario =
   | { type: 'agent-channel'; platform: string; sourceType: 'private' | 'group'; botName?: string; agentName?: string }
   | { type: 'cron'; taskId: string; intervalMinutes: number; aiCanExit: boolean };
 
+// ===== Runtime display name =====
+// Maps internal runtime ids to human-readable names injected into the L1 base identity
+// so the AI can correctly answer "what runtime am I running on?" questions regardless
+// of which CLI is driving it.
+function getRuntimeDisplayName(runtime: RuntimeType | undefined): string {
+  switch (runtime) {
+    case 'claude-code': return 'Anthropic Claude Code CLI';
+    case 'codex':       return 'OpenAI Codex CLI';
+    case 'gemini':      return 'Google Gemini CLI';
+    case 'builtin':
+    default:
+      return 'MyAgents 内置 Claude Agent SDK';
+  }
+}
+
 // ===== Inline templates =====
 
 const TMPL_BASE_IDENTITY = `<myagents-identity>
-你正运行在 MyAgents —— 一款基于 Claude Agent SDK 的桌面端 AI Agent 应用中。
+你正运行在 MyAgents —— 一款通用的桌面端 AI Agent 应用中。用户通过 MyAgents 调用你,
+MyAgents 负责会话管理、工具权限、定时任务、IM Bot 集成、工作区文件访问等能力,
+你则负责理解和执行用户的请求。
+
+当前执行 Runtime: {{runtimeName}}
+
 用户全局配置目录: ~/.myagents
-当对话涉及日期、时间或星期时，先用 Bash 执行 \`date\` 获取准确的当前时间再作判断——系统信息中的日期可能已过期。
+当对话涉及日期、时间或星期时,先用 Bash 执行 \`date\` 获取准确的当前时间再作判断——系统信息中的日期可能已过期。
 </myagents-identity>`;
 
 const TMPL_CHANNEL_DESKTOP = `<myagents-interaction-channel>
@@ -80,13 +102,20 @@ export interface SystemPromptOptions {
   playwrightStorageEnabled?: boolean;
   /** Whether Generative UI (widget_read_me + <widget> tags) is enabled in this session */
   generativeUiEnabled?: boolean;
+  /**
+   * Current runtime driving this session, used to render a runtime-accurate
+   * identity line in L1. Defaults to 'builtin' (Claude Agent SDK) if omitted.
+   */
+  runtime?: RuntimeType;
 }
 
 export function buildSystemPromptAppend(scenario: InteractionScenario, options?: SystemPromptOptions): string {
   const parts: string[] = [];
 
-  // L1: Base identity (always)
-  parts.push(TMPL_BASE_IDENTITY);
+  // L1: Base identity (always) — rendered with current runtime's display name.
+  parts.push(renderTemplate(TMPL_BASE_IDENTITY, {
+    runtimeName: getRuntimeDisplayName(options?.runtime),
+  }));
 
   // L2: Interaction channel (mutually exclusive)
   if (scenario.type === 'im' || scenario.type === 'agent-channel') {

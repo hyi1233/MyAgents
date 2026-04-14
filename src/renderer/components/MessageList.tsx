@@ -299,7 +299,7 @@ const MessageList = memo(function MessageList({
     const sm = streamingMessageRef.current;
     const isStreamingMsg = !!sm && message === sm;
     return (
-      <div className="mx-auto max-w-3xl px-3 py-1 overflow-hidden">
+      <div className="mx-auto max-w-3xl px-3 py-1 overflow-hidden" data-chat-search-scope="">
         <Message
           message={message}
           isLoading={isStreamingMsg && isLoadingRef.current}

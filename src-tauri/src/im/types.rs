@@ -842,7 +842,7 @@ pub struct AgentConfigRust {
     #[serde(default)]
     pub last_active_channel: Option<LastActiveChannel>,
 
-    // Agent Runtime (v0.1.59) — 'builtin' | 'claude-code' | 'codex'
+    // Agent Runtime (v0.1.59 / v0.1.66) — 'builtin' | 'claude-code' | 'codex' | 'gemini'
     #[serde(default)]
     pub runtime: Option<String>,
     #[serde(default)]

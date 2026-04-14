@@ -350,6 +350,83 @@ impl SessionRouter {
 
     /// Handle /new command — reset session for a peer.
     /// Upgrades the Sidecar Manager key so the running Sidecar can be found by the new session_id.
+    /// Detect runtime drift for an IM peer session and reset it like a `/new`.
+    ///
+    /// When the user changes the agent's runtime in Settings (codex → gemini
+    /// for example), any Sidecar that's still alive for this peer was spawned
+    /// with the old MYAGENTS_RUNTIME env var and cannot switch in-place. The
+    /// v0.1.62 session-stability rule — which pins a session to whichever
+    /// runtime created it — is wrong for IM: peer session mapping is opaque
+    /// to the user, they just see "my agent is now gemini" and expect the
+    /// next IM message to reflect that.
+    ///
+    /// This method runs at the TOP of message processing (before
+    /// `ensure_sidecar`). If drift is detected it:
+    ///   1. Kills the running Sidecar process (best-effort).
+    ///   2. Removes the entry from `ManagedSidecarManager`.
+    ///   3. Regenerates `peer_sessions[session_key].session_id` to a fresh
+    ///      UUID. The old session_id's messages remain on disk (SessionStore
+    ///      persisted them) and stay findable via global search — we just
+    ///      detach them from the IM peer map so the WeChat Bot's live chat
+    ///      starts clean.
+    ///
+    /// Returns `Some((old_session_id, new_session_id))` when a reset happened
+    /// so the caller can send the user a notification ("🔁 已自动创建新对话
+    /// (xxxxxxxx)"). Returns `None` when no drift was detected.
+    ///
+    /// `desired_runtime` is the agent's CURRENT runtime as resolved from
+    /// config (typically via `normalize_runtime_type(agent_config.runtime)`).
+    /// Valid values: `"builtin"`, `"claude-code"`, `"codex"`, `"gemini"`.
+    pub fn check_and_reset_on_runtime_drift(
+        &mut self,
+        session_key: &str,
+        desired_runtime: &str,
+        manager: &ManagedSidecarManager,
+    ) -> Option<(String, String)> {
+        let old_id = self.peer_sessions.get(session_key)?.session_id.clone();
+
+        // Delegate the Sidecar-side half (compare spawn-time runtime, decide
+        // whether killing is safe based on owner accounting) to SidecarManager
+        // so router.rs doesn't reach into private fields.
+        //
+        // The tri-state result lets us distinguish:
+        //   - NoDrift → no action
+        //   - KilledAndRemoved → full kill happened, spawn path will recreate
+        //   - DetectedKeptAlive → Sidecar stays alive (shared with desktop
+        //     Tab/Cron/BackgroundCompletion), but we STILL regenerate the
+        //     peer session_id to fork the IM conversation cleanly. The
+        //     desktop session continues unperturbed on the old session_id.
+        let drift_result = {
+            let mut mgr = manager.lock().ok()?;
+            mgr.kill_sidecar_if_runtime_differs(&old_id, desired_runtime)
+        };
+        if !drift_result.is_drift() {
+            return None;
+        }
+
+        // Regenerate the peer's session_id. Zero the cached port so
+        // prepare_ensure_sidecar re-enters the NeedCreate branch on the next
+        // message. message_count=0 and last_active=now keep the peer session
+        // looking like a freshly bootstrapped one for the idle collector.
+        let new_id = uuid::Uuid::new_v4().to_string();
+        if let Some(ps) = self.peer_sessions.get_mut(session_key) {
+            ps.session_id = new_id.clone();
+            ps.sidecar_port = 0;
+            ps.message_count = 0;
+            ps.last_active = Instant::now();
+        }
+
+        ulog_info!(
+            "[im-router] Runtime drift: peer={} old={} → new={} desired={}",
+            session_key,
+            &old_id[..8.min(old_id.len())],
+            &new_id[..8.min(new_id.len())],
+            desired_runtime
+        );
+
+        Some((old_id, new_id))
+    }
+
     pub async fn reset_session<R: Runtime>(
         &mut self,
         session_key: &str,
@@ -588,7 +665,7 @@ impl SessionRouter {
         mcp_servers_json: Option<&str>,
         provider_env: Option<&serde_json::Value>,
     ) {
-        if matches!(runtime, "codex" | "claude-code") {
+        if matches!(runtime, "codex" | "claude-code" | "gemini") {
             let runtime_model = runtime_config
                 .and_then(|v| v.get("model"))
                 .and_then(|v| v.as_str())
@@ -649,7 +726,7 @@ impl SessionRouter {
         mcp_servers_json: Option<&str>,
         provider_env: Option<&serde_json::Value>,
     ) {
-        if matches!(runtime, "codex" | "claude-code") {
+        if matches!(runtime, "codex" | "claude-code" | "gemini") {
             let runtime_model = runtime_config
                 .and_then(|v| v.get("model"))
                 .and_then(|v| v.as_str())

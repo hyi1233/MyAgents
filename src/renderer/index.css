@@ -984,3 +984,12 @@ code {
   color: var(--ink-muted);
   font-style: normal;
 }
+
+/*
+ * The CSS Highlight API styles for the in-page text finder (Cmd/Ctrl+F)
+ * live in useChatSearch.ts and are injected at runtime via a <style> tag.
+ * LightningCSS (Tailwind v4's CSS optimizer, ≤1.30.2 as of 2026-04)
+ * does not yet recognize `::highlight(name)` as a valid pseudo-element
+ * and emits build-time warnings when it sees the literal in a static
+ * stylesheet. Runtime injection keeps the build clean.
+ */

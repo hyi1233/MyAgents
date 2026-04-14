@@ -14,6 +14,8 @@ import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import QueryNavigator from '@/components/chat/QueryNavigator';
+import ChatSearchPanel from '@/components/ChatSearchPanel';
+import { useChatSearch, isHighlightApiSupported } from '@/hooks/useChatSearch';
 import SelectionCommentMenu from '@/components/SelectionCommentMenu';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
@@ -42,7 +44,7 @@ import {
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
-import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, getDefaultRuntimePermissionMode } from '../../shared/types/runtime';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
@@ -57,6 +59,18 @@ const LazyBrowserPanel = lazy(() => import('@/components/BrowserPanel'));
 const LazyIntroductionOverlay = lazy(() => import('@/components/IntroductionOverlay'));
 // Terminal chrome now uses CSS tokens that auto-switch with light/dark theme.
 // No need for cached theme constants — the header uses var(--paper), var(--ink), etc.
+
+/** Human-readable label for a runtime type (used in confirm dialogs, toasts, etc.) */
+function getRuntimeDisplayLabel(runtime: RuntimeType | undefined): string {
+  switch (runtime) {
+    case 'claude-code': return 'Claude Code';
+    case 'codex': return 'Codex';
+    case 'gemini': return 'Gemini CLI';
+    case 'builtin':
+    default:
+      return 'MyAgents';
+  }
+}
 const SIGNED_HISTORY_PROVIDER_IDS = new Set(['anthropic-sub', 'anthropic-api']);
 
 function requiresSignedSessionHistory(providerId?: string): boolean {
@@ -571,6 +585,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     'builtin': { installed: true },
     'claude-code': { installed: false },
     'codex': { installed: false },
+    'gemini': { installed: false },
   });
   // Gate: when multiAgentRuntime is off, treat everything as builtin regardless of agent config.
   // This gate is applied at the definition of currentRuntime itself so ALL downstream
@@ -596,15 +611,46 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   );
   const [runtimePermissionMode, setRuntimePermissionMode] = useState<string>(
     (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode
-    || (currentRuntime === 'claude-code' ? 'default' : 'full-auto')
+    || getDefaultRuntimePermissionMode(currentRuntime) || 'default'
   );
+
+  // Sync runtimePermissionMode + runtimeModel when currentRuntime transitions.
+  //
+  // Background: the useState initializers above run ONCE on mount. On the first
+  // render `currentRuntime` may still be 'builtin' because useConfig is loading
+  // asynchronously. More importantly, the agent's runtimeConfig may carry a stale
+  // permissionMode value from a previous runtime (e.g. 'no-restrictions' left over
+  // from a Codex session, confirmed in unified-2026-04-15.log:918). Reading that
+  // value verbatim means the Gemini permission dropdown shows its fallback first
+  // item instead of the correct mapped mode.
+  //
+  // Fix: on every currentRuntime transition, validate the persisted value against
+  // the current runtime's allowed mode set and only honor it if it's legal; else
+  // fall back to the runtime's default mode. This effect does not fire on every
+  // re-render (deps are currentRuntime + isExternalRuntime), so in-session user
+  // selections made via the dropdown are never overwritten.
+  useEffect(() => {
+    if (!isExternalRuntime) return;
+    const cfg = currentAgent?.runtimeConfig as { permissionMode?: string; model?: string } | undefined;
+    const validModes = new Set(getRuntimePermissionModes(currentRuntime).map((m) => m.value));
+    const saved = cfg?.permissionMode;
+    const effective = saved && validModes.has(saved)
+      ? saved
+      : (getDefaultRuntimePermissionMode(currentRuntime) || 'default');
+    setRuntimePermissionMode(effective);
+    setRuntimeModel(cfg?.model);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only re-sync on runtime transitions, not on every currentAgent.runtimeConfig edit
+  }, [currentRuntime, isExternalRuntime]);
 
   // Runtime-specific models and permission modes
   const runtimePermissionModes = currentRuntime === 'claude-code' ? CC_PERMISSION_MODES
-    : currentRuntime === 'codex' ? CODEX_PERMISSION_MODES : undefined;
+    : currentRuntime === 'codex' ? CODEX_PERMISSION_MODES
+    : currentRuntime === 'gemini' ? GEMINI_PERMISSION_MODES
+    : undefined;
 
-  // Codex models are dynamic (fetched from app-server); CC models are static
+  // Codex + Gemini models are dynamic (fetched from the CLI); CC models are static
   const [codexModels, setCodexModels] = useState<typeof CC_MODELS>([]);
+  const [geminiModels, setGeminiModels] = useState<typeof CC_MODELS>([]);
   useEffect(() => {
     if (!multiAgentRuntimeEnabled || currentRuntime !== 'codex') return;
     let cancelled = false;
@@ -614,9 +660,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
+  useEffect(() => {
+    if (!multiAgentRuntimeEnabled || currentRuntime !== 'gemini') return;
+    let cancelled = false;
+    apiGet('/api/runtime/models?type=gemini').then((res: unknown) => {
+      const data = res as { models?: typeof CC_MODELS } | undefined;
+      if (!cancelled && data?.models?.length) setGeminiModels(data.models);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
 
   const runtimeModels = currentRuntime === 'claude-code' ? CC_MODELS
-    : currentRuntime === 'codex' ? codexModels : undefined;
+    : currentRuntime === 'codex' ? codexModels
+    : currentRuntime === 'gemini' ? geminiModels
+    : undefined;
 
   // Effective model/permission based on runtime.
   // For external runtimes: if user hasn't explicitly selected a model (runtimeModel=undefined),
@@ -1167,12 +1224,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // AgentConfig is source of truth, Project is fallback for non-agent workspaces
     const effectivePermission = (currentAgent?.permissionMode as PermissionMode | undefined) ?? currentProject.permissionMode ?? config.defaultPermissionMode;
     setPermissionMode(effectivePermission);
-    // Also sync runtime-specific permission mode from persisted runtimeConfig
-    // (without this, Chat defaults to 'full-auto'/'default' and ignores the saved value)
-    if (isExternalRuntime) {
-      const savedRuntimePerm = (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode;
-      if (savedRuntimePerm) setRuntimePermissionMode(savedRuntimePerm);
-    }
+    // Runtime-specific permission mode sync is handled by the `[currentRuntime, isExternalRuntime]`
+    // effect higher up, which validates the persisted value against the current runtime's mode
+    // set and falls back to the runtime default if stale. Don't override here without validation —
+    // doing so reintroduces the cross-runtime leak (e.g. Codex's 'no-restrictions' bleeding into
+    // a Gemini session, confirmed in ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt:174).
     // Sync provider (useState initializer runs when currentProject is still undefined).
     // Re-arm providerInitRef to suppress the deferred provider-change effect (fires next render)
     // that would otherwise override the project-stored model with provider's primaryModel.
@@ -1273,6 +1329,51 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const handleScrollerRef = useCallback((el: HTMLElement | Window | null) => {
     scrollerRef.current = el instanceof HTMLElement ? el : null;
   }, [scrollerRef]);
+
+  // ── In-page text finder (Cmd/Ctrl+F) ──
+  // Scope: already-rendered messages only (Virtuoso virtualizes the rest).
+  // Full history search lives in the global search engine on Launcher.
+  const [chatSearchOpen, setChatSearchOpen] = useState(false);
+  const chatSearch = useChatSearch({
+    scrollerRef: scrollerRef as React.RefObject<HTMLElement | null>,
+    active: chatSearchOpen,
+  });
+  const chatSearchSetQueryRef = useRef(chatSearch.setQuery);
+  chatSearchSetQueryRef.current = chatSearch.setQuery;
+  const closeChatSearch = useCallback(() => {
+    setChatSearchOpen(false);
+    chatSearchSetQueryRef.current('');
+  }, []);
+  // Esc / Cmd+W closes the panel first. z-index 100 sits between the split
+  // panel (0) and overlay layers (200+), matching the DESIGN.md layer system.
+  useCloseLayer(() => {
+    if (!chatSearchOpen) return false;
+    closeChatSearch();
+    return true;
+  }, 100);
+  // Register Cmd/Ctrl+F only while this Tab is active so background tabs don't
+  // steal the shortcut and open phantom panels.
+  useEffect(() => {
+    if (!isActive) return;
+    const handler = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      if (event.key.toLowerCase() !== 'f') return;
+      event.preventDefault();
+      if (!isHighlightApiSupported()) {
+        toast.error('当前环境不支持页内搜索（缺少 CSS Highlight API）');
+        return;
+      }
+      setChatSearchOpen(true);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [isActive, toast]);
+  // When the tab becomes inactive, close the panel so a) the global
+  // CSS.highlights registry doesn't retain stale Range objects from this tab,
+  // and b) switching back shows a fresh state rather than a rotting counter.
+  useEffect(() => {
+    if (!isActive && chatSearchOpen) closeChatSearch();
+  }, [isActive, chatSearchOpen, closeChatSearch]);
 
   // Auto-focus input when Tab becomes active
   useEffect(() => {
@@ -1457,9 +1558,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [currentProject?.id, patchProject]);
 
   // Cross-runtime session detection: session was created by a DIFFERENT runtime than the current one.
-  // Covers all mismatch scenarios: builtin↔CC, builtin↔Codex, CC↔Codex.
+  // Covers all mismatch scenarios across builtin, Claude Code, Codex, and Gemini.
   // sessionRuntime is null ONLY when session hasn't loaded yet (initial state).
-  // After loadSession, it's always a valid RuntimeType ('builtin' | 'codex' | 'claude-code')
+  // After loadSession, it's always a valid RuntimeType ('builtin' | 'codex' | 'claude-code' | 'gemini')
   // because: new sessions write runtime via createSessionMetadata (defaults to 'builtin'),
   // old sessions get 'builtin' at load time (TabProvider: runtime || 'builtin').
   const isCrossRuntimeSession = sessionRuntime !== null && sessionRuntime !== currentRuntime;
@@ -1639,7 +1740,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       if (onForkSession && agentDir) {
         const { createSession } = await import('@/api/sessionClient');
         const session = await createSession(agentDir, runtime);
-        const runtimeLabel = runtime === 'claude-code' ? 'Claude Code' : runtime === 'codex' ? 'Codex' : 'MyAgents';
+        const runtimeLabel = getRuntimeDisplayLabel(runtime);
         onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
       }
     } catch (err) {
@@ -2128,6 +2229,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           className="relative flex flex-1 flex-col overflow-hidden"
           {...dragHandlers}
         >
+          {/* In-page text finder — Cmd/Ctrl+F */}
+          {chatSearchOpen && (
+            <ChatSearchPanel controller={chatSearch} onClose={closeChatSearch} />
+          )}
           {/* Drop zone overlay for file drag */}
           <DropZoneOverlay
             isVisible={isAnyDragActive && (!isTauriDragging || activeZoneId === 'chat-content' || activeZoneId === null)}
@@ -2655,7 +2760,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       {pendingCrossRuntimeMessage && (
         <ConfirmDialog
           title="跨 Runtime 会话"
-          message={`此会话由 ${sessionRuntime === 'codex' ? 'Codex' : sessionRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'} 创建，当前 Runtime 为 ${currentRuntime === 'codex' ? 'Codex' : currentRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'}，新消息将使用当前 Runtime 新开会话。`}
+          message={`此会话由 ${getRuntimeDisplayLabel(sessionRuntime as RuntimeType | undefined)} 创建,当前 Runtime 为 ${getRuntimeDisplayLabel(currentRuntime)},新消息将使用当前 Runtime 新开会话。`}
           confirmText="新开会话并发送"
           cancelText="取消"
           onConfirm={confirmCrossRuntimeSend}
@@ -2667,7 +2772,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       {pendingRuntimeChange && (
         <ConfirmDialog
           title="切换 Runtime"
-          message={`切换到 ${pendingRuntimeChange === 'claude-code' ? 'Claude Code' : pendingRuntimeChange === 'codex' ? 'Codex' : 'MyAgents'} 将新开一个会话。当前会话保留不变。`}
+          message={`切换到 ${getRuntimeDisplayLabel(pendingRuntimeChange)} 将新开一个会话。当前会话保留不变。`}
           confirmText="确认切换"
           cancelText="取消"
           onConfirm={confirmRuntimeChange}

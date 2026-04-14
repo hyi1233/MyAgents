@@ -16,6 +16,9 @@ import {
   type CommandFrontmatter
 } from '../shared/slashCommands';
 import { sanitizeFolderName, isWindowsReservedName } from '../shared/utils';
+import { resolveSkillUrl } from './skills/url-resolver';
+import { fetchSkillZip, TarballFetchError } from './skills/tarball-fetcher';
+import { analyseTree, buildInstallPayload, writeSkillFiles, type SkillCandidate } from './skills/installer';
 import { isPreviewable } from '../shared/fileTypes';
 import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
@@ -31,6 +34,7 @@ import {
 } from './tools/cron-tools';
 import { setImCronContext } from './tools/im-cron-tool';
 import {
+  handleSkillList, handleSkillInfo, handleSkillAdd, handleSkillRemove, handleSkillToggle, handleSkillSync,
   handleMcpList, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
   handleMcpOAuthDiscover, handleMcpOAuthStart, handleMcpOAuthStatus, handleMcpOAuthRevoke,
   handleModelList, handleModelAdd, handleModelRemove, handleModelSetKey, handleModelSetDefault, handleModelVerify,
@@ -1090,6 +1094,15 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'plugin/list') return await handlePluginList();
   if (route === 'plugin/install') return await handlePluginInstall(payload as Parameters<typeof handlePluginInstall>[0]);
   if (route === 'plugin/remove') return await handlePluginUninstall(payload as Parameters<typeof handlePluginUninstall>[0]);
+
+  // Skill commands
+  if (route === 'skill/list') return await handleSkillList();
+  if (route === 'skill/info') return await handleSkillInfo(payload as Parameters<typeof handleSkillInfo>[0]);
+  if (route === 'skill/add') return await handleSkillAdd(payload as Parameters<typeof handleSkillAdd>[0]);
+  if (route === 'skill/remove') return await handleSkillRemove(payload as Parameters<typeof handleSkillRemove>[0]);
+  if (route === 'skill/enable') return await handleSkillToggle({ name: String(payload.name ?? ''), enabled: true });
+  if (route === 'skill/disable') return await handleSkillToggle({ name: String(payload.name ?? ''), enabled: false });
+  if (route === 'skill/sync') return await handleSkillSync();
 
   // Config commands
   if (route === 'config/get') return handleConfigGet(payload as Parameters<typeof handleConfigGet>[0]);
@@ -2445,7 +2458,7 @@ async function main() {
           return jsonResponse({ success: false, error: 'agentDir is required.' }, 400);
         }
 
-        const VALID_RUNTIMES = ['builtin', 'claude-code', 'codex'] as const;
+        const VALID_RUNTIMES = ['builtin', 'claude-code', 'codex', 'gemini'] as const;
         const runtimeValue = VALID_RUNTIMES.includes(payload?.runtime as typeof VALID_RUNTIMES[number])
           ? (payload.runtime as import('../shared/types/runtime').RuntimeType)
           : undefined;
@@ -6326,6 +6339,309 @@ async function main() {
         }
       }
 
+      // POST /api/skill/install-from-url - Install skill(s) from a GitHub repo / raw zip URL
+      // Two-step flow: first call analyses and may return a preview for the user to confirm;
+      // second call (with confirmedSelection) re-fetches and writes the chosen skills.
+      if (pathname === '/api/skill/install-from-url' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            url: string;
+            scope: 'user' | 'project';
+            confirmedSelection?: {
+              pluginName?: string;
+              folderNames?: string[];
+              overwrite?: string[];
+              renames?: Record<string, string>;
+            };
+          };
+
+          if (!payload.url || typeof payload.url !== 'string') {
+            return jsonResponse({ success: false, error: 'url 参数必填' }, 400);
+          }
+          const scope = payload.scope === 'project' ? 'project' : 'user';
+          const baseDir = scope === 'user' ? userSkillsBaseDir : projectSkillsBaseDir;
+          if (!baseDir) {
+            return jsonResponse({ success: false, error: '请先设置工作目录' }, 400);
+          }
+
+          // 1. Resolve URL
+          let resolved;
+          try {
+            resolved = resolveSkillUrl(payload.url);
+          } catch (err) {
+            return jsonResponse(
+              { success: false, error: err instanceof Error ? err.message : '链接解析失败' },
+              400,
+            );
+          }
+
+          // 2. Download + extract in memory
+          let tree;
+          try {
+            tree = await fetchSkillZip(resolved);
+          } catch (err) {
+            const statusCode = err instanceof TarballFetchError ? err.statusCode : 500;
+            return jsonResponse(
+              { success: false, error: err instanceof Error ? err.message : '下载失败' },
+              statusCode,
+            );
+          }
+
+          // 3. Analyse
+          const analysis = analyseTree(tree, resolved);
+
+          if (analysis.mode === 'empty') {
+            return jsonResponse({ success: false, error: analysis.reason }, 422);
+          }
+
+          // 4. Compute existing folder conflicts for a given candidate list
+          const checkConflicts = (candidates: SkillCandidate[]) => {
+            const conflicts: Array<{ suggestedFolderName: string; name: string }> = [];
+            for (const cand of candidates) {
+              const folder = sanitizeFolderName(cand.suggestedFolderName);
+              if (existsSync(join(baseDir, folder))) {
+                conflicts.push({ suggestedFolderName: folder, name: cand.name });
+              }
+            }
+            return conflicts;
+          };
+
+          // ---------- Step B: confirmedSelection provided — write to disk ----------
+          if (payload.confirmedSelection) {
+            const overwrite = new Set(payload.confirmedSelection.overwrite ?? []);
+            const renames = payload.confirmedSelection.renames ?? {};
+
+            // Determine which candidates were chosen
+            let chosen: SkillCandidate[];
+            if (analysis.mode === 'marketplace') {
+              const plugin = analysis.plugins.find(p => p.name === payload.confirmedSelection!.pluginName);
+              if (!plugin) {
+                return jsonResponse({ success: false, error: '指定的插件不存在' }, 400);
+              }
+              const wanted = new Set(
+                (payload.confirmedSelection.folderNames ?? []).map(n => sanitizeFolderName(n)),
+              );
+              chosen = wanted.size > 0
+                ? plugin.skills.filter(s => wanted.has(sanitizeFolderName(s.suggestedFolderName)))
+                : plugin.skills;
+            } else if (analysis.mode === 'multi') {
+              const wanted = new Set(
+                (payload.confirmedSelection.folderNames ?? []).map(n => sanitizeFolderName(n)),
+              );
+              chosen = analysis.candidates.filter(
+                s => wanted.has(sanitizeFolderName(s.suggestedFolderName)),
+              );
+              if (chosen.length === 0) {
+                return jsonResponse({ success: false, error: '未选择任何 skill' }, 400);
+              }
+            } else {
+              chosen = [analysis.skill];
+            }
+
+            // ---------- Pre-validation before ANY disk writes ----------
+            // Compute the final target folder name for every chosen skill,
+            // honoring renames. Then check for:
+            //   (1) duplicates within the chosen set (two skills collapsing to
+            //       the same folder name — usually via frontmatter.name collision)
+            //   (2) existing folders that aren't in overwrite
+            //   (3) rename targets that collide with existing folders
+            // All of these MUST fail before we write anything, otherwise a
+            // partial install leaks. Pre-validation gives atomic-ish semantics
+            // without a temp-dir dance.
+            const plan: Array<{ cand: SkillCandidate; folderName: string; originalName: string }> = [];
+            const seenTargets = new Set<string>();
+            for (const cand of chosen) {
+              const originalName = sanitizeFolderName(cand.suggestedFolderName);
+              const renameTo = renames[originalName] ?? renames[cand.suggestedFolderName];
+              const folderName = renameTo ? sanitizeFolderName(renameTo) : originalName;
+
+              if (seenTargets.has(folderName)) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: `多个 skill 解析到同一个文件夹名 "${folderName}"，请使用 renames 指定不同名称`,
+                    conflict: true,
+                    conflictFolder: folderName,
+                  },
+                  409,
+                );
+              }
+              seenTargets.add(folderName);
+
+              // If renamed, the rename target must not already exist on disk
+              // (the user's original `overwrite` set was keyed on the original
+              // name, not the rename target).
+              if (renameTo && existsSync(join(baseDir, folderName))) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: `重命名目标 "${folderName}" 已存在`,
+                    conflict: true,
+                    conflictFolder: folderName,
+                  },
+                  409,
+                );
+              }
+
+              // Non-renamed conflict must be covered by `overwrite`
+              if (!renameTo && existsSync(join(baseDir, folderName)) && !overwrite.has(folderName)) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: `技能 "${folderName}" 已存在`,
+                    conflict: true,
+                    conflictFolder: folderName,
+                  },
+                  409,
+                );
+              }
+
+              plan.push({ cand, folderName, originalName });
+            }
+
+            // ---------- Write phase (all validations have passed) ----------
+            const payloadMap = buildInstallPayload(tree, chosen);
+            const installed: Array<{ folderName: string; path: string; name: string; description: string }> = [];
+
+            for (const { cand, folderName } of plan) {
+              const files = payloadMap.get(cand.suggestedFolderName);
+              if (!files) continue;
+
+              const skillDir = join(baseDir, folderName);
+              if (existsSync(skillDir) && overwrite.has(folderName)) {
+                rmSync(skillDir, { recursive: true, force: true });
+              }
+
+              writeSkillFiles(skillDir, files);
+
+              installed.push({
+                folderName,
+                path: skillDir,
+                name: cand.name,
+                description: cand.description,
+              });
+            }
+
+            if (installed.length === 0) {
+              return jsonResponse({ success: false, error: '没有任何 skill 被安装' }, 500);
+            }
+
+            if (scope === 'user') {
+              bumpSkillsGeneration();
+              if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+            }
+
+            return jsonResponse({
+              success: true,
+              mode: 'installed',
+              installed,
+              sourceUrl: tree.sourceUrl,
+              effectiveRef: tree.effectiveRef,
+            });
+          }
+
+          // ---------- Step A: no confirmedSelection — decide whether to auto-install or return preview ----------
+          if (analysis.mode === 'marketplace') {
+            return jsonResponse({
+              success: true,
+              mode: 'marketplace',
+              preview: {
+                marketplaceName: analysis.marketplaceName,
+                marketplaceDescription: analysis.marketplaceDescription,
+                plugins: analysis.plugins.map(p => ({
+                  name: p.name,
+                  description: p.description,
+                  skills: p.skills.map(s => ({
+                    suggestedFolderName: sanitizeFolderName(s.suggestedFolderName),
+                    name: s.name,
+                    description: s.description,
+                    hasDangerousTools: s.hasDangerousTools,
+                    conflict: existsSync(join(baseDir, sanitizeFolderName(s.suggestedFolderName))),
+                  })),
+                })),
+              },
+              sourceUrl: tree.sourceUrl,
+              effectiveRef: tree.effectiveRef,
+            });
+          }
+
+          if (analysis.mode === 'multi') {
+            return jsonResponse({
+              success: true,
+              mode: 'multi',
+              preview: {
+                candidates: analysis.candidates.map(s => ({
+                  suggestedFolderName: sanitizeFolderName(s.suggestedFolderName),
+                  name: s.name,
+                  description: s.description,
+                  hasDangerousTools: s.hasDangerousTools,
+                  rootPath: s.rootPath,
+                  conflict: existsSync(join(baseDir, sanitizeFolderName(s.suggestedFolderName))),
+                })),
+              },
+              sourceUrl: tree.sourceUrl,
+              effectiveRef: tree.effectiveRef,
+            });
+          }
+
+          // Single mode: check for conflict — if none, auto-install; if there is, return preview
+          const cand = analysis.skill;
+          const folderName = sanitizeFolderName(cand.suggestedFolderName);
+          const conflicts = checkConflicts([cand]);
+
+          if (conflicts.length > 0) {
+            return jsonResponse({
+              success: true,
+              mode: 'single-conflict',
+              preview: {
+                skill: {
+                  suggestedFolderName: folderName,
+                  name: cand.name,
+                  description: cand.description,
+                  hasDangerousTools: cand.hasDangerousTools,
+                  conflict: true,
+                },
+              },
+              sourceUrl: tree.sourceUrl,
+              effectiveRef: tree.effectiveRef,
+            });
+          }
+
+          // Auto-install the single unambiguous skill
+          const skillDir = join(baseDir, folderName);
+          const files = buildInstallPayload(tree, [cand]).get(cand.suggestedFolderName);
+          if (!files || files.size === 0) {
+            return jsonResponse({ success: false, error: '未找到可安装的文件' }, 500);
+          }
+
+          writeSkillFiles(skillDir, files);
+
+          if (scope === 'user') {
+            bumpSkillsGeneration();
+            if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+          }
+
+          return jsonResponse({
+            success: true,
+            mode: 'installed',
+            installed: [{
+              folderName,
+              path: skillDir,
+              name: cand.name,
+              description: cand.description,
+            }],
+            sourceUrl: tree.sourceUrl,
+            effectiveRef: tree.effectiveRef,
+          });
+        } catch (error) {
+          console.error('[api/skill/install-from-url] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Install failed' },
+            500,
+          );
+        }
+      }
+
       // ============= COMMANDS MANAGEMENT API =============
       // GET /api/command-items - List all commands
       // Supports ?agentDir= for listing commands from a specific workspace (e.g. from Launcher)
@@ -7300,14 +7616,33 @@ async function main() {
             senderName: payload.senderName,
           };
 
-          // ─── External Runtime branch (CC/Codex) ───
+          // ─── External Runtime branch (CC/Codex/Gemini) ───
           if (shouldUseExternalRuntime()) {
             const imSource = payload.source.split('_')[0];
             const imSourceType = payload.source.includes('group') ? 'group' as const : 'private' as const;
             const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
             const runtimeConfig = payload.runtimeConfig ?? null;
+            // Runtime drift is handled authoritatively on the Rust side:
+            //   - Desktop/Tab: v0.1.62 session-stability pins runtime
+            //   - IM/Agent:    v0.1.66 SessionRouter::check_and_reset_on_runtime_drift
+            //                  runs before ensure_sidecar, regenerating the peer
+            //                  session_id and forking a fresh Sidecar with the
+            //                  agent's current runtime
+            //
+            // By the time a message reaches this handler, the MYAGENTS_RUNTIME
+            // env var was set at spawn time and Rust guarantees it matches the
+            // agent's current runtime (modulo race windows during config
+            // hot-reload). If we DO observe a mismatch at this layer, it means
+            // Rust's drift detection missed an edge case — log loudly so it
+            // surfaces in reports, but DO NOT return an error: there's no
+            // downstream Rust handler for a 409, which would turn the race
+            // into a permanently-broken session. The stale runtime is still
+            // better than a hard failure, and the user's next message will
+            // re-trigger drift detection on Rust's side.
             if (payloadRuntime !== getActiveRuntimeType()) {
-              console.warn(`[im/chat] Runtime mismatch: sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}`);
+              console.error(
+                `[im/chat] Runtime mismatch (Rust drift detection failed to catch): sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}. Proceeding with sidecar runtime; user should re-send after Rust drift detection reconciles.`,
+              );
             }
             const ccResult = await sendExternalMessage(
               finalMessage, payload.images ?? undefined, undefined, undefined,
