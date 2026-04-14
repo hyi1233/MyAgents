@@ -11,7 +11,7 @@ import { apiGetJson as globalApiGet, apiPostJson as globalApiPost, apiDelete as 
 import { useTabApiOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
-import { CreateDialog, NewSkillChooser } from './SkillDialogs';
+import { CreateDialog, NewSkillChooser, InstallFromUrlDialog, type InstallFromUrlResponse } from './SkillDialogs';
 import type { SkillItem, CommandItem } from '../../shared/skillsTypes';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 
@@ -61,6 +61,7 @@ export default function SkillsCommandsList({
     const [skills, setSkills] = useState<SkillItem[]>([]);
     const [commands, setCommands] = useState<CommandItem[]>([]);
     const [showNewSkillDialog, setShowNewSkillDialog] = useState(false);
+    const [showInstallFromUrlDialog, setShowInstallFromUrlDialog] = useState(false);
     const [showNewCommandDialog, setShowNewCommandDialog] = useState(false);
     const [newItemName, setNewItemName] = useState('');
     const [newItemDescription, setNewItemDescription] = useState('');
@@ -173,6 +174,22 @@ export default function SkillsCommandsList({
             toastRef.current.error(err instanceof Error ? err.message : '上传失败');
         }
     }, [scope, loadData, onSelectSkill, api]);
+
+    // 从 URL 安装 skill — 走 Tab-scoped API，scope 来自 props，
+    // 所以工作区入口会装到 <workspace>/.claude/skills/ 而不是全局 ~/.myagents/skills/
+    const handleInstallFromUrl = useCallback(
+        async (
+            url: string,
+            confirmedSelection?: { pluginName?: string; folderNames?: string[]; overwrite?: string[] },
+        ): Promise<InstallFromUrlResponse> => {
+            return api.post<InstallFromUrlResponse>('/api/skill/install-from-url', {
+                url,
+                scope,
+                confirmedSelection,
+            });
+        },
+        [api, scope],
+    );
 
     // 导入文件夹
     const handleImportFolder = useCallback(async (folderPath: string) => {
@@ -394,7 +411,34 @@ export default function SkillsCommandsList({
                     }}
                     onUploadSkill={handleUploadSkill}
                     onImportFolder={handleImportFolder}
+                    onInstallFromUrl={() => {
+                        setShowNewSkillDialog(false);
+                        setShowInstallFromUrlDialog(true);
+                    }}
                     onCancel={() => setShowNewSkillDialog(false)}
+                />
+            )}
+
+            {/* Install from URL Dialog */}
+            {showInstallFromUrlDialog && (
+                <InstallFromUrlDialog
+                    onInstall={handleInstallFromUrl}
+                    onCancel={() => setShowInstallFromUrlDialog(false)}
+                    onInstalled={(folderNames) => {
+                        setShowInstallFromUrlDialog(false);
+                        loadData();
+                        if (folderNames.length === 1) {
+                            toastRef.current.success(`已安装技能 "${folderNames[0]}"`);
+                            onSelectSkill(folderNames[0], scope, true);
+                        } else {
+                            toastRef.current.success(`已安装 ${folderNames.length} 个技能`);
+                        }
+                        window.dispatchEvent(
+                            new CustomEvent(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, {
+                                detail: { skillName: folderNames[0] },
+                            }),
+                        );
+                    }}
                 />
             )}
 
