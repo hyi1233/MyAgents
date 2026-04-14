@@ -588,7 +588,7 @@ impl SessionRouter {
         mcp_servers_json: Option<&str>,
         provider_env: Option<&serde_json::Value>,
     ) {
-        if matches!(runtime, "codex" | "claude-code") {
+        if matches!(runtime, "codex" | "claude-code" | "gemini") {
             let runtime_model = runtime_config
                 .and_then(|v| v.get("model"))
                 .and_then(|v| v.as_str())
@@ -649,7 +649,7 @@ impl SessionRouter {
         mcp_servers_json: Option<&str>,
         provider_env: Option<&serde_json::Value>,
     ) {
-        if matches!(runtime, "codex" | "claude-code") {
+        if matches!(runtime, "codex" | "claude-code" | "gemini") {
             let runtime_model = runtime_config
                 .and_then(|v| v.get("model"))
                 .and_then(|v| v.as_str())

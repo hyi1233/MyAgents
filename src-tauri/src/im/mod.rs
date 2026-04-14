@@ -71,18 +71,20 @@ fn normalize_runtime_type(runtime: Option<&str>) -> String {
     match runtime {
         Some("claude-code") => "claude-code".to_string(),
         Some("codex") => "codex".to_string(),
+        Some("gemini") => "gemini".to_string(),
         _ => "builtin".to_string(),
     }
 }
 
 fn is_external_runtime_type(runtime: &str) -> bool {
-    matches!(runtime, "claude-code" | "codex")
+    matches!(runtime, "claude-code" | "codex" | "gemini")
 }
 
 fn runtime_display_name(runtime: &str) -> &'static str {
     match runtime {
         "codex" => "Codex",
         "claude-code" => "Claude Code CLI",
+        "gemini" => "Gemini CLI",
         _ => "MyAgents Builtin SDK",
     }
 }
@@ -153,6 +155,12 @@ fn runtime_permission_choices(runtime: &str) -> Vec<RuntimePermissionChoice> {
             RuntimePermissionChoice { value: "plan".to_string(), label: "Plan".to_string(), description: "规划模式，只读不执行".to_string() },
             RuntimePermissionChoice { value: "acceptEdits".to_string(), label: "Accept Edits".to_string(), description: "自动接受文件编辑，其他需确认".to_string() },
             RuntimePermissionChoice { value: "bypassPermissions".to_string(), label: "Bypass Permissions".to_string(), description: "跳过所有权限确认".to_string() },
+        ],
+        "gemini" => vec![
+            RuntimePermissionChoice { value: "default".to_string(), label: "Default".to_string(), description: "每次工具调用都需要确认".to_string() },
+            RuntimePermissionChoice { value: "autoEdit".to_string(), label: "Auto Edit".to_string(), description: "自动接受文件编辑,其他需确认".to_string() },
+            RuntimePermissionChoice { value: "yolo".to_string(), label: "YOLO".to_string(), description: "跳过所有工具确认".to_string() },
+            RuntimePermissionChoice { value: "plan".to_string(), label: "Plan".to_string(), description: "规划模式,只读不执行".to_string() },
         ],
         _ => Vec::new(),
     }

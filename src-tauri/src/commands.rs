@@ -1227,6 +1227,9 @@ pub fn cmd_detect_runtimes() -> HashMap<String, RuntimeDetectionResult> {
     // Codex CLI
     results.insert("codex".to_string(), detect_cli("codex"));
 
+    // Gemini CLI (v0.1.66)
+    results.insert("gemini".to_string(), detect_cli("gemini"));
+
     results
 }
 
