@@ -44,7 +44,7 @@ import {
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
-import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode } from '../../shared/types/runtime';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
@@ -613,6 +613,34 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode
     || getDefaultRuntimePermissionMode(currentRuntime) || 'default'
   );
+
+  // Sync runtimePermissionMode + runtimeModel when currentRuntime transitions.
+  //
+  // Background: the useState initializers above run ONCE on mount. On the first
+  // render `currentRuntime` may still be 'builtin' because useConfig is loading
+  // asynchronously. More importantly, the agent's runtimeConfig may carry a stale
+  // permissionMode value from a previous runtime (e.g. 'no-restrictions' left over
+  // from a Codex session, confirmed in unified-2026-04-15.log:918). Reading that
+  // value verbatim means the Gemini permission dropdown shows its fallback first
+  // item instead of the correct mapped mode.
+  //
+  // Fix: on every currentRuntime transition, validate the persisted value against
+  // the current runtime's allowed mode set and only honor it if it's legal; else
+  // fall back to the runtime's default mode. This effect does not fire on every
+  // re-render (deps are currentRuntime + isExternalRuntime), so in-session user
+  // selections made via the dropdown are never overwritten.
+  useEffect(() => {
+    if (!isExternalRuntime) return;
+    const cfg = currentAgent?.runtimeConfig as { permissionMode?: string; model?: string } | undefined;
+    const validModes = new Set(getRuntimePermissionModes(currentRuntime).map((m) => m.value));
+    const saved = cfg?.permissionMode;
+    const effective = saved && validModes.has(saved)
+      ? saved
+      : (getDefaultRuntimePermissionMode(currentRuntime) || 'default');
+    setRuntimePermissionMode(effective);
+    setRuntimeModel(cfg?.model);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only re-sync on runtime transitions, not on every currentAgent.runtimeConfig edit
+  }, [currentRuntime, isExternalRuntime]);
 
   // Runtime-specific models and permission modes
   const runtimePermissionModes = currentRuntime === 'claude-code' ? CC_PERMISSION_MODES

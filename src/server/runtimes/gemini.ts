@@ -546,12 +546,20 @@ export class GeminiRuntime implements AgentRuntime {
 
       const available = result.models?.availableModels ?? [];
       const currentId = result.models?.currentModelId;
+      // Only the empty "默认" entry is marked isDefault — matches CC_MODELS convention.
+      // When value='' is sent to the runtime, gemini.ts skips session/set_model and
+      // Gemini uses its own currentModelId automatically. The fact that "auto-gemini-3"
+      // is Gemini's own default is surfaced in the description, not as isDefault=true,
+      // so the UI doesn't show two competing default markers.
       const defaultEntry: RuntimeModelInfo = { value: '', displayName: '默认', isDefault: true };
       const discovered: RuntimeModelInfo[] = available.map((m) => ({
         value: m.modelId,
         displayName: m.name || m.modelId,
-        description: m.description,
-        isDefault: m.modelId === currentId,
+        description:
+          m.modelId === currentId
+            ? `${m.description ? m.description + ' · ' : ''}Gemini CLI 内置默认`
+            : m.description,
+        isDefault: false,
       }));
       return [defaultEntry, ...discovered];
     } finally {
