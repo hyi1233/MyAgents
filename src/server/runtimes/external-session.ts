@@ -633,8 +633,10 @@ async function _doStartExternalSession(options: {
   const runtime = getExternalRuntime(runtimeType);
   activeRuntime = runtime;
 
-  // Build system prompt using MyAgents' three-layer architecture
-  const systemPromptAppend = buildSystemPromptAppend(options.scenario);
+  // Build system prompt using MyAgents' three-layer architecture.
+  // Pass the current runtime so L1 identity text reports the correct CLI
+  // (e.g. "Google Gemini CLI" instead of the builtin default).
+  const systemPromptAppend = buildSystemPromptAppend(options.scenario, { runtime: runtimeType });
 
   console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}, model=${options.model || '(default)'}, permissionMode=${options.permissionMode || '(default)'}, scenario=${options.scenario.type}, resume=${options.resumeSessionId || 'none'}`);
   turnCompleted = false;

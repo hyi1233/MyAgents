@@ -5080,6 +5080,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             s => s.id === 'playwright' && (s.args ?? []).some((a: string) => /^--caps=.*\bstorage\b/.test(a))
           ),
           generativeUiEnabled: currentScenario.type === 'desktop',
+          // agent-session.ts is the builtin Claude Agent SDK path by definition.
+          runtime: 'builtin',
         }),
       },
       cwd: agentDir,
