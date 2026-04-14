@@ -500,7 +500,13 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
 // Get main label for tool (displayed as primary text in ProcessRow)
 // For MCP tools: uses server display name from config (e.g., "Playwright 浏览器", "天眼查")
 // For Task tool: returns the subagent_type (e.g., "Explore", "Plan")
+// Generic override: if parsedInput has `_displayName`, use it verbatim — this lets
+// external runtimes (like Gemini) surface their real tool identifier (e.g.
+// "run_shell_command") in the UI while internally still routing tool.name to a
+// MyAgents-native component (BashTool/GrepTool/...) for rich body rendering.
 export function getToolMainLabel(tool: ToolUseSimple): string {
+  const displayNameOverride = getStringProp(tool.parsedInput, '_displayName');
+  if (displayNameOverride) return displayNameOverride;
   if (tool.name === 'Task' || tool.name === 'Agent') {
     const subagentType = getStringProp(tool.parsedInput, 'subagent_type');
     return subagentType || tool.name;
@@ -667,6 +673,9 @@ export function getToolLabel(tool: ToolUseSimple): string {
 // Unified expanded label generation logic - for ToolHeader in expanded state
 // Returns the base semantic label (without pattern/file details) to match collapsed badge
 export function getToolExpandedLabel(tool: ToolUseSimple): string {
+  // External-runtime display override — see getToolMainLabel for the rationale.
+  const displayNameOverride = getStringProp(tool.parsedInput, '_displayName');
+  if (displayNameOverride) return displayNameOverride;
   switch (tool.name) {
     case 'Glob':
       return 'Find';

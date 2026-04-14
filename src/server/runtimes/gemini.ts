@@ -1305,15 +1305,32 @@ function mapGeminiInternalToolName(
 
 /**
  * Convert a Gemini tool_call / tool_call_update notification into the structured
- * `input` object that MyAgents frontend expects (see `toolBadgeConfig.tsx::getToolLabel`
- * for the canonical field names per tool).
+ * `input` object that MyAgents frontend expects.
  *
- * Gemini's `title` field is pre-formatted by the CLI and is our ONLY source of
- * structured parameters since `rawInput` is empty in v0.37.2. For each tool we
- * pattern-match the title back into the frontend's field shape (command / file_path /
- * pattern / query / url). The mapping is lossy but produces the same display
- * quality as the native Codex integration — see `toolBadgeConfig.tsx` for how
- * these fields become the label text.
+ * The returned object serves two roles:
+ *   (1) It feeds `toolBadgeConfig.tsx::getToolLabel` for the collapsed row's
+ *       secondary label — each component looks up canonical field names
+ *       (command / file_path / pattern / query / url / ...).
+ *   (2) It feeds the expanded-view specialized components (BashTool / ReadTool /
+ *       EditTool / GrepTool / ...) which render rich Input+Output sections.
+ *
+ * Three important design points:
+ *
+ * - `_displayName` is set to Gemini's internal tool name (e.g. "run_shell_command",
+ *   "grep_search", "glob"). `getToolMainLabel` / `getToolExpandedLabel` read this
+ *   override and show it as the badge title, so users see Gemini's real tool
+ *   identifier even though we route via tool.name='Bash' / 'Grep' / etc. for
+ *   rich body rendering. Without this, the user loses visibility into which
+ *   Gemini tool was actually invoked.
+ *
+ * - `rawInput` is NOT populated by Gemini ACP v0.37.2 (verified with real CLI).
+ *   The `title` field is pre-formatted and is our only source of structured
+ *   parameters. We pattern-match the title back into the frontend's field shape.
+ *
+ * - Meta fields like `cwd`, `locations`, and the original `title`/`kind` are
+ *   preserved under underscore-prefixed keys so specialized components
+ *   (e.g. BashTool's meta bar) can display them without conflicting with
+ *   their own canonical fields.
  */
 function buildGeminiToolInput(
   internalName: string,
@@ -1323,22 +1340,34 @@ function buildGeminiToolInput(
   content: unknown,
 ): Record<string, unknown> {
   const loc0 = Array.isArray(locations) && locations[0] ? locations[0] : undefined;
+  // displayName = the Gemini internal name when we can parse it, else a sensible
+  // human-readable fallback. Always included so the UI surfaces the real tool.
+  const displayName = internalName || (kind ? `${kind} (${title || 'tool'})` : title || 'tool');
+
+  // Fields shared by every tool path — expanded components ignore keys they
+  // don't recognize, so it's safe to pass extra metadata.
+  const meta: Record<string, unknown> = {
+    _displayName: displayName,
+    _geminiKind: kind || undefined,
+    _geminiTitle: title || undefined,
+    ...(loc0 ? { _location: loc0 } : {}),
+    ...(Array.isArray(locations) && locations.length > 1 ? { _locations: locations } : {}),
+  };
 
   switch (internalName) {
     case 'run_shell_command': {
-      // title IS the command (verified: toolCallId=run_shell_command-…, title="pwd")
-      return { command: title || '' };
+      // title IS the command (verified via real CLI: toolCallId=run_shell_command-…, title="pwd")
+      return { ...meta, command: title || '' };
     }
     case 'read_file':
     case 'write_file':
     case 'replace': {
       // For file operations Gemini's title is usually the absolute path.
-      // Locations[] is empty in practice but we check first for robustness.
       const file_path = loc0?.path ?? title ?? '';
-      return { file_path };
+      return { ...meta, file_path };
     }
     case 'read_many_files': {
-      return { file_path: title || '', paths: title || '' };
+      return { ...meta, file_path: title || '', paths: title || '' };
     }
     case 'grep':
     case 'grep_search':
@@ -1346,23 +1375,22 @@ function buildGeminiToolInput(
       // title format: `'pattern' in *.ext within ./path` — extract pattern
       const patternMatch = title.match(/^'([^']*)'/);
       const pattern = patternMatch ? patternMatch[1] : title;
-      return { pattern };
+      return { ...meta, pattern };
     }
     case 'glob': {
-      // title format: `'*.md'` — strip quotes
+      // title format: `'*.md'` — strip single quotes
       const pattern = title.replace(/^'|'$/g, '');
-      return { pattern };
+      return { ...meta, pattern };
     }
     case 'list_directory': {
       const pattern = title || '.';
-      return { pattern };
+      return { ...meta, pattern };
     }
     case 'google_web_search': {
-      return { query: title || '' };
+      return { ...meta, query: title || '' };
     }
     case 'web_fetch': {
-      // title is usually the URL or the fetch prompt
-      return { url: title || '' };
+      return { ...meta, url: title || '' };
     }
     case 'save_memory':
     case 'activate_skill':
@@ -1370,11 +1398,12 @@ function buildGeminiToolInput(
     case 'update_topic':
     case 'complete_task':
     case 'task_complete': {
-      return { title, kind };
+      return { ...meta, title, kind };
     }
   }
-  // Unknown tool — pass through whatever we have so at least something renders
+  // Unknown tool (MCP, plugins, new built-ins) — pass through whatever we have.
   return {
+    ...meta,
     title,
     kind,
     ...(Array.isArray(content) ? { content } : {}),
