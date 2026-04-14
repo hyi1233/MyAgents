@@ -530,7 +530,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                         <textarea
                             value={url}
                             onChange={e => setUrl(e.target.value)}
-                            rows={2}
+                            rows={5}
                             placeholder={
                                 '示例：\n  anthropics/skills\n  https://github.com/vercel-labs/skills/tree/main/skills/react-best-practices\n  npx skills add foo/bar --skill baz'
                             }
