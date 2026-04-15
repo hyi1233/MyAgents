@@ -315,7 +315,6 @@ export default function TabProvider({
     const [agentError, setAgentError] = useState<string | null>(null);
     const [systemStatus, setSystemStatus] = useState<string | null>(null);  // e.g., 'compacting'
     const [lastTerminalReason, setLastTerminalReason] = useState<TerminalReason | null>(null);
-    const [contextUsagePercent, setContextUsagePercent] = useState<number | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
     const [pendingAskUserQuestion, setPendingAskUserQuestion] = useState<AskUserQuestionRequest | null>(null);
@@ -466,7 +465,6 @@ export default function TabProvider({
         setSystemStatus(null);
         setAgentError(null);
         setLastTerminalReason(null);
-        setContextUsagePercent(null);
         setUnifiedLogs([]);
         setLogs([]);
         clearInteractiveState();
@@ -1241,23 +1239,6 @@ export default function TabProvider({
                     }
                 }
 
-                // SDK 0.2.86+: auto-sample context usage after turn ends (PRD §5.2.2).
-                // Fire-and-forget so it never blocks the UI. Server has a 3s timeout
-                // and returns null for external runtime / pre-warm / abort races.
-                // Gated by currentSessionIdRef so a stale response from a prior session
-                // won't overwrite the current session's percentage.
-                {
-                    const sidAtFire = currentSessionIdRef.current;
-                    apiGetJson<{ success: boolean; usage?: { percentage?: number } }>('/api/session/context-usage')
-                        .then(resp => {
-                            if (currentSessionIdRef.current !== sidAtFire) return;
-                            if (resp?.success && typeof resp.usage?.percentage === 'number') {
-                                setContextUsagePercent(resp.usage.percentage);
-                            }
-                        })
-                        .catch(() => { /* silent — overlay still works on manual open */ });
-                }
-
                 // Apply backend's real message ID + sdkUuid to the just-moved history message.
                 // Streaming messages use Date.now() IDs that don't match backend's messageSequence IDs.
                 // Without this, fork/rewind pass the wrong ID to the backend.
@@ -1807,7 +1788,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, apiGetJson, clearInteractiveState, flushPendingChunks, clearSessionActive, resetPaginationState]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, clearSessionActive, resetPaginationState]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -2355,7 +2336,6 @@ export default function TabProvider({
             setSystemStatus(null);
             setAgentError(null);
             setLastTerminalReason(null);
-            setContextUsagePercent(null);
             clearInteractiveState();
             // Update current session ID to reflect the loaded session.
             // Ref is updated synchronously so that any in-flight async handler
@@ -2797,7 +2777,6 @@ export default function TabProvider({
         agentError,
         systemStatus,
         lastTerminalReason,
-        contextUsagePercent,
         pendingPermission,
         pendingAskUserQuestion,
         pendingExitPlanMode,
@@ -2835,7 +2814,7 @@ export default function TabProvider({
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime,
-        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, lastTerminalReason, contextUsagePercent, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
+        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);

@@ -1056,43 +1056,6 @@ export function getSessionPermissionMode(): PermissionMode {
   return currentPermissionMode;
 }
 
-/**
- * Fetch the SDK's context usage breakdown (system prompt / tools / messages / MCP / agents / ...).
- * Requires SDK 0.2.86+. Returns null when no active session, in a transient state
- * (pre-warm not completed yet), or when the call times out. The HTTP endpoint returns
- * 200 + `{success:false, reason:'no_session'}` in all null cases so the frontend
- * can distinguish "no data" from actual network errors.
- *
- * The SDK call is async and cheap (not free) — it issues a `get_context_usage` control
- * request to the subprocess. Callers should sample sparingly: once per turn_end + on user
- * demand (expand panel). See PRD §5.2.3.
- *
- * Safety (from /cross-review-code findings):
- * - Local const `session` reference captured *before* the await, so a concurrent
- *   `abortPersistentSession()` that sets `querySession = null` can't race with us.
- * - 3s Promise.race timeout so a stuck subprocess (dying mid-abort, pre-warm hang,
- *   control-channel backup) can't block the HTTP handler indefinitely. The user-facing
- *   case is `prompt_too_long` — exactly the moment SDK is under maximum pressure.
- */
-const CONTEXT_USAGE_TIMEOUT_MS = 3_000;
-
-export async function getSessionContextUsage(): Promise<
-  import('@anthropic-ai/claude-agent-sdk').SDKControlGetContextUsageResponse | null
-> {
-  const session = querySession;
-  if (!session) return null;
-  try {
-    const resp = await Promise.race([
-      session.getContextUsage(),
-      new Promise<null>(resolve => setTimeout(() => resolve(null), CONTEXT_USAGE_TIMEOUT_MS)),
-    ]);
-    return resp ?? null;
-  } catch (err) {
-    console.warn('[agent] getContextUsage failed:', err);
-    return null;
-  }
-}
-
 /** Set permission mode (called from frontend via /api/session/permission-mode) */
 export function setSessionPermissionMode(mode: PermissionMode): void {
   if (mode === currentPermissionMode) return;

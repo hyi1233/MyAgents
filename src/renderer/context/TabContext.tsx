@@ -62,14 +62,6 @@ export interface TabState {
      * runtime as forward-compat defense. See shared/terminalReason.ts.
      */
     lastTerminalReason: TerminalReason | null;
-    /**
-     * SDK 0.2.86+ context usage percentage (0..100). Auto-sampled after each
-     * chat:message-complete via /api/session/context-usage. null = not yet
-     * sampled / unavailable (external runtime, pre-warm, no session). Displayed
-     * as a small badge on the Chat header Gauge button so users see context
-     * pressure building *before* prompt_too_long hits. PRD §5.2.2.
-     */
-    contextUsagePercent: number | null;
 
     // Permission prompt state
     pendingPermission: PermissionRequest | null;
@@ -175,7 +167,6 @@ const defaultContextValue: TabContextValue = {
     agentError: null,
     systemStatus: null,
     lastTerminalReason: null,
-    contextUsagePercent: null,
     pendingPermission: null,
     pendingAskUserQuestion: null,
     pendingExitPlanMode: null,

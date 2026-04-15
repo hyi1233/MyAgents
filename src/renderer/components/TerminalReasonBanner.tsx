@@ -21,8 +21,6 @@ interface TerminalReasonBannerProps {
   onDismiss: () => void;
   /** max_turns → 引导用户新开会话。prop 缺失时按钮不渲染。 */
   onNewSession?: () => void;
-  /** prompt_too_long → 引导用户查看上下文明细。prop 缺失时按钮不渲染。 */
-  onOpenContextUsage?: () => void;
 }
 
 const SEVERITY_STYLES: Record<TerminalReasonSeverity, {
@@ -51,7 +49,6 @@ export default function TerminalReasonBanner({
   reason,
   onDismiss,
   onNewSession,
-  onOpenContextUsage,
 }: TerminalReasonBannerProps) {
   // Guard rapid double-clicks on the "新开会话" button — handleNewSession is async
   // and involves Rust IPC + session handover; re-entering it mid-flight can
@@ -71,11 +68,9 @@ export default function TerminalReasonBanner({
   const style = SEVERITY_STYLES[info.severity];
   const Icon = style.icon;
 
-  // Per-reason shortcut buttons. Drives the PRD §5.1.2 actions:
+  // Per-reason shortcut button. Drives the PRD §5.1.2 action:
   // - max_turns → 新开会话继续
-  // - prompt_too_long → 查看上下文明细 (opens ContextUsageOverlay, A2)
   const showNewSession = reason === 'max_turns' && !!onNewSession;
-  const showOpenContext = reason === 'prompt_too_long' && !!onOpenContextUsage;
 
   return (
     <div className={`relative z-10 flex-shrink-0 border-b border-[var(--line)] ${style.bg} px-4 py-2 text-[11px] text-[var(--ink)]`}>
@@ -102,15 +97,6 @@ export default function TerminalReasonBanner({
               className="rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)] disabled:cursor-wait disabled:opacity-60"
             >
               新开会话
-            </button>
-          )}
-          {showOpenContext && (
-            <button
-              type="button"
-              onClick={() => onOpenContextUsage!()}
-              className="rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
-            >
-              查看上下文明细
             </button>
           )}
           <button
