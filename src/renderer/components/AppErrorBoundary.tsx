@@ -55,7 +55,7 @@ export default class AppErrorBoundary extends Component<Props, State> {
                 height: '100vh',
                 backgroundColor: 'var(--paper, #fafafa)',
                 color: 'var(--ink, #1a1a1a)',
-                fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+                fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Microsoft YaHei UI", sans-serif',
             }}>
                 <div style={{
                     maxWidth: 420,

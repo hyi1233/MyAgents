@@ -319,7 +319,7 @@ Your explanatory text here...
 
 <generative-ui-widget>
 <style>
-  .widget { font-family: system-ui, sans-serif; color: var(--widget-text); padding: 16px; }
+  .widget { font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; color: var(--widget-text); padding: 16px; }
 </style>
 <div class="widget">
   <!-- SVG, canvas, or HTML content -->

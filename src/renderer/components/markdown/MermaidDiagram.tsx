@@ -50,7 +50,7 @@ function initMermaid(force = false) {
         theme: dark ? 'dark' : 'neutral',
         securityLevel: 'strict',
         suppressErrorRendering: true, // Don't show error in SVG
-        fontFamily: "'Avenir Next', 'Gill Sans', sans-serif",
+        fontFamily: "'Avenir Next', 'Gill Sans', 'PingFang SC', 'Microsoft YaHei', 'Microsoft YaHei UI', sans-serif",
         flowchart: {
             useMaxWidth: true,
             htmlLabels: true,

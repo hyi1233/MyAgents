@@ -132,23 +132,27 @@ MyAgents 是一款 AI Agent 桌面客户端，采用**温暖纸张质感**的设
 
 跨平台字体策略：macOS 优先使用系统字体，Windows 使用对应的系统字体作为 fallback。
 
+> ⚠️ **雅黑陷阱**：`sans-serif` / `monospace` 通用字族在中文 Windows 上映射到 SimSun / NSimSun（宋体），CJK 字符在它们那里会被"成功"命中 → 后续的 `Microsoft YaHei` 永远轮不到。
+> 因此 Latin-only 子链 **不能**以 `sans-serif` 结尾，组合链的通用字族兜底必须放在整条链的**最末端**（CJK 字体之后）。
+
 ```css
-:root {
-  /* 英文字体 - macOS: SF Pro, Windows: Segoe UI */
-  --font-sans: 'SF Pro Text', 'SF Pro Display', -apple-system,
-               'Segoe UI', BlinkMacSystemFont, sans-serif;
+/* @theme — Tailwind v4 单一真相源，同时驱动 font-sans / font-mono 工具类 */
+@theme {
+  /* Latin-only 子链：结尾无 generic */
+  --font-latin: 'SF Pro Text', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI';
+  /* CJK 子链：macOS 苹方 → Windows 微软雅黑（加 Microsoft YaHei UI 容错） */
+  --font-chinese: 'PingFang SC', 'Microsoft YaHei', 'Microsoft YaHei UI', 'Hiragino Sans GB';
+  /* 等宽 Latin-only：结尾无 generic */
+  --font-mono-latin: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Fira Code';
 
-  /* 中文字体 - macOS: 苹方, Windows: 微软雅黑 */
-  --font-chinese: 'PingFang SC', 'Microsoft YaHei',
-                  'Hiragino Sans GB', sans-serif;
+  /* 公共 Token：generic 只在整条链最末 */
+  --font-body: var(--font-latin), var(--font-chinese), sans-serif;
+  --font-display: var(--font-latin), var(--font-chinese), sans-serif;
+  --font-code: var(--font-mono-latin), var(--font-chinese), monospace;
 
-  /* 等宽字体 - 跨平台 */
-  --font-mono: 'SF Mono', 'Cascadia Code', 'Consolas',
-               'Monaco', 'Fira Code', monospace;
-
-  /* 组合使用 - 英文字体在前确保英文使用英文字体 */
-  --font-body: var(--font-sans), var(--font-chinese);
-  --font-display: var(--font-sans), var(--font-chinese);
+  /* Tailwind 工具类别名 — `font-sans` / `font-mono` 自动带中文 fallback */
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-code);
 }
 ```
 
@@ -915,15 +919,16 @@ AI 的思考过程，用户可选择查看。
   --line-strong: rgb(28 22 18 / 0.18);
   --line-subtle: rgb(28 22 18 / 0.06);
 
-  /* ========== Typography ========== */
-  --font-sans: 'SF Pro Text', 'SF Pro Display', -apple-system,
-               'Segoe UI', BlinkMacSystemFont, sans-serif;
-  --font-chinese: 'PingFang SC', 'Microsoft YaHei',
-                  'Hiragino Sans GB', sans-serif;
-  --font-mono: 'SF Mono', 'Cascadia Code', 'Consolas',
-               'Monaco', 'Fira Code', monospace;
-  --font-body: var(--font-sans), var(--font-chinese);
-  --font-display: var(--font-sans), var(--font-chinese);
+  /* ========== Typography ==========
+     注：生产代码中 font 已迁移至 @theme 块（单一真相源，详见 §2.1）。
+     Latin-only 子链末尾不带 generic；组合链的 sans-serif / monospace 只出现在
+     最末端 —— 避开 Chinese Windows 的 SimSun/NSimSun 回退坑。 */
+  --font-latin: 'SF Pro Text', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI';
+  --font-chinese: 'PingFang SC', 'Microsoft YaHei', 'Microsoft YaHei UI', 'Hiragino Sans GB';
+  --font-mono-latin: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Fira Code';
+  --font-body: var(--font-latin), var(--font-chinese), sans-serif;
+  --font-display: var(--font-latin), var(--font-chinese), sans-serif;
+  --font-code: var(--font-mono-latin), var(--font-chinese), monospace;
 
   /* ========== Border Radius ========== */
   --radius-sm: 6px;

@@ -15,6 +15,26 @@
   --shadow-lg: 0 16px 40px rgb(28 22 18 / 0.16);
   --shadow-xl: 0 24px 48px rgb(28 22 18 / 0.20);
   --shadow-2xl: 0 32px 64px -12px rgb(28 22 18 / 0.25);
+
+  /* Font families — single source of truth (Tailwind v4 @theme).
+     CRITICAL: intermediate `sans-serif` / `monospace` generics MUST NOT appear
+     before the Chinese families. On Chinese Windows SKUs those generics map
+     to SimSun / NSimSun (宋体), which successfully match CJK glyphs and halt
+     the font-family walk — so `Microsoft YaHei` is never reached. Latin-only
+     sub-chains therefore end at the last real family, and the single trailing
+     generic sits at the very end of each public token. */
+  --font-latin: 'SF Pro Text', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI';
+  --font-chinese: 'PingFang SC', 'Microsoft YaHei', 'Microsoft YaHei UI', 'Hiragino Sans GB';
+  --font-mono-latin: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Fira Code';
+
+  /* Public tokens — consumed by body, .font-display, .brand-*, code blocks */
+  --font-body: var(--font-latin), var(--font-chinese), sans-serif;
+  --font-display: var(--font-latin), var(--font-chinese), sans-serif;
+  --font-code: var(--font-mono-latin), var(--font-chinese), monospace;
+
+  /* Tailwind v4 utility aliases — `font-sans` / `font-mono` read these */
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-code);
 }
 
 /* Custom titlebar styles for frameless window */
@@ -106,22 +126,10 @@
   --sidebar-min-width: 320px;
   --header-height: 48px;
 
-  /* ========== Typography: Font Family (Cross-platform) ========== */
-  /* 英文: macOS SF Pro → Windows Segoe UI */
-  --font-sans: 'SF Pro Text', 'SF Pro Display', -apple-system,
-               'Segoe UI', BlinkMacSystemFont, sans-serif;
-  /* 中文: macOS 苹方 → Windows 微软雅黑 */
-  --font-chinese: 'PingFang SC', 'Microsoft YaHei',
-                  'Hiragino Sans GB', sans-serif;
-  /* 等宽(纯): 代码编辑器、语法高亮 */
-  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas',
-               'Monaco', 'Fira Code', monospace;
-  /* 等宽+中文: 代码中包含中文注释时使用 */
-  --font-mono-chinese: var(--font-mono), var(--font-chinese);
-  /* 组合使用 */
-  --font-body: var(--font-sans), var(--font-chinese);
-  --font-display: var(--font-sans), var(--font-chinese);
-  --font-code: var(--font-mono-chinese);  /* 统一代码字体入口 */
+  /* Font families live in @theme at the top of this file (single source of
+     truth, so Tailwind's font-sans / font-mono utilities also pick them up
+     with Chinese fallback). Public tokens: --font-body, --font-display,
+     --font-code. */
 
   /* ========== Typography: Size ========== */
   /* 基于 16px 正文的字号体系 */
@@ -582,11 +590,6 @@ button:disabled {
   animation: indeterminate 1.5s ease-in-out infinite;
 }
 
-
-/* Override Tailwind's font-mono to use our CSS variable with Chinese fallback */
-.font-mono {
-  font-family: var(--font-code) !important;
-}
 
 /* Terminal-like monospace typography for tool calls */
 .tool-input {
