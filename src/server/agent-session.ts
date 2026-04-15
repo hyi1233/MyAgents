@@ -554,9 +554,23 @@ export type OpenAiBridgeConfig = {
 
 let currentOpenAiBridgeConfig: OpenAiBridgeConfig = null;
 
-/** Set the sidecar port (called once from index.ts on startup) */
+/** Set the sidecar port (called once from index.ts on startup).
+ *
+ *  Side effect: exports `MYAGENTS_PORT` to `process.env` so every subprocess
+ *  spawned later via `augmentedProcessEnv()` (external runtimes: gemini / claude-code /
+ *  codex) inherits it automatically — the AI's shell tool can then invoke
+ *  `myagents` CLI without the CLI bailing with `MYAGENTS_PORT not set`. This is
+ *  the pit-of-success alternative to editing three runtime `spawn()` call sites
+ *  individually: a new runtime added tomorrow gets the same guarantee for free.
+ *
+ *  The builtin SDK path still sets `env.MYAGENTS_PORT` explicitly in
+ *  `buildClaudeSessionEnv()` (idempotent) because pre-warm can spawn before
+ *  this function is called and the process.env write would arrive too late. */
 export function setSidecarPort(port: number): void {
   sidecarPort = port;
+  if (port > 0) {
+    process.env.MYAGENTS_PORT = String(port);
+  }
 }
 
 /** Get the current sidecar port (used by admin-api for self-loopback) */
@@ -1435,6 +1449,22 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
       let command = server.command;
       // Defensive: args may be non-array (e.g. boolean `true`) due to CLI parsing bugs or manual config edits
       let args = [...(Array.isArray(server.args) ? server.args : [])];
+
+      // Sentinel: bundled cuse (computer-use) binary — resolve to the
+      // platform-specific path shipped in the app bundle. If the binary is
+      // missing (unsupported platform, or a dev build without the binary
+      // downloaded yet), skip the MCP with a warning rather than crashing
+      // the session.
+      if (command === '__bundled_cuse__') {
+        const { getBundledCusePath } = await import('./utils/runtime');
+        const cusePath = getBundledCusePath();
+        if (!cusePath) {
+          console.warn(`[agent] MCP ${server.id}: bundled cuse binary not found (platform=${process.platform}); skipping. Run scripts/download_cuse.sh to install.`);
+          continue;
+        }
+        command = cusePath;
+        console.log(`[agent] MCP ${server.id}: resolved to bundled cuse at ${cusePath}`);
+      }
 
       // For npx commands: prefer system npx → bundled Node.js npx → bun x
       // System Node.js is maintained by the user's package manager, more reliable than our bundled npm.
@@ -2366,6 +2396,53 @@ export function resolveClaudeCodeCli(): string {
  * Build environment for Claude session
  * @param providerEnv - Optional provider environment override (for verification or external calls)
  */
+/**
+ * Auth env vars that the Claude Code CLI reads at startup. Any one of these
+ * left unset (after `{...process.env}` spread + our provider branches) becomes
+ * a hole that Bun's auto-dotenv loader can fill from the project workspace's
+ * `.env` — for example a `.env.example`-style placeholder
+ * `ANTHROPIC_API_KEY=sk-ant-your-anthropic-key-here` that an AI helpfully
+ * copied over. The polluted value then reaches cli.js and surfaces as
+ * "Not logged in · Please run /login".
+ *
+ * Fix: after all provider branches run, any var in this list that's still
+ * absent gets sealed to an empty string. Verified by reading claude-code
+ * source (utils/auth.ts, utils/authFileDescriptor.ts, services/api/filesApi.ts)
+ * — every check is a JS truthy test (`if (process.env.X)` or
+ * `process.env.X || fallback`), so empty string is semantically identical to
+ * unset: OAuth keychain fallback, apiKeyHelper, and Bedrock/Vertex paths all
+ * continue to work. Empty strings block Bun's dotenv merge because Bun treats
+ * "key explicitly present in spawn env" as parent-wins even when the value
+ * happens to be "". Smoke-tested with Bun 1.3.6 (see PR discussion).
+ *
+ * NOT included: CLAUDE_CONFIG_DIR — claude-code/src/utils/envUtils.ts:10 reads
+ * it with `??` (nullish coalescing), so an empty string would fall through as
+ * "" (not as the homedir fallback) and break the keychain service-name hash.
+ * `.env` pollution of CLAUDE_CONFIG_DIR is also essentially impossible — no
+ * project template ever sets a CC-internal var like that.
+ */
+const CC_AUTH_ENV_VARS_TO_SEAL = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+] as const;
+
+/**
+ * Seal CC auth env vars against Bun dotenv auto-load pollution.
+ * Only fills in empty strings for vars that are currently ABSENT from env —
+ * preserves any real value we or the parent shell explicitly set. See
+ * `CC_AUTH_ENV_VARS_TO_SEAL` above for the full rationale.
+ */
+function sealCcAuthEnv(env: NodeJS.ProcessEnv): void {
+  for (const key of CC_AUTH_ENV_VARS_TO_SEAL) {
+    if (!(key in env)) {
+      env[key] = '';
+    }
+  }
+}
+
 export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.ProcessEnv {
   // Ensure essential paths are always present, even when launched from Finder
   // (Finder launches via launchd which doesn't inherit shell environment variables)
@@ -2595,6 +2672,14 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
       modelAliases: effectiveProviderEnv.modelAliases,
     };
     console.log(`[env] OpenAI bridge: ANTHROPIC_BASE_URL → loopback :${sidecarPort}, upstream → ${effectiveProviderEnv.baseUrl}, proxy vars stripped`);
+    // Seal any auth var not explicitly set above (e.g. ANTHROPIC_AUTH_TOKEN
+    // was deleted, CLAUDE_CODE_OAUTH_TOKEN was never touched) to an empty
+    // string so Bun's auto-dotenv loader can't backfill them from the
+    // workspace's .env at subprocess spawn time. See CC_AUTH_ENV_VARS_TO_SEAL
+    // above for full rationale — this is the "Not logged in · Please run
+    // /login" bug that triggers when a user (or an AI helping them) fills
+    // out a project's .env.example with placeholder Anthropic credentials.
+    sealCcAuthEnv(env);
     return env;
   }
 
@@ -2653,12 +2738,25 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
         break;
     }
   } else {
-    // Clear any previously set third-party apiKey, let SDK use default auth
+    // Subscription mode: clear any previously inherited third-party apiKey so
+    // the SDK falls through to keychain OAuth. NOTE: `delete` alone is NOT
+    // enough — when the SDK subprocess (bun cli.js) starts with cwd set to
+    // the project workspace, Bun's auto-dotenv loader will happily refill
+    // any deleted key from the project's .env. `sealCcAuthEnv(env)` below
+    // plugs that hole by converting the deletes into explicit empty strings,
+    // which Bun treats as "parent already set this, don't override".
     delete env.ANTHROPIC_AUTH_TOKEN;
     delete env.ANTHROPIC_API_KEY;
     console.log('[env] ANTHROPIC_AUTH_TOKEN cleared (using default auth)');
   }
 
+  // Block Bun auto-dotenv pollution of CC auth env vars before handing the
+  // env off to sdk.mjs. This is the last-line-of-defense for anything the
+  // branches above either deleted (subscription mode) or never set at all
+  // (CLAUDE_CODE_OAUTH_TOKEN{,_FILE_DESCRIPTOR}). See CC_AUTH_ENV_VARS_TO_SEAL
+  // above for the full rationale — triggering symptom is "Not logged in"
+  // after a user (or an AI) fills out a project's .env.example.
+  sealCcAuthEnv(env);
   return env;
 }
 
@@ -6095,6 +6193,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           is_error?: boolean;
           result?: string;
           errors?: string[];
+          // SDK 0.2.91+ 新增：标识 result 终止原因。字段缺失表示 loop 被 bypass
+          // (本地 slash 命令) 或在 yield 之间被外部中断。使用 SDK 导出的 TerminalReason
+          // 联合类型而非裸 string，确保 SDK 升级新增枚举值时 tsc 能捕获缺失处理。
+          terminal_reason?: import('@anthropic-ai/claude-agent-sdk').TerminalReason;
           usage?: {
             input_tokens?: number;
             output_tokens?: number;
@@ -6239,6 +6341,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         const lastAssistant = messages.length > 0 && messages[messages.length - 1].role === 'assistant'
           ? messages[messages.length - 1] : null;
 
+        // Log non-completed terminal_reasons to unified logs for debugging.
+        // Some reasons (e.g. aborted_streaming) suppress the UI banner entirely
+        // (see src/shared/terminalReason.ts), so this is the ONLY surface left
+        // for figuring out why a turn ended early. One line per non-trivial turn
+        // — low frequency, keeps signal tight.
+        if (resultMessage.terminal_reason && resultMessage.terminal_reason !== 'completed') {
+          console.log(`[agent][terminal_reason] ${resultMessage.terminal_reason} scenario=${currentScenario.type} model=${currentTurnUsage.model ?? 'unknown'} duration_ms=${durationMs} tool_count=${currentTurnToolCount}`);
+        }
+
         console.log('[agent][sdk] Broadcasting chat:message-complete');
         // Include usage data for frontend analytics tracking + assistant sdkUuid for fork button
         broadcast('chat:message-complete', {
@@ -6249,6 +6360,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
           tool_count: currentTurnToolCount,
           duration_ms: durationMs,
+          // SDK 0.2.91+ terminal_reason — 前端映射为中文 banner/toast。
+          // 未设置时前端按 `completed` 处理（不显示额外提示）。
+          terminal_reason: resultMessage.terminal_reason,
           // Piggyback sdkUuid + real message ID so fork button works immediately after streaming.
           // Frontend streaming messages use Date.now() IDs that don't match backend messageSequence IDs.
           assistant_sdk_uuid: lastAssistant?.sdkUuid,

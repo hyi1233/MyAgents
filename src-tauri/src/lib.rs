@@ -68,7 +68,6 @@ pub fn run() {
     let agent_state = im::create_agent_state();
     let sidecar_state_for_window = sidecar_state.clone();
     let sidecar_state_for_exit = sidecar_state.clone();
-    let sidecar_state_for_tray_exit = sidecar_state.clone();
     let sidecar_state_for_monitor = sidecar_state.clone();
     let sidecar_state_for_session_monitor = sidecar_state.clone();
 
@@ -77,20 +76,17 @@ pub fn run() {
     let sidecar_state_for_management = sidecar_state.clone();
     let im_state_for_window = im_bot_state.clone();
     let im_state_for_exit = im_bot_state.clone();
-    let im_state_for_tray_exit = im_bot_state.clone();
     let agent_state_for_window = agent_state.clone();
     let agent_state_for_exit = agent_state.clone();
-    let agent_state_for_tray_exit = agent_state.clone();
 
     // Track if cleanup has been performed to avoid duplicate cleanup
     // All clones share the same underlying AtomicBool - whichever exit path
     // triggers first will do cleanup, and all others will see the flag as true
     // and skip. The separate variables are needed because each is moved into
-    // a different closure (window event, tray exit, app exit).
+    // a different closure (window event, app exit).
     let cleanup_done = Arc::new(AtomicBool::new(false));
     let cleanup_done_for_window = cleanup_done.clone();
     let cleanup_done_for_exit = cleanup_done.clone();
-    let cleanup_done_for_tray_exit = cleanup_done.clone();
     let cleanup_done_for_monitor = cleanup_done.clone();
     let cleanup_done_for_session_monitor = cleanup_done.clone();
     let cleanup_done_for_agent_monitor = cleanup_done.clone();
@@ -99,13 +95,11 @@ pub fn run() {
     let terminal_state = terminal::TerminalManager::new();
     let terminal_state_for_exit = terminal_state.clone();
     let terminal_state_for_window = terminal_state.clone();
-    let terminal_state_for_tray_exit = terminal_state.clone();
 
     // Create browser manager state
     let browser_state = browser::BrowserManager::new();
     let browser_state_for_exit = browser_state.clone();
     let browser_state_for_window = browser_state.clone();
-    let browser_state_for_tray_exit = browser_state.clone();
 
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
@@ -362,24 +356,17 @@ pub fn run() {
                 log::error!("[App] Failed to setup system tray: {}", e);
             }
 
-            // Setup tray exit handler (for when user confirms exit from tray menu)
+            // Frontend confirms exit (from X button → ConfirmDialog → "退出" button).
+            // Delegate to `AppHandle::exit(0)` and let `RunEvent::ExitRequested` run
+            // cleanup on the main run-loop thread. Running cleanup inline here would
+            // deadlock/panic: this callback fires from within the `plugin:event|emit`
+            // async command (a Tokio worker), and `tauri::async_runtime::block_on`
+            // inside a Tokio worker panics with "Cannot start a runtime from within
+            // a runtime" — the panic is swallowed and `exit(0)` never runs, which is
+            // why X-button close silently failed before.
             let app_handle_for_tray = app.handle().clone();
             app.listen("tray:confirm-exit", move |_| {
-                log::info!("[App] Tray exit confirmed by user");
-                use std::sync::atomic::Ordering::Relaxed;
-                if !cleanup_done_for_tray_exit.swap(true, Relaxed) {
-                    log::info!("[App] Cleaning up sidecars before exit...");
-                    im::signal_all_agents_shutdown(&agent_state_for_tray_exit);
-                    im::signal_all_bots_shutdown(&im_state_for_tray_exit);
-                    let _ = stop_all_sidecars(&sidecar_state_for_tray_exit);
-                    // Clean up terminal PTY sessions
-                    let ts = terminal_state_for_tray_exit.clone();
-                    tauri::async_runtime::block_on(terminal::close_all_terminals(&ts));
-                    // Clean up browser webviews
-                    let bs = browser_state_for_tray_exit.clone();
-                    tauri::async_runtime::block_on(browser::close_all_browsers(&bs, &app_handle_for_tray));
-                    app_dirs::release_lock();
-                }
+                log::info!("[App] Frontend confirmed exit, delegating to run-loop cleanup");
                 app_handle_for_tray.exit(0);
             });
 

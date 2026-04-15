@@ -17,6 +17,7 @@ import QueryNavigator from '@/components/chat/QueryNavigator';
 import ChatSearchPanel from '@/components/ChatSearchPanel';
 import { useChatSearch, isHighlightApiSupported } from '@/hooks/useChatSearch';
 import SelectionCommentMenu from '@/components/SelectionCommentMenu';
+import TerminalReasonBanner from '@/components/TerminalReasonBanner';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
@@ -168,6 +169,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     systemInitInfo: _systemInitInfo,
     agentError,
     systemStatus,
+    lastTerminalReason,
     pendingPermission,
     pendingAskUserQuestion,
     pendingExitPlanMode,
@@ -177,6 +179,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setMessages,
     setIsLoading,
     setAgentError,
+    setLastTerminalReason,
     connectSse,
     disconnectSse,
     sendMessage,
@@ -2249,6 +2252,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               </div>
             </div>
           )}
+
+          {/* SDK 0.2.91+ terminal_reason banner. For error-severity reasons that
+              already surface via agentError (image_error / model_error), suppress
+              this banner to avoid double-stacking ~80px of banner region. agentError
+              carries the richer provider-level message; the reason banner's info
+              would just duplicate it. notice/info-severity reasons (max_turns,
+              prompt_too_long, etc.) still render alongside agentError since they
+              carry actionable signals agentError doesn't. */}
+          <TerminalReasonBanner
+            reason={agentError ? null : lastTerminalReason}
+            onDismiss={() => setLastTerminalReason(null)}
+            onNewSession={handleNewSession}
+          />
 
           {agentError && (
             <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)] px-4 py-2 text-[11px] text-[var(--ink)]">
