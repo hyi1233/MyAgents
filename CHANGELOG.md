@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.67] - 2026-04-16
+
+### Added
+- **内置 cuse 电脑操作 MCP(macOS / Windows)**:开箱即用的桌面操作工具,让 AI 能直接帮你点鼠标、打字、截屏、在应用之间切换,不再需要手动装任何命令行工具或配置 MCP。首次使用时 macOS 会弹窗申请屏幕录制、辅助功能、Apple Events 权限,授权一次以后持久生效。Linux 暂不支持(工具列表里会自动隐藏)。
+- **切到 Gemini / Claude Code / Codex 也能用定时任务、发图、生成图表卡片**:之前这三项能力是 MyAgents 内置 Runtime 专属,换到外部 Runtime 后就丢了。现在这些 Runtime 也可以创建心跳循环、让 Bot 发图片 / 视频 / 音频、生成可交互的数据图表卡片 —— 和内置 Runtime 体验一致,无缝切换。
+- **AI 回答中断时显示原因和行动按钮**:之前 AI "突然停了" 只能干瞪眼。现在会显示具体原因,比如:
+  - 对话轮数达上限 → 黄色提示条 + 「新开会话」按钮
+  - 上下文装不下了 → 红色提示条 + 说明
+  - 图片解析失败 / 模型报错 → 具体错误信息
+  - 正常结束或你主动点停止 → 不打扰
+- **定时任务支持超长 prompt 从文件读入**:如果你的心跳循环 prompt 很长(几千字起跳),之前只能挤在一行参数里,现在可以写到一个文件里用 `myagents cron add --prompt-file <path>` 传入,体验参考 `git commit -F`。
+
+### Fixed
+- **macOS 点 X 按钮关不掉窗口**:最近几个版本在 macOS 上点窗口左上角的 X 按钮,窗口不会关闭(无论"最小化到托盘"是否开启)。有循环任务时弹出的退出确认框,点"退出"也没反应。本版本修复 —— 之前只能靠 Cmd+Q 或托盘"退出"菜单来关。
+- **Claude Code 订阅登录被项目里的 .env 文件破坏**:如果你订阅模式登录了 Claude Code,但打开的项目目录里有 `.env` 文件且含 `ANTHROPIC_API_KEY=sk-ant-your-anthropic-key-here` 这类占位符(比如从 `.env.example` 拷贝出来忘了改),之前会收到"Not logged in · Please run /login"报错。现在会正确忽略这些占位符,你的 Keychain 登录状态不再被破坏。
+- **Windows 中文显示为宋体**:中文版 Windows 上,工具调用结果、文件搜索、部分正文区域中文会显示为宋体(SimSun/NSimSun)而非微软雅黑,观感粗糙。根因是字体链里一个容易踩的陷阱,现已修复为正确使用 Microsoft YaHei / YaHei UI。
+- **"回复被中断"横幅不再无意义打扰**:之前用户主动点停止、切换 Runtime、配置变更等场景会误触发黄色提示条,现已正确识别这些预期行为不再打扰,但会记录到统一日志便于事后排查。
+- **安全加固:发图工具的路径校验**:IM Bot 发图 / 视频 / 音频时对文件路径做了严格的白名单 + symlink 真实路径校验,防御通过 symlink 泄露敏感文件(如 `~/.ssh/id_rsa`)的风险。
+
+---
+
 ## [0.1.66] - 2026-04-15
 
 ### Added
