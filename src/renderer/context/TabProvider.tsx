@@ -1103,7 +1103,7 @@ export default function TabProvider({
                         : contentArray.findIndex(b => isToolBlock(b) && b.tool?.streamIndex === index);
                     if (toolIdx !== -1) {
                         const block = contentArray[toolIdx];
-                        if (isToolBlock(block) && block.tool?.inputJson) {
+                        if (isToolBlock(block) && block.tool?.inputJson != null) {
                             let parsedInput: ToolInput | undefined;
                             try {
                                 parsedInput = JSON.parse(block.tool.inputJson);
