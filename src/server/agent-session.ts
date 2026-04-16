@@ -905,8 +905,10 @@ function applyProxyEnvVars(proxyUrl: string, noProxyVal: string): void {
 }
 
 /** Restart session after proxy change.
- * Immediate abort (not deferred like setMcpServers/setAgents) — proxy changes are
- * discrete user actions from Settings, not rapid-fire React state sync. */
+ * Attempts immediate abort when idle; during active turns falls back to
+ * pendingConfigRestart (same deferred mechanism as setMcpServers/setAgents).
+ * Differs from MCP/agents in that it doesn't go through schedulePreWarm's
+ * 500ms debounce — proxy changes are discrete user actions from Settings. */
 function triggerProxyRestart(): void {
   if (querySession) {
     if (isProcessing && !isPreWarming) {
@@ -1103,8 +1105,10 @@ export function getSessionProviderEnv(): ProviderEnv | undefined {
  * Provider env is baked into SDK subprocess environment variables at spawn time
  * and CANNOT be updated on a running process. If a session is already running
  * with stale env (e.g., pre-warm started before sync_ai_config arrived),
- * we must restart it. Immediate abort (not deferred like setMcpServers/setAgents) —
- * provider changes are discrete Rust-layer calls, not rapid-fire React state sync.
+ * we must restart it. Attempts immediate abort when idle; during active turns
+ * falls back to pendingConfigRestart. Differs from MCP/agents in that it doesn't
+ * go through schedulePreWarm's 500ms debounce — provider changes are discrete
+ * Rust-layer calls, not rapid-fire React state sync.
  */
 export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): void {
   const oldLabel = currentProviderEnv?.baseUrl ?? 'anthropic';
@@ -1194,9 +1198,9 @@ function schedulePreWarm(): void {
     if (!agentDir) return;
 
     // Drain deferred config restart: abort the stale session so the next
-    // startStreamingSession() picks up the latest MCP/agents config.
+    // startStreamingSession() picks up the latest MCP/agents/provider/proxy config.
     // Batched exit point for rapid-fire config changes (setMcpServers, setAgents,
-    // OAuth). Provider/proxy use immediate abort (discrete events, no batching needed).
+    // OAuth) and active-turn fallbacks from provider/proxy immediate-abort paths.
     if (pendingConfigRestart && querySession) {
       pendingConfigRestart = false;
       console.log('[agent] pre-warm: applying batched config restart');
@@ -5611,6 +5615,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log(`[agent] Background task ${taskMsg.status}: ${taskMsg.task_id} — ${taskMsg.summary}`);
           broadcast('chat:task-notification', {
             taskId: taskMsg.task_id,
+            toolUseId: taskMsg.tool_use_id,
             status: taskMsg.status,
             summary: taskMsg.summary,
             outputFile: taskMsg.output_file,

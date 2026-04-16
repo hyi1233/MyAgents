@@ -40,17 +40,23 @@ export function setBackgroundTaskDescription(taskId: string, description: string
     descriptions.set(taskId, description);
 }
 
-/** Read task description (set at task-started time). */
-export function getBackgroundTaskDescription(taskId: string): string | undefined {
+/** Read task description (set at task-started time).
+ * Accepts either taskId or toolUseId — resolves through the mapping like getBackgroundTaskStatus.
+ */
+export function getBackgroundTaskDescription(key: string): string | undefined {
+    const taskId = toolUseIdToTaskId.get(key) ?? key;
     return descriptions.get(taskId);
 }
 
-/** Called by TabProvider when `chat:task-notification` arrives. */
-export function setBackgroundTaskStatus(taskId: string, status: string): void {
+/** Called by TabProvider when `chat:task-notification` arrives.
+ * @param directToolUseId - toolUseId forwarded from the SSE event (preferred).
+ *   Falls back to the mapping registered at task-started time if absent.
+ */
+export function setBackgroundTaskStatus(taskId: string, status: string, directToolUseId?: string): void {
     statuses.set(taskId, status);
-    // Dispatch event with BOTH taskId and toolUseId so TaskTool (which only
-    // knows its toolUseId = tool.id) can match the notification to itself.
-    const toolUseId = taskIdToToolUseId.get(taskId);
+    // Resolve toolUseId: prefer the value forwarded directly from the SSE event,
+    // fall back to the mapping built at task-started time.
+    const toolUseId = directToolUseId ?? taskIdToToolUseId.get(taskId);
     window.dispatchEvent(new CustomEvent(EVENT_NAME, {
         detail: { taskId, toolUseId, status },
     }));

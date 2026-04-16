@@ -1595,14 +1595,16 @@ export default function TabProvider({
                 // from task-notification events (which only carry taskId).
                 if (startPayload.taskId && startPayload.toolUseId) {
                     registerBackgroundTask(startPayload.taskId, startPayload.toolUseId);
+                } else if (startPayload.taskId && !startPayload.toolUseId) {
+                    console.warn(`[TabProvider ${tabId}] chat:task-started missing toolUseId for task ${startPayload.taskId} — background task status matching will degrade`);
                 }
                 break;
             }
             case 'chat:task-notification': {
                 console.log(`[TabProvider ${tabId}] ${eventName}:`, data);
-                const payload = data as { taskId?: string; status?: string; summary?: string };
+                const payload = data as { taskId?: string; toolUseId?: string; status?: string; summary?: string };
                 if (payload.taskId && payload.status) {
-                    setBackgroundTaskStatus(payload.taskId, payload.status);
+                    setBackgroundTaskStatus(payload.taskId, payload.status, payload.toolUseId);
                     // Inject a visible notification message into the chat so the user
                     // understands why AI continues responding (prevents "AI talking to itself" UX).
                     const description = getBackgroundTaskDescription(payload.taskId);

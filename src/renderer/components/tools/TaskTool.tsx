@@ -508,8 +508,10 @@ export default function TaskTool({ tool }: TaskToolProps) {
     }
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      // Match by toolUseId (preferred, new path) or taskId (fallback)
-      if ((detail.toolUseId === bgToolUseId || detail.taskId === bgToolUseId) && isTerminalStatus(detail.status)) {
+      // Match strictly by toolUseId — the mapping module and server both
+      // resolve taskId→toolUseId, so detail.toolUseId is always populated
+      // when the mapping was registered at task-started time.
+      if (detail.toolUseId === bgToolUseId && isTerminalStatus(detail.status)) {
         setBgTerminalStatus(detail.status);
       }
     };
