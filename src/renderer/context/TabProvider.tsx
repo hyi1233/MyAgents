@@ -40,7 +40,7 @@ import {
     notifyAskUserQuestion,
     notifyPlanModeRequest,
 } from '@/services/notificationService';
-import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTaskDescription, clearAllBackgroundTaskStatuses } from '@/utils/backgroundTaskStatus';
+import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTaskDescription, clearAllBackgroundTaskStatuses, registerBackgroundTask } from '@/utils/backgroundTaskStatus';
 
 /** Minimum QA rounds before triggering AI title generation */
 const AUTO_TITLE_MIN_ROUNDS = 3;
@@ -1586,9 +1586,15 @@ export default function TabProvider({
             // Background task lifecycle (SDK Task tool)
             case 'chat:task-started': {
                 console.log(`[TabProvider ${tabId}] ${eventName}:`, data);
-                const startPayload = data as { taskId?: string; description?: string };
+                const startPayload = data as { taskId?: string; toolUseId?: string; description?: string };
                 if (startPayload.taskId && startPayload.description) {
                     setBackgroundTaskDescription(startPayload.taskId, startPayload.description);
+                }
+                // Register the toolUseId↔taskId mapping so TaskTool components
+                // (which only know their tool.id = toolUseId) can look up status
+                // from task-notification events (which only carry taskId).
+                if (startPayload.taskId && startPayload.toolUseId) {
+                    registerBackgroundTask(startPayload.taskId, startPayload.toolUseId);
                 }
                 break;
             }
