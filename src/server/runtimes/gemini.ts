@@ -35,6 +35,7 @@ import type {
   ImagePayload,
 } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
+import { resolveGeminiWorkspaceInstructions } from './workspace-instructions';
 
 // ─── Tmp directory layout for system prompt files ───
 
@@ -156,6 +157,7 @@ async function extractGeminiBasePrompt(version: string): Promise<string | null> 
  * Layout:
  *   <header comment with session id + timestamp>
  *   <MyAgents three-layer prompt (verbatim from options.systemPromptAppend)>
+ *   <workspace instructions — cross-runtime protocol, only when GEMINI.md absent>
  *   ---
  *   # Built-in Gemini CLI Guidelines
  *   <Gemini official system prompt verbatim, if extraction succeeded>
@@ -167,6 +169,7 @@ async function writeSessionSystemPrompt(
   sessionId: string,
   myAgentsPrompt: string | undefined,
   geminiVersion: string,
+  workspacePath?: string,
 ): Promise<string | null> {
   if (!myAgentsPrompt || myAgentsPrompt.trim().length === 0) return null;
 
@@ -179,6 +182,17 @@ async function writeSessionSystemPrompt(
   let content = `<!-- MyAgents Gemini runtime session prompt, generated at ${timestamp} -->\n`;
   content += `<!-- Session: ${sessionId} -->\n\n`;
   content += myAgentsPrompt.trim() + '\n\n';
+
+  // Cross-runtime workspace protocol: inject workspace instruction files when
+  // GEMINI.md is absent. Chain: CLAUDE.md + rules → AGENTS.md → nothing.
+  // When GEMINI.md exists, Gemini loads it natively — we skip to avoid duplication.
+  if (workspacePath) {
+    const workspaceInstructions = resolveGeminiWorkspaceInstructions(workspacePath);
+    if (workspaceInstructions) {
+      console.log(`[gemini] Injecting workspace instructions (${workspaceInstructions.length} bytes)`);
+      content += workspaceInstructions + '\n\n';
+    }
+  }
 
   if (basePrompt && basePrompt.trim().length > 0) {
     content += '---\n\n';
@@ -244,19 +258,21 @@ class JsonRpcClient {
     const id = this.nextId++;
     this.write({ jsonrpc: '2.0', id, method, params });
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new Error(`JSON-RPC call "${method}" timed out after ${timeoutMs}ms`));
-        }
-      }, timeoutMs);
+      const timer = timeoutMs > 0
+        ? setTimeout(() => {
+            if (this.pending.has(id)) {
+              this.pending.delete(id);
+              reject(new Error(`JSON-RPC call "${method}" timed out after ${timeoutMs}ms`));
+            }
+          }, timeoutMs)
+        : null;
       this.pending.set(id, {
         resolve: (r) => {
-          clearTimeout(timer);
+          if (timer) clearTimeout(timer);
           resolve(r);
         },
         reject: (e) => {
-          clearTimeout(timer);
+          if (timer) clearTimeout(timer);
           reject(e);
         },
       });
@@ -608,6 +624,7 @@ export class GeminiRuntime implements AgentRuntime {
       options.sessionId,
       options.systemPromptAppend,
       geminiVersion,
+      options.workspacePath,
     );
 
     // 3. Spawn gemini --acp with the system prompt env var (if we have a file).
@@ -853,7 +870,7 @@ export class GeminiRuntime implements AgentRuntime {
       .call(
         'session/prompt',
         { sessionId: geminiProc.sessionId, prompt },
-        10 * 60_000,
+        0,  // No RPC timeout — watchdog handles hung processes
       )
       .then((result) => {
         const usage = extractUsage(result as PromptResponse);
@@ -1097,10 +1114,18 @@ export class GeminiRuntime implements AgentRuntime {
           });
 
           events.push({ kind: 'tool_use_stop', toolUseId: toolCallId });
+          const toolName = state?.toolName || mapGeminiInternalToolName(
+            parseGeminiToolName(toolCallId),
+            String(update.kind || ''),
+            String(update.title || 'Tool'),
+          );
+          const fallbackResult = isError
+            ? 'Tool execution failed'
+            : getEmptyResultFallback(toolName);
           events.push({
             kind: 'tool_result',
             toolUseId: toolCallId,
-            content: resultText || (isError ? 'Tool execution failed' : 'Tool executed'),
+            content: resultText || fallbackResult,
             isError,
           });
           return events;
@@ -1422,20 +1447,71 @@ function buildGeminiToolInput(
   };
 }
 
-/** Extract text content from a tool_call_update's `content[]` array. */
+/**
+ * Fallback result text when Gemini ACP returns empty content for a completed tool.
+ * Some tools (Read, Glob, Grep) don't expose their output via ACP — the result
+ * is consumed internally by Gemini. We show a tool-specific hint instead of
+ * the generic "Tool executed".
+ */
+function getEmptyResultFallback(toolName: string): string {
+  switch (toolName) {
+    case 'Read':   return '(content consumed by Gemini internally)';
+    case 'Grep':   return '(search results consumed by Gemini internally)';
+    case 'Glob':   return '(file list consumed by Gemini internally)';
+    case 'Bash':   return '(no output)';
+    case 'Write':  return '(file written)';
+    case 'Edit':   return '(file edited)';
+    default:       return '(completed)';
+  }
+}
+
+/** Extract text content from a tool_call_update's `content[]` array.
+ *
+ * Gemini ACP content items come in several shapes:
+ *   - `{ text: "..." }` — plain text (e.g. Read result)
+ *   - `{ content: { text: "..." } }` — nested text
+ *   - `{ type: "diff", path, oldText, newText }` — file edits (Edit / Write)
+ *   - `{ type: "output", text: "..." }` — shell output (Bash)
+ */
 function extractToolResultText(update: Record<string, unknown>): string {
   const content = update.content as Array<Record<string, unknown>> | undefined;
-  if (!Array.isArray(content)) return '';
+  if (!Array.isArray(content) || content.length === 0) return '';
   const parts: string[] = [];
   for (const item of content) {
+    // Nested text: { content: { text: "..." } }
     const inner = item.content as Record<string, unknown> | undefined;
     if (inner && typeof inner.text === 'string') {
       parts.push(inner.text);
+    // Direct text: { text: "..." } or { type: "output", text: "..." }
     } else if (typeof item.text === 'string') {
       parts.push(item.text);
+    // Diff content: { type: "diff", path, oldText, newText }
+    } else if (item.type === 'diff' && typeof item.path === 'string') {
+      const old = typeof item.oldText === 'string' ? item.oldText : '';
+      const nw = typeof item.newText === 'string' ? item.newText : '';
+      parts.push(`--- ${item.path}\n+++ ${item.path}\n${formatMinimalDiff(old, nw)}`);
     }
   }
   return parts.join('\n');
+}
+
+/** Produce a minimal unified-diff-style string from old/new text (line-level). */
+function formatMinimalDiff(oldText: string, newText: string): string {
+  const oldLines = oldText.split('\n');
+  const newLines = newText.split('\n');
+  const out: string[] = [];
+  const max = Math.max(oldLines.length, newLines.length);
+  for (let i = 0; i < max; i++) {
+    const ol = i < oldLines.length ? oldLines[i] : undefined;
+    const nl = i < newLines.length ? newLines[i] : undefined;
+    if (ol === nl) {
+      out.push(` ${ol}`);
+    } else {
+      if (ol !== undefined) out.push(`-${ol}`);
+      if (nl !== undefined) out.push(`+${nl}`);
+    }
+  }
+  return out.join('\n');
 }
 
 /** Extract usage from a session/prompt RPC response's `_meta.quota`. */

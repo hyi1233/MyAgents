@@ -10,6 +10,7 @@ import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
+import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import type { RuntimeType } from '../../shared/types/runtime';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
 import { createSessionMetadata } from '../types/session';
@@ -643,10 +644,25 @@ async function _doStartExternalSession(options: {
   // The builtin path at agent-session.ts keeps cliToolsEnabled off and
   // continues to use the in-process MCP servers — no behaviour change. See
   // prd_0.1.67_external_runtime_cli_skill.md.
-  const systemPromptAppend = buildSystemPromptAppend(options.scenario, {
+  const baseSystemPrompt = buildSystemPromptAppend(options.scenario, {
     runtime: runtimeType,
     cliToolsEnabled: true,
   });
+
+  // Cross-runtime workspace protocol: append workspace instruction files
+  // so external runtimes receive the same project context as the builtin SDK.
+  //   - Codex: only .claude/rules/*.md (CLAUDE.md is loaded natively via -c flag)
+  //   - Gemini: full chain fallback (handled inside writeSessionSystemPrompt)
+  //   - Claude Code: no injection needed (reads CLAUDE.md natively)
+  const workspaceInstructions = runtimeType === 'codex'
+    ? resolveCodexWorkspaceInstructions(options.workspacePath)
+    : '';  // Gemini handles it in writeSessionSystemPrompt; CC reads natively
+  if (workspaceInstructions) {
+    console.log(`[external-session] Injecting workspace instructions for ${runtimeType} (${workspaceInstructions.length} bytes)`);
+  }
+  const systemPromptAppend = workspaceInstructions
+    ? baseSystemPrompt + '\n\n' + workspaceInstructions
+    : baseSystemPrompt;
 
   console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}, model=${options.model || '(default)'}, permissionMode=${options.permissionMode || '(default)'}, scenario=${options.scenario.type}, resume=${options.resumeSessionId || 'none'}`);
   turnCompleted = false;
