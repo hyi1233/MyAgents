@@ -70,12 +70,9 @@ onTokenChange((serverId, event) => {
   if (!currentMcpServers?.some(s => s.id === serverId)) return;
 
   if (event === 'acquired' || event === 'refreshed') {
-    console.log(`[agent] OAuth token ${event} for MCP ${serverId}, restarting session to apply`);
-    if (isProcessing && !isPreWarming) {
-      pendingConfigRestart = true;
-    } else {
-      abortPersistentSession();
-    }
+    console.log(`[agent] OAuth token ${event} for MCP ${serverId}, deferring restart to pre-warm debounce`);
+    if (querySession) pendingConfigRestart = true;
+    preWarmFailCount = 0;
     if (!isProcessing || isPreWarming) {
       schedulePreWarm();
     }
@@ -376,9 +373,12 @@ let sessionState: SessionState = 'idle';
 let querySession: Query | null = null;
 let isProcessing = false;
 let shouldAbortSession = false;
-// Deferred config restart: when MCP/Agents config changes during an active turn,
-// we defer the session restart until the current turn completes naturally.
-// This prevents Tab config sync from aborting a shared IM session mid-response.
+// Deferred config restart: MCP/Agents config changes set this flag instead of
+// aborting immediately. Two consumers drain it:
+// 1. schedulePreWarm() timer — batches rapid-fire changes (e.g. React state sync
+//    firing 7× /api/mcp/set in 4s) into a single abort+restart.
+// 2. Turn-complete handler — when config changed during an active user turn,
+//    the restart is deferred until the turn finishes to avoid killing mid-response.
 let pendingConfigRestart = false;
 let sessionTerminationPromise: Promise<void> | null = null;
 
@@ -964,18 +964,15 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
     }
   }
 
-  // If MCP changed and session is running, restart with resume to apply new config
+  // If MCP changed, defer restart to the debounced pre-warm timer.
+  // DO NOT abort immediately — rapid-fire /api/mcp/set calls from React state sync
+  // (e.g. 7 calls in 4s when toggling one server in Settings) would kill the SDK
+  // subprocess + all stdio MCP servers repeatedly, destroying in-process state.
+  // The timer in schedulePreWarm() batches these into a single abort+restart.
   if (mcpChanged && querySession) {
     const ids = servers.map(s => s.id).join(', ') || 'none';
-    if (isProcessing && !isPreWarming) {
-      // Active user turn in progress (e.g. IM responding) — defer restart to avoid killing mid-response.
-      // The restart will fire after the current turn completes (see result handler pendingConfigRestart).
-      console.log(`[agent] MCP config changed → [${ids}], deferring restart (active turn)`);
-      pendingConfigRestart = true;
-    } else {
-      if (isDebugMode) console.log(`[agent] MCP config changed → [${ids}], restarting session with resume`);
-      abortPersistentSession();
-    }
+    console.log(`[agent] MCP config changed → [${ids}], deferring restart to pre-warm debounce`);
+    pendingConfigRestart = true;
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -1018,15 +1015,10 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
     console.log(`[agent] Sub-agents set: ${newNames || 'none'}`);
   }
 
-  // If agents changed and session is running, restart with resume
+  // Defer restart to pre-warm debounce (same as setMcpServers — see comment there).
   if (agentsChanged && querySession) {
-    if (isProcessing && !isPreWarming) {
-      console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), deferring restart (active turn)`);
-      pendingConfigRestart = true;
-    } else {
-      if (isDebugMode) console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), restarting session with resume`);
-      abortPersistentSession();
-    }
+    console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), deferring restart to pre-warm debounce`);
+    pendingConfigRestart = true;
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -1197,6 +1189,21 @@ function schedulePreWarm(): void {
   preWarmTimer = setTimeout(() => {
     preWarmTimer = null;
     if (!agentDir) return;
+
+    // Drain deferred config restart: abort the stale session so the next
+    // startStreamingSession() picks up the latest MCP/agents/provider config.
+    // This is the single exit point for all config-change restarts — setMcpServers,
+    // setAgents etc. only set pendingConfigRestart=true and let this timer batch them.
+    if (pendingConfigRestart && querySession) {
+      pendingConfigRestart = false;
+      console.log('[agent] pre-warm: applying batched config restart');
+      abortPersistentSession();
+      // Session is now terminating — retry after cleanup finishes
+      schedulePreWarm();
+      return;
+    }
+    pendingConfigRestart = false;
+
     if (isSessionActive()) {
       // Session still cleaning up — RETRY instead of calling startStreamingSession().
       // We must NOT call startStreamingSession() here because it would await
