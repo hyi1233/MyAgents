@@ -163,7 +163,7 @@ import { broadcast, createSseClient, getClients } from './sse';
 import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifySubscription } from './provider-verify';
 import { createBridgeHandler } from './openai-bridge';
 import { registerBridgeSeedFn } from './bridge-cache';
-import { generateTitle } from './title-generator';
+import { generateTitle, generateTitleExternal } from './title-generator';
 import {
   shouldUseExternalRuntime,
   sendExternalMessage,
@@ -2877,11 +2877,29 @@ async function main() {
           return jsonResponse({ success: false, skipped: true });
         }
 
-        const title = await generateTitle(
-          rounds,
-          payload.model || '',
-          payload.providerEnv,
-        );
+        // Runtime-aware dispatch: builtin uses the Claude Agent SDK path with
+        // provider-env; external runtimes (CC/Codex/Gemini) spawn a fresh
+        // short-lived CLI process of the same runtime so the title respects the
+        // session's actual model + CLI auth. See title-generator.ts for rationale.
+        const activeRuntime = getActiveRuntimeType();
+        let title: string | null;
+        if (activeRuntime === 'builtin') {
+          title = await generateTitle(
+            rounds,
+            payload.model || '',
+            payload.providerEnv,
+          );
+        } else {
+          // External runtimes don't need providerEnv — auth is CLI-owned
+          // (claude login / codex login / gemini OAuth). workspacePath comes
+          // from session metadata so Gemini/Codex inherit project context.
+          title = await generateTitleExternal(
+            rounds,
+            activeRuntime,
+            payload.model || '',
+            meta.agentDir,
+          );
+        }
 
         if (title) {
           // Re-check titleSource before writing to prevent TOCTOU race with user rename
