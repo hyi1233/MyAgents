@@ -987,6 +987,26 @@ export class GeminiRuntime implements AgentRuntime {
     }
   }
 
+  /**
+   * Switch the active session's model via ACP `session/set_model` RPC
+   * (stable protocol method, see https://agentclientprotocol.com/protocol/schema).
+   * Throws on failure so the caller can fall back to process restart.
+   * Empty `model` is a no-op — the runtime keeps its currently selected model.
+   */
+  async setModel(process: RuntimeProcess, model: string): Promise<void> {
+    const geminiProc = process as GeminiProcess;
+    if (geminiProc.exited) throw new Error('Gemini process has exited');
+    if (!geminiProc.sessionId) throw new Error('Gemini session has no sessionId');
+    if (!model) return;  // "" means "default" — leave Gemini's selection alone
+
+    await geminiProc.rpc.call(
+      'session/set_model',
+      { sessionId: geminiProc.sessionId, modelId: model },
+      5_000,
+    );
+    console.log(`[gemini] set_model (mid-session) → ${model}`);
+  }
+
   // ─── Logging ───
 
   private logNotification(method: string, params: unknown): void {

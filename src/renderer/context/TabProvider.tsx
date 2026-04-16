@@ -1356,7 +1356,7 @@ export default function TabProvider({
             }
 
             case 'chat:system-init': {
-                const payload = data as { info: SystemInitInfo; sessionId?: string } | null;
+                const payload = data as { info: SystemInitInfo; sessionId?: string; prewarm?: boolean } | null;
                 if (payload?.info) {
                     setSystemInitInfo(payload.info);
 
@@ -1364,8 +1364,18 @@ export default function TabProvider({
                     // Do NOT set isStreamingRef — that must only be set when a streaming message
                     // is actually created (first message-chunk via flushSync). Setting it here
                     // without a streaming message causes chunks to skip the creation path.
-                    isSessionActiveRef.current = true;
-                    setIsLoading(true);
+                    //
+                    // Pre-warm exception: a pre-warmed external runtime emits session_init when
+                    // the CLI subprocess finishes handshake — no user turn has started. Flipping
+                    // isLoading:true here would strand the UI at "加载智慧模块中..." until the
+                    // user actually sends a message. Skip the loading flip for prewarm payloads;
+                    // when the user actually sends a message the chat:status 'running' event
+                    // (see line 827 branch above) will set isLoading:true, and Case 1/2 paths
+                    // re-emit chat:system-init with prewarm cleared.
+                    if (!payload.prewarm) {
+                        isSessionActiveRef.current = true;
+                        setIsLoading(true);
+                    }
 
                     // Auto-sync sessionId when a new session is created (e.g., first message in empty session)
                     // This ensures currentSessionId stays in sync with the actual session

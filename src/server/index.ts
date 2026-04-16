@@ -185,6 +185,7 @@ import {
   getExternalPendingInteractiveRequests,
   getExternalSessionId,
   getExternalLiveAssistantMessage,
+  prewarmExternalSession,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
 import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
@@ -1755,6 +1756,48 @@ async function main() {
         }
 
         return jsonResponse({ success: true, runtime: activeRuntime });
+      }
+
+      // Pre-warm the external runtime process (v0.1.68)
+      //
+      // Called by the frontend when a Chat tab opens a Gemini/Codex session.
+      // Spawns the CLI, completes the JSON-RPC handshake, and opens a session
+      // so the user's first message can hit sendExternalMessage Case 3 (write
+      // to stdin of an already-warm process) instead of paying the ~11s cold
+      // boot — which on Gemini includes base-prompt extraction + session/new
+      // round-trips over the ACP channel.
+      //
+      // Idempotent + fire-safe: the endpoint short-circuits if a session is
+      // already active/starting, and relies on prewarmExternalSession to skip
+      // non-persistent runtimes (CC -p mode) with a reason string.
+      if (pathname === '/api/runtime/prewarm' && request.method === 'POST') {
+        if (!shouldUseExternalRuntime()) {
+          return jsonResponse({ success: false, error: 'Pre-warm is only for external runtimes' }, 400);
+        }
+        const body = (await request.json().catch(() => ({}))) as {
+          sessionId?: string;
+          model?: string;
+          permissionMode?: string;
+        };
+        const sessionId = body.sessionId || getSessionId();
+        if (!sessionId) {
+          return jsonResponse({ success: false, error: 'No sessionId available' }, 400);
+        }
+        try {
+          const result = await prewarmExternalSession({
+            sessionId,
+            workspacePath: currentAgentDir,
+            scenario: { type: 'desktop' },
+            model: body.model,
+            permissionMode: body.permissionMode,
+          });
+          return jsonResponse({ success: true, ...result });
+        } catch (error) {
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+            500,
+          );
+        }
       }
 
       if (pathname === '/api/runtime/permission-response' && request.method === 'POST') {
