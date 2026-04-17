@@ -523,6 +523,18 @@ fn decode_string_list(raw: &str) -> Result<Vec<String>, String> {
     Ok(Vec::new())
 }
 
+// ================ Static access for Management API ================
+
+static THOUGHT_STORE: std::sync::OnceLock<Arc<ThoughtStore>> = std::sync::OnceLock::new();
+
+pub fn set_thought_store(store: Arc<ThoughtStore>) {
+    let _ = THOUGHT_STORE.set(store);
+}
+
+pub fn get_thought_store() -> Option<&'static Arc<ThoughtStore>> {
+    THOUGHT_STORE.get()
+}
+
 // ================ Tauri commands ================
 
 pub type ManagedThoughtStore = Arc<ThoughtStore>;

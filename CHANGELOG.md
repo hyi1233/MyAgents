@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.69] - 2026-04-18
+
+### Added
+- **任务中心（Task Center）**：全新的任务管理 Tab，左栏是「想法」速记流（按月分目录的 Markdown 文件 + `#tag` 自动识别），右栏是任务列表（进行中 / 待启动 / 已完成三段式），点击任务卡唤起详情 Overlay，支持状态变更历史、手动归档 / 删除。顶部导航栏新增「任务」入口。
+- **任务 / 想法 模式切换器**：启动页输入框上方新增 `任务 | 想法` 切换（`Cmd/Ctrl+Shift+T` 切换），选中「想法」后回车保存为想法而非启动对话，写完自动切回「任务」。
+- **`myagents task` CLI**：AI 可通过 shell 自管任务生命周期 —— `task list / get / update-status / update-progress / append-session / archive / delete` 覆盖 PRD §10.2.1 状态机。`actor` / `source` 由运行环境自动推断（`MYAGENTS_PORT` 在位 = AI 子进程 → `agent/cli`，否则 = 用户终端 → `user/cli`），UI 路径由 Tauri 层强制盖戳 `user/ui`，三条入口互不伪造。
+- **`myagents thought` CLI**：`thought list / create` 让 AI / 用户在 shell 中沉淀速记。
+- **状态机 + 审计链**：Task 持久化 `statusHistory: StatusTransition[]` 追加日志（`{from, to, at, actor, source, message}`），任何状态变更原子写入；崩溃恢复自动把遗留 running/verifying 迁到 blocked 并记入 statusHistory；删除写入 `→ deleted` 伪状态保留审计可溯。
+- **思考与任务双向绑定**：派发想法时 `Thought.convertedTaskIds` 自动追加任务 ID；任务软删时反向清理。
+
+### Architecture
+- 新增 Rust 层 `task.rs` / `thought.rs` 模块：tmp-write + `sync_all` + rename + 父目录 fsync 的 crash-durable 原子写盘；`task_docs_dir` 路径穿越硬拦截（`..` / 分隔符 / 非法字符一律拒绝）；`create_from_alignment` 事务化（JSONL 先落盘、alignment 目录再 rename、失败回滚）。
+- 新增 Bun `admin-api.ts` 任务/想法转发层 + Rust `management_api.rs` HTTP 端点：`/api/task/*` + `/api/thought/*` 与 `/api/cron/*` 同架构层次。
+- 新增 `src/shared/types/task.ts` / `thought.ts` 共享类型：`TaskRunMode` / `TaskDispatchOrigin` / `TaskEndConditions` 显式 kebab-case + `deadline` 毫秒时间戳，消除 Rust/TS 序列化契约漂移。
+- 内置 MA 小助理版本门控提升（`ADMIN_AGENT_VERSION 11 → 12`，`CLI_VERSION 4 → 5`）。
+
+### Deferred to future releases
+- CronTaskManager 自动注册（scheduled/recurring/loop 的调度器挂载）与一键「重新派发」—— 数据结构已持久化，挂调度在后续迭代完成。
+- 任务通知分发（桌面 / IM Bot 转发 statusHistory 变更）—— 复用既有 `send_task_notification` / `deliver_cron_result_to_bot` 的集成在 v0.1.70 补齐。
+- AI 讨论路径（`/task-alignment` 讨论 → `task create-from-alignment` 创建）端到端闭环 —— 数据层已实现，skill 侧指令补齐在后续版本。
+- Tantivy 的 ThoughtIndex / TaskIndex 全文检索接入。
+
+---
+
 ## [0.1.68] - 2026-04-17
 
 ### Added

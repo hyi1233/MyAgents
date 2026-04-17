@@ -98,6 +98,8 @@ Commands:
   agent     Manage agents & channels
   skill     Manage skills (install from URL, list, enable/disable, sync)
   cron      Manage scheduled tasks (list/add/runs/exit ...)
+  task      Manage Task Center tasks (list/get/update-status/update-progress ...)
+  thought   Manage Task Center thoughts (list/create)
   im        IM runtime actions for current chat (send-media)
   widget    Generative UI widget design guidelines (readme)
   plugin    Manage OpenClaw channel plugins
@@ -127,6 +129,14 @@ Examples:
   myagents skill remove my-skill
   myagents skill sync
   myagents cron list
+  myagents task list
+  myagents task get <taskId>
+  myagents task update-status <taskId> running --message "starting work"
+  myagents task update-status <taskId> verifying
+  myagents task update-status <taskId> done --message "bundle size dropped 40%"
+  myagents task update-progress <taskId> "finished step 1/3"
+  myagents task append-session <taskId> <sessionId>
+  myagents thought list
   myagents plugin list
   myagents version
   myagents reload
@@ -205,6 +215,18 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'plugin' && action === 'list') {
     printPluginList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
+  if (group === 'task' && action === 'list') {
+    printTaskList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
+  if (group === 'task' && action === 'get') {
+    printTaskDetail(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'thought' && action === 'list') {
+    printThoughtList(result.data as Array<Record<string, unknown>>);
     return;
   }
   if (group === 'skill' && action === 'list') {
@@ -417,6 +439,76 @@ function printSkillAdd(result: Record<string, unknown>): void {
   }
   // Fall-through: preview / dry-run / error path already handled by generic branch
   console.log(`\u2713 ${result.hint ?? 'done'}`);
+}
+
+function printTaskList(tasks: Array<Record<string, unknown>>): void {
+  if (!tasks || tasks.length === 0) {
+    console.log('(no tasks)');
+    return;
+  }
+  console.log(`Tasks (${tasks.length}):`);
+  for (const t of tasks) {
+    const status = String(t.status ?? '?');
+    const mode = String(t.executionMode ?? 'once');
+    const origin = String(t.dispatchOrigin ?? 'direct');
+    console.log(`  ${t.id}  [${status}]  ${t.name}`);
+    console.log(
+      `     mode=${mode}  origin=${origin}  workspace=${t.workspaceId}  sessions=${
+        Array.isArray(t.sessionIds) ? (t.sessionIds as string[]).length : 0
+      }`,
+    );
+  }
+}
+
+function printTaskDetail(task: Record<string, unknown>): void {
+  if (!task) {
+    console.log('(task not found)');
+    return;
+  }
+  console.log(`Task ${task.id}: ${task.name}`);
+  console.log(`  Status:         ${task.status}`);
+  console.log(`  Executor:       ${task.executor}`);
+  console.log(`  Execution mode: ${task.executionMode}`);
+  console.log(`  Dispatch:       ${task.dispatchOrigin}`);
+  console.log(`  Workspace:      ${task.workspacePath ?? task.workspaceId}`);
+  if (task.description) console.log(`  Description:    ${task.description}`);
+  if (task.runMode) console.log(`  RunMode:        ${task.runMode}`);
+  if (task.runtime) console.log(`  Runtime:        ${task.runtime}`);
+  if (Array.isArray(task.tags) && (task.tags as string[]).length > 0) {
+    console.log(`  Tags:           ${(task.tags as string[]).join(', ')}`);
+  }
+  const hist = task.statusHistory as Array<Record<string, unknown>> | undefined;
+  if (hist && hist.length > 0) {
+    const last = hist[hist.length - 1];
+    console.log(
+      `  Last change:    ${last.from ?? '—'} → ${last.to} (${last.actor}${last.source ? ` / ${last.source}` : ''})`,
+    );
+    if (last.message) console.log(`     message: ${last.message}`);
+    console.log(`  History entries: ${hist.length}`);
+  }
+}
+
+function printThoughtList(thoughts: Array<Record<string, unknown>>): void {
+  if (!thoughts || thoughts.length === 0) {
+    console.log('(no thoughts)');
+    return;
+  }
+  console.log(`Thoughts (${thoughts.length}):`);
+  for (const t of thoughts) {
+    const content = String(t.content ?? '');
+    const preview = content.length > 80 ? content.slice(0, 77) + '...' : content;
+    const tags = Array.isArray(t.tags) ? (t.tags as string[]) : [];
+    const convCount = Array.isArray(t.convertedTaskIds)
+      ? (t.convertedTaskIds as string[]).length
+      : 0;
+    console.log(`  ${t.id}  ${preview}`);
+    if (tags.length || convCount) {
+      const bits: string[] = [];
+      if (tags.length) bits.push(`tags=${tags.join(',')}`);
+      if (convCount) bits.push(`tasks=${convCount}`);
+      console.log(`     ${bits.join('  ')}`);
+    }
+  }
 }
 
 function printMcpOAuth(data: Record<string, unknown>): void {
@@ -820,6 +912,75 @@ function buildRequestBody(
   if (group === 'config') {
     if (action === 'get') return { key: rest[0] || flags.key };
     if (action === 'set') return { key: rest[0] || flags.key, value: tryParseJson(rest[1] ?? String(flags.value ?? '')), dryRun: flags.dryRun };
+    return {};
+  }
+
+  // Task Center (v0.1.69) — covers all `myagents task <action>` subcommands.
+  //
+  // The `actor` / `source` trust fields are NOT settable via the CLI; the
+  // admin-api handler derives them from the calling process environment
+  // (MYAGENTS_PORT present → agent subprocess; otherwise user terminal).
+  if (group === 'task') {
+    if (action === 'list') {
+      return {
+        workspaceId: flags.workspaceId,
+        status: flags.status,
+        tag: flags.tag,
+        includeDeleted: flags.includeDeleted,
+      };
+    }
+    if (action === 'get') return { id: rest[0] || flags.id };
+    if (action === 'update-status') {
+      return {
+        id: rest[0],
+        status: rest[1],
+        message: flags.message,
+      };
+    }
+    if (action === 'update-progress') {
+      return {
+        id: rest[0],
+        message: rest.slice(1).join(' ') || flags.message,
+      };
+    }
+    if (action === 'append-session') {
+      return { id: rest[0], sessionId: rest[1] || flags.sessionId };
+    }
+    if (action === 'archive') return { id: rest[0], message: flags.message };
+    if (action === 'delete') return { id: rest[0] };
+    if (action === 'create-direct') {
+      return {
+        name: rest[0] || flags.name,
+        executor: flags.executor ?? 'agent',
+        description: flags.description,
+        workspaceId: flags.workspaceId,
+        workspacePath: flags.workspacePath,
+        taskMdContent: flags.taskMdContent ?? rest.slice(1).join(' '),
+        executionMode: flags.executionMode ?? 'once',
+        runMode: flags.runMode,
+        sourceThoughtId: flags.sourceThoughtId,
+        tags: typeof flags.tags === 'string'
+          ? (flags.tags as string).split(',').map(s => s.trim()).filter(Boolean)
+          : undefined,
+      };
+    }
+    return {};
+  }
+
+  // Thought (v0.1.69) — `myagents thought <list|create>`
+  if (group === 'thought') {
+    if (action === 'list') {
+      return {
+        tag: flags.tag,
+        query: flags.query,
+        limit: flags.limit ? Number(flags.limit) : undefined,
+      };
+    }
+    if (action === 'create') {
+      return {
+        content: rest.join(' ') || flags.content,
+      };
+    }
     return {};
   }
 

@@ -1159,6 +1159,121 @@ export async function handleCronStatus(payload: { workspacePath?: string }): Pro
 }
 
 // ---------------------------------------------------------------------------
+// Task Center forwarding (v0.1.69)
+//
+// Trust-boundary note: the CLI stamps `actor` + `source` from its own env
+// (AI subprocess = agent/cli, user terminal = user/cli) BEFORE posting here.
+// We forward these fields verbatim to the Rust Management API. The renderer-
+// originated path (Tauri IPC) never reaches this module — it goes through
+// `cmd_task_update_status` in Rust which stamps `user/ui` authoritatively.
+// ---------------------------------------------------------------------------
+
+function qsFrom(params: Record<string, string | number | boolean | undefined>): string {
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined) continue;
+    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+  }
+  return parts.length ? `?${parts.join('&')}` : '';
+}
+
+export async function handleTaskList(payload: {
+  workspaceId?: string;
+  status?: string;
+  tag?: string;
+  includeDeleted?: boolean;
+}): Promise<AdminResponse> {
+  const resp = await managementApi(`/api/task/list${qsFrom(payload)}`);
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).tasks ?? [] };
+  }
+  return { success: false, error: String(resp.error ?? 'Failed to list tasks') };
+}
+
+export async function handleTaskGet(payload: { id: string }): Promise<AdminResponse> {
+  const resp = await managementApi(`/api/task/get${qsFrom({ id: payload.id })}`);
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).task };
+  }
+  return { success: false, error: String(resp.error ?? 'Failed to get task') };
+}
+
+export async function handleTaskCreateDirect(
+  payload: Record<string, unknown>,
+): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/create-direct', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskUpdateStatus(
+  payload: Record<string, unknown>,
+): Promise<AdminResponse> {
+  // Infer actor/source if caller omitted them:
+  //   Inside an AI subprocess → MYAGENTS_PORT is set → actor=agent, source=cli.
+  //   Otherwise (user ran `myagents` in their terminal) → actor=user, source=cli.
+  // `MYAGENTS_PORT` is injected by `buildClaudeSessionEnv()` into SDK subproc
+  // env (see cli_architecture.md); the user's own shell does NOT have it set
+  // (the user's CLI binary reads `~/.myagents/sidecar.port` instead).
+  if (payload.actor === undefined) {
+    payload.actor = process.env.MYAGENTS_PORT ? 'agent' : 'user';
+  }
+  if (payload.source === undefined) {
+    payload.source = 'cli';
+  }
+  const resp = await managementApi('/api/task/update-status', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskUpdateProgress(payload: {
+  id: string;
+  message: string;
+}): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/update-progress', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskAppendSession(payload: {
+  id: string;
+  sessionId: string;
+}): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/append-session', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskArchive(payload: {
+  id: string;
+  message?: string;
+}): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/archive', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskDelete(payload: { id: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/delete', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleThoughtList(payload: {
+  tag?: string;
+  query?: string;
+  limit?: number;
+}): Promise<AdminResponse> {
+  const resp = await managementApi(`/api/thought/list${qsFrom(payload)}`);
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).thoughts ?? [] };
+  }
+  return { success: false, error: String(resp.error ?? 'Failed to list thoughts') };
+}
+
+export async function handleThoughtCreate(payload: {
+  content: string;
+  images?: string[];
+}): Promise<AdminResponse> {
+  const resp = await managementApi('/api/thought/create', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
 // Session-scoped capabilities for external runtimes (v0.1.67)
 //
 // These handlers expose Pattern 1 (context-injected) MCP tools to the `myagents`

@@ -109,6 +109,11 @@ pub fn run() {
         Arc::new(thought::ThoughtStore::new(data_dir.join("thoughts")));
     let task_state: task::ManagedTaskStore =
         Arc::new(task::TaskStore::new(data_dir.clone()));
+    // Expose the same Arcs via OnceLock singletons so the Rust Management API
+    // (used by Bun CLI bridge → /api/admin/task/*) can read/write tasks without
+    // access to Tauri `State`. They point at the same inner store.
+    thought::set_thought_store(thought_state.clone());
+    task::set_task_store(task_state.clone());
 
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());

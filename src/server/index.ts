@@ -46,6 +46,9 @@ import {
   handleCronExit, handleImSendMedia, handleReadme,
   handlePluginList, handlePluginInstall, handlePluginUninstall,
   handleAgentRuntimeStatus,
+  handleTaskList, handleTaskGet, handleTaskCreateDirect, handleTaskUpdateStatus,
+  handleTaskUpdateProgress, handleTaskAppendSession, handleTaskArchive, handleTaskDelete,
+  handleThoughtList, handleThoughtCreate,
 } from './admin-api';
 import { setImMediaContext } from './tools/im-media-tool';
 import { setImBridgeToolsContext } from './tools/im-bridge-tools';
@@ -1137,6 +1140,18 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   // Config commands
   if (route === 'config/get') return handleConfigGet(payload as Parameters<typeof handleConfigGet>[0]);
   if (route === 'config/set') return handleConfigSet(payload as Parameters<typeof handleConfigSet>[0]);
+
+  // Task Center — thoughts + tasks (v0.1.69)
+  if (route === 'task/list') return await handleTaskList(payload as Parameters<typeof handleTaskList>[0]);
+  if (route === 'task/get') return await handleTaskGet(payload as Parameters<typeof handleTaskGet>[0]);
+  if (route === 'task/create-direct') return await handleTaskCreateDirect(payload);
+  if (route === 'task/update-status') return await handleTaskUpdateStatus(payload);
+  if (route === 'task/update-progress') return await handleTaskUpdateProgress(payload as Parameters<typeof handleTaskUpdateProgress>[0]);
+  if (route === 'task/append-session') return await handleTaskAppendSession(payload as Parameters<typeof handleTaskAppendSession>[0]);
+  if (route === 'task/archive') return await handleTaskArchive(payload as Parameters<typeof handleTaskArchive>[0]);
+  if (route === 'task/delete') return await handleTaskDelete(payload as Parameters<typeof handleTaskDelete>[0]);
+  if (route === 'thought/list') return await handleThoughtList(payload as Parameters<typeof handleThoughtList>[0]);
+  if (route === 'thought/create') return await handleThoughtCreate(payload as Parameters<typeof handleThoughtCreate>[0]);
 
   // System commands
   if (route === 'status') return handleStatus();

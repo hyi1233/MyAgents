@@ -18,6 +18,8 @@ use crate::im::{self, ManagedImBots, ManagedAgents};
 use crate::im::adapter::ImStreamAdapter;
 use crate::im::bridge;
 use crate::im::types::MediaType;
+use crate::task;
+use crate::thought;
 
 /// Global management API port (set once at startup)
 static MANAGEMENT_PORT: OnceLock<u16> = OnceLock::new();
@@ -97,6 +99,17 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/plugin/install", post(install_plugin_handler))
         .route("/api/plugin/uninstall", post(uninstall_plugin_handler))
         .route("/api/agent/runtime-status", get(agent_runtime_status_handler))
+        // Task Center (v0.1.69) — HTTP surface for the `myagents task` CLI.
+        .route("/api/task/list", get(task_list_handler))
+        .route("/api/task/get", get(task_get_handler))
+        .route("/api/task/create-direct", post(task_create_direct_handler))
+        .route("/api/task/update-status", post(task_update_status_handler))
+        .route("/api/task/update-progress", post(task_update_progress_handler))
+        .route("/api/task/append-session", post(task_append_session_handler))
+        .route("/api/task/archive", post(task_archive_handler))
+        .route("/api/task/delete", post(task_delete_handler))
+        .route("/api/thought/list", get(thought_list_handler))
+        .route("/api/thought/create", post(thought_create_handler))
         // Bridge messages carry base64-encoded media attachments (images/files).
         // Default axum 2MB limit is too small — raise to 50MB for this API.
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024));
@@ -986,5 +999,301 @@ async fn handle_bridge_message(
                 "error": format!("Failed to send message to processing loop: {}", e)
             })),
         ),
+    }
+}
+
+// ========================================================================
+// Task Center handlers (v0.1.69)
+// ========================================================================
+//
+// These endpoints are called by the Bun Admin API (admin-api.ts), which in
+// turn is called by the `myagents task` CLI. The CLI is the **entry point of
+// trust inference** for `actor` / `source` (PRD §10.2.1 caller-inference table):
+//
+// - `MYAGENTS_PORT` env var set → AI sub-process → `actor=agent, source=cli`
+// - Otherwise (user terminal reading `~/.myagents/sidecar.port`) →
+//   `actor=user, source=cli`
+//
+// That inference happens in the CLI script itself (knows its own env) and is
+// forwarded to the Bun Admin API, which forwards here. We take the caller's
+// word for actor/source: the CLI process running inside an SDK subprocess is
+// inside a trust boundary already (the whole host is the user's machine).
+// For UI transitions the Tauri command layer stamps `user/ui` authoritatively
+// without ever reaching this path.
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskListQuery {
+    workspace_id: Option<String>,
+    status: Option<String>,
+    tag: Option<String>,
+    include_deleted: Option<bool>,
+}
+
+async fn task_list_handler(
+    Query(q): Query<TaskListQuery>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    let filter = task::TaskListFilter {
+        workspace_id: q.workspace_id,
+        status: q.status.and_then(|s| parse_status_filter(&s)),
+        tag: q.tag,
+        include_deleted: q.include_deleted,
+    };
+    let tasks = store.list(filter).await;
+    Json(serde_json::json!({ "ok": true, "tasks": tasks }))
+}
+
+fn parse_status_filter(raw: &str) -> Option<task::StatusFilter> {
+    if raw.contains(',') {
+        let list: Vec<task::TaskStatus> = raw
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| serde_json::from_str(&format!("\"{}\"", s)).ok())
+            .collect();
+        if list.is_empty() {
+            None
+        } else {
+            Some(task::StatusFilter::Many(list))
+        }
+    } else {
+        serde_json::from_str::<task::TaskStatus>(&format!("\"{}\"", raw.trim()))
+            .ok()
+            .map(task::StatusFilter::One)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskGetQuery {
+    id: String,
+}
+
+async fn task_get_handler(
+    Query(q): Query<TaskGetQuery>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    match store.get(&q.id).await {
+        Some(t) => Json(serde_json::json!({ "ok": true, "task": t })),
+        None => Json(serde_json::json!({
+            "ok": false,
+            "error": "not_found"
+        })),
+    }
+}
+
+async fn task_create_direct_handler(
+    Json(input): Json<task::TaskCreateDirectInput>,
+) -> Json<serde_json::Value> {
+    let Some(task_store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    let source_thought = input.source_thought_id.clone();
+    match task_store.create_direct(input).await {
+        Ok(t) => {
+            // Best-effort bidirectional link (same as Tauri command layer).
+            if let (Some(thought_id), Some(thoughts)) =
+                (source_thought, thought::get_thought_store())
+            {
+                let _ = thoughts.link_task(&thought_id, &t.id).await;
+            }
+            Json(serde_json::json!({ "ok": true, "task": t }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskUpdateStatusApiRequest {
+    id: String,
+    status: task::TaskStatus,
+    #[serde(default)]
+    message: Option<String>,
+    /// Caller-declared actor. CLI from AI subprocess → "agent"; user terminal → "user".
+    actor: task::TransitionActor,
+    /// Caller-declared source. Usually "cli" from this endpoint; scheduler /
+    /// watchdog / crash paths don't use HTTP.
+    #[serde(default)]
+    source: Option<task::TransitionSource>,
+}
+
+async fn task_update_status_handler(
+    Json(req): Json<TaskUpdateStatusApiRequest>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    match store
+        .update_status(task::TaskUpdateStatusInput {
+            id: req.id,
+            status: req.status,
+            message: req.message,
+            actor: req.actor,
+            source: req.source.or(Some(task::TransitionSource::Cli)),
+        })
+        .await
+    {
+        Ok((task, transition)) => Json(serde_json::json!({
+            "ok": true,
+            "task": task,
+            "transition": transition
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskUpdateProgressApiRequest {
+    id: String,
+    message: String,
+}
+
+async fn task_update_progress_handler(
+    Json(req): Json<TaskUpdateProgressApiRequest>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    match store.update_progress(&req.id, &req.message).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskAppendSessionApiRequest {
+    id: String,
+    session_id: String,
+}
+
+async fn task_append_session_handler(
+    Json(req): Json<TaskAppendSessionApiRequest>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    match store.append_session(&req.id, &req.session_id).await {
+        Ok(t) => Json(serde_json::json!({ "ok": true, "task": t })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskArchiveApiRequest {
+    id: String,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+async fn task_archive_handler(
+    Json(req): Json<TaskArchiveApiRequest>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    match store.archive(&req.id, req.message).await {
+        Ok(t) => Json(serde_json::json!({ "ok": true, "task": t })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskDeleteApiRequest {
+    id: String,
+}
+
+async fn task_delete_handler(
+    Json(req): Json<TaskDeleteApiRequest>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    let source_thought = store.get(&req.id).await.and_then(|t| t.source_thought_id);
+    match store.delete(&req.id).await {
+        Ok(()) => {
+            if let (Some(thought_id), Some(thoughts)) =
+                (source_thought, thought::get_thought_store())
+            {
+                let _ = thoughts.unlink_task(&thought_id, &req.id).await;
+            }
+            Json(serde_json::json!({ "ok": true }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThoughtListQuery {
+    tag: Option<String>,
+    query: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn thought_list_handler(
+    Query(q): Query<ThoughtListQuery>,
+) -> Json<serde_json::Value> {
+    let Some(store) = thought::get_thought_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "thought store not initialized"
+        }));
+    };
+    let thoughts = store
+        .list(thought::ThoughtListFilter {
+            tag: q.tag,
+            query: q.query,
+            limit: q.limit,
+        })
+        .await;
+    Json(serde_json::json!({ "ok": true, "thoughts": thoughts }))
+}
+
+async fn thought_create_handler(
+    Json(input): Json<thought::ThoughtCreateInput>,
+) -> Json<serde_json::Value> {
+    let Some(store) = thought::get_thought_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "thought store not initialized"
+        }));
+    };
+    match store.create(input).await {
+        Ok(t) => Json(serde_json::json!({ "ok": true, "thought": t })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
 }

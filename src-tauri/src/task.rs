@@ -1263,6 +1263,26 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+// ================ Static access for Management API ================
+//
+// The Rust Management API (src/management_api.rs) serves HTTP requests from
+// the Bun Sidecar on a loopback port. It runs as a tokio task without direct
+// access to Tauri `State`, so we expose a singleton `OnceLock` just like
+// `cron_task::CRON_TASK_MANAGER`. `lib.rs` calls `set_task_store()` during
+// `setup()` with the same `Arc<TaskStore>` that's in managed state — the two
+// handles point at the same inner store (Arc::clone), so mutations are
+// visible to both the Tauri IPC path and the HTTP path.
+
+static TASK_STORE: std::sync::OnceLock<Arc<TaskStore>> = std::sync::OnceLock::new();
+
+pub fn set_task_store(store: Arc<TaskStore>) {
+    let _ = TASK_STORE.set(store);
+}
+
+pub fn get_task_store() -> Option<&'static Arc<TaskStore>> {
+    TASK_STORE.get()
+}
+
 // ================ Tauri commands ================
 //
 // The Tauri layer is the trust boundary for actor/source inference (PRD §10.2.1
