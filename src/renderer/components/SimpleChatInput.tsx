@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2 } from 'lucide-react';
+import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import Tip from '@/components/Tip';
@@ -59,6 +59,12 @@ interface SimpleChatInputProps {
   onProviderChange?: (providerId: string, targetModel?: string) => void; // Called when provider is changed (with optional model to set atomically)
   selectedModel?: string; // Current selected model ID
   onModelChange?: (modelId: string) => void; // Called when model is changed
+  /**
+   * v0.1.69: true when session exists but has no snapshot (legacy pre-v0.1.69 session).
+   * Renders an "unlocked" indicator next to the model button so the user knows changes
+   * to the agent defaults will affect this session (live-follow vs snapshot-frozen).
+   */
+  sessionUnlocked?: boolean;
   // Permission modes
   permissionMode?: PermissionMode; // Current permission mode from parent
   onPermissionModeChange?: (mode: PermissionMode) => void;
@@ -165,6 +171,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onProviderChange,
   selectedModel,
   onModelChange,
+  sessionUnlocked = false,
   permissionMode = 'auto',
   onPermissionModeChange,
   apiKeys = {},
@@ -1594,6 +1601,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
             {/* Right side - model selector + send/stop button */}
             <div className="flex items-center gap-2 shrink-0">
+              {/* v0.1.69: Unlocked indicator for legacy pre-snapshot sessions */}
+              {sessionUnlocked && (
+                <span
+                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)]/60"
+                  title="该 session 未锁定，跟随 agent 默认（修改 agent 会影响此会话）"
+                >
+                  <Unlock className="h-3 w-3" />
+                </span>
+              )}
               {/* Model Dropdown with Provider Selector */}
               <div className="relative">
                 <button

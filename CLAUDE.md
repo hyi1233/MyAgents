@@ -120,7 +120,9 @@ npm run typecheck && npm run lint  # 代码质量检查
 - `messageGenerator()` 使用 `while(true)` 持续 yield，SDK subprocess 全程存活
 - 所有中止场景 MUST 使用 `abortPersistentSession()`（设置 abort 标志 + 唤醒 generator Promise 门控 + interrupt subprocess），禁止直接设置 `shouldAbortSession = true`（generator 会永久阻塞）
 - 配置变更时 MUST 先设 `resumeSessionId` 再 abort，否则 AI 会"失忆"
-- `abortPersistentSession()` 的调用场景：`setMcpServers`、`setAgents`、`resetSession`、`switchToSession`、`enqueueUserMessage` provider change、`rewindSession`
+- **两种重启机制不要混淆**：
+  - **直接 abort**（`abortPersistentSession()`）— 立即中断 + interrupt subprocess。触发点：`resetSession`、`switchToSession`、`rewindSession`、`recoverFromStaleSession`、`enqueueUserMessage` provider change、provider proxy 凭证变化、startup timeout、watchdog、end-of-turn drain、pre-warm drain
+  - **延迟重启**（`scheduleDeferredRestart('mcp' | 'agents')`）— 合并防抖 + 下次 pre-warm 时柔性重启。触发点：`setMcpServers`、`setAgents`。**不**等同于直接 abort（不会立即中断 in-flight turn，也不 interrupt subprocess）
 
 ### Pre-warm 机制
 

@@ -15,6 +15,9 @@ import type { RuntimeType } from '../../shared/types/runtime';
 import { isPendingSessionId } from '../../shared/constants';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
 import { createSessionMetadata } from '../types/session';
+import { snapshotForImSession } from '../utils/session-snapshot';
+import { findAgentByWorkspacePath } from '../utils/admin-config';
+import type { AgentConfig } from '../../shared/types/agent';
 import type { MessageUsage, SessionMessage } from '../types/session';
 import type { SystemInitInfo } from '../../shared/types/system';
 import { trackServer } from '../analytics';
@@ -196,7 +199,16 @@ function registerSessionMetadataIfNew(
   origin: string,
 ): void {
   if (!sessionId || getSessionMetadata(sessionId)) return;
-  const meta = createSessionMetadata(workspacePath);
+  // v0.1.69: Same lazy-creation reasoning as agent-session.ts:enqueueUserMessage —
+  // POST /sessions and Cron `new_task` pre-create metadata, so this lazy path
+  // realistically only fires for IM Bot first-message on an external runtime.
+  // IM uses live-follow (runtime only). The runtime field is overwritten below
+  // with `getCurrentRuntimeType()` to honor the actual sidecar runtime regardless
+  // of what the agent record claims (defense in depth — pre-warm Tab might have
+  // forced a different runtime).
+  const lazyAgent = findAgentByWorkspacePath(workspacePath) as AgentConfig | undefined;
+  const lazySnapshot = lazyAgent ? snapshotForImSession(lazyAgent) : undefined;
+  const meta = createSessionMetadata(workspacePath, lazySnapshot);
   meta.id = sessionId;
   meta.runtime = getCurrentRuntimeType();
   // Patch deferred runtimeSessionId from pre-warm session_init (if any).

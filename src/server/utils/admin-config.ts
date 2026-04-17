@@ -11,6 +11,7 @@ import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
 import type { McpServerDefinition } from '../../renderer/config/types';
+import type { SessionMetadata } from '../types/session';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -381,6 +382,23 @@ export function resolveProviderEnv(
 // Workspace config resolution (Sidecar self-resolve at startup)
 // ---------------------------------------------------------------------------
 
+/**
+ * Find the Agent whose workspacePath matches `agentDir` (cross-platform path normalization).
+ * Used by session-snapshot helpers to capture the AgentConfig at session creation time (v0.1.69).
+ *
+ * Returns the raw on-disk shape — callers cast to AgentConfig at use sites (the session snapshot
+ * helpers only read `runtime`/`providerId`/`providerEnvJson`/`model`/`permissionMode`/
+ * `mcpEnabledServers`, all of which are documented optional/required on AgentConfig).
+ */
+export function findAgentByWorkspacePath(agentDir: string): AgentConfigSlim | undefined {
+  const config = loadConfig();
+  const normalized = agentDir.replace(/\\/g, '/');
+  const agents = (config.agents ?? []) as AgentConfigSlim[];
+  return agents.find(a =>
+    typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalized
+  );
+}
+
 /** Result of self-resolution for a workspace */
 export interface WorkspaceResolvedConfig {
   mcpServers: McpServerDefinition[];
@@ -397,8 +415,23 @@ export interface WorkspaceResolvedConfig {
  *
  * For desktop Chat sessions, the frontend's /api/mcp/set and per-message providerEnv will
  * override the self-resolved values — so there is no conflict.
+ *
+ * v0.1.69 — `sessionMeta`: when provided, the session's snapshot fields take priority
+ * over the agent's. This is the read-side complement of `snapshotForOwnedSession()` and
+ * implements the layered Option-C semantics from PRD §6 (`session ?? agent`). The
+ * fallback is field-by-field: a session may have captured `model` but not
+ * `mcpEnabledServers`, in which case the unset fields lazily resolve via agent —
+ * this is a *read-only* fallback (no write-back), per PRD §6.4.
+ *
+ * IM sessions deliberately don't snapshot model/permission/mcp (D4 live-follow), so
+ * the session-meta merge is a no-op for them — `meta?.<field>` is undefined and we
+ * fall through to the existing agent path. The IM channel-overrides merge happens
+ * elsewhere (at the IM bot delivery layer where `channel` context is available).
  */
-export function resolveWorkspaceConfig(agentDir: string): WorkspaceResolvedConfig {
+export function resolveWorkspaceConfig(
+  agentDir: string,
+  sessionMeta?: SessionMetadata | null,
+): WorkspaceResolvedConfig {
   const config = loadConfig();
 
   // Normalize path separators for cross-platform matching
@@ -411,28 +444,47 @@ export function resolveWorkspaceConfig(agentDir: string): WorkspaceResolvedConfi
   );
 
   // --- Resolve MCP ---
-  // Uses the existing getEffectiveMcpServers which does: global enabled ∩ project enabled
-  // For agent workspaces, mcpEnabledServers is synced to both project and agent.
-  const mcpServers = getEffectiveMcpServers(agentDir);
+  // Session snapshot first (PRD §6 D2/D9): if the session captured its own enabled
+  // server list, intersect with the global-enabled set so users disabling a server
+  // globally still wins (security stays at the global lever, locked sessions just
+  // pin their feature surface).
+  let mcpServers: McpServerDefinition[];
+  if (sessionMeta?.mcpEnabledServers) {
+    const allServers = getAllMcpServers(config);
+    const globalEnabled = new Set(getEnabledMcpServerIds(config));
+    const sessionEnabled = new Set(sessionMeta.mcpEnabledServers);
+    mcpServers = allServers.filter(s => globalEnabled.has(s.id) && sessionEnabled.has(s.id));
+  } else {
+    // Lazy fallback for legacy / IM sessions — uses project ∩ global as before.
+    mcpServers = getEffectiveMcpServers(agentDir);
+  }
 
   // --- Resolve Provider ---
-  // Priority: agent.providerId → config.defaultProviderId → persisted snapshot
+  // Priority: session.providerId → agent.providerId → config.defaultProviderId → persisted snapshot
   let providerEnv: ResolvedProviderEnv | undefined;
-  const providerId = (agent?.providerId as string | undefined)
+  const providerId = sessionMeta?.providerId
+    || (agent?.providerId as string | undefined)
     || (config.defaultProviderId as string | undefined);
   if (providerId) {
     providerEnv = resolveProviderEnv(providerId, config);
   }
-  // Fallback: if runtime resolution failed, try the persisted snapshot (backward compat)
-  if (!providerEnv && agent?.providerEnvJson) {
+  // Snapshot env wins: if the session froze providerEnvJson, prefer that — even if
+  // the providerId still resolves cleanly today, the session's intent was the snapshot
+  // value (e.g., a custom baseUrl that has since been edited at the agent level).
+  if (sessionMeta?.providerEnvJson) {
+    try {
+      providerEnv = JSON.parse(sessionMeta.providerEnvJson) as ResolvedProviderEnv;
+    } catch { /* malformed snapshot — keep providerEnv from above */ }
+  } else if (!providerEnv && agent?.providerEnvJson) {
+    // Backward-compat: legacy sessions without a snapshot fall back to agent's persisted env
     try {
       providerEnv = JSON.parse(agent.providerEnvJson as string) as ResolvedProviderEnv;
     } catch { /* ignore malformed snapshot */ }
   }
 
   // --- Resolve Model ---
-  // Priority: agent.model → provider's primaryModel (if resolved)
-  let model = (agent?.model as string | undefined) ?? undefined;
+  // Priority: session.model → agent.model → provider's primaryModel (if resolved)
+  let model = sessionMeta?.model ?? (agent?.model as string | undefined) ?? undefined;
   if (!model && providerId) {
     const provider = findProvider(providerId);
     if (provider) {
@@ -441,8 +493,9 @@ export function resolveWorkspaceConfig(agentDir: string): WorkspaceResolvedConfi
   }
 
   if (mcpServers.length > 0 || providerEnv || model) {
+    const source = sessionMeta?.configSnapshotAt ? 'session-snapshot' : 'agent';
     console.log(
-      `[admin-config] resolveWorkspaceConfig: ` +
+      `[admin-config] resolveWorkspaceConfig (${source}): ` +
       `provider=${providerId ?? 'subscription'}, model=${model ?? 'default'}, ` +
       `mcp=${mcpServers.length} server(s)${agent ? '' : ' (no agent match)'}`
     );

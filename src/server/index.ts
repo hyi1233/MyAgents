@@ -156,6 +156,10 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
+import { findAgentByWorkspacePath } from './utils/admin-config';
+import { snapshotForOwnedSession } from './utils/session-snapshot';
+import { resolveSessionConfig } from './utils/resolve-session-config';
+import type { AgentConfig } from '../shared/types/agent';
 import { initLogger, getLoggerDiagnostics } from './logger';
 import { cleanupOldLogs } from './AgentLogger';
 import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
@@ -1039,6 +1043,17 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { 'Content-Type': 'application/json' }
   });
+}
+
+/**
+ * Strip credential-bearing fields from a SessionMetadata before returning to clients.
+ * Replaces providerEnvJson with '[redacted]' when present (so the client can still tell
+ * a provider override exists without seeing the raw API key). Used by GET /sessions,
+ * GET /sessions/:id, and PATCH /sessions/:id response shapes — zero-trust parity.
+ */
+function redactSessionMetadata<T extends { providerEnvJson?: string }>(meta: T): T {
+  if (meta.providerEnvJson === undefined) return meta;
+  return { ...meta, providerEnvJson: '[redacted]' };
 }
 
 /**
@@ -2104,8 +2119,39 @@ async function main() {
           console.log(`[cron] execute taskId=${taskId} sessionId=${currentSessionId} interval=${intervalMinutes}min exec#=${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
           // Wrap cron prompt so AI recognizes it as system-triggered (not a real-time human message)
           const wrappedPrompt = `<system-reminder>\n<CRON_TASK>\n${prompt}\n</CRON_TASK>\n</system-reminder>`;
+
+          // v0.1.69 T15: Resolve per-tick from the session snapshot (owned kind).
+          // This endpoint runs against whatever session is already loaded in this
+          // Sidecar, so there's no switch step — but the snapshot is still
+          // authoritative over task-frozen payload fields.
+          let effectiveModel = model;
+          let effectiveProviderEnv: typeof providerEnv = providerEnv;
+          let effectiveRuntimeConfig = payload.runtimeConfig;
+          if (currentSessionId) {
+            const sessionMeta = getSessionMetadata(currentSessionId);
+            const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+            if (sessionMeta && agent) {
+              const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
+              if (resolved.model !== undefined) effectiveModel = resolved.model;
+              if (resolved.providerEnvJson) {
+                try {
+                  effectiveProviderEnv = JSON.parse(resolved.providerEnvJson);
+                } catch (e) {
+                  console.warn(`[cron] execute T15: failed to parse providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`, e);
+                }
+              }
+              if (resolved.runtime !== 'builtin') {
+                effectiveRuntimeConfig = {
+                  ...(payload.runtimeConfig ?? {}),
+                  model: resolved.model ?? payload.runtimeConfig?.model,
+                  permissionMode: resolved.permissionMode ?? payload.runtimeConfig?.permissionMode,
+                };
+              }
+            }
+          }
+
           if (shouldUseExternalRuntime()) {
-            const runtimeConfig = payload.runtimeConfig ?? null;
+            const runtimeConfig = effectiveRuntimeConfig ?? null;
             const runtimeResult = await sendExternalMessage(
               wrappedPrompt, undefined, undefined, undefined,
               {
@@ -2122,7 +2168,7 @@ async function main() {
           } else {
             // Cron tasks are unattended — bypass all permissions so tool requests
             // don't block indefinitely waiting for a user who isn't present.
-            await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', model, providerEnv);
+            await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', effectiveModel, effectiveProviderEnv);
           }
           // Reset scenario after enqueue — already consumed by startStreamingSession()
           resetInteractionScenario();
@@ -2170,8 +2216,16 @@ async function main() {
         let effectiveSessionId = sessionId;
 
         if (effectiveRunMode === 'new_session') {
-          // Create a fresh session for each execution (no memory of previous runs)
-          const newSession = createSession(agentDir, payload.runtime ?? getActiveRuntimeType());
+          // Create a fresh session for each execution (no memory of previous runs).
+          // v0.1.69: Cron new_task ticks are structurally 'owned' — every tick reads the
+          // current Agent and freezes a snapshot into the new SessionMetadata. Per-tick
+          // freshness keeps "live-follow" semantics for cron without inventing a third
+          // owner kind in resolveSessionConfig (PRD D4 footnote).
+          const cronAgent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+          const cronSnapshot = cronAgent ? snapshotForOwnedSession(cronAgent) : {};
+          const overrideRuntime = payload.runtime ?? getActiveRuntimeType();
+          if (overrideRuntime) cronSnapshot.runtime = overrideRuntime;
+          const newSession = createSession(agentDir, cronSnapshot);
           const switched = await switchToSession(newSession.id);
           if (!switched) {
             console.error(`[cron] execute-sync taskId=${taskId} failed to switch to new session ${newSession.id}`);
@@ -2200,6 +2254,45 @@ async function main() {
           }
         } else {
           console.log(`[cron] execute-sync taskId=${taskId} no sessionId provided, using current session`);
+        }
+
+        // v0.1.69 T15: Cron per-tick resolve — unified for both run modes.
+        //
+        // Both single_session and new_session derive their effective config from the
+        // session snapshot that was captured at creation time (single_session: at
+        // CronTask creation; new_session: at each tick by `snapshotForOwnedSession`
+        // above). CronTask.model / provider_env / runtime_config are task-frozen
+        // fallbacks used only if no snapshot exists.
+        //
+        // Resolving for both paths keeps "payload.model" from winning over the fresh
+        // per-tick snapshot in new_session mode — if the user edits the Agent between
+        // ticks, new_session picks up the change next tick via the fresh snapshot.
+        let effectiveModel = model;
+        let effectiveProviderEnv: typeof providerEnv = providerEnv;
+        let effectiveRuntimeConfig = payload.runtimeConfig;
+        const snapshotSessionId = effectiveSessionId ?? getSessionId();
+        if (snapshotSessionId) {
+          const sessionMeta = getSessionMetadata(snapshotSessionId);
+          const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+          if (sessionMeta && agent) {
+            const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
+            if (resolved.model !== undefined) effectiveModel = resolved.model;
+            if (resolved.providerEnvJson) {
+              try {
+                effectiveProviderEnv = JSON.parse(resolved.providerEnvJson);
+              } catch (e) {
+                console.warn(`[cron] execute-sync T15: failed to parse providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`, e);
+              }
+            }
+            if (resolved.runtime !== 'builtin') {
+              effectiveRuntimeConfig = {
+                ...(payload.runtimeConfig ?? {}),
+                model: resolved.model ?? payload.runtimeConfig?.model,
+                permissionMode: resolved.permissionMode ?? payload.runtimeConfig?.permissionMode,
+              };
+            }
+            console.log(`[cron] execute-sync T15: resolved from snapshot session=${snapshotSessionId} runMode=${effectiveRunMode} snapshotLocked=${Boolean(sessionMeta.configSnapshotAt)} model=${effectiveModel ?? 'default'} runtime=${resolved.runtime}`);
+          }
         }
 
         // Set cron task context so the exit_cron_task tool knows which task is running
@@ -2235,7 +2328,8 @@ async function main() {
 
           if (shouldUseExternalRuntime()) {
             // ─── External Runtime (CC/Codex): cron task ───
-            const runtimeConfig = payload.runtimeConfig ?? null;
+            // T15: effectiveRuntimeConfig carries snapshot-resolved model/permissionMode
+            const runtimeConfig = effectiveRuntimeConfig ?? null;
             const ccResult = await sendExternalMessage(
               wrappedPrompt, undefined, undefined, undefined,
               {
@@ -2272,7 +2366,9 @@ async function main() {
             // ─── Builtin Runtime: existing path ───
             // Cron tasks are unattended — bypass all permissions so tool requests
             // (e.g. Bash) don't block forever waiting for human approval.
-            const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', model, providerEnv);
+            // T15: effectiveModel / effectiveProviderEnv come from the session snapshot
+            //      (single_session) or payload defaults (new_session / fallback).
+            const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', effectiveModel, effectiveProviderEnv);
             console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
             // Wait for session to become idle (execution complete)
@@ -2498,7 +2594,10 @@ async function main() {
           const sessions = agentDirParam
             ? getSessionsByAgentDir(agentDirParam)
             : getAllSessionMetadata();
-          return jsonResponse({ success: true, sessions });
+          // Zero-trust: strip providerEnvJson before handing to clients.
+          // Matches PATCH response behavior (see PATCH /sessions/:id).
+          const safeSessions = sessions.map(redactSessionMetadata);
+          return jsonResponse({ success: true, sessions: safeSessions });
         } catch (error) {
           console.error('[sessions] Error in GET /sessions:', error);
           return jsonResponse({
@@ -2526,7 +2625,14 @@ async function main() {
         const runtimeValue = VALID_RUNTIMES.includes(payload?.runtime as typeof VALID_RUNTIMES[number])
           ? (payload.runtime as import('../shared/types/runtime').RuntimeType)
           : undefined;
-        const session = createSession(agentDirValue, runtimeValue);
+        // v0.1.69 Desktop session = owned snapshot. Capture model/permission/mcp/provider
+        // from AgentConfig so the session is self-contained from creation onward.
+        // The frontend's runtime override (payload.runtime) wins over agent.runtime — Tab UI
+        // can pin a session to a specific runtime independent of the Agent's default.
+        const agent = findAgentByWorkspacePath(agentDirValue) as AgentConfig | undefined;
+        const baseSnapshot = agent ? snapshotForOwnedSession(agent) : {};
+        if (runtimeValue) baseSnapshot.runtime = runtimeValue;
+        const session = createSession(agentDirValue, baseSnapshot);
         return jsonResponse({ success: true, session });
       }
 
@@ -2775,7 +2881,7 @@ async function main() {
         // of screenshots. Browser dev mode uses the /api/attachment/* fallback
         // route below.
         const sessionWithPreview = {
-          ...session,
+          ...redactSessionMetadata(session),
           liveStreamingMessage,
           liveSessionState: shouldUseExternalRuntime() && sessionId === getExternalSessionId()
             ? getExternalSessionState()
@@ -2803,16 +2909,28 @@ async function main() {
         return jsonResponse({ success: true });
       }
 
-      // PATCH /sessions/:id - Update session metadata
+      // PATCH /sessions/:id - Update session metadata (incl. v0.1.69 config snapshot)
       if (pathname.startsWith('/sessions/') && request.method === 'PATCH') {
         const sessionId = pathname.replace('/sessions/', '');
         if (!sessionId) {
           return jsonResponse({ success: false, error: 'Session ID required.' }, 400);
         }
 
-        let payload: { title?: string; titleSource?: 'default' | 'auto' | 'user' };
+        // Snapshot fields (v0.1.69): send `null` to clear (revert to agent fallback);
+        // omit a field to leave it unchanged.
+        interface PatchPayload {
+          title?: string;
+          titleSource?: 'default' | 'auto' | 'user';
+          model?: string | null;
+          permissionMode?: string | null;
+          mcpEnabledServers?: string[] | null;
+          providerId?: string | null;
+          providerEnvJson?: string | null;
+        }
+
+        let payload: PatchPayload;
         try {
-          payload = (await request.json()) as { title?: string; titleSource?: 'default' | 'auto' | 'user' };
+          payload = (await request.json()) as PatchPayload;
         } catch {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
@@ -2821,13 +2939,38 @@ async function main() {
         if (payload.title !== undefined) updates.title = String(payload.title).slice(0, 100);
         if (payload.titleSource !== undefined) updates.titleSource = payload.titleSource;
 
+        // Snapshot fields: null → clear (undefined in stored JSON); value → set.
+        // `undefined` in stored metadata is how the resolver recognizes "fall back to agent".
+        const snapshotKeys = [
+          'model',
+          'permissionMode',
+          'mcpEnabledServers',
+          'providerId',
+          'providerEnvJson',
+        ] as const;
+        let wroteSnapshotField = false;
+        for (const key of snapshotKeys) {
+          const v = payload[key];
+          if (v === undefined) continue;
+          updates[key] = v === null ? undefined : v;
+          wroteSnapshotField = true;
+        }
+
+        // Stamp configSnapshotAt on the first snapshot write (lazy migration).
+        // Also bumps on subsequent writes — harmless, useful for debugging.
+        if (wroteSnapshotField) {
+          updates.configSnapshotAt = new Date().toISOString();
+        }
+
         const updated = updateSessionMetadata(sessionId, updates as Parameters<typeof updateSessionMetadata>[1]);
 
         if (!updated) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
 
-        return jsonResponse({ success: true, session: updated });
+        // Zero-trust: redact credential-bearing fields from the echo payload.
+        // The client already owns what it sent; no need to round-trip secrets.
+        return jsonResponse({ success: true, session: redactSessionMetadata(updated) });
       }
 
       // POST /sessions/switch - Switch to existing session for resume

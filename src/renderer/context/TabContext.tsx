@@ -23,6 +23,7 @@ import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
 import type { ExitPlanModeRequest, EnterPlanModeRequest } from '../../shared/types/planMode';
 import type { TerminalReason } from '../../shared/terminalReason';
+import type { SessionMetadata } from '@/api/sessionClient';
 
 export type SessionState = 'idle' | 'running' | 'stopping' | 'error';
 
@@ -46,6 +47,13 @@ export interface TabState {
     isSessionLoading: boolean;  // true while loadSession REST API is in-flight
     sessionState: SessionState;
     sessionRuntime: string | null;  // Runtime that created this session (null = builtin)
+    /**
+     * Full session metadata — includes v0.1.69 snapshot fields (model / permissionMode /
+     * mcpEnabledServers / providerId / configSnapshotAt). Derivation source for Chat.tsx
+     * `session ?? agent` precedence. Null while session is not loaded; populated after
+     * loadSession and refreshed after PATCH /sessions/:id.
+     */
+    sessionMeta: SessionMetadata | null;
 
     // Agent info
     logs: string[];
@@ -109,6 +117,9 @@ export interface TabContextValue extends TabState {
     // SDK terminal_reason banner dismissal
     setLastTerminalReason: Dispatch<SetStateAction<TerminalReason | null>>;
 
+    // v0.1.69 session snapshot — call after PATCH /sessions/:id to refresh derivation source
+    setSessionMeta: Dispatch<SetStateAction<SessionMetadata | null>>;
+
     // SSE connection management
     isConnected: boolean;
     connectSse: () => Promise<void>;
@@ -161,6 +172,7 @@ const defaultContextValue: TabContextValue = {
     isSessionLoading: false,
     sessionState: 'idle',
     sessionRuntime: null,
+    sessionMeta: null,
     logs: [],
     unifiedLogs: [],
     systemInitInfo: null,
@@ -183,6 +195,7 @@ const defaultContextValue: TabContextValue = {
     setSystemInitInfo: () => { },
     setAgentError: () => { },
     setLastTerminalReason: () => { },
+    setSessionMeta: () => { },
     connectSse: async () => { },
     disconnectSse: () => { },
     sendMessage: async () => false,

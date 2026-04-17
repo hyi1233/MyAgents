@@ -34,6 +34,8 @@ import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
+import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
+import type { SessionMetadata } from '@/api/sessionClient';
 import { Loader2 } from 'lucide-react';
 
 // ============================================================
@@ -216,6 +218,12 @@ export default function App() {
 
   const configProjectsRef = useRef(configProjects);
   configProjectsRef.current = configProjects;
+
+  // Ref for full AppConfig — needed by session-switch flow (T12) to resolve per-workspace
+  // agent.runtime for cross-runtime detection without putting `config` into the
+  // handleSwitchSession useCallback deps (it's intentionally a stable empty-deps callback).
+  const configRef = useRef(config);
+  configRef.current = config;
 
   // Toast (ref-stabilized per CLAUDE.md rules)
   const toast = useToast();
@@ -1020,6 +1028,68 @@ export default function App() {
       console.log(`[App] handleSwitchSession Scenario 1: Session ${sessionId} already in tab ${existingTab.id}, jumping to it`);
       setActiveTabId(existingTab.id);
       return;
+    }
+
+    // Scenario 1.5 (T12): Cross-runtime session → Open in NEW Tab
+    //
+    // With v0.1.69 config-snapshot, a session's runtime is part of its immutable
+    // identity. If we took over the current tab's sidecar (spawned with the agent's
+    // runtime), the sidecar's MYAGENTS_RUNTIME would mismatch the session — the
+    // Rust layer would then kill + respawn on sidecar drift detection, and the
+    // current tab's chat UI would fight the adoption by re-snapshotting its own
+    // defaults into the session. Safer: open in a new Tab so the sidecar spawn
+    // path picks up session.runtime naturally via resolve_session_runtime().
+    //
+    // Gated on multiAgentRuntime — when disabled, everything runs as builtin and
+    // this mismatch cannot arise.
+    const cfg = configRef.current;
+    if (cfg?.multiAgentRuntime) {
+      const currentTabForRuntimeCheck = tabsRef.current.find(t => t.id === tabId);
+      if (currentTabForRuntimeCheck?.agentDir) {
+        try {
+          const meta = await apiGetJson<{ success: boolean; session: SessionMetadata }>(`/sessions/${sessionId}?limit=1`);
+          const sessionRuntime = meta.session.runtime || 'builtin';
+          const currentAgent = getAgentByWorkspacePath(cfg, currentTabForRuntimeCheck.agentDir);
+          const currentAgentRuntime = currentAgent?.runtime || 'builtin';
+          if (sessionRuntime !== currentAgentRuntime) {
+            console.log(`[App] handleSwitchSession Scenario 1.5: Cross-runtime session (session=${sessionRuntime}, agent=${currentAgentRuntime}), opening in new tab`);
+            if (tabsRef.current.length >= MAX_TABS) {
+              toastRef.current.error('标签页已达上限，请关闭一个后重试');
+              return;
+            }
+            const newTab: Tab = {
+              ...createNewTab(),
+              agentDir: currentTabForRuntimeCheck.agentDir,
+              sessionId,
+              view: 'chat',
+              title: currentTabForRuntimeCheck.title || getFolderName(currentTabForRuntimeCheck.agentDir),
+            };
+            setTabs(prev => [...prev, newTab]);
+            setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
+            try {
+              const result = await ensureSessionSidecar(sessionId, currentTabForRuntimeCheck.agentDir, 'tab', newTab.id);
+              await activateSession(sessionId, newTab.id, null, result.port, currentTabForRuntimeCheck.agentDir, false);
+              setTabs(prev => prev.map(t =>
+                t.id === newTab.id
+                  ? { ...t, joinedExistingSidecar: !result.isNew }
+                  : t,
+              ));
+              setActiveTabId(newTab.id);
+            } catch (error) {
+              console.error('[App] Failed to open cross-runtime session in new tab:', error);
+              setTabs(prev => prev.filter(t => t.id !== newTab.id));
+            } finally {
+              setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
+            }
+            return;
+          }
+        } catch (error) {
+          // Non-fatal: if metadata fetch fails (e.g., session just created, transient 404),
+          // fall through to scenarios 2-4. The Rust resolve_session_runtime() on the sidecar
+          // spawn path is still authoritative for correctness.
+          console.warn('[App] Cross-runtime check failed, falling through to normal switch:', error);
+        }
+      }
     }
 
     // Scenario 2: Session has running cron task (no Tab) → Add Tab as owner to existing Sidecar

@@ -26,15 +26,40 @@ export interface SessionMetadata {
     title: string;
     createdAt: string;
     lastActiveAt: string;
+    /** @deprecated legacy split-id sessions; equals id on unified sessions */
+    sdkSessionId?: string;
+    unifiedSession?: boolean;
     stats?: SessionStats;
     /** Associated cron task ID (if this session is used by a scheduled task) */
     cronTaskId?: string;
-    /** Session origin — undefined or 'desktop' for Desktop, IM sources for Telegram/Feishu */
-    source?: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
+    /**
+     * Session origin — `'desktop'` for desktop, `'{platform}_private'` / `'{platform}_group'`
+     * for IM channels. Platform segment is open-ended because OpenClaw plugins register
+     * dynamic platform names at runtime (e.g. `'weixin_private'`, `'qq_group'`). Treat as
+     * an opaque string; use `isImSource()` for categorization.
+     */
+    source?: string;
     /** Preview of the last user message (truncated, for Task Center display) */
     lastMessagePreview?: string;
     /** How the title was set: default (first message truncation), auto (AI-generated), user (manually renamed) */
     titleSource?: 'default' | 'auto' | 'user';
+    /** Fork source — present on first open after a fork, consumed and cleared */
+    forkFrom?: { sourceSessionId: string; messageUuid: string };
+    /** Runtime that created this session. Absent = pre-v0.1.60 session → treat as 'builtin' */
+    runtime?: string;
+    /** Runtime's native session/thread ID (Codex threadId, CC session_id from hook) */
+    runtimeSessionId?: string;
+
+    // ─── Config snapshot (v0.1.69) ───
+    // Desktop/Cron sessions capture these on first write; IM sessions stay undefined
+    // (live-follow AgentConfig). `configSnapshotAt` presence marks "locked".
+    model?: string;
+    permissionMode?: string;
+    mcpEnabledServers?: string[];
+    providerId?: string;
+    /** Credentials — server redacts to '[redacted]' in PATCH response (zero-trust) */
+    providerEnvJson?: string;
+    configSnapshotAt?: string;
 }
 
 export interface SessionMessage {
@@ -125,7 +150,18 @@ export async function deleteSession(sessionId: string): Promise<boolean> {
  */
 export async function updateSession(
     sessionId: string,
-    updates: { title?: string; titleSource?: 'default' | 'auto' | 'user' }
+    updates: {
+        title?: string;
+        titleSource?: 'default' | 'auto' | 'user';
+        // v0.1.69 snapshot fields — null clears, undefined leaves unchanged.
+        // Server auto-stamps configSnapshotAt when any snapshot field is touched
+        // and redacts providerEnvJson to '[redacted]' in the response (zero-trust).
+        model?: string | null;
+        permissionMode?: string | null;
+        mcpEnabledServers?: string[] | null;
+        providerId?: string | null;
+        providerEnvJson?: string | null;
+    }
 ): Promise<SessionMetadata | null> {
     try {
         const result = await apiFetch(`/sessions/${sessionId}`, {

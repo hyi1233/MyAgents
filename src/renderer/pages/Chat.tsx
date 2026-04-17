@@ -28,6 +28,7 @@ import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { useCronTask } from '@/hooks/useCronTask';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
+import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
 import type { CronTask } from '@/types/cronTask';
 import { formatScheduleDescription } from '@/types/cronTask';
 import CronTaskCard from '@/components/scheduled-tasks/CronTaskCard';
@@ -35,6 +36,7 @@ import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import type { CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
+import { isImSource } from '@/utils/taskCenterUtils';
 import { type PermissionMode, type McpServerDefinition, getEffectiveModelAliases } from '@/config/types';
 import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
 import {
@@ -165,6 +167,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     isSessionLoading,
     sessionState,
     sessionRuntime,
+    sessionMeta,
+    setSessionMeta,
     unifiedLogs,
     systemInitInfo: _systemInitInfo,
     agentError,
@@ -1244,7 +1248,34 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [currentProject?.mcpEnabledServers]);
 
-  // Handle workspace MCP toggle — persist via patchProject (updates disk + React state)
+  // v0.1.69 — owned (Desktop/Cron) sessions lock config via SessionMetadata snapshot
+  // (configSnapshotAt stamped at creation per `snapshotForOwnedSession`). Tab-level UI
+  // changes on a locked session MUST go only to the session snapshot, not the agent
+  // — agent is the template for *future* sessions. IM / unlocked sessions have no
+  // snapshot and live-follow the agent; UI changes there patch the agent as before.
+  const isOwnedSession = !!sessionMeta?.configSnapshotAt;
+
+  // v0.1.69 T17: legacy pre-snapshot session — session exists but has no snapshot,
+  // and not IM-sourced (IM is live-follow by design, not a legacy artifact). These
+  // sessions live-follow the agent, so edits to the agent mutate this session's
+  // effective config. Show an "unlocked" indicator so the user understands why.
+  const isSessionUnlocked = !!sessionMeta
+    && !sessionMeta.configSnapshotAt
+    && !isImSource(sessionMeta.source);
+
+  /**
+   * Patch one or more snapshot fields on the current session and mirror the update
+   * into TabContext so `sessionMeta`-driven derivations (see the sync effect above)
+   * don't rubber-band back to the old value on the next render. Safe no-op if there
+   * is no current sessionId (new-tab pre-create race).
+   */
+  const patchSnapshot = useCallback(async (patch: Parameters<typeof patchSessionMetadata>[1]) => {
+    if (!sessionId) return;
+    const updated = await patchSessionMetadata(sessionId, patch);
+    if (updated) setSessionMeta(updated);
+  }, [sessionId, setSessionMeta]);
+
+  // Handle workspace MCP toggle — owned session: PATCH snapshot only; unlocked/IM: patch agent+project (live-follow)
   const handleWorkspaceMcpToggle = useCallback(async (serverId: string, enabled: boolean) => {
     const newEnabled = enabled
       ? [...workspaceMcpEnabled, serverId]
@@ -1252,9 +1283,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     setWorkspaceMcpEnabled(newEnabled);
 
-    // Persist to project config (patchProject updates disk AND projects React state,
-    // keeping currentProject.mcpEnabledServers in sync for tab-activate sync at L672)
-    if (currentProject) {
+    if (isOwnedSession) {
+      void patchSnapshot({ mcpEnabledServers: newEnabled });
+    } else if (currentProject) {
+      // Persist to project config (patchProject updates disk AND projects React state,
+      // keeping currentProject.mcpEnabledServers in sync for tab-activate sync at L672)
       void patchProject(currentProject.id, { mcpEnabledServers: newEnabled });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { mcpEnabledServers: newEnabled });
@@ -1273,7 +1306,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       console.error('[Chat] Failed to sync MCP servers:', err);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost is stable, only care about state changes
-  }, [workspaceMcpEnabled, currentProject, mcpServers, globalMcpEnabled]);
+  }, [workspaceMcpEnabled, currentProject, mcpServers, globalMcpEnabled, isOwnedSession, patchSnapshot]);
 
   // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
   const providerInitRef = useRef(true);
@@ -1318,6 +1351,27 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time sync when project first loads
   }, [currentProject?.id]);
+
+  // v0.1.69: session snapshot → local state (session-first per D7 Option C).
+  // Also handles T11 reset-on-session-switch: when switching to an unlocked / IM session
+  // (no snapshot), fall back to the agent's current config so stale local state from a
+  // previously-loaded locked session doesn't bleed across. Runs on session load AND after
+  // PATCH /sessions/:id. React bails on setState when target === current, so no render loop.
+  useEffect(() => {
+    if (!sessionMeta) return;  // Not loaded yet — keep mount-time defaults
+    if (joinedExistingSidecarRef.current) return;  // Adoption effect handles it
+    // Field-by-field merge: `session ?? agent` (Option C). Missing snapshot fields
+    // re-derive from the agent — this is the write-read symmetry of IM live-follow.
+    const model = sessionMeta.model ?? currentAgent?.model;
+    const mode = sessionMeta.permissionMode ?? (currentAgent?.permissionMode as string | undefined);
+    const providerId = sessionMeta.providerId ?? currentAgent?.providerId;
+    const mcp = sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers;
+    if (model) setSelectedModel(model);
+    if (mode) setPermissionMode(mode as PermissionMode);
+    if (providerId) setSelectedProviderId(providerId);
+    if (mcp) setWorkspaceMcpEnabled(mcp);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- currentAgent derived from config, listening to its identity would re-fire on unrelated agent changes
+  }, [sessionMeta]);
 
   // 若 selectedModel 不在当前 provider 的 models 中（如模型已被删除），回退到 primaryModel 并更新项目
   useEffect(() => {
@@ -1551,7 +1605,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       // Provider unchanged but caller passed a specific model — treat as model change
       if (targetModel) {
         setSelectedModel(targetModel);
-        if (currentProject) {
+        if (isOwnedSession) {
+          void patchSnapshot({ model: targetModel });
+        } else if (currentProject) {
           void patchProject(currentProject.id, { model: targetModel });
           if (currentProject?.agentId) {
             void patchAgentConfig(currentProject.agentId, { model: targetModel });
@@ -1589,15 +1645,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Suppress the deferred provider-change useEffect — we've already set the correct model
     providerInitRef.current = true;
 
-    // Write back to project (last-writer-wins for new tabs)
-    if (currentProject) {
+    // Write back: owned session locks to snapshot; unlocked/IM follows agent (last-writer-wins for new tabs)
+    if (isOwnedSession) {
+      void patchSnapshot({ providerId, model: model ?? null });
+    } else if (currentProject) {
       void patchProject(currentProject.id, { providerId, model: model ?? null });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { providerId, model: model ?? undefined });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
-  }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider?.id]);
+  }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider?.id, isOwnedSession, patchSnapshot]);
 
   // Handle model change with analytics tracking and project write-back
   const handleModelChange = useCallback((model: string) => {
@@ -1610,26 +1668,30 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     track('model_switch', { model });
 
     setSelectedModel(model);
-    if (currentProject) {
+    if (isOwnedSession) {
+      void patchSnapshot({ model });
+    } else if (currentProject) {
       void patchProject(currentProject.id, { model });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { model });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
-  }, [selectedModel, currentProject?.id, patchProject]);
+  }, [selectedModel, currentProject?.id, patchProject, isOwnedSession, patchSnapshot]);
 
-  // Handle permission mode change with project write-back
+  // Handle permission mode change — owned session: snapshot; unlocked/IM: project+agent
   const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
     setPermissionMode(mode);
-    if (currentProject) {
+    if (isOwnedSession) {
+      void patchSnapshot({ permissionMode: mode });
+    } else if (currentProject) {
       void patchProject(currentProject.id, { permissionMode: mode });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { permissionMode: mode });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
-  }, [currentProject?.id, patchProject]);
+  }, [currentProject?.id, patchProject, isOwnedSession, patchSnapshot]);
 
   // Cross-runtime session detection: session was created by a DIFFERENT runtime than the current one.
   // Covers all mismatch scenarios across builtin, Claude Code, Codex, and Gemini.
@@ -2506,6 +2568,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onProviderChange={handleProviderChange}
             selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
             onModelChange={isExternalRuntime ? setRuntimeModel : handleModelChange}
+            sessionUnlocked={isSessionUnlocked}
             permissionMode={effectivePermissionMode}
             onPermissionModeChange={isExternalRuntime
               ? ((mode: PermissionMode) => setRuntimePermissionMode(mode))

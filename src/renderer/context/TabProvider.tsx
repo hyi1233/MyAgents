@@ -15,6 +15,7 @@ import type { ReactNode } from 'react';
 
 import { track } from '@/analytics';
 import { generateSessionTitle } from '@/api/sessionClient';
+import type { SessionMetadata } from '@/api/sessionClient';
 import { createSseConnection, type SseConnection } from '@/api/SseConnection';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
@@ -309,6 +310,7 @@ export default function TabProvider({
     const loadingOlderRef = useRef(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
     const [sessionRuntime, setSessionRuntime] = useState<string | null>(null);
+    const [sessionMeta, setSessionMeta] = useState<SessionMetadata | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const [unifiedLogs, setUnifiedLogs] = useState<LogEntry[]>([]);
     const [systemInitInfo, setSystemInitInfo] = useState<SystemInitInfo | null>(null);
@@ -467,6 +469,7 @@ export default function TabProvider({
         setLastTerminalReason(null);
         setUnifiedLogs([]);
         setLogs([]);
+        setSessionMeta(null);
         clearInteractiveState();
         // Reset auto-title state for new conversation
         autoTitleAttemptedRef.current = false;
@@ -2344,6 +2347,12 @@ export default function TabProvider({
             // Old sessions (pre-v0.1.60) have no runtime field → treat as 'builtin'.
             // null is reserved strictly for "session not loaded yet" (initial state).
             setSessionRuntime(response.session.runtime || 'builtin');
+            // Strip SessionData.messages so sessionMeta holds just the metadata slice
+            // (prevents accidental reliance on .messages elsewhere and keeps the
+            // snapshot concept clean — SessionData is a superset of SessionMetadata).
+            const { messages: _meta_messages, ...metaOnly } = response.session as SessionMetadata & { messages?: unknown };
+            void _meta_messages;
+            setSessionMeta(metaOnly as SessionMetadata);
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
             if (!options?.skipLoadingReset) {
@@ -2789,6 +2798,7 @@ export default function TabProvider({
         isSessionLoading,
         sessionState,
         sessionRuntime,
+        sessionMeta,
         logs,
         unifiedLogs,
         systemInitInfo,
@@ -2811,6 +2821,7 @@ export default function TabProvider({
         setSystemInitInfo,
         setAgentError,
         setLastTerminalReason,
+        setSessionMeta,
         connectSse,
         disconnectSse,
         sendMessage,
@@ -2831,7 +2842,7 @@ export default function TabProvider({
         // Cron task exit handler ref (mutable, no need in deps)
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
-        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime,
+        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage

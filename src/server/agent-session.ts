@@ -24,6 +24,9 @@ import { parsePartialJson } from '../shared/parsePartialJson';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
+import { snapshotForImSession, snapshotForOwnedSession } from './utils/session-snapshot';
+import { findAgentByWorkspacePath } from './utils/admin-config';
+import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
 import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
@@ -404,6 +407,25 @@ const pendingConfigRestart = new Set<RestartReason>();
  *  one turn collapse into a single restart at the next drain point. */
 function scheduleDeferredRestart(reason: RestartReason): void {
   pendingConfigRestart.add(reason);
+}
+
+/**
+ * v0.1.69 T14: Return true if the current session is locked — its config was
+ * captured as a snapshot at creation (see types/session.ts). Callers that
+ * react to AgentConfig change events should consult this before scheduling a
+ * restart: a snapshotted session owns MCP/agents/provider/model/permissionMode
+ * and does NOT follow later agent changes, so restarting would be wasted work
+ * (the frontend already passes the session-resolved list → fingerprint is
+ * stable → no restart needed). If the frontend misbehaves and sends the
+ * agent's raw list, this guard prevents the mis-call from thrashing the SDK.
+ *
+ * IM sessions intentionally leave `configSnapshotAt` undefined (D4
+ * live-follow), so this returns false and the legacy restart path runs.
+ */
+function isCurrentSessionSnapshotted(): boolean {
+  if (!sessionId) return false;
+  const meta = getSessionMetadata(sessionId);
+  return Boolean(meta?.configSnapshotAt);
 }
 
 /** True when at least one reason is pending. */
@@ -1015,9 +1037,16 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
   // subprocess + all stdio MCP servers repeatedly, destroying in-process state.
   // The timer in schedulePreWarm() batches these into a single abort+restart.
   if (mcpChanged && querySession) {
-    const ids = servers.map(s => s.id).join(', ') || 'none';
-    console.log(`[agent] MCP config changed → [${ids}], deferring restart to pre-warm debounce`);
-    scheduleDeferredRestart('mcp');
+    if (isCurrentSessionSnapshotted()) {
+      // v0.1.69 T14: Locked session owns its MCP list — agent-level toggles don't apply here.
+      // Expected frontend behavior is to pass the session-resolved list so mcpChanged is false;
+      // if we got here, it means someone passed the agent's raw list. Log and skip restart.
+      console.log(`[agent] MCP changed but session ${sessionId} is snapshotted — skip restart (snapshot is authoritative)`);
+    } else {
+      const ids = servers.map(s => s.id).join(', ') || 'none';
+      console.log(`[agent] MCP config changed → [${ids}], deferring restart to pre-warm debounce`);
+      scheduleDeferredRestart('mcp');
+    }
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -1062,8 +1091,13 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
 
   // Defer restart to pre-warm debounce (same as setMcpServers — see comment there).
   if (agentsChanged && querySession) {
-    console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), deferring restart to pre-warm debounce`);
-    scheduleDeferredRestart('agents');
+    if (isCurrentSessionSnapshotted()) {
+      // v0.1.69 T14: Locked session owns its sub-agents — skip restart (same rationale as MCP).
+      console.log(`[agent] Sub-agents changed but session ${sessionId} is snapshotted — skip restart`);
+    } else {
+      console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), deferring restart to pre-warm debounce`);
+      scheduleDeferredRestart('agents');
+    }
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -1175,7 +1209,13 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
 
   // If a session is running, its subprocess has the OLD provider env.
   // Restart so the next session picks up the updated environment.
-  if (querySession) {
+  // v0.1.69 T14: Locked sessions own their provider — agent-level provider sync
+  // should not abort them. The snapshot in the Sidecar's startup env is
+  // authoritative; a later /api/provider/set from Rust reflecting an agent
+  // config change must be ignored at the restart-scheduling layer.
+  if (isCurrentSessionSnapshotted()) {
+    console.log(`[agent] provider changed (${oldLabel} → ${newLabel}) but session ${sessionId} is snapshotted — skip abort/restart`);
+  } else if (querySession) {
     if (isProcessing && !isPreWarming) {
       // Active user turn in progress — defer restart to avoid killing mid-response.
       // The restart will fire after the current turn completes (pendingConfigRestart).
@@ -4042,7 +4082,12 @@ export async function initializeAgent(
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { resolveWorkspaceConfig } = require('./utils/admin-config');
-      const resolved = resolveWorkspaceConfig(agentDir);
+      // v0.1.69: pass session metadata so the sidecar prefers session snapshot
+      // (`meta.model`, `meta.providerId/EnvJson`, `meta.mcpEnabledServers`) over the
+      // agent's current values. For IM sessions (which deliberately don't snapshot
+      // these fields), this is a no-op — the agent fallback handles them.
+      const sessionMetaForResolve = sessionId ? getSessionMetadata(sessionId) : null;
+      const resolved = resolveWorkspaceConfig(agentDir, sessionMetaForResolve);
       // Only self-resolve MCP for sessions with initialPrompt (IM/Cron).
       // Tab sessions must NOT self-resolve: the frontend's /api/mcp/set is the
       // authoritative source, and self-resolve produces slightly different field
@@ -4397,15 +4442,29 @@ export async function enqueueUserMessage(
       }
       console.log(`[agent] session ${sessionId} already exists in SessionStore, preserving stats`);
     } else {
-      // Brand new session — create metadata
-      const sessionMeta = createSessionMetadata(agentDir);
+      // Brand new session — create metadata. v0.1.69: lazy creation covers two cases:
+      //   (a) Desktop first-send with a pending session ID (App.tsx generates a
+      //       `pending-<tabId>` placeholder and never calls POST /sessions; the real
+      //       session is materialized here). → owned snapshot (self-contained).
+      //   (b) IM Bot / agent-channel first message. → im snapshot (live-follow).
+      // Dispatch on `currentScenario.type` set by the caller before enqueue:
+      //   - 'desktop' / 'cron' → owned (config frozen into session)
+      //   - 'im' / 'agent-channel' → live-follow (only runtime recorded)
+      // If the agent lookup misses (workspace not registered), snapshot is `{}` and
+      // `resolveSessionConfig`'s lazy fallback (meta ?? agent) covers it.
+      const lazyAgent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+      const useLiveFollow = currentScenario.type === 'im' || currentScenario.type === 'agent-channel';
+      const lazySnapshot = lazyAgent
+        ? (useLiveFollow ? snapshotForImSession(lazyAgent) : snapshotForOwnedSession(lazyAgent))
+        : undefined;
+      const sessionMeta = createSessionMetadata(agentDir, lazySnapshot);
       sessionMeta.id = sessionId;
       sessionMeta.title = trimmed ? trimmed.slice(0, 40) : '图片消息';
       if (sessionMeta.title.length < trimmed.length) {
         sessionMeta.title += '...';
       }
       saveSessionMetadata(sessionMeta);
-      console.log(`[agent] session ${sessionId} persisted to SessionStore`);
+      console.log(`[agent] session ${sessionId} persisted to SessionStore (lazy, scenario=${currentScenario.type}, snapshot=${lazyAgent ? (useLiveFollow ? 'im' : 'owned') : 'none'})`);
     }
   } else {
     // Update session title from first real message if needed
@@ -5016,8 +5075,21 @@ export function forkSession(assistantMessageId: string): {
   const sourceTitle = sourceMeta?.title || 'Chat';
 
   try {
-    // 3. Create new session metadata with forkFrom
-    const newSession = createSessionMetadata(currentAgentDir);
+    // 3. Create new session metadata with forkFrom.
+    // v0.1.69: Inherit the source session's snapshot (model/permission/mcp/provider/runtime).
+    // Forking from a "locked" Desktop session yields a locked clone with the same config —
+    // Branching off a conversation should not silently change AI behavior. The user can
+    // still PATCH the forked session afterward to detach it.
+    const inheritedSnapshot: Partial<typeof sourceMeta> = sourceMeta ? {
+      runtime: sourceMeta.runtime,
+      model: sourceMeta.model,
+      permissionMode: sourceMeta.permissionMode,
+      mcpEnabledServers: sourceMeta.mcpEnabledServers ? [...sourceMeta.mcpEnabledServers] : undefined,
+      providerId: sourceMeta.providerId,
+      providerEnvJson: sourceMeta.providerEnvJson,
+      configSnapshotAt: sourceMeta.configSnapshotAt,
+    } : {};
+    const newSession = createSessionMetadata(currentAgentDir, inheritedSnapshot);
     newSession.title = `🌿 ${sourceTitle}`;
     newSession.titleSource = 'auto';
     newSession.forkFrom = {
