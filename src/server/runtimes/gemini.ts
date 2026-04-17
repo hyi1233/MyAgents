@@ -732,10 +732,15 @@ export class GeminiRuntime implements AgentRuntime {
 
     try {
       // 8. ACP initialize handshake.
+      // Matches queryModels timeout: covers Gemini Node.js cold-start (3-8s)
+      // + OAuth refresh. A tighter timeout here causes SIGKILL mid-initialize,
+      // leaving gemini's PromptProvider reading a prompt file we just unlinked
+      // via proc.exited.then — visible as spurious "missing system prompt file"
+      // stderr noise.
       await geminiProc.rpc.call(
         'initialize',
         { protocolVersion: 1, clientCapabilities: {} },
-        15_000,
+        30_000,
       );
 
       // 9. Determine mode + create/load session.
@@ -844,7 +849,11 @@ export class GeminiRuntime implements AgentRuntime {
       }
     } catch (err) {
       try {
-        proc.kill();
+        // SIGKILL (not SIGTERM): gemini mid-initialize would otherwise keep
+        // running long enough to read the prompt file we're about to unlink in
+        // proc.exited.then, generating misleading "missing system prompt file"
+        // stderr errors on cold-start failures.
+        proc.kill(9);
       } catch {
         /* ignore */
       }

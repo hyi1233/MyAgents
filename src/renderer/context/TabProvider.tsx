@@ -1359,9 +1359,19 @@ export default function TabProvider({
             }
 
             case 'chat:system-init': {
-                const payload = data as { info: SystemInitInfo; sessionId?: string; prewarm?: boolean } | null;
+                const payload = data as { info: SystemInitInfo; sessionId?: string; prewarm?: boolean; runtime?: string } | null;
                 if (payload?.info) {
                     setSystemInitInfo(payload.info);
+                    // v0.1.69: backend tags every system-init with the runtime that
+                    // actually spawned the process (builtin / claude-code / codex /
+                    // gemini). Freezing it here means a session created in this tab
+                    // gets its sessionRuntime set on first system-init and is never
+                    // affected by later agent.runtime changes — Chat.tsx's
+                    // currentRuntime = sessionRuntime ?? agentRuntime then keeps the
+                    // bottom-bar display consistent with how messages route.
+                    if (payload.runtime) {
+                        setSessionRuntime(payload.runtime);
+                    }
 
                     // Mark session as active (prevents loadSession from interrupting) and loading.
                     // Do NOT set isStreamingRef — that must only be set when a streaming message

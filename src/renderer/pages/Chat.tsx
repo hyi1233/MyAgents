@@ -598,9 +598,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // This gate is applied at the definition of currentRuntime itself so ALL downstream
   // derivations (runtimePermissionModes, runtimeModels, etc.) are automatically safe.
   const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
-  const currentRuntime = multiAgentRuntimeEnabled
+  // Agent's currently-configured runtime — used as the default for NEW sessions.
+  const agentRuntime: RuntimeType = multiAgentRuntimeEnabled
     ? ((currentAgent?.runtime as RuntimeType) || 'builtin')
     : 'builtin';
+  // v0.1.69: session is self-contained — its frozen runtime is authoritative for
+  // both display and message routing within this tab. Falls back to agentRuntime
+  // only before the session has loaded (sessionRuntime===null) or for newly-created
+  // sessions before TabProvider syncs metadata. Changing agent.runtime in another
+  // tab does NOT change an existing session's display: the session's Sidecar was
+  // spawned with its frozen runtime and the backend routes by sessionId.
+  const currentRuntime: RuntimeType = (sessionRuntime as RuntimeType | null) ?? agentRuntime;
   const isExternalRuntime = currentRuntime !== 'builtin';
 
   // Detect installed runtimes once on mount
@@ -1693,13 +1701,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
   }, [currentProject?.id, patchProject, isOwnedSession, patchSnapshot]);
 
-  // Cross-runtime session detection: session was created by a DIFFERENT runtime than the current one.
-  // Covers all mismatch scenarios across builtin, Claude Code, Codex, and Gemini.
-  // sessionRuntime is null ONLY when session hasn't loaded yet (initial state).
-  // After loadSession, it's always a valid RuntimeType ('builtin' | 'codex' | 'claude-code' | 'gemini')
-  // because: new sessions write runtime via createSessionMetadata (defaults to 'builtin'),
-  // old sessions get 'builtin' at load time (TabProvider: runtime || 'builtin').
-  const isCrossRuntimeSession = sessionRuntime !== null && sessionRuntime !== currentRuntime;
+  // Cross-runtime SDK protection: only fires when the multiAgentRuntime feature
+  // gate is OFF but the session was created by an external runtime (Codex/CC/
+  // Gemini). In that case the backend would try to run the built-in SDK against
+  // an external-runtime session → "No conversation found" crash, so we MUST block
+  // sending and route the user through fork-to-new-session instead.
+  //
+  // Normal agent-runtime drift does NOT trigger this (per v0.1.69 self-contained
+  // principle): when the feature gate is on, existing sessions keep their frozen
+  // runtime and the backend routes by sessionId to the correct Sidecar — no fork
+  // needed. The previous formula `sessionRuntime !== currentRuntime` was wrong
+  // because it compared session-actual against agent-preference, which forced an
+  // unnecessary fork every time the user changed agent.runtime in another tab.
+  const isCrossRuntimeSession = sessionRuntime !== null
+    && sessionRuntime !== 'builtin'
+    && !multiAgentRuntimeEnabled;
   const [pendingCrossRuntimeMessage, setPendingCrossRuntimeMessage] = useState<{
     text: string;
     images: ImageAttachment[];
@@ -1869,10 +1885,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setPendingRuntimeChange(null);
     if (!runtime || !currentAgent) return;
     try {
-      // 1. Save runtime to agent config + refresh React state so new tab sees updated runtime
-      await patchAgentConfig(currentAgent.id, { runtime });
-      await refreshConfig();  // Must use refreshConfig (not refreshProviderData) to update config.agents
-      // 2. Create a new session and open in new Tab (pass runtime to avoid cross-runtime mismatch)
+      // The bottom-bar runtime selector is a per-tab fork action, NOT a workspace-
+      // level setting. We pin the new tab to the chosen runtime by stamping it on
+      // the new SessionMetadata (server-side override in POST /sessions wins over
+      // agent.runtime). We deliberately do NOT call patchAgentConfig here:
+      //
+      //   - Patching agent.runtime mutates shared workspace state, which leaks
+      //     into every other open tab on this workspace — empty tabs would flip
+      //     their displayed runtime, and even non-empty tabs whose sessionRuntime
+      //     hadn't been hydrated yet could drift. That broke the v0.1.69
+      //     self-contained guarantee in practice.
+      //   - The new tab still opens with the right runtime: createSession passes
+      //     `runtime` into POST /sessions, which overrides the snapshot's runtime
+      //     field; sidecar.rs's resolve_session_runtime() then spawns the new
+      //     Sidecar with MYAGENTS_RUNTIME set from session metadata, not agent
+      //     config. So nothing here depends on agent.runtime being patched.
+      //   - Users who want to change the workspace default runtime should do it
+      //     in Settings → Agent → Runtime (WorkspaceBasicsSection.tsx) — that's
+      //     the right surface for a workspace-level change.
       if (onForkSession && agentDir) {
         const { createSession } = await import('@/api/sessionClient');
         const session = await createSession(agentDir, runtime);
@@ -1883,7 +1913,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       console.error('[chat] Failed to switch runtime:', err);
       toastRef.current.error('切换 Runtime 失败');
     }
-  }, [pendingRuntimeChange, currentAgent, refreshConfig, onForkSession, agentDir]);
+  }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir]);
 
   // Cross-protocol provider switch confirm: save new provider to project, create new session in new tab.
   // Current tab stays unchanged (preserving the third-party session). See: #68

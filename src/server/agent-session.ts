@@ -4490,7 +4490,7 @@ export async function enqueueUserMessage(
     console.log(`[agent] pre-warm → active, first user message, sessionRegistered=${sessionRegistered}`);
     // Replay buffered system_init so frontend gets tools/session info
     if (systemInitInfo) {
-      broadcast('chat:system-init', { info: systemInitInfo, sessionId });
+      broadcast('chat:system-init', { info: systemInitInfo, sessionId, runtime: 'builtin' });
     }
   }
   // Cancel any pending pre-warm timer (user is sending a message now).
@@ -5651,7 +5651,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Buffer system_init during pre-warm; replay when first user message arrives
         if (!isPreWarming) {
           sessionRegistered = true;  // SDK 确认注册，后续必须 resume
-          broadcast('chat:system-init', { info: systemInitInfo, sessionId });
+          broadcast('chat:system-init', { info: systemInitInfo, sessionId, runtime: 'builtin' });
         } else {
           // Pre-warm 不设 sessionRegistered — 这是核心设计约束
           // Pre-warm 的 system_init 只意味着 subprocess 准备好了，
@@ -6780,7 +6780,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       isPreWarming = false;
       if (systemInitInfo) {
         sessionRegistered = true;
-        broadcast('chat:system-init', { info: systemInitInfo, sessionId });
+        broadcast('chat:system-init', { info: systemInitInfo, sessionId, runtime: 'builtin' });
       }
       if (preWarmTimer) {
         clearTimeout(preWarmTimer);

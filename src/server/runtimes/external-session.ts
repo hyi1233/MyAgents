@@ -104,7 +104,7 @@ type ExternalPendingInteractiveRequest = {
   };
 };
 let externalSessionState: ExternalSessionState = 'idle';
-let externalSystemInitPayload: { info: SystemInitInfo; sessionId: string; prewarm?: boolean } | null = null;
+let externalSystemInitPayload: { info: SystemInitInfo; sessionId: string; prewarm?: boolean; runtime: RuntimeType } | null = null;
 // True between the start of a pre-warm (no initialMessage) and the first real user turn.
 // Consumed by the session_init broadcast so the frontend knows not to flip isLoading:true
 // — a pre-warmed process is "alive but idle", not "processing a turn". Cleared when the
@@ -531,7 +531,7 @@ export function getExternalSessionState(): ExternalSessionState {
   return externalSessionState;
 }
 
-export function getExternalSystemInitPayload(): { info: SystemInitInfo; sessionId: string; prewarm?: boolean } | null {
+export function getExternalSystemInitPayload(): { info: SystemInitInfo; sessionId: string; prewarm?: boolean; runtime: RuntimeType } | null {
   return externalSystemInitPayload;
 }
 
@@ -1490,6 +1490,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         },
         sessionId: lastSessionId,
         prewarm: isPrewarmingSession || undefined,
+        // Authoritative runtime tag — the spawning runtime is the one running this
+        // process, regardless of any later agent.runtime drift. Frontend uses this
+        // to freeze sessionRuntime at session-creation time so the bottom-bar
+        // display stays consistent with how messages actually route.
+        runtime: getCurrentRuntimeType(),
       };
       broadcast('chat:system-init', externalSystemInitPayload);
       break;
@@ -1524,47 +1529,54 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     case 'session_complete':
       clearWatchdog();
       console.log(`[external-session] session_complete: subtype=${event.subtype}, result=${(event.result || '').length > 0 ? `${(event.result || '').length}chars` : 'empty'}, turnCompleted=${turnCompleted}, assistantText=${currentAssistantText.length}chars`);
-      if (event.subtype === 'success') {
-        // CC slash commands (e.g. /context, /cost) return output directly in `result`
-        // without streaming text_delta events. Only broadcast if NO turn completed
-        // (turnCompleted means text was already streamed + persisted normally).
-        if (event.result && !turnCompleted && !currentAssistantText.trim()) {
-          broadcast('chat:message-chunk', event.result);
-          currentAssistantText += event.result;
-          pendingTextBuffer += event.result;
-        }
-        // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
-        if (!turnCompleted) {
-          lastTurnSucceeded = true;
-          persistTurnResult();
-        }
-      } else {
-        const errorMessage = event.result || 'Session ended with error';
-        // Suppress user-visible error when the external runtime's persistent process
-        // dies while idle (after a turn already completed, with no new turn in flight).
-        // Common cause: OS memory pressure / SIGKILL (exit 137) after tens of minutes
-        // of inactivity on Codex/Gemini. The next sendExternalMessage will hit the
-        // "Previous process exited, resuming" branch and transparently spawn a fresh
-        // process — the user never needed to see an error in the first place.
-        //
-        // Repro: user reported "Gemini process exited with code 137" toast after
-        // leaving a session idle for 26 minutes with no interaction. See
-        // ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt final session_complete line.
-        const isIdleExit = turnCompleted && !currentAssistantText.trim();
-        // Pre-warm exit: process crashed after spawn but before any user turn
+      {
+        // Pre-warm exit: process died after spawn but before any user turn
         // started. `currentTurnStartTime === 0` distinguishes this from a
-        // mid-turn failure (which sets the timestamp at turn kickoff). Silent
-        // failure — the next user message will retry through the normal path.
+        // mid-turn exit (which sets the timestamp at turn kickoff). Applies to
+        // BOTH subtypes:
+        //   - subtype='error' (SIGKILL / init timeout) → silent retry on send
+        //   - subtype='success' (graceful exit code 0 during our timeout kill)
+        //     → would otherwise fall through to persistTurnResult and broadcast
+        //     chat:message-complete — triggering a misleading "任务完成" OS
+        //     notification on an empty tab that never ran a turn.
         const isPrewarmExit = !turnCompleted && currentTurnStartTime === 0;
-        if (isIdleExit) {
-          console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
-        } else if (isPrewarmExit) {
-          console.log(`[external-session] Ignoring pre-warm exit "${errorMessage}" — no user turn was in flight; next send will start fresh`);
+        if (isPrewarmExit) {
+          console.log(`[external-session] Ignoring pre-warm exit (subtype=${event.subtype}) — no user turn was in flight; next send will start fresh`);
+        } else if (event.subtype === 'success') {
+          // CC slash commands (e.g. /context, /cost) return output directly in `result`
+          // without streaming text_delta events. Only broadcast if NO turn completed
+          // (turnCompleted means text was already streamed + persisted normally).
+          if (event.result && !turnCompleted && !currentAssistantText.trim()) {
+            broadcast('chat:message-chunk', event.result);
+            currentAssistantText += event.result;
+            pendingTextBuffer += event.result;
+          }
+          // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
+          if (!turnCompleted) {
+            lastTurnSucceeded = true;
+            persistTurnResult();
+          }
         } else {
-          broadcast('chat:agent-error', { message: errorMessage });
-          broadcast('chat:message-error', errorMessage);
-          fireImCallback('error', errorMessage);
-          resetTurnAccumulators(); // Prevent stale content leaking into next turn
+          const errorMessage = event.result || 'Session ended with error';
+          // Suppress user-visible error when the external runtime's persistent process
+          // dies while idle (after a turn already completed, with no new turn in flight).
+          // Common cause: OS memory pressure / SIGKILL (exit 137) after tens of minutes
+          // of inactivity on Codex/Gemini. The next sendExternalMessage will hit the
+          // "Previous process exited, resuming" branch and transparently spawn a fresh
+          // process — the user never needed to see an error in the first place.
+          //
+          // Repro: user reported "Gemini process exited with code 137" toast after
+          // leaving a session idle for 26 minutes with no interaction. See
+          // ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt final session_complete line.
+          const isIdleExit = turnCompleted && !currentAssistantText.trim();
+          if (isIdleExit) {
+            console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
+          } else {
+            broadcast('chat:agent-error', { message: errorMessage });
+            broadcast('chat:message-error', errorMessage);
+            fireImCallback('error', errorMessage);
+            resetTurnAccumulators(); // Prevent stale content leaking into next turn
+          }
         }
       }
       pendingPermissionSuggestions.clear();
