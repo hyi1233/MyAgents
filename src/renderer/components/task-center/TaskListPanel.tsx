@@ -22,7 +22,9 @@ import {
   taskUpdateStatus,
 } from '@/api/taskCenter';
 import { useToast } from '@/components/Toast';
+import { useConfig } from '@/hooks/useConfig';
 import type { Task, TaskStatus } from '@/../shared/types/task';
+import { canAutoUpgrade, upgradeLegacyCron, type LegacyCronRaw } from './legacyUpgrade';
 import { LegacyCronOverlay } from './LegacyCronOverlay';
 import { TaskDetailOverlay } from './TaskDetailOverlay';
 import { TaskCardItem } from './views/TaskCardItem';
@@ -63,6 +65,11 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
   useEffect(() => {
     toastRef.current = toast;
   }, [toast]);
+  const { projects } = useConfig();
+  const projectsRef = useRef(projects);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [legacy, setLegacy] = useState<LegacyCronRow[]>([]);
@@ -91,8 +98,29 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
         taskList({}),
         fetchLegacyCronTasks(),
       ]);
-      setTasks(nativeList);
-      setLegacy(legacyList);
+      // Silent auto-upgrade (PRD §11.4 / §16.2). Any legacy row that has
+      // the prerequisites (prompt + resolvable workspace) is upgraded in
+      // place before we commit state. Rows that fail eligibility remain
+      // in the legacy list and can still be upgraded manually via the
+      // `LegacyCronOverlay` button (where we surface the actual error).
+      //
+      // The operation is idempotent — once a cron has `task_id` set,
+      // `fetchLegacyCronTasks` filters it out, so re-running this does
+      // nothing on subsequent reloads.
+      const { upgradedTasks, remainingLegacy } = await autoUpgradeEligible(
+        legacyList,
+        projectsRef.current,
+      );
+      const mergedNative = upgradedTasks.length
+        ? [...upgradedTasks, ...nativeList]
+        : nativeList;
+      setTasks(mergedNative);
+      setLegacy(remainingLegacy);
+      if (upgradedTasks.length > 0) {
+        toastRef.current.success(
+          `已自动升级 ${upgradedTasks.length} 个旧定时任务为新版任务`,
+        );
+      }
     } catch (err) {
       console.error('[TaskListPanel] load failed', err);
       setTasks([]);
@@ -222,12 +250,23 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
       finished: [],
     };
     for (const c of filtered) {
+      // Legacy → new-model status mapping. We use `hasExited` (derived
+      // from `CronTask.exit_reason`) to distinguish "ended naturally"
+      // from "user paused" — the scheduler sets exit_reason when end
+      // conditions trigger or the AI calls ExitCronTask, so this is a
+      // reliable signal that the cron is done, not just idle.
+      //   • running              → `running`  (active bucket)
+      //   • stopped + exited     → `done`     (finished bucket)
+      //   • stopped (no reason)  → `stopped`  (pending bucket — user
+      //                                        can restart from here)
       const status: TaskStatus =
         c.kind === 'task'
           ? c.task.status
           : c.legacy.status === 'running'
             ? 'running'
-            : 'stopped';
+            : c.legacy.hasExited
+              ? 'done'
+              : 'stopped';
       for (const [name, cfg] of Object.entries(BUCKETS) as Array<
         [Bucket, typeof BUCKETS[Bucket]]
       >) {
@@ -461,10 +500,18 @@ async function fetchLegacyCronTasks(): Promise<LegacyCronRow[]> {
             : typeof t.createdAt === 'string'
               ? Date.parse(t.createdAt)
               : 0;
+        // `exit_reason` is populated by the scheduler when end-conditions
+        // trigger or the AI calls ExitCronTask — the signal we use to say
+        // "this cron is done, not paused". Defend against snake/camel as
+        // other raw fields do.
+        const exitReason =
+          (t.exitReason as string | null | undefined) ??
+          (t.exit_reason as string | null | undefined);
         return {
           id: String(t.id ?? ''),
           name: String(t.name ?? t.prompt ?? '未命名定时任务').slice(0, 80),
           status,
+          hasExited: status === 'stopped' && !!exitReason,
           raw: t,
           workspacePath: String(t.workspacePath ?? ''),
           updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0,
@@ -474,6 +521,40 @@ async function fetchLegacyCronTasks(): Promise<LegacyCronRow[]> {
     console.warn('[TaskListPanel] fetchLegacyCronTasks failed', err);
     return [];
   }
+}
+
+/**
+ * Sweep a freshly-fetched legacy list and upgrade every eligible row to
+ * a new-model Task. Uses the same `upgradeLegacyCron` flow as the manual
+ * button in `LegacyCronOverlay` so the behaviour is identical — only the
+ * trigger differs. Rows that fail eligibility (no prompt, unknown
+ * workspace, etc.) stay in the legacy list untouched; the user can still
+ * upgrade them manually or dismiss them via the existing delete path.
+ *
+ * Errors are logged but do not abort the sweep — one bad row shouldn't
+ * leave the rest unmigrated.
+ */
+async function autoUpgradeEligible(
+  legacy: LegacyCronRow[],
+  projects: import('@/config/types').Project[],
+): Promise<{ upgradedTasks: Task[]; remainingLegacy: LegacyCronRow[] }> {
+  const upgradedTasks: Task[] = [];
+  const remainingLegacy: LegacyCronRow[] = [];
+  for (const row of legacy) {
+    const raw = row.raw as LegacyCronRaw;
+    if (!canAutoUpgrade(raw, projects)) {
+      remainingLegacy.push(row);
+      continue;
+    }
+    try {
+      const { task } = await upgradeLegacyCron(raw, projects);
+      upgradedTasks.push(task);
+    } catch (err) {
+      console.warn('[TaskListPanel] auto-upgrade failed for', row.id, err);
+      remainingLegacy.push(row);
+    }
+  }
+  return { upgradedTasks, remainingLegacy };
 }
 
 export default TaskListPanel;

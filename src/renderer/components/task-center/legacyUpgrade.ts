@@ -101,6 +101,20 @@ export interface UpgradeResult {
   thoughtId: string;
 }
 
+/** Can this legacy row be upgraded automatically — without the user
+ *  confirming? The upgrade creates a Thought + Task, so we need the
+ *  prerequisites: a valid prompt and a resolvable workspace. Rows that
+ *  fail this check remain in the legacy list and the user can still
+ *  trigger a manual upgrade via LegacyCronOverlay (where they'd see the
+ *  resolvable-workspace error up front). */
+export function canAutoUpgrade(legacy: LegacyCronRaw, projects: Project[]): boolean {
+  if (!String(legacy.id ?? '').trim()) return false;
+  if (!String(legacy.prompt ?? '').trim()) return false;
+  const path = String(legacy.workspacePath ?? '').trim();
+  if (!path) return false;
+  return projects.some((p) => p.path === path);
+}
+
 /**
  * Upgrade one legacy cron into a new-model Task. Reuses the existing
  * CronTask — no schedule interruption — and wires both-sided back-pointers.

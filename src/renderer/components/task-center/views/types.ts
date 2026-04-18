@@ -7,6 +7,14 @@ export interface LegacyCronRow {
   id: string;
   name: string;
   status: 'running' | 'stopped';
+  /**
+   * True when the cron ended naturally — end-conditions triggered, AI
+   * self-exit, or a scheduled one-shot ran. We distinguish these from
+   * user-paused crons (status=stopped without `exit_reason`) so the
+   * bucket logic can route "completed" into `已完成` instead of
+   * `待启动`. Derived from `CronTask.exit_reason` being Some(_).
+   */
+  hasExited: boolean;
   /** Raw CronTask object — forwarded to LegacyCronOverlay on click. */
   raw: Record<string, unknown>;
   workspacePath: string;
