@@ -1,11 +1,14 @@
 /**
  * CustomSelect - Custom dropdown select component
  * Replaces native <select> with styled dropdown matching design system.
- * Uses fixed positioning so dropdown is never clipped by overflow:hidden parents.
+ * Positioning is delegated to the shared `<Popover>` primitive, which
+ * portals to <body> and auto-flips when there isn't room below.
  */
 
 import { Check, ChevronDown } from 'lucide-react';
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useRef, useState } from 'react';
+
+import { Popover } from '@/components/ui/Popover';
 
 export interface SelectOption {
     value: string;
@@ -43,56 +46,7 @@ export default function CustomSelect({
     footerAction,
 }: CustomSelectProps) {
     const [isOpen, setIsOpen] = useState(false);
-    const containerRef = useRef<HTMLDivElement>(null);
     const triggerRef = useRef<HTMLButtonElement>(null);
-    const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
-
-    // Compute dropdown position from trigger's bounding rect
-    // Auto-detect: open upward when not enough space below
-    const updatePosition = useCallback(() => {
-        if (!triggerRef.current) return;
-        const rect = triggerRef.current.getBoundingClientRect();
-        const maxDropdownHeight = 240; // max-h-60 = 15rem = 240px
-        const spaceBelow = window.innerHeight - rect.bottom;
-        const openUpward = spaceBelow < maxDropdownHeight && rect.top > spaceBelow;
-        setDropdownStyle({
-            position: 'fixed',
-            left: rect.left,
-            width: rect.width,
-            ...(openUpward
-                ? { bottom: window.innerHeight - rect.top + 4 }
-                : { top: rect.bottom + 4 }),
-        });
-    }, []);
-
-    useEffect(() => {
-        if (!isOpen) return;
-        updatePosition();
-    }, [isOpen, updatePosition]);
-
-    // Reposition dropdown on scroll/resize to prevent detachment from trigger
-    useEffect(() => {
-        if (!isOpen) return;
-        const handleRepositionOrClose = () => updatePosition();
-        window.addEventListener('scroll', handleRepositionOrClose, true);
-        window.addEventListener('resize', handleRepositionOrClose);
-        return () => {
-            window.removeEventListener('scroll', handleRepositionOrClose, true);
-            window.removeEventListener('resize', handleRepositionOrClose);
-        };
-    }, [isOpen, updatePosition]);
-
-    // Close on click outside
-    useEffect(() => {
-        if (!isOpen) return;
-        const handleClickOutside = (e: MouseEvent) => {
-            if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-                setIsOpen(false);
-            }
-        };
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, [isOpen]);
 
     const selectedOption = options.find(o => o.value === value);
 
@@ -102,8 +56,7 @@ export default function CustomSelect({
     }, [onChange]);
 
     return (
-        <div ref={containerRef} className={`relative ${className ?? ''}`}>
-            {/* Trigger */}
+        <div className={`relative ${className ?? ''}`}>
             <button
                 ref={triggerRef}
                 type="button"
@@ -118,19 +71,23 @@ export default function CustomSelect({
                 </span>
                 <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)] transition-transform ${isOpen ? 'rotate-180' : ''}`} />
             </button>
-
-            {/* Dropdown panel — fixed position to escape overflow clipping */}
-            {isOpen && (
-                <div
-                    className="z-[300] max-h-60 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md"
-                    style={dropdownStyle}
-                >
-                    {options.map(option =>
-                        option.isSeparator ? (
-                            <div key={option.value} className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]/50">
-                                {option.label}
-                            </div>
-                        ) : (
+            <Popover
+                open={isOpen}
+                onClose={() => setIsOpen(false)}
+                anchorRef={triggerRef}
+                placement="bottom-start"
+                matchAnchorWidth
+                className="max-h-60 overflow-auto py-1 shadow-md"
+                // Elevated above modal backdrops since selects are often
+                // rendered inside OverlayBackdrop-wrapped dialogs.
+                zIndex={300}
+            >
+                {options.map(option =>
+                    option.isSeparator ? (
+                        <div key={option.value} className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]/50">
+                            {option.label}
+                        </div>
+                    ) : (
                         <button
                             key={option.value}
                             type="button"
@@ -152,30 +109,28 @@ export default function CustomSelect({
                                 <Check className="h-3 w-3 shrink-0" />
                             )}
                         </button>
-                        )
-                    )}
+                    )
+                )}
 
-                    {/* Footer action */}
-                    {footerAction && (
-                        <>
-                            <div className="my-1 border-t border-[var(--line)]" />
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setIsOpen(false);
-                                    footerAction.onClick();
-                                }}
-                                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                            >
-                                {footerAction.icon && (
-                                    <span className="shrink-0">{footerAction.icon}</span>
-                                )}
-                                <span>{footerAction.label}</span>
-                            </button>
-                        </>
-                    )}
-                </div>
-            )}
+                {footerAction && (
+                    <>
+                        <div className="my-1 border-t border-[var(--line)]" />
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setIsOpen(false);
+                                footerAction.onClick();
+                            }}
+                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                        >
+                            {footerAction.icon && (
+                                <span className="shrink-0">{footerAction.icon}</span>
+                            )}
+                            <span>{footerAction.label}</span>
+                        </button>
+                    </>
+                )}
+            </Popover>
         </div>
     );
 }

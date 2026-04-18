@@ -17,6 +17,7 @@ import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 import { isProviderAvailable } from '@/config/configService';
 import RuntimeSelector from '@/components/RuntimeSelector';
+import { Popover } from '@/components/ui/Popover';
 import { taskCenterAvailable } from '@/api/taskCenter';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 
@@ -278,6 +279,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const internalRef = useRef<HTMLTextAreaElement>(null);
   const textareaRef = inputRef ?? internalRef;
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Anchor refs for Popover-based dropdowns. The textarea wrapper anchors
+  // the @file and /slash menus (both sit at the bottom of the textarea
+  // area); the four toolbar menus anchor to their own trigger buttons.
+  const textareaWrapperRef = useRef<HTMLDivElement>(null);
+  const plusBtnRef = useRef<HTMLButtonElement>(null);
+  const modeBtnRef = useRef<HTMLButtonElement>(null);
+  const toolBtnRef = useRef<HTMLButtonElement>(null);
+  const modelBtnRef = useRef<HTMLButtonElement>(null);
   const [isExpanded, setIsExpanded] = useState(false);
 
   // Image attachments - moved up for processDroppedFiles to use
@@ -1245,7 +1254,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
           )}
 
           {/* Textarea area */}
-          <div className="relative px-4 pt-3">
+          <div ref={textareaWrapperRef} className="relative px-4 pt-3">
             <textarea
               ref={textareaRef}
               value={inputValue}
@@ -1275,56 +1284,73 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               }}
             />
 
-            {/* @file search popup */}
-            {showFileSearch && (
-              <div className="absolute left-4 bottom-full mb-2 w-80 max-h-64 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl">
-                {fileSearchQuery.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                    输入文件名搜索...
+            {/* @file search popup. Keyboard is owned by the textarea
+                (↑↓/Enter/Esc), so we disable the Popover's own Escape
+                handler to avoid double-fire. */}
+            <Popover
+              open={showFileSearch}
+              onClose={() => setShowFileSearch(false)}
+              anchorRef={textareaWrapperRef}
+              placement="top-start"
+              offset={8}
+              closeOnEscape={false}
+              className="w-80 max-h-64 overflow-auto"
+            >
+              {fileSearchQuery.length === 0 ? (
+                <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
+                  输入文件名搜索...
+                </div>
+              ) : isFileSearching ? (
+                <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
+                  搜索中...
+                </div>
+              ) : fileSearchResults.length === 0 ? (
+                <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
+                  未找到文件
+                </div>
+              ) : (
+                fileSearchResults.map((file, idx) => (
+                  <div
+                    key={file.path}
+                    className={`flex items-center gap-2 px-3 py-2 cursor-pointer text-sm ${idx === selectedFileIndex
+                      ? 'bg-[var(--accent)]/10 text-[var(--ink)]'
+                      : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
+                      }`}
+                    onClick={() => {
+                      if (atPosition !== null) {
+                        const before = inputValue.slice(0, atPosition);
+                        const after = inputValue.slice(textareaRef.current?.selectionStart || atPosition + fileSearchQuery.length + 1);
+                        setInputValue(`${before}@${file.path} ${after}`);
+                        setShowFileSearch(false);
+                        setAtPosition(null);
+                      }
+                    }}
+                  >
+                    <FileText className="h-4 w-4 flex-shrink-0" />
+                    <span className="truncate">{file.path}</span>
                   </div>
-                ) : isFileSearching ? (
-                  <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                    搜索中...
-                  </div>
-                ) : fileSearchResults.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                    未找到文件
-                  </div>
-                ) : (
-                  fileSearchResults.map((file, idx) => (
-                    <div
-                      key={file.path}
-                      className={`flex items-center gap-2 px-3 py-2 cursor-pointer text-sm ${idx === selectedFileIndex
-                        ? 'bg-[var(--accent)]/10 text-[var(--ink)]'
-                        : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
-                        }`}
-                      onClick={() => {
-                        if (atPosition !== null) {
-                          const before = inputValue.slice(0, atPosition);
-                          const after = inputValue.slice(textareaRef.current?.selectionStart || atPosition + fileSearchQuery.length + 1);
-                          setInputValue(`${before}@${file.path} ${after}`);
-                          setShowFileSearch(false);
-                          setAtPosition(null);
-                        }
-                      }}
-                    >
-                      <FileText className="h-4 w-4 flex-shrink-0" />
-                      <span className="truncate">{file.path}</span>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
+                ))
+              )}
+            </Popover>
 
-            {/* /slash command popup */}
-            {!isLauncherMode && showSlashMenu && (
+            {/* /slash command popup. Same ownership pattern — textarea owns
+                the keyboard (↑↓/Enter/Tab/Esc); the primitive just positions
+                the content above the input. */}
+            <Popover
+              open={!isLauncherMode && showSlashMenu}
+              onClose={() => setShowSlashMenu(false)}
+              anchorRef={textareaWrapperRef}
+              placement="top-start"
+              offset={8}
+              closeOnEscape={false}
+            >
               <SlashCommandMenu
                 commands={filteredSlashCommands}
                 selectedIndex={selectedSlashIndex}
                 isEmpty={slashSearchQuery.length > 0 && filteredSlashCommands.length === 0}
                 onSelect={handleSlashSelect}
               />
-            )}
+            </Popover>
 
             {/* Expand/Collapse button - larger click area */}
             <button
@@ -1359,89 +1385,92 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               {toolbarPrefix}
 
               {/* Plus menu */}
-              <div className="relative">
+              <button
+                ref={plusBtnRef}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // Close other menus first
+                  setShowModeMenu(false);
+                  setShowModelMenu(false);
+                  setShowToolMenu(false);
+                  setShowPlusMenu(!showPlusMenu);
+                }}
+                className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                title="添加上下文"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+              <Popover
+                open={showPlusMenu}
+                onClose={() => setShowPlusMenu(false)}
+                anchorRef={plusBtnRef}
+                placement="top-start"
+                className="w-48 py-1"
+              >
+                {!isLauncherMode && (
                 <button
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    // Close other menus first
-                    setShowModeMenu(false);
-                    setShowModelMenu(false);
-                    setShowToolMenu(false);
-                    setShowPlusMenu(!showPlusMenu);
+                    // Insert @ at cursor position and trigger file search
+                    const textarea = textareaRef.current;
+                    if (textarea) {
+                      const cursorPos = textarea.selectionStart;
+                      const before = inputValue.slice(0, cursorPos);
+                      const after = inputValue.slice(cursorPos);
+                      setInputValue(`${before}@${after}`);
+                      setShowFileSearch(true);
+                      setAtPosition(cursorPos);
+                      setFileSearchQuery('');
+                      textarea.focus();
+                    }
+                    setShowPlusMenu(false);
                   }}
-                  className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                  title="添加上下文"
+                  className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
-                  <Plus className="h-4 w-4" />
+                  <AtSign className="h-4 w-4" />
+                  引用文件
                 </button>
-                {showPlusMenu && (
-                  <div className="absolute left-0 bottom-full mb-1 w-48 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
-                    {!isLauncherMode && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Insert @ at cursor position and trigger file search
-                        const textarea = textareaRef.current;
-                        if (textarea) {
-                          const cursorPos = textarea.selectionStart;
-                          const before = inputValue.slice(0, cursorPos);
-                          const after = inputValue.slice(cursorPos);
-                          setInputValue(`${before}@${after}`);
-                          setShowFileSearch(true);
-                          setAtPosition(cursorPos);
-                          setFileSearchQuery('');
-                          textarea.focus();
-                        }
-                        setShowPlusMenu(false);
-                      }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                    >
-                      <AtSign className="h-4 w-4" />
-                      引用文件
-                    </button>
-                    )}
-                    {!isLauncherMode && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Insert / at cursor position and trigger slash menu
-                        const textarea = textareaRef.current;
-                        if (textarea) {
-                          const cursorPos = textarea.selectionStart;
-                          const before = inputValue.slice(0, cursorPos);
-                          const after = inputValue.slice(cursorPos);
-                          setInputValue(`${before}/${after}`);
-                          setShowSlashMenu(true);
-                          setSlashPosition(cursorPos);
-                          setSlashSearchQuery('');
-                          setSelectedSlashIndex(0);
-                          textarea.focus();
-                        }
-                        setShowPlusMenu(false);
-                      }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                    >
-                      <span className="inline-flex h-4 w-4 items-center justify-center font-medium text-[var(--ink-muted)]">/</span>
-                      使用技能
-                    </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        fileInputRef.current?.click();
-                      }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                    >
-                      <Paperclip className="h-4 w-4" />
-                      上传文件
-                    </button>
-                  </div>
                 )}
-              </div>
+                {!isLauncherMode && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    // Insert / at cursor position and trigger slash menu
+                    const textarea = textareaRef.current;
+                    if (textarea) {
+                      const cursorPos = textarea.selectionStart;
+                      const before = inputValue.slice(0, cursorPos);
+                      const after = inputValue.slice(cursorPos);
+                      setInputValue(`${before}/${after}`);
+                      setShowSlashMenu(true);
+                      setSlashPosition(cursorPos);
+                      setSlashSearchQuery('');
+                      setSelectedSlashIndex(0);
+                      textarea.focus();
+                    }
+                    setShowPlusMenu(false);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                >
+                  <span className="inline-flex h-4 w-4 items-center justify-center font-medium text-[var(--ink-muted)]">/</span>
+                  使用技能
+                </button>
+                )}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    fileInputRef.current?.click();
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                >
+                  <Paperclip className="h-4 w-4" />
+                  上传文件
+                </button>
+              </Popover>
 
               {/* Hidden file input */}
               <input
@@ -1464,95 +1493,104 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               )}
 
               {/* Mode Dropdown */}
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowModeMenu(!showModeMenu);
-                    setShowModelMenu(false);
-                    setShowPlusMenu(false);
-                    setShowToolMenu(false);
-                  }}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                  title="切换执行模式"
-                >
-                  <span>{currentModeDisplay?.icon}</span>
-                  <span className="toolbar-label">{currentModeDisplay?.label}</span>
-                  <ChevronUp className="h-3 w-3" />
-                </button>
-                {showModeMenu && (
-                  <div className="absolute left-0 bottom-full mb-1 w-72 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
-                    <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--line)]">
-                      <span className="text-xs font-medium text-[var(--ink-muted)]">会话模式</span>
-                      {onOpenAgentSettings && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setShowModeMenu(false);
-                            onOpenAgentSettings();
-                          }}
-                          className="text-xs font-medium text-[var(--accent)] hover:text-[var(--accent-warm-hover)] transition-colors"
-                        >
-                          Agent 设置
-                        </button>
-                      )}
-                    </div>
-                    {displayPermissionModes.map((mode) => (
-                      <button
-                        key={mode.value}
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (mode.value === 'fullAgency' || (mode.value as string) === 'bypassPermissions') {
-                            toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
-                          }
-                          onPermissionModeChange?.(mode.value);
-                          setShowModeMenu(false);
-                        }}
-                        className={`flex w-full flex-col items-start px-3 py-2 text-left ${permissionMode === mode.value
-                          ? 'bg-[var(--accent)]/10'
-                          : 'hover:bg-[var(--hover-bg)]'
-                          }`}
-                      >
-                        <span className={`text-sm font-medium flex items-center gap-1.5 ${permissionMode === mode.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
-                          }`}>
-                          <span>{mode.icon}</span>
-                          {mode.label}
-                        </span>
-                        <span className="text-xs text-[var(--ink-muted)] mt-0.5">{mode.description}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <button
+                ref={modeBtnRef}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowModeMenu(!showModeMenu);
+                  setShowModelMenu(false);
+                  setShowPlusMenu(false);
+                  setShowToolMenu(false);
+                }}
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                title="切换执行模式"
+              >
+                <span>{currentModeDisplay?.icon}</span>
+                <span className="toolbar-label">{currentModeDisplay?.label}</span>
+                <ChevronUp className="h-3 w-3" />
+              </button>
+              <Popover
+                open={showModeMenu}
+                onClose={() => setShowModeMenu(false)}
+                anchorRef={modeBtnRef}
+                placement="top-start"
+                className="w-72 py-1"
+              >
+                <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--line)]">
+                  <span className="text-xs font-medium text-[var(--ink-muted)]">会话模式</span>
+                  {onOpenAgentSettings && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowModeMenu(false);
+                        onOpenAgentSettings();
+                      }}
+                      className="text-xs font-medium text-[var(--accent)] hover:text-[var(--accent-warm-hover)] transition-colors"
+                    >
+                      Agent 设置
+                    </button>
+                  )}
+                </div>
+                {displayPermissionModes.map((mode) => (
+                  <button
+                    key={mode.value}
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (mode.value === 'fullAgency' || (mode.value as string) === 'bypassPermissions') {
+                        toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
+                      }
+                      onPermissionModeChange?.(mode.value);
+                      setShowModeMenu(false);
+                    }}
+                    className={`flex w-full flex-col items-start px-3 py-2 text-left ${permissionMode === mode.value
+                      ? 'bg-[var(--accent)]/10'
+                      : 'hover:bg-[var(--hover-bg)]'
+                      }`}
+                  >
+                    <span className={`text-sm font-medium flex items-center gap-1.5 ${permissionMode === mode.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
+                      }`}>
+                      <span>{mode.icon}</span>
+                      {mode.label}
+                    </span>
+                    <span className="text-xs text-[var(--ink-muted)] mt-0.5">{mode.description}</span>
+                  </button>
+                ))}
+              </Popover>
 
               {/* Tool/MCP Dropdown - hidden for external runtimes (they use their own tools) */}
               {!isExternalRuntime && (
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowToolMenu(!showToolMenu);
-                    setShowModeMenu(false);
-                    setShowModelMenu(false);
-                    setShowPlusMenu(false);
-                  }}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                  title="使用工具"
-                >
-                  <Wrench className="h-3.5 w-3.5" />
-                  <span className="toolbar-label">工具</span>
-                  {workspaceMcpEnabled.length > 0 && (
-                    <span className="text-[11px] text-[var(--ink-muted)]">
-                      {workspaceMcpEnabled.length}
-                    </span>
-                  )}
-                </button>
-                {showToolMenu && (
-                  <div className="absolute left-0 bottom-full mb-1 w-64 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
+              <>
+              <button
+                ref={toolBtnRef}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowToolMenu(!showToolMenu);
+                  setShowModeMenu(false);
+                  setShowModelMenu(false);
+                  setShowPlusMenu(false);
+                }}
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                title="使用工具"
+              >
+                <Wrench className="h-3.5 w-3.5" />
+                <span className="toolbar-label">工具</span>
+                {workspaceMcpEnabled.length > 0 && (
+                  <span className="text-[11px] text-[var(--ink-muted)]">
+                    {workspaceMcpEnabled.length}
+                  </span>
+                )}
+              </button>
+              <Popover
+                open={showToolMenu}
+                onClose={() => setShowToolMenu(false)}
+                anchorRef={toolBtnRef}
+                placement="top-start"
+                className="w-64 py-1"
+              >
                     <div className="px-3 py-2 text-xs font-medium text-[var(--ink-muted)] border-b border-[var(--line)]">
                       工具 (在此对话中启用)
                     </div>
@@ -1623,9 +1661,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         安装开启 MCP 工具，即可使用浏览器等更多功能
                       </div>
                     )}
-                  </div>
-                )}
-              </div>
+              </Popover>
+              </>
               )}
 
               {/* Heartbeat Loop Button */}
@@ -1662,33 +1699,38 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               )}
               {/* Model Dropdown with Provider Selector — hidden in thought mode
                   (PRD §4.2: thought input is a note box, not an AI chat input). */}
-              <div
-                className="relative"
-                style={thoughtModeActive ? { display: 'none' } : undefined}
+              {!thoughtModeActive && (
+              <>
+              <button
+                ref={modelBtnRef}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const willOpen = !showModelMenu;
+                  setShowModelMenu(willOpen);
+                  setShowModeMenu(false);
+                  setShowPlusMenu(false);
+                  setShowToolMenu(false);
+                  // Refresh providers data when opening menu
+                  if (willOpen && onRefreshProviders) {
+                    onRefreshProviders();
+                  }
+                }}
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                title="切换模型"
               >
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const willOpen = !showModelMenu;
-                    setShowModelMenu(willOpen);
-                    setShowModeMenu(false);
-                    setShowPlusMenu(false);
-                    setShowToolMenu(false);
-                    // Refresh providers data when opening menu
-                    if (willOpen && onRefreshProviders) {
-                      onRefreshProviders();
-                    }
-                  }}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                  title="切换模型"
-                >
-                  <span className="max-w-[140px] truncate">{currentModelName}</span>
-                  <ChevronUp className="h-3 w-3 shrink-0" />
-                </button>
-                {showModelMenu && (isExternalRuntime && runtimeModels ? (
-                  /* External Runtime model selector — shows CC/Codex/Gemini models */
-                  <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
+                <span className="max-w-[140px] truncate">{currentModelName}</span>
+                <ChevronUp className="h-3 w-3 shrink-0" />
+              </button>
+              <Popover
+                open={showModelMenu}
+                onClose={() => setShowModelMenu(false)}
+                anchorRef={modelBtnRef}
+                placement="top-end"
+                className="w-64 max-h-[300px] overflow-y-auto py-1"
+              >
+                {isExternalRuntime && runtimeModels ? (
+                  <>
                     <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                       {runtime === 'claude-code' ? 'CLAUDE CODE' : runtime === 'gemini' ? 'GEMINI CLI' : runtime?.toUpperCase()} 模型
                     </div>
@@ -1713,70 +1755,68 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         </button>
                       );
                     })}
-                  </div>
-                ) : showModelMenu && (() => {
-                  /* Builtin Runtime model selector — original provider-based */
+                  </>
+                ) : (() => {
                   const availableProviders = (providers ?? []).filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
-                  return (
-                    <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
-                      {availableProviders.length === 0 ? (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setShowModelMenu(false);
-                            window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
-                              detail: { section: 'providers' }
-                            }));
-                          }}
-                          className="w-full px-3 py-2.5 text-left text-[13px] text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
-                        >
-                          请先设置模型服务 →
-                        </button>
-                      ) : (
-                        availableProviders.map((p, idx) => (
-                          <div key={p.id}>
-                            {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
-                            <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                              {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
-                              {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
-                                <Tip label="验证未通过，部分模型可能不可用" position="bottom">
-                                  <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
-                                </Tip>
-                              )}
-                            </div>
-                            {p.models.map(model => {
-                              const isSelected = provider?.id === p.id && currentModelId === model.model;
-                              return (
-                                <button
-                                  key={model.model}
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (provider?.id !== p.id) {
-                                      onProviderChange?.(p.id, model.model);
-                                    } else {
-                                      onModelChange?.(model.model);
-                                    }
-                                    setShowModelMenu(false);
-                                  }}
-                                  className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
-                                    isSelected
-                                      ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
-                                      : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
-                                  }`}
-                                >
-                                  {model.modelName}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ))
-                      )}
+                  if (availableProviders.length === 0) {
+                    return (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowModelMenu(false);
+                          window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+                            detail: { section: 'providers' }
+                          }));
+                        }}
+                        className="w-full px-3 py-2.5 text-left text-[13px] text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
+                      >
+                        请先设置模型服务 →
+                      </button>
+                    );
+                  }
+                  return availableProviders.map((p, idx) => (
+                    <div key={p.id}>
+                      {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
+                      <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                        {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
+                        {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
+                          <Tip label="验证未通过，部分模型可能不可用" position="bottom">
+                            <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
+                          </Tip>
+                        )}
+                      </div>
+                      {p.models.map(model => {
+                        const isSelected = provider?.id === p.id && currentModelId === model.model;
+                        return (
+                          <button
+                            key={model.model}
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (provider?.id !== p.id) {
+                                onProviderChange?.(p.id, model.model);
+                              } else {
+                                onModelChange?.(model.model);
+                              }
+                              setShowModelMenu(false);
+                            }}
+                            className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                              isSelected
+                                ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
+                                : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                            }`}
+                          >
+                            {model.modelName}
+                          </button>
+                        );
+                      })}
                     </div>
-                  );
-                })())}
-              </div>
+                  ));
+                })()}
+              </Popover>
+              </>
+              )}
 
               {/* Button states: system task (disabled send) → stopping (disabled spinner) → AI responding (stop) → normal (send) */}
               {systemStatus ? (

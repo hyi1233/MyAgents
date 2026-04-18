@@ -249,6 +249,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // to avoid re-rendering Chat (and MessageList) on every keystroke
   const [showLogs, setShowLogs] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const historyBtnRef = useRef<HTMLButtonElement>(null);
   // Narrow mode: workspace renders as overlay drawer instead of side panel
   // Initialize from window.innerWidth to avoid layout flash (FOUC) on first render
   const [isNarrowLayout, setIsNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
@@ -2338,28 +2339,28 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               {!splitFile && <span>新对话</span>}
             </button>
             {/* History button */}
-            <div className="relative">
-              <button
-                type="button"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => setShowHistory((prev) => !prev)}
-                className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${showHistory
-                  ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
-                  : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
-                  }`}
-              >
-                <History className="h-3.5 w-3.5 flex-shrink-0" />
-                {!splitFile && <span>历史</span>}
-              </button>
-              <SessionHistoryDropdown
-                agentDir={agentDir}
-                currentSessionId={sessionId}
-                onSelectSession={handleSelectSession}
-                onDeleteCurrentSession={handleNewSession}
-                isOpen={showHistory}
-                onClose={() => setShowHistory(false)}
-              />
-            </div>
+            <button
+              ref={historyBtnRef}
+              type="button"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => setShowHistory((prev) => !prev)}
+              className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${showHistory
+                ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
+                : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
+                }`}
+            >
+              <History className="h-3.5 w-3.5 flex-shrink-0" />
+              {!splitFile && <span>历史</span>}
+            </button>
+            <SessionHistoryDropdown
+              agentDir={agentDir}
+              currentSessionId={sessionId}
+              onSelectSession={handleSelectSession}
+              onDeleteCurrentSession={handleNewSession}
+              isOpen={showHistory}
+              onClose={() => setShowHistory(false)}
+              triggerRef={historyBtnRef}
+            />
             {/* Dev-only buttons - controlled by config.showDevTools */}
             {config.showDevTools && (
               <>

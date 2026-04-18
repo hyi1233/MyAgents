@@ -1,6 +1,8 @@
 // SlashCommandMenu.tsx
-// Dropdown menu for slash commands selection
-// Supports builtin commands, custom commands, and skills
+// Content of the `/` command dropdown — positioning + outside-click are the
+// caller's responsibility (wraps this in `<Popover>`). Keeping this pure
+// means the primitive owns all layout/dismissal logic and the menu can be
+// anchored to different triggers without duplicating chrome.
 
 import { useEffect, useRef } from 'react';
 
@@ -39,7 +41,7 @@ export default function SlashCommandMenu({
     // Empty state: show "未找到指令" when no matches
     if (isEmpty || commands.length === 0) {
         return (
-            <div className="absolute left-4 bottom-full mb-2 w-80 max-h-64 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl">
+            <div className="w-80 max-h-64 overflow-auto">
                 <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
                     未找到指令
                 </div>
@@ -48,7 +50,7 @@ export default function SlashCommandMenu({
     }
 
     return (
-        <div className="absolute left-4 bottom-full mb-2 w-80 max-h-64 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl">
+        <div className="w-80 max-h-64 overflow-auto">
             {commands.map((cmd, index) => (
                 <div
                     key={`${cmd.source}-${cmd.name}`}

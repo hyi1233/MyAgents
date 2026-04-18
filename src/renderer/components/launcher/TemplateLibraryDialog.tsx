@@ -18,6 +18,7 @@ import { isBrowserDevMode } from '@/utils/browserMock';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import WorkspaceIcon from './WorkspaceIcon';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import { Popover } from '@/components/ui/Popover';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 
@@ -49,7 +50,7 @@ export default memo(function TemplateLibraryDialog({
     const [descDraft, setDescDraft] = useState('');
 
     const pathCheckTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-    const iconPickerRef = useRef<HTMLDivElement>(null);
+    const iconBtnRef = useRef<HTMLButtonElement>(null);
 
     // Load templates and default target dir on mount
     useEffect(() => {
@@ -248,17 +249,9 @@ export default memo(function TemplateLibraryDialog({
         }
     }, [onClose, showIconPicker]);
 
-    // Close icon picker on outside click
-    useEffect(() => {
-        if (!showIconPicker) return;
-        const handleClick = (e: MouseEvent) => {
-            if (iconPickerRef.current && !iconPickerRef.current.contains(e.target as Node)) {
-                setShowIconPicker(false);
-            }
-        };
-        document.addEventListener('mousedown', handleClick);
-        return () => document.removeEventListener('mousedown', handleClick);
-    }, [showIconPicker]);
+    // Outside-click for the icon picker is handled by the `<Popover>`
+    // primitive below; Escape is intercepted by `handleKeyDown` above so
+    // the dialog itself doesn't close on first Esc while the picker is open.
 
     // Update template metadata (user templates only)
     const handleUpdateTemplate = useCallback(async (field: 'icon' | 'description' | 'name', value: string) => {
@@ -366,8 +359,9 @@ export default memo(function TemplateLibraryDialog({
                                 <div className="mb-6">
                                     <div className="flex items-start gap-3">
                                         {/* Icon — clickable for user templates */}
-                                        <div className="relative" ref={iconPickerRef}>
+                                        <>
                                             <button
+                                                ref={iconBtnRef}
                                                 type="button"
                                                 onClick={() => { if (!selectedTemplate.isBuiltin) setShowIconPicker(v => !v); }}
                                                 className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-all ${
@@ -379,33 +373,38 @@ export default memo(function TemplateLibraryDialog({
                                             >
                                                 <WorkspaceIcon icon={selectedTemplate.icon} size={28} />
                                             </button>
-                                            {/* Icon picker popover */}
-                                            {showIconPicker && (
-                                                <div className="absolute left-0 top-full z-10 mt-1.5 w-[280px] rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
-                                                    <div className="max-h-[200px] overflow-y-auto overscroll-contain">
-                                                        <div className="flex flex-wrap gap-1.5">
-                                                            {ALL_WORKSPACE_ICON_IDS.filter(id => id !== 'folder-open').map((iconId) => (
-                                                                <button
-                                                                    key={iconId}
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                        void handleUpdateTemplate('icon', iconId === DEFAULT_WORKSPACE_ICON ? '' : iconId);
-                                                                        setShowIconPicker(false);
-                                                                    }}
-                                                                    className={`flex h-10 w-10 items-center justify-center rounded-xl transition-all ${
-                                                                        (selectedTemplate.icon || DEFAULT_WORKSPACE_ICON) === iconId
-                                                                            ? 'bg-[var(--accent-warm-muted)] ring-1 ring-[var(--accent-warm)]'
-                                                                            : 'hover:bg-[var(--hover-bg)]'
-                                                                    }`}
-                                                                >
-                                                                    <WorkspaceIcon icon={iconId} size={24} />
-                                                                </button>
-                                                            ))}
-                                                        </div>
+                                            <Popover
+                                                open={showIconPicker}
+                                                onClose={() => setShowIconPicker(false)}
+                                                anchorRef={iconBtnRef}
+                                                placement="bottom-start"
+                                                offset={6}
+                                                zIndex={220}
+                                                className="w-[280px] rounded-xl p-2 shadow-lg"
+                                            >
+                                                <div className="max-h-[200px] overflow-y-auto overscroll-contain">
+                                                    <div className="flex flex-wrap gap-1.5">
+                                                        {ALL_WORKSPACE_ICON_IDS.filter(id => id !== 'folder-open').map((iconId) => (
+                                                            <button
+                                                                key={iconId}
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    void handleUpdateTemplate('icon', iconId === DEFAULT_WORKSPACE_ICON ? '' : iconId);
+                                                                    setShowIconPicker(false);
+                                                                }}
+                                                                className={`flex h-10 w-10 items-center justify-center rounded-xl transition-all ${
+                                                                    (selectedTemplate.icon || DEFAULT_WORKSPACE_ICON) === iconId
+                                                                        ? 'bg-[var(--accent-warm-muted)] ring-1 ring-[var(--accent-warm)]'
+                                                                        : 'hover:bg-[var(--hover-bg)]'
+                                                                }`}
+                                                            >
+                                                                <WorkspaceIcon icon={iconId} size={24} />
+                                                            </button>
+                                                        ))}
                                                     </div>
                                                 </div>
-                                            )}
-                                        </div>
+                                            </Popover>
+                                        </>
                                         <div className="min-w-0 flex-1">
                                             {/* Name — inline editable for user templates */}
                                             {!selectedTemplate.isBuiltin && editingName ? (

@@ -12,7 +12,6 @@
 
 import {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -24,6 +23,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { thoughtDelete, thoughtUpdate } from '@/api/taskCenter';
+import { Popover } from '@/components/ui/Popover';
 import type { Thought } from '@/../shared/types/thought';
 import { splitWithTagHighlights } from '@/utils/parseThoughtTags';
 
@@ -54,13 +54,9 @@ export function ThoughtCard({
   const [expanded, setExpanded] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
-  // Auto-flip: when the menu would clip past the viewport bottom we drop
-  // it above the anchor button instead of below.
-  const [menuDropUp, setMenuDropUp] = useState(false);
 
   const viewRef = useRef<HTMLDivElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
 
   // Overflow detection — measure only in collapsed state so flipping to
@@ -82,46 +78,9 @@ export function ThoughtCard({
     el.style.height = `${Math.min(el.scrollHeight, EDIT_MAX_HEIGHT_PX)}px`;
   }, [draft, editing]);
 
-  // Close the kebab menu on outside click or Escape — keyboard parity
-  // with the tag autocomplete in ThoughtInput.
-  useEffect(() => {
-    if (!showMenu) return;
-    const clickHandler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setShowMenu(false);
-      }
-    };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setShowMenu(false);
-    };
-    document.addEventListener('mousedown', clickHandler);
-    document.addEventListener('keydown', keyHandler);
-    return () => {
-      document.removeEventListener('mousedown', clickHandler);
-      document.removeEventListener('keydown', keyHandler);
-    };
-  }, [showMenu]);
-
-  // Flip the menu above its anchor when there isn't room below — the
-  // card lives in a scrollable list, so the last card's default
-  // `top-full` menu would otherwise be clipped.
-  useLayoutEffect(() => {
-    if (!showMenu) {
-      setMenuDropUp(false);
-      return;
-    }
-    const btn = menuAnchorRef.current;
-    if (!btn) return;
-    const MENU_ESTIMATED_HEIGHT = 72; // 2 rows × ~34 px + padding
-    const rect = btn.getBoundingClientRect();
-    const spaceBelow = window.innerHeight - rect.bottom;
-    const spaceAbove = rect.top;
-    // Prefer "below" when it fits; flip up only if below is tight AND
-    // above has more room.
-    setMenuDropUp(
-      spaceBelow < MENU_ESTIMATED_HEIGHT && spaceAbove > spaceBelow,
-    );
-  }, [showMenu]);
+  // Close, flip, and outside-click behaviour are handled by the `<Popover>`
+  // primitive below — no hand-rolled `mousedown` / `keydown` / viewport
+  // measurement here.
 
   const handleSave = useCallback(async () => {
     if (draft.trim() === thought.content.trim()) {
@@ -292,44 +251,42 @@ export function ThoughtCard({
               )}
               {/* More menu — houses destructive actions so they're not
                   one-click-adjacent to the primary 派发 affordance. */}
-              <div className="relative" ref={menuRef}>
+              <button
+                ref={menuAnchorRef}
+                type="button"
+                onClick={() => setShowMenu((v) => !v)}
+                disabled={busy}
+                title="更多操作"
+                className="rounded-[var(--radius-md)] p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </button>
+              <Popover
+                open={showMenu}
+                onClose={() => setShowMenu(false)}
+                anchorRef={menuAnchorRef}
+                placement="bottom-end"
+                className="min-w-[120px] py-1"
+              >
                 <button
-                  ref={menuAnchorRef}
                   type="button"
-                  onClick={() => setShowMenu((v) => !v)}
-                  disabled={busy}
-                  title="更多操作"
-                  className="rounded-[var(--radius-md)] p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                  onClick={() => {
+                    setShowMenu(false);
+                    enterEdit();
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
-                  <MoreHorizontal className="h-3.5 w-3.5" />
+                  编辑
                 </button>
-                {showMenu && (
-                  <div
-                    className={`absolute right-0 z-10 min-w-[120px] overflow-hidden rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md ${
-                      menuDropUp ? 'bottom-full mb-1' : 'top-full mt-1'
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowMenu(false);
-                        enterEdit();
-                      }}
-                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                    >
-                      编辑
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleDelete()}
-                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--error)] hover:bg-[var(--error-bg)]"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      删除
-                    </button>
-                  </div>
-                )}
-              </div>
+                <button
+                  type="button"
+                  onClick={() => void handleDelete()}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--error)] hover:bg-[var(--error-bg)]"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  删除
+                </button>
+              </Popover>
             </>
           )}
         </div>

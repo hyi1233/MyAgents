@@ -11,6 +11,7 @@ import { ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { isProviderAvailable } from '@/config/configService';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
+import { Popover } from '@/components/ui/Popover';
 
 const MAX_IMAGES = 5;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
@@ -40,7 +41,7 @@ export default function BugReportOverlay({
         _setShowModelMenu(v);
     }, []);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
-    const menuRef = useRef<HTMLDivElement>(null);
+    const modelBtnRef = useRef<HTMLButtonElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const { openPreview } = useImagePreview();
 
@@ -90,27 +91,17 @@ export default function BugReportOverlay({
     useEffect(() => { onCloseRef.current = onClose; });
 
     useEffect(() => {
+        // Menu-level Escape / outside-click are handled by the Popover
+        // primitive. Dialog-level Escape (close overlay) stays here, but
+        // only fires when the menu is NOT open so Esc closes menu first.
         const handleKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                if (showModelMenuRef.current) {
-                    setShowModelMenu(false);
-                } else {
-                    onCloseRef.current();
-                }
-            }
-        };
-        const handleClick = (e: MouseEvent) => {
-            if (showModelMenuRef.current && menuRef.current && !menuRef.current.contains(e.target as Node)) {
-                setShowModelMenu(false);
+            if (e.key === 'Escape' && !showModelMenuRef.current) {
+                onCloseRef.current();
             }
         };
         document.addEventListener('keydown', handleKey);
-        document.addEventListener('mousedown', handleClick);
-        return () => {
-            document.removeEventListener('keydown', handleKey);
-            document.removeEventListener('mousedown', handleClick);
-        };
-    }, [setShowModelMenu]);
+        return () => document.removeEventListener('keydown', handleKey);
+    }, []);
 
     const handleSubmit = useCallback(() => {
         if (!canSubmit) return;
@@ -262,67 +253,73 @@ export default function BugReportOverlay({
                                 </button>
 
                                 {/* Model selector */}
-                                <div className="relative" ref={menuRef}>
-                                    <button
-                                        type="button"
-                                        onClick={() => setShowModelMenu(!showModelMenu)}
-                                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                    >
-                                        <span className="max-w-[180px] truncate">{modelDisplayName}</span>
-                                        <ChevronUp className="h-3 w-3" />
-                                    </button>
-
-                                    {/* Model dropdown menu — only available providers */}
-                                    {showModelMenu && (() => {
+                                <button
+                                    ref={modelBtnRef}
+                                    type="button"
+                                    onClick={() => setShowModelMenu(!showModelMenu)}
+                                    className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                >
+                                    <span className="max-w-[180px] truncate">{modelDisplayName}</span>
+                                    <ChevronUp className="h-3 w-3" />
+                                </button>
+                                <Popover
+                                    open={showModelMenu}
+                                    onClose={() => setShowModelMenu(false)}
+                                    anchorRef={modelBtnRef}
+                                    placement="top-start"
+                                    // BugReportOverlay itself sits at z-200
+                                    // (OverlayBackdrop); the model dropdown
+                                    // must stack above it.
+                                    zIndex={220}
+                                    className="w-[260px] max-h-[300px] overflow-y-auto rounded-xl py-1 shadow-lg"
+                                >
+                                    {(() => {
                                         const availableProviders = providers.filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
-                                        return (
-                                            <div className="absolute bottom-full left-0 mb-1 max-h-[300px] w-[260px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-lg">
-                                                {availableProviders.length === 0 ? (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            setShowModelMenu(false);
-                                                            onNavigateToProviders();
-                                                        }}
-                                                        className="w-full px-3 py-2.5 text-left text-[12px] text-[var(--accent)] transition-colors hover:bg-[var(--paper-inset)]"
-                                                    >
-                                                        请先配置模型 →
-                                                    </button>
-                                                ) : (
-                                                    availableProviders.map((provider, idx) => (
-                                                        <div key={provider.id}>
-                                                            {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
-                                                            <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                                                                {provider.name}
-                                                            </div>
-                                                            {provider.models.map(model => {
-                                                                const isSelected = selectedProviderId === provider.id && selectedModel === model.model;
-                                                                return (
-                                                                    <button
-                                                                        key={model.model}
-                                                                        type="button"
-                                                                        onClick={() => {
-                                                                            setSelectedProviderId(provider.id);
-                                                                            setSelectedModel(model.model);
-                                                                            setShowModelMenu(false);
-                                                                        }}
-                                                                        className={`w-full rounded-md px-3 py-1.5 text-left text-[12px] transition-colors ${
-                                                                            isSelected
-                                                                                ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
-                                                                                : 'text-[var(--ink)] hover:bg-[var(--paper-inset)]'
-                                                                        }`}
-                                                                    >
-                                                                        {model.modelName}
-                                                                    </button>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    ))
-                                                )}
+                                        if (availableProviders.length === 0) {
+                                            return (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setShowModelMenu(false);
+                                                        onNavigateToProviders();
+                                                    }}
+                                                    className="w-full px-3 py-2.5 text-left text-[12px] text-[var(--accent)] transition-colors hover:bg-[var(--paper-inset)]"
+                                                >
+                                                    请先配置模型 →
+                                                </button>
+                                            );
+                                        }
+                                        return availableProviders.map((provider, idx) => (
+                                            <div key={provider.id}>
+                                                {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
+                                                <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                                                    {provider.name}
+                                                </div>
+                                                {provider.models.map(model => {
+                                                    const isSelected = selectedProviderId === provider.id && selectedModel === model.model;
+                                                    return (
+                                                        <button
+                                                            key={model.model}
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setSelectedProviderId(provider.id);
+                                                                setSelectedModel(model.model);
+                                                                setShowModelMenu(false);
+                                                            }}
+                                                            className={`w-full rounded-md px-3 py-1.5 text-left text-[12px] transition-colors ${
+                                                                isSelected
+                                                                    ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
+                                                                    : 'text-[var(--ink)] hover:bg-[var(--paper-inset)]'
+                                                            }`}
+                                                        >
+                                                            {model.modelName}
+                                                        </button>
+                                                    );
+                                                })}
                                             </div>
-                                        );
+                                        ));
                                     })()}
-                                </div>
+                                </Popover>
                             </div>
 
                             {/* Send button */}

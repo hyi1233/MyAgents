@@ -199,13 +199,12 @@ export default function CustomTitleBar({
                         <BotMessageSquare className="h-4 w-4" />
                         <span className="text-[13px] font-medium">小助理</span>
                     </button>
-                    {showFeedback && (
-                        <FeedbackPopover
-                            onClose={() => setShowFeedback(false)}
-                            onOpenBugReport={handleOpenBugReport}
-                            triggerRef={feedbackBtnRef}
-                        />
-                    )}
+                    <FeedbackPopover
+                        open={showFeedback}
+                        onClose={() => setShowFeedback(false)}
+                        onOpenBugReport={handleOpenBugReport}
+                        triggerRef={feedbackBtnRef}
+                    />
                 </div>
 
                 {isTauri() && (

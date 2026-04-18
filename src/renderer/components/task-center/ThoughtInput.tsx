@@ -20,6 +20,7 @@ import {
 } from 'react';
 import { Hash, Send } from 'lucide-react';
 import { thoughtCreate } from '@/api/taskCenter';
+import { Popover } from '@/components/ui/Popover';
 import {
   findActiveTagContext,
   isBoundaryChar,
@@ -56,6 +57,7 @@ export function ThoughtInput({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const overlayInnerRef = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   // Pending caret position — consumed by the useLayoutEffect below after
   // React commits the new value, so `setSelectionRange` runs against the
   // up-to-date DOM instead of racing with rAF.
@@ -220,7 +222,10 @@ export function ThoughtInput({
 
   return (
     <div className="w-full">
-      <div className="relative flex flex-col rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors focus-within:border-[var(--line-strong)]">
+      <div
+        ref={cardRef}
+        className="relative flex flex-col rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors focus-within:border-[var(--line-strong)]"
+      >
         {/* Mirror layer: same text as the textarea but with coloured `#tag`
             runs. Must match the textarea's font metrics so the highlighted
             spans sit under the same glyphs the user is typing.
@@ -281,33 +286,45 @@ export function ThoughtInput({
           />
         </div>
 
-        {tagMenu && filteredTags.length > 0 && (
-          <div className="absolute left-2 top-full z-20 mt-1 w-56 overflow-hidden rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md">
+        {/* Tag autocomplete — Escape dismissal is owned by the textarea's
+            onKeyDown (sets tagMenu=null explicitly), so we disable the
+            Popover's own Escape handler to keep the two paths from
+            double-firing. Outside-click close from the primitive is fine
+            since textarea clicks are the anchor and don't count as outside. */}
+        <Popover
+          open={!!tagMenu && filteredTags.length > 0}
+          onClose={() => setTagMenu(null)}
+          anchorRef={cardRef}
+          placement="bottom-start"
+          closeOnEscape={false}
+          className="w-56 py-1 shadow-md"
+        >
+          {tagMenu && (
             <div className="px-3 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
               {tagMenu.query ? `匹配 #${tagMenu.query}` : '选择标签'}
             </div>
-            {filteredTags.map(([tag, n], i) => (
-              <button
-                key={tag}
-                type="button"
-                onMouseDown={(e) => {
-                  // Prevent textarea blur so the selection state survives.
-                  e.preventDefault();
-                  insertTag(tag);
-                }}
-                onMouseEnter={() => setTagIndex(i)}
-                className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] transition-colors ${
-                  i === tagIndex
-                    ? 'bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]'
-                    : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
-                }`}
-              >
-                <span>#{tag}</span>
-                <span className="text-[10px] text-[var(--ink-muted)]/60">{n}</span>
-              </button>
-            ))}
-          </div>
-        )}
+          )}
+          {filteredTags.map(([tag, n], i) => (
+            <button
+              key={tag}
+              type="button"
+              onMouseDown={(e) => {
+                // Prevent textarea blur so the selection state survives.
+                e.preventDefault();
+                insertTag(tag);
+              }}
+              onMouseEnter={() => setTagIndex(i)}
+              className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] transition-colors ${
+                i === tagIndex
+                  ? 'bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]'
+                  : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
+              }`}
+            >
+              <span>#{tag}</span>
+              <span className="text-[10px] text-[var(--ink-muted)]/60">{n}</span>
+            </button>
+          ))}
+        </Popover>
 
         <div className="flex items-center justify-between px-2 pb-2 pt-1">
           <div className="flex items-center gap-1">
