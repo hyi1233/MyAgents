@@ -169,6 +169,31 @@ myagents cron runs <taskId>                     # 查看执行历史
 myagents cron status                            # 查看任务概览（总数/运行中/下次执行）
 ```
 
+### 管理任务中心（v0.1.69+）
+
+任务中心是用户沉淀「想法」并派发为可执行任务的产品面板。用户可能说"看下我还有啥没做完的任务"、"把这个想法派发出去"、"帮我在任务中心创建一个任务"。
+
+```bash
+myagents thought list                                       # 列出所有想法
+myagents thought create "今天下班前把 README 更新完 #文档"   # 记一条想法
+
+myagents task list                                          # 列出所有任务
+myagents task list --status running                         # 仅进行中的任务
+myagents task list --workspaceId ws-abc                     # 仅指定工作区
+myagents task get <taskId>                                  # 查看任务详情 + statusHistory
+myagents task run <taskId>                                  # 立即派发一个 todo 任务
+myagents task rerun <taskId>                                # 从 blocked/stopped/done 重新派发
+myagents task update-status <taskId> done --message "完成"  # 更新状态（含审计字段）
+myagents task update-progress <taskId> "阶段 1/3 已完成"    # 仅追加 progress.md，不改 status
+myagents task archive <taskId>                              # 归档（仅用户可操作）
+myagents task delete <taskId>                               # 软删除（30 天保留）
+```
+
+**状态机约束**（PRD §9.1）：
+- `update-status` 只能走合法转换：`todo→running→verifying→done`（或 `→blocked/stopped`）、`done→archived` 等，非法会 `invalid_transition` 拒绝
+- `archived` 只能由用户通过 UI / CLI 设置，AI 走 CLI 会被 `archive_user_only` 拒绝
+- `update-status` 会自动追加 `statusHistory`、写 `progress.md`、发桌面通知（如果订阅），`update-progress` 只改 `progress.md`
+
 调度方式有三种：
 - `--schedule "*/30 * * * *"` — 标准 cron 表达式
 - `--every 15` — 每 N 分钟

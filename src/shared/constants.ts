@@ -80,6 +80,11 @@ export const CUSTOM_EVENTS = {
     OPEN_SETTINGS: 'open-settings',
     /** Fired to open the Task Center singleton tab. No payload. */
     OPEN_TASK_CENTER: 'open-task-center',
+    /**
+     * Fired to open a new chat tab primed with `/task-alignment` for a thought.
+     * Payload: `{ thoughtId: string; content: string; tags: string[] }`.
+     */
+    OPEN_AI_DISCUSSION: 'open-ai-discussion',
     /** Fired when user tries to open a Session that's already active in another Tab */
     JUMP_TO_TAB: 'jump-to-tab',
     /** Fired to launch AI bug report: opens new Chat tab with ~/.myagents workspace */

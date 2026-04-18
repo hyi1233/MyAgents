@@ -2,7 +2,7 @@
 // Supports inline edit, delete, and "dispatch to task" split-button entry.
 
 import { useCallback, useState } from 'react';
-import { Trash2, Zap } from 'lucide-react';
+import { MessageSquare, Trash2, Zap } from 'lucide-react';
 import { thoughtDelete, thoughtUpdate } from '@/api/taskCenter';
 import type { Thought } from '@/../shared/types/thought';
 import { splitWithTagHighlights } from '@/utils/parseThoughtTags';
@@ -11,11 +11,19 @@ interface Props {
   thought: Thought;
   onChanged: (t: Thought | null) => void;
   onDispatch?: (t: Thought) => void;
+  /** Open a new chat tab with `/task-alignment` (PRD §8.3). */
+  onDiscuss?: (t: Thought) => void;
   /** Click handler for inline tag chips — wires into the panel's tag filter. */
   onTagClick?: (tag: string) => void;
 }
 
-export function ThoughtCard({ thought, onChanged, onDispatch, onTagClick }: Props) {
+export function ThoughtCard({
+  thought,
+  onChanged,
+  onDispatch,
+  onDiscuss,
+  onTagClick,
+}: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(thought.content);
   const [busy, setBusy] = useState(false);
@@ -137,11 +145,22 @@ export function ThoughtCard({ thought, onChanged, onDispatch, onTagClick }: Prop
             </>
           ) : (
             <>
+              {onDiscuss && (
+                <button
+                  type="button"
+                  onClick={() => onDiscuss(thought)}
+                  title="AI 讨论 — 开新对话用 /task-alignment 聊出方案"
+                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
+                >
+                  <MessageSquare className="h-3.5 w-3.5" />
+                  AI 讨论
+                </button>
+              )}
               {onDispatch && (
                 <button
                   type="button"
                   onClick={() => onDispatch(thought)}
-                  title="派发为任务"
+                  title="直接派发为任务（不讨论）"
                   className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
                 >
                   <Zap className="h-3.5 w-3.5" />

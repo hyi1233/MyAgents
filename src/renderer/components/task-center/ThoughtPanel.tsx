@@ -3,13 +3,14 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Search, X } from 'lucide-react';
-import { thoughtList } from '@/api/taskCenter';
+import { thoughtList, taskCenterAvailable } from '@/api/taskCenter';
 import { ThoughtInput } from './ThoughtInput';
 import { ThoughtCard } from './ThoughtCard';
 import type { Thought } from '@/../shared/types/thought';
 
 interface Props {
   onDispatchThought?: (t: Thought) => void;
+  onDiscussThought?: (t: Thought) => void;
   /**
    * When `true`, the panel re-fetches from disk. Parent should bump this on tab
    * activation so a thought created elsewhere (e.g. Launcher 想法 mode) appears
@@ -18,7 +19,11 @@ interface Props {
   refreshKey?: unknown;
 }
 
-export function ThoughtPanel({ onDispatchThought, refreshKey }: Props) {
+export function ThoughtPanel({
+  onDispatchThought,
+  onDiscussThought,
+  refreshKey,
+}: Props) {
   const [thoughts, setThoughts] = useState<Thought[]>([]);
   const [query, setQuery] = useState('');
   const [activeTag, setActiveTag] = useState<string | null>(null);
@@ -40,6 +45,30 @@ export function ThoughtPanel({ onDispatchThought, refreshKey }: Props) {
   useEffect(() => {
     void reload();
   }, [reload, refreshKey]);
+
+  // When a task transitions (including creation → convertedTaskIds backlink on
+  // its source thought), refetch so "已派生 N 个任务" count stays live.
+  useEffect(() => {
+    if (!taskCenterAvailable()) return;
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      if (cancelled) return;
+      const unlisten = await listen('task:status-changed', () => {
+        void reload();
+      });
+      if (cancelled) {
+        unlisten();
+      } else {
+        off = unlisten;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, [reload]);
 
   const handleCardChanged = useCallback(
     (prevId: string, next: Thought | null) => {
@@ -143,6 +172,7 @@ export function ThoughtPanel({ onDispatchThought, refreshKey }: Props) {
                 thought={t}
                 onChanged={(next) => handleCardChanged(t.id, next)}
                 onDispatch={onDispatchThought}
+                onDiscuss={onDiscussThought}
                 onTagClick={setActiveTag}
               />
             ))}

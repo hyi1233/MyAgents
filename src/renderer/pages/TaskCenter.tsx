@@ -7,6 +7,7 @@ import { ThoughtPanel } from '@/components/task-center/ThoughtPanel';
 import { TaskListPanel } from '@/components/task-center/TaskListPanel';
 import { DispatchTaskDialog } from '@/components/task-center/DispatchTaskDialog';
 import { taskCenterAvailable } from '@/api/taskCenter';
+import { CUSTOM_EVENTS } from '@/../shared/constants';
 import type { Thought } from '@/../shared/types/thought';
 
 interface Props {
@@ -28,6 +29,21 @@ export default function TaskCenter({ isActive }: Props) {
 
   const handleDispatch = useCallback((t: Thought) => {
     setDispatching(t);
+  }, []);
+
+  const handleDiscuss = useCallback((t: Thought) => {
+    // Hand off to App.tsx which owns tab creation. It'll pick a workspace via
+    // smart default (match thought.tags → project name), open a new Chat tab,
+    // and auto-send the task-alignment prompt.
+    window.dispatchEvent(
+      new CustomEvent(CUSTOM_EVENTS.OPEN_AI_DISCUSSION, {
+        detail: {
+          thoughtId: t.id,
+          content: t.content,
+          tags: t.tags,
+        },
+      }),
+    );
   }, []);
 
   const handleDispatched = useCallback(() => {
@@ -75,6 +91,7 @@ export default function TaskCenter({ isActive }: Props) {
           <div className="flex-1 overflow-hidden">
             <ThoughtPanel
               onDispatchThought={handleDispatch}
+              onDiscussThought={handleDiscuss}
               refreshKey={`${refreshKey}:${isActive ? '1' : '0'}`}
             />
           </div>

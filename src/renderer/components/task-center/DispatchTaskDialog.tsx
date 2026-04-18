@@ -20,7 +20,9 @@ import type {
   TaskExecutor,
   TaskRunMode,
   EndConditions,
+  NotificationConfig,
 } from '@/../shared/types/task';
+import NotificationConfigEditor from './NotificationConfigEditor';
 
 const OVERLAY_Z = 200;
 
@@ -67,6 +69,9 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
   const [tagsInput, setTagsInput] = useState(thought.tags.join(', '));
   const [descriptionInput, setDescriptionInput] = useState('');
   const [taskMd, setTaskMd] = useState(thought.content);
+  const [notification, setNotification] = useState<NotificationConfig>({
+    desktop: true,
+  });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -118,8 +123,9 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
         endConditions: buildEndConditions(),
         sourceThoughtId: thought.id,
         tags,
+        notification,
       });
-      toast.success(`任务「${task.name}」已派发`);
+      toast.success(`任务「${task.name}」已创建，可在任务中心点「立即执行」`);
       onDispatched(task);
     } catch (e) {
       setErr(extractErrorMessage(e));
@@ -138,6 +144,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
     buildEndConditions,
     thought.id,
     tagsInput,
+    notification,
     toast,
     onDispatched,
   ]);
@@ -321,6 +328,13 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
               onChange={(e) => setTagsInput(e.target.value)}
               placeholder="以逗号分隔，例如 MyAgents, 维护"
               className="w-full rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--line-strong)] focus:outline-none"
+            />
+          </Field>
+
+          <Field label="通知到">
+            <NotificationConfigEditor
+              value={notification}
+              onChange={setNotification}
             />
           </Field>
         </div>

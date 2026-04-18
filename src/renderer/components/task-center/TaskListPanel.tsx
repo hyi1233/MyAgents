@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Search } from 'lucide-react';
-import { taskList } from '@/api/taskCenter';
+import { taskList, taskCenterAvailable } from '@/api/taskCenter';
 import type { Task, TaskStatus } from '@/../shared/types/task';
 import { TaskCard } from './TaskCard';
 import { TaskDetailOverlay } from './TaskDetailOverlay';
@@ -45,6 +45,31 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
   useEffect(() => {
     void reload();
   }, [reload, refreshKey]);
+
+  // SSE: listen for task:status-changed events fired by Rust `update_status`
+  // and refetch so every open TaskCenter tab stays in sync with the source of
+  // truth. Guarded on Tauri because `listen` is a Tauri-only import.
+  useEffect(() => {
+    if (!taskCenterAvailable()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      if (cancelled) return;
+      const off = await listen('task:status-changed', () => {
+        void reload();
+      });
+      if (cancelled) {
+        off();
+      } else {
+        unlisten = off;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [reload]);
 
   const buckets = useMemo(() => {
     const needle = query.trim().toLowerCase();

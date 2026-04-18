@@ -9,12 +9,16 @@ import {
   taskArchive,
   taskDelete,
   taskGet,
+  taskRerun,
+  taskRun,
+  taskUpdate,
   taskUpdateStatus,
 } from '@/api/taskCenter';
-import type { Task } from '@/../shared/types/task';
+import type { NotificationConfig, Task } from '@/../shared/types/task';
 import { TaskStatusBadge } from './TaskStatusBadge';
 import { DispatchOriginBadge } from './DispatchOriginBadge';
 import { StatusHistoryList } from './StatusHistoryList';
+import NotificationConfigEditor from './NotificationConfigEditor';
 
 const OVERLAY_Z = 200;
 
@@ -51,6 +55,37 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
   // eslint-disable-next-line react-hooks/exhaustive-deps -- we only want this on mount
   }, []);
 
+  // Live-update on external transitions (CLI / scheduler / other window).
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      if (cancelled) return;
+      const unlisten = await listen<{ taskId?: string }>(
+        'task:status-changed',
+        async (evt) => {
+          if (evt.payload?.taskId !== task.id) return;
+          try {
+            const fresh = await taskGet(task.id);
+            if (fresh) setTask(fresh);
+          } catch {
+            /* silent */
+          }
+        },
+      );
+      if (cancelled) {
+        unlisten();
+      } else {
+        off = unlisten;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, [task.id]);
+
   const runStatus = useCallback(
     async (next: Task['status']) => {
       setBusy(true);
@@ -67,6 +102,43 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
     },
     [task.id, onChanged],
   );
+
+  const dispatchRun = useCallback(async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await taskRun(task.id);
+      // The Rust endpoint transitions us to `running` via update_status; our
+      // SSE listener upstairs handles the refresh, but also refetch here so
+      // the overlay updates instantly.
+      const fresh = await taskGet(task.id);
+      if (fresh) {
+        setTask(fresh);
+        onChanged?.(fresh);
+      }
+    } catch (e) {
+      setErr(extractErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [task.id, onChanged]);
+
+  const dispatchRerun = useCallback(async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await taskRerun(task.id);
+      const fresh = await taskGet(task.id);
+      if (fresh) {
+        setTask(fresh);
+        onChanged?.(fresh);
+      }
+    } catch (e) {
+      setErr(extractErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [task.id, onChanged]);
 
   const doArchive = useCallback(async () => {
     setBusy(true);
@@ -134,8 +206,8 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
             <ActionBtn
               icon={<Play className="h-3.5 w-3.5" />}
               label="立即执行"
-              disabled
-              title="Phase 4 实装"
+              disabled={busy}
+              onClick={dispatchRun}
             />
           )}
           {(task.status === 'running' || task.status === 'verifying') && (
@@ -154,8 +226,9 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
             <ActionBtn
               icon={<RotateCcw className="h-3.5 w-3.5" />}
               label="重新派发"
-              disabled
-              title="Phase 4 实装：reset → todo → run"
+              disabled={busy}
+              onClick={dispatchRerun}
+              title="reset → todo → run (PRD §10.2.2)"
             />
           )}
           {task.status === 'verifying' && (
@@ -202,9 +275,14 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
           {/* Notification / verify / associated sessions blocks are placeholders for
               Phase 4-5 wiring. We show their presence so users understand the
               surface area. */}
-          <Placeholder
-            title="通知设置"
-            hint="Phase 5 将接入桌面 / Bot 通知配置"
+          <NotificationSection
+            task={task}
+            disabled={task.status === 'running' || task.status === 'verifying'}
+            onSaved={(updated) => {
+              setTask(updated);
+              onChanged?.(updated);
+            }}
+            onError={(msg) => setErr(msg)}
           />
           <Placeholder
             title="验收标准 verify.md"
@@ -310,6 +388,89 @@ function ActionBtn({
       {icon}
       {label}
     </button>
+  );
+}
+
+/**
+ * Notification config with local draft + explicit save. Avoids per-keystroke
+ * Rust writes (CC review W5) and fully disables editing while the task is
+ * running (W4 — the Rust `update()` guard would reject anyway, so we surface
+ * the constraint in the UI instead of letting users bump against invisible
+ * walls).
+ */
+function NotificationSection({
+  task,
+  disabled,
+  onSaved,
+  onError,
+}: {
+  task: Task;
+  disabled: boolean;
+  onSaved: (updated: Task) => void;
+  onError: (msg: string) => void;
+}) {
+  const [draft, setDraft] = useState<NotificationConfig>(
+    task.notification ?? { desktop: true },
+  );
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // If parent task updates (e.g. SSE-driven refetch), reset draft to match.
+  useEffect(() => {
+    setDraft(task.notification ?? { desktop: true });
+    setDirty(false);
+  }, [task]);
+
+  const save = useCallback(async () => {
+    if (!dirty) return;
+    setSaving(true);
+    try {
+      const updated = await taskUpdate({ id: task.id, notification: draft });
+      onSaved(updated);
+      setDirty(false);
+    } catch (e) {
+      onError(extractErrorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [dirty, draft, task.id, onSaved, onError]);
+
+  return (
+    <div className="mt-3">
+      <div className="mb-1.5 flex items-center justify-between">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+          通知
+        </div>
+        {dirty && !disabled && (
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={saving}
+            className="rounded-[var(--radius-md)] bg-[var(--accent-warm-muted)] px-2.5 py-1 text-[11px] font-medium text-[var(--accent-warm)] hover:bg-[var(--accent-warm-subtle)] disabled:opacity-50"
+          >
+            {saving ? '保存中…' : '保存'}
+          </button>
+        )}
+      </div>
+      {disabled && (
+        <div className="mb-1.5 text-[11px] text-[var(--ink-muted)]/70">
+          任务运行 / 验证中，通知设置不可编辑
+        </div>
+      )}
+      <div
+        className={
+          disabled ? 'pointer-events-none opacity-50' : undefined
+        }
+      >
+        <NotificationConfigEditor
+          value={draft}
+          onChange={(next) => {
+            setDraft(next);
+            setDirty(true);
+          }}
+        />
+      </div>
+    </div>
   );
 }
 

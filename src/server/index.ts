@@ -46,8 +46,9 @@ import {
   handleCronExit, handleImSendMedia, handleReadme,
   handlePluginList, handlePluginInstall, handlePluginUninstall,
   handleAgentRuntimeStatus,
-  handleTaskList, handleTaskGet, handleTaskCreateDirect, handleTaskUpdateStatus,
-  handleTaskUpdateProgress, handleTaskAppendSession, handleTaskArchive, handleTaskDelete,
+  handleTaskList, handleTaskGet, handleTaskCreateDirect, handleTaskCreateFromAlignment,
+  handleTaskUpdateStatus, handleTaskUpdateProgress, handleTaskAppendSession,
+  handleTaskArchive, handleTaskDelete, handleTaskRun, handleTaskRerun,
   handleThoughtList, handleThoughtCreate,
 } from './admin-api';
 import { setImMediaContext } from './tools/im-media-tool';
@@ -1145,6 +1146,9 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'task/list') return await handleTaskList(payload as Parameters<typeof handleTaskList>[0]);
   if (route === 'task/get') return await handleTaskGet(payload as Parameters<typeof handleTaskGet>[0]);
   if (route === 'task/create-direct') return await handleTaskCreateDirect(payload);
+  if (route === 'task/create-from-alignment') return await handleTaskCreateFromAlignment(payload);
+  if (route === 'task/run') return await handleTaskRun(payload as Parameters<typeof handleTaskRun>[0]);
+  if (route === 'task/rerun') return await handleTaskRerun(payload as Parameters<typeof handleTaskRerun>[0]);
   if (route === 'task/update-status') return await handleTaskUpdateStatus(payload);
   if (route === 'task/update-progress') return await handleTaskUpdateProgress(payload as Parameters<typeof handleTaskUpdateProgress>[0]);
   if (route === 'task/append-session') return await handleTaskAppendSession(payload as Parameters<typeof handleTaskAppendSession>[0]);

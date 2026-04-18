@@ -14,6 +14,7 @@ use tokio::net::TcpListener;
 use crate::cron_task::{
     self, CronDelivery, CronSchedule, CronTask, CronTaskConfig, TaskProviderEnv,
 };
+use crate::ulog_info;
 use crate::im::{self, ManagedImBots, ManagedAgents};
 use crate::im::adapter::ImStreamAdapter;
 use crate::im::bridge;
@@ -103,11 +104,17 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/task/list", get(task_list_handler))
         .route("/api/task/get", get(task_get_handler))
         .route("/api/task/create-direct", post(task_create_direct_handler))
+        .route(
+            "/api/task/create-from-alignment",
+            post(task_create_from_alignment_handler),
+        )
         .route("/api/task/update-status", post(task_update_status_handler))
         .route("/api/task/update-progress", post(task_update_progress_handler))
         .route("/api/task/append-session", post(task_append_session_handler))
         .route("/api/task/archive", post(task_archive_handler))
         .route("/api/task/delete", post(task_delete_handler))
+        .route("/api/task/run", post(task_run_handler))
+        .route("/api/task/rerun", post(task_rerun_handler))
         .route("/api/thought/list", get(thought_list_handler))
         .route("/api/thought/create", post(thought_create_handler))
         // Bridge messages carry base64-encoded media attachments (images/files).
@@ -264,6 +271,7 @@ async fn create_cron_handler(
         delivery: req.delivery,
         schedule: req.schedule,
         name: req.name,
+        task_id: None,
     };
 
     match manager.create_task(config).await {
@@ -1295,5 +1303,353 @@ async fn thought_create_handler(
     match store.create(input).await {
         Ok(t) => Json(serde_json::json!({ "ok": true, "thought": t })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+// ========================================================================
+// Task Center execution handlers (v0.1.69)
+// ========================================================================
+
+async fn task_create_from_alignment_handler(
+    Json(input): Json<task::TaskCreateFromAlignmentInput>,
+) -> Json<serde_json::Value> {
+    let Some(task_store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    let source_thought = input.source_thought_id.clone();
+    match task_store.create_from_alignment(input).await {
+        Ok(t) => {
+            if let (Some(thought_id), Some(thoughts)) =
+                (source_thought, thought::get_thought_store())
+            {
+                let _ = thoughts.link_task(&thought_id, &t.id).await;
+            }
+            Json(serde_json::json!({ "ok": true, "task": t }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// PRD §10.2.2 `POST /api/task/run` — trigger execution of an existing Task.
+///
+/// Behavior:
+/// - Bridges the Task to a CronTask (the unified execution primitive, §11.1):
+///   creates one with `task_id` reverse pointer if none exists, starts it,
+///   and kicks the scheduler. The scheduler's first tick calls
+///   `execute_cron_task()` which builds the first-message prompt dynamically
+///   from `dispatchOrigin` + `.task/<id>/task.md` (PRD §9.3.1).
+/// - On successful dispatch transitions `todo → running` via TaskStore.
+/// - For `executionMode = 'once'` the CronTask is `At { at: now }` so it fires
+///   once and stays stopped after.
+/// - For scheduled/recurring/loop the CronTask schedule mirrors the Task.
+async fn task_run_handler(
+    Json(req): Json<TaskIdApiRequest>,
+) -> Json<serde_json::Value> {
+    let Some(task_store) = task::get_task_store() else {
+        return Json(serde_json::json!({ "ok": false, "error": "task store not initialized" }));
+    };
+    let Some(ta) = task_store.get(&req.id).await else {
+        return Json(serde_json::json!({ "ok": false, "error": "task not found" }));
+    };
+
+    // Legal-transition guard: `run` is only meaningful from `todo`. Other
+    // states require the user to hit `rerun` (which resets first).
+    if ta.status != task::TaskStatus::Todo {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("task is in state '{}'; use /api/task/rerun to re-dispatch it", ta.status.as_str())
+        }));
+    }
+
+    match ensure_cron_for_task(&ta).await {
+        Ok(cron_id) => {
+            // Write back the CronTask back-pointer so the detail Overlay
+            // can show "下次触发时间" derived from CronTask.next_execution_at.
+            let _ = task_store
+                .set_cron_task_id(&ta.id, Some(cron_id.clone()))
+                .await;
+
+            // Mark Task as running. `system / ui` — the invocation came from
+            // UI button or CLI `task run`, the actor-inference table treats
+            // both as system in this row.
+            match task_store
+                .update_status(task::TaskUpdateStatusInput {
+                    id: ta.id.clone(),
+                    status: task::TaskStatus::Running,
+                    message: Some("dispatched".to_string()),
+                    actor: task::TransitionActor::System,
+                    source: Some(task::TransitionSource::Scheduler),
+                })
+                .await
+            {
+                Ok((t, _)) => Json(serde_json::json!({
+                    "ok": true,
+                    "task": t,
+                    "cronTaskId": cron_id,
+                })),
+                Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+            }
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// PRD §10.2.2 `POST /api/task/rerun` — reset the status back to `todo` (via
+/// a proper audited transition) then invoke the `run` flow. Used when a task
+/// is stuck in `blocked` / `stopped` / `done` / `archived` and the user wants
+/// to try again from scratch.
+async fn task_rerun_handler(
+    Json(req): Json<TaskIdApiRequest>,
+) -> Json<serde_json::Value> {
+    let Some(task_store) = task::get_task_store() else {
+        return Json(serde_json::json!({ "ok": false, "error": "task store not initialized" }));
+    };
+    let Some(ta) = task_store.get(&req.id).await else {
+        return Json(serde_json::json!({ "ok": false, "error": "task not found" }));
+    };
+
+    if !matches!(
+        ta.status,
+        task::TaskStatus::Blocked
+            | task::TaskStatus::Stopped
+            | task::TaskStatus::Done
+            | task::TaskStatus::Archived
+    ) {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("rerun only valid from blocked/stopped/done/archived; current = '{}'", ta.status.as_str())
+        }));
+    }
+
+    // Step 1: reset → todo with source=rerun (PRD §10.2.1 caller-inference
+    // table row "rerun").
+    if let Err(e) = task_store
+        .update_status(task::TaskUpdateStatusInput {
+            id: ta.id.clone(),
+            status: task::TaskStatus::Todo,
+            message: Some("rerun requested".to_string()),
+            actor: task::TransitionActor::System,
+            source: Some(task::TransitionSource::Rerun),
+        })
+        .await
+    {
+        return Json(serde_json::json!({ "ok": false, "error": format!("reset failed: {}", e) }));
+    }
+
+    // Drop any stale CronTask back-pointer so `ensure_cron_for_task` sees a
+    // clean slate (particularly important if the previous CronTask has
+    // exhausted endConditions).
+    if let Some(stale) = ta.cron_task_id.as_deref() {
+        let _ = cron_task::get_cron_task_manager()
+            .delete_task(stale)
+            .await;
+        let _ = task_store.set_cron_task_id(&ta.id, None).await;
+    }
+
+    // Step 2: defer to the same path as `task/run`. Re-fetch to pick up the
+    // fresh `todo` status.
+    let req_next = TaskIdApiRequest { id: ta.id.clone() };
+    task_run_handler(Json(req_next)).await
+}
+
+/// Ensure a CronTask exists for this Task; create one if missing. Returns the
+/// CronTask id (newly created or existing). Starts + schedules the CronTask
+/// so the next scheduler tick picks it up.
+///
+/// Reuse is gated on **schedule compatibility** (CC review C4): if the
+/// existing CronTask's schedule / runMode / endConditions diverge from what
+/// the Task now wants (user edited the task via a path other than `update()`
+/// or a legacy CronTask predates the change), tear down the stale one and
+/// mint a fresh CronTask. This keeps `ensure_cron_for_task` the single source
+/// of truth for schedule compatibility rather than trusting callers.
+async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
+    let manager = cron_task::get_cron_task_manager();
+    let desired = schedule_from_task(ta);
+    let desired_run_mode = resolve_run_mode(ta);
+    let desired_end_conditions = ta
+        .end_conditions
+        .clone()
+        .map(cron_task::EndConditions::from)
+        .unwrap_or_default();
+
+    // Candidate IDs: the Task's own cached `cron_task_id`, and any other
+    // CronTask that carries this Task's id as a back-pointer (defensive —
+    // covers the "cached id got lost but the CronTask is still around" case).
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(id) = ta.cron_task_id.clone() {
+        candidates.push(id);
+    }
+    if let Some(existing) = manager.find_by_task_id(&ta.id).await {
+        if !candidates.iter().any(|x| x == &existing.id) {
+            candidates.push(existing.id);
+        }
+    }
+
+    for id in candidates {
+        let Some(existing) = manager.get_task(&id).await else {
+            continue;
+        };
+        let compatible = schedules_equivalent(&existing.schedule, &desired)
+            && existing.run_mode == desired_run_mode
+            && existing.end_conditions == desired_end_conditions;
+        if compatible {
+            manager
+                .start_task(&id)
+                .await
+                .map_err(|e| format!("start_task: {}", e))?;
+            manager
+                .start_task_scheduler(&id)
+                .await
+                .map_err(|e| format!("start_task_scheduler: {}", e))?;
+            return Ok(id);
+        }
+        // Mismatch — drop the stale CronTask and fall through to create a
+        // fresh one.
+        ulog_info!(
+            "[management-api] CronTask {} schedule mismatches Task {} — recreating",
+            id,
+            ta.id
+        );
+        let _ = manager.delete_task(&id).await;
+    }
+
+    // Build a CronTask config. `prompt` is a stored fallback — the actual
+    // prompt the sidecar receives is built dynamically on each tick from
+    // task.md (see `cron_task::execute_task_directly` + `task::build_dispatch_prompt`).
+    let schedule = desired;
+    let interval_minutes = match &schedule {
+        cron_task::CronSchedule::Every { minutes, .. } => (*minutes).max(5),
+        _ => 60, // placeholder for At/Cron/Loop — scheduler ignores for these variants
+    };
+    let run_mode = desired_run_mode;
+    let end_conditions = desired_end_conditions;
+
+    // Each Task Center dispatch mints its own Sidecar session id, separate
+    // from the Task id (one Task can run across multiple sessions).
+    let session_id = uuid::Uuid::new_v4().to_string();
+
+    let config = cron_task::CronTaskConfig {
+        workspace_path: ta.workspace_path.clone(),
+        session_id,
+        prompt: format!("(dynamic — built from .task/{}/task.md at dispatch)", ta.id),
+        interval_minutes,
+        end_conditions,
+        run_mode,
+        notify_enabled: ta.notification.as_ref().map(|n| n.desktop).unwrap_or(true),
+        tab_id: None,
+        permission_mode: "auto".to_string(),
+        model: None,
+        provider_env: None,
+        runtime: ta.runtime.clone(),
+        runtime_config: ta.runtime_config.clone(),
+        source_bot_id: None,
+        delivery: None,
+        schedule: Some(schedule),
+        name: Some(ta.name.clone()),
+        task_id: Some(ta.id.clone()),
+    };
+
+    let created = manager
+        .create_task(config)
+        .await
+        .map_err(|e| format!("create_task: {}", e))?;
+    manager
+        .start_task(&created.id)
+        .await
+        .map_err(|e| format!("start_task: {}", e))?;
+    manager
+        .start_task_scheduler(&created.id)
+        .await
+        .map_err(|e| format!("start_task_scheduler: {}", e))?;
+    Ok(created.id)
+}
+
+fn schedule_from_task(ta: &task::Task) -> cron_task::CronSchedule {
+    match ta.execution_mode {
+        task::TaskExecutionMode::Once => {
+            // Fire immediately (a few seconds in the future to survive any
+            // clock jitter). Scheduler will run once and then CronTask stays
+            // stopped.
+            let when = chrono::Utc::now() + chrono::Duration::seconds(2);
+            cron_task::CronSchedule::At {
+                at: when.to_rfc3339(),
+            }
+        }
+        task::TaskExecutionMode::Scheduled => {
+            // Honor `endConditions.deadline` as the one-shot fire time when
+            // present, otherwise default to "now + 1 minute". Future iteration
+            // will accept an explicit dispatchAt field.
+            let when = ta
+                .end_conditions
+                .as_ref()
+                .and_then(|ec| ec.deadline)
+                .and_then(|ms| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms))
+                .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::minutes(1));
+            cron_task::CronSchedule::At {
+                at: when.to_rfc3339(),
+            }
+        }
+        task::TaskExecutionMode::Recurring => {
+            // MVP — every 60 minutes. `endConditions.maxExecutions` caps iterations.
+            cron_task::CronSchedule::Every {
+                minutes: 60,
+                start_at: None,
+            }
+        }
+        task::TaskExecutionMode::Loop => cron_task::CronSchedule::Loop,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskIdApiRequest {
+    id: String,
+}
+
+/// Derive the cron RunMode from a Task, honoring the PRD §9.2 default matrix
+/// (loop → single-session, recurring/others → new-session) unless the user
+/// explicitly set `runMode`.
+fn resolve_run_mode(ta: &task::Task) -> cron_task::RunMode {
+    match ta.run_mode {
+        Some(task::TaskRunMode::NewSession) => cron_task::RunMode::NewSession,
+        Some(task::TaskRunMode::SingleSession) => cron_task::RunMode::SingleSession,
+        None => {
+            if matches!(ta.execution_mode, task::TaskExecutionMode::Loop) {
+                cron_task::RunMode::SingleSession
+            } else {
+                cron_task::RunMode::NewSession
+            }
+        }
+    }
+}
+
+/// Compare two `CronSchedule`s for equivalence. `At` variants compare the
+/// stored RFC3339 string exactly (we never re-compute `At` timestamps, so an
+/// identical string means the schedule hasn't drifted). Returns `false` if
+/// the stored schedule is `None` and the desired one is any concrete variant.
+fn schedules_equivalent(
+    a: &Option<cron_task::CronSchedule>,
+    b: &cron_task::CronSchedule,
+) -> bool {
+    let Some(a) = a else { return false };
+    use cron_task::CronSchedule::*;
+    match (a, b) {
+        (At { at: x }, At { at: y }) => x == y,
+        (
+            Every {
+                minutes: m1,
+                start_at: s1,
+            },
+            Every {
+                minutes: m2,
+                start_at: s2,
+            },
+        ) => m1 == m2 && s1 == s2,
+        (Cron { expr: e1, tz: t1 }, Cron { expr: e2, tz: t2 }) => e1 == e2 && t1 == t2,
+        (Loop, Loop) => true,
+        _ => false,
     }
 }

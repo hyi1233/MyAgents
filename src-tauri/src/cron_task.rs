@@ -162,7 +162,7 @@ pub enum TaskStatus {
 }
 
 /// End conditions for a cron task
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndConditions {
     /// Task will stop after this time (ISO timestamp)
@@ -285,6 +285,12 @@ pub struct CronTask {
     /// Used by frontend to sort tasks by most recent activity.
     #[serde(default = "chrono::Utc::now")]
     pub updated_at: DateTime<Utc>,
+    /// Reverse pointer into the Task Center (v0.1.69, PRD §11.2). When set,
+    /// this CronTask was created by a Task dispatch; each firing looks up the
+    /// `Task.dispatchOrigin` + `task.md` to build the prompt dynamically
+    /// (PRD §9.3.1) instead of using the `prompt` field as a frozen string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// Configuration for creating a new cron task
@@ -322,6 +328,10 @@ pub struct CronTaskConfig {
     pub schedule: Option<CronSchedule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Reverse pointer into Task Center (v0.1.69, PRD §11.2). Set when the
+    /// CronTask is dispatched by a Task Center task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -1326,6 +1336,7 @@ impl CronTaskManager {
             next_execution_at: None, // Enriched at read time
             internal_session_id: None, // Set after first execution
             updated_at: Utc::now(),
+            task_id: config.task_id.clone(),
         };
 
         let mut tasks = self.tasks.write().await;
@@ -1342,6 +1353,35 @@ impl CronTaskManager {
     pub async fn get_task(&self, task_id: &str) -> Option<CronTask> {
         let tasks = self.tasks.read().await;
         tasks.get(task_id).cloned().map(enrich_task)
+    }
+
+    /// Look up a CronTask by its Task Center reverse pointer (PRD §11.2).
+    /// Returns the first match; tasks are expected to be 1:1 with CronTasks.
+    pub async fn find_by_task_id(&self, ta_task_id: &str) -> Option<CronTask> {
+        let tasks = self.tasks.read().await;
+        tasks
+            .values()
+            .find(|t| t.task_id.as_deref() == Some(ta_task_id))
+            .cloned()
+            .map(enrich_task)
+    }
+
+    /// Delete every CronTask linked to the given Task Center id. Used when a
+    /// Task is archived / deleted / rerun so stale scheduler entries don't
+    /// keep firing.
+    pub async fn delete_by_task_id(&self, ta_task_id: &str) -> Result<usize, String> {
+        let ids: Vec<String> = {
+            let tasks = self.tasks.read().await;
+            tasks
+                .values()
+                .filter(|t| t.task_id.as_deref() == Some(ta_task_id))
+                .map(|t| t.id.clone())
+                .collect()
+        };
+        for id in &ids {
+            let _ = self.delete_task(id).await;
+        }
+        Ok(ids.len())
     }
 
     /// Get all tasks (enriched with next_execution_at)
@@ -1765,9 +1805,77 @@ async fn execute_task_directly(
     // Build execution payload
     // execution_number is 1-based (first execution = 1)
     let execution_number = task.execution_count + 1;
+
+    // PRD §9.3.1: if this CronTask is linked to a Task Center task, construct
+    // the prompt dynamically from the latest `.task/<id>/task.md` / alignment
+    // state instead of using the CronTask's frozen `prompt` field. This lets
+    // the user edit task.md between firings and the next execution picks up
+    // the change.
+    //
+    // Short-circuit + block guards (CC review C1c + C2):
+    //   - linked Task is deleted / archived / in terminal state → skip this
+    //     tick and stop the CronTask so it doesn't fire again
+    //   - task.md missing / empty for a direct task → transition the Task to
+    //     Blocked with the error as message (rather than sending a meaningless
+    //     placeholder prompt to the model)
+    let prompt_to_send = if let Some(ref ta_id) = task.task_id {
+        if let Some(ta_store) = crate::task::get_task_store() {
+            if let Some(ta) = ta_store.get(ta_id).await {
+                if ta.deleted
+                    || matches!(
+                        ta.status,
+                        crate::task::TaskStatus::Deleted
+                            | crate::task::TaskStatus::Archived
+                            | crate::task::TaskStatus::Stopped
+                            | crate::task::TaskStatus::Blocked
+                            | crate::task::TaskStatus::Done
+                    )
+                {
+                    ulog_warn!(
+                        "[CronTask] task {} linked to Task {} in terminal state '{}' — skipping tick and stopping CronTask",
+                        task.id,
+                        ta_id,
+                        ta.status.as_str()
+                    );
+                    return Err(format!(
+                        "linked Task {} is in terminal state '{}'",
+                        ta_id,
+                        ta.status.as_str()
+                    ));
+                }
+            }
+        }
+
+        match crate::task::build_dispatch_prompt(ta_id).await {
+            Some(Ok(p)) => p,
+            Some(Err(e)) => {
+                ulog_error!(
+                    "[CronTask] task {} linked to Task {} but dispatch prompt build failed: {} — blocking Task",
+                    task.id, ta_id, e
+                );
+                // Transition Task to Blocked so the UI surfaces the problem.
+                if let Some(ta_store) = crate::task::get_task_store() {
+                    let _ = ta_store
+                        .update_status(crate::task::TaskUpdateStatusInput {
+                            id: ta_id.clone(),
+                            status: crate::task::TaskStatus::Blocked,
+                            message: Some(format!("dispatch prompt build failed: {}", e)),
+                            actor: crate::task::TransitionActor::System,
+                            source: Some(crate::task::TransitionSource::Crash),
+                        })
+                        .await;
+                }
+                return Err(format!("dispatch prompt build failed: {}", e));
+            }
+            None => task.prompt.clone(),
+        }
+    } else {
+        task.prompt.clone()
+    };
+
     let payload = CronExecutePayload {
         task_id: task.id.clone(),
-        prompt: task.prompt.clone(),
+        prompt: prompt_to_send,
         session_id: Some(task.session_id.clone()),
         is_first_execution: Some(is_first_execution),
         ai_can_exit: Some(task.end_conditions.ai_can_exit),
@@ -1900,8 +2008,12 @@ async fn stop_task_internal(
     // Emit stopped event
     let _ = handle.emit("cron:task-stopped", serde_json::json!({
         "taskId": task_id,
-        "exitReason": exit_reason
+        "exitReason": exit_reason.clone()
     }));
+
+    // PRD §11 — propagate completion to Task Center if this CronTask is linked
+    // to a Task (best-effort, failures logged).
+    crate::task::mark_cron_completion_if_linked(task_id, exit_reason.as_deref()).await;
 
     ulog_info!("[CronTask] Task {} stopped", task_id);
 }
@@ -2238,6 +2350,82 @@ pub async fn cmd_update_cron_task_fields(
 
     manager.get_task(&task_id).await
         .ok_or_else(|| format!("Task not found after update: {}", task_id))
+}
+
+/// Task Center adapter (v0.1.69) — deliver a Task status notification to an IM
+/// Bot via the existing cron delivery pipeline. The caller supplies the bot
+/// channel id and (optional) chat thread; platform is looked up on the fly.
+///
+/// Safe to call from outside `cron_task`; it handles the case where IM state
+/// is missing, the bot isn't running, etc. — all errors are logged and swallowed.
+pub async fn deliver_task_notification_to_bot(
+    handle: &AppHandle,
+    bot_channel_id: &str,
+    bot_thread: Option<&str>,
+    task_id: &str,
+    summary: &str,
+) {
+    let _ = deliver_task_notification_to_bot_checked(
+        handle,
+        bot_channel_id,
+        bot_thread,
+        task_id,
+        summary,
+    )
+    .await;
+}
+
+/// Same as `deliver_task_notification_to_bot` but returns `true` when the bot
+/// lookup + dispatch happened, `false` when the bot wasn't registered /
+/// offline / IM state missing. The Task Center uses the bool to decide
+/// whether to fire a desktop fallback (PRD §12.6).
+pub async fn deliver_task_notification_to_bot_checked(
+    handle: &AppHandle,
+    bot_channel_id: &str,
+    bot_thread: Option<&str>,
+    task_id: &str,
+    summary: &str,
+) -> bool {
+    // Structural precheck — confirm the bot channel is actually registered
+    // somewhere the router can reach. This catches the majority of failure
+    // modes (bot offline, bot removed, IM state not yet initialized).
+    let reachable = {
+        let mut found = false;
+        if let Some(agent_state) = handle.try_state::<crate::im::ManagedAgents>() {
+            let agents_guard = agent_state.lock().await;
+            for (_, agent) in agents_guard.iter() {
+                if agent.channels.contains_key(bot_channel_id) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            if let Some(im_state) = handle.try_state::<crate::im::ManagedImBots>() {
+                let guard = im_state.lock().await;
+                if guard.contains_key(bot_channel_id) {
+                    found = true;
+                }
+            }
+        }
+        found
+    };
+    if !reachable {
+        ulog_warn!(
+            "[CronTask] Task notification for {} targeted bot {} but channel is not registered",
+            task_id,
+            bot_channel_id
+        );
+        return false;
+    }
+
+    let delivery = CronDelivery {
+        bot_id: bot_channel_id.to_string(),
+        chat_id: bot_thread.unwrap_or("").to_string(),
+        platform: "task-center".to_string(),
+    };
+    deliver_cron_result_to_bot(handle, &delivery, task_id, summary).await;
+    true
 }
 
 /// Deliver cron task completion result to IM Bot (v0.1.21)

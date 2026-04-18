@@ -288,6 +288,8 @@ pub fn run() {
             search::cmd_search_index_status,
             search::cmd_invalidate_workspace_index,
             search::cmd_refresh_workspace_index,
+            search::cmd_search_thoughts,
+            search::cmd_search_tasks,
             // Task Center — Thought commands (v0.1.69)
             thought::cmd_thought_create,
             thought::cmd_thought_list,

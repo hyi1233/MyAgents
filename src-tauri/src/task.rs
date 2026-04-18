@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::cron_task::{EndConditions as CronEndConditions, RunMode as CronRunMode};
 use crate::{ulog_debug, ulog_info, ulog_warn};
+use tauri::Emitter;
 
 /// Task-layer `RunMode`. Same semantics as `cron_task::RunMode` but emits PRD-
 /// specified kebab-case JSON (`"single-session"` / `"new-session"`). We do NOT
@@ -741,7 +742,23 @@ impl TaskStore {
             return Err(format!("Failed to write task.md: {}", e));
         }
         *inner = next;
+        drop(inner);
         ulog_info!("[task] created direct id={} name={}", id, t.name);
+
+        // Broadcast so every open Task Center panel refreshes (CC review C5).
+        emit_task_event(
+            "task:status-changed",
+            serde_json::json!({
+                "taskId": t.id,
+                "from": serde_json::Value::Null,
+                "to": TaskStatus::Todo.as_str(),
+                "at": t.created_at,
+                "actor": TransitionActor::User.as_str(),
+                "source": TransitionSource::Ui.as_str(),
+                "message": "created (direct)",
+                "event": "created",
+            }),
+        );
         Ok(t)
     }
 
@@ -821,7 +838,22 @@ impl TaskStore {
         }
 
         *inner = next;
+        drop(inner);
         ulog_info!("[task] created ai-aligned id={} name={}", id, t.name);
+
+        emit_task_event(
+            "task:status-changed",
+            serde_json::json!({
+                "taskId": t.id,
+                "from": serde_json::Value::Null,
+                "to": TaskStatus::Todo.as_str(),
+                "at": t.created_at,
+                "actor": TransitionActor::Agent.as_str(),
+                "source": TransitionSource::Cli.as_str(),
+                "message": "created (ai-aligned)",
+                "event": "created",
+            }),
+        );
         Ok(t)
     }
 
@@ -868,7 +900,7 @@ impl TaskStore {
                 TaskOpError::update_rejected_while_running(),
             ));
         }
-        let mut updated = existing;
+        let mut updated = existing.clone();
         if let Some(v) = input.name {
             validate_task_name(&v)?;
             updated.name = v;
@@ -902,10 +934,52 @@ impl TaskStore {
         }
         updated.updated_at = now_ms();
 
+        // Detect schedule-shape changes that invalidate the linked CronTask
+        // (PRD §11.2). When any of these change, the existing CronTask's
+        // schedule/runMode/endConditions no longer match the Task, so the
+        // next `task run` should create a fresh CronTask. We drop the back-
+        // pointer here and leave the stale CronTask for the scheduler to
+        // garbage-collect; the actual cleanup happens in the command layer
+        // (it has access to CronTaskManager).
+        let schedule_changed = existing.execution_mode != updated.execution_mode
+            || existing.run_mode != updated.run_mode
+            || existing.end_conditions != updated.end_conditions;
+        let invalidated_cron_id = if schedule_changed {
+            let taken = updated.cron_task_id.take();
+            if taken.is_some() {
+                ulog_info!(
+                    "[task] execution-shape changed for {} → detaching CronTask {:?}",
+                    updated.id,
+                    taken
+                );
+            }
+            taken
+        } else {
+            None
+        };
+
         let mut next = inner.clone();
         next.insert(updated.id.clone(), updated.clone());
         Self::persist_locked(&self.jsonl_path, &next)?;
         *inner = next;
+        drop(inner);
+
+        // Best-effort CronTask cleanup — the orphaned CronTask (if any) is
+        // removed from the scheduler AFTER persist so a crash between the two
+        // steps is safe: on reboot the Task shows no back-pointer and the
+        // scheduler will simply stop firing the orphaned CronTask once its
+        // endConditions trigger (or user removes it from the cron panel).
+        if let Some(cron_id) = invalidated_cron_id {
+            let manager = crate::cron_task::get_cron_task_manager();
+            if let Err(e) = manager.delete_task(&cron_id).await {
+                ulog_warn!(
+                    "[task] failed to delete orphaned CronTask {}: {}",
+                    cron_id,
+                    e
+                );
+            }
+        }
+
         Ok(updated)
     }
 
@@ -984,6 +1058,10 @@ impl TaskStore {
         next.insert(updated.id.clone(), updated.clone());
         Self::persist_locked(&self.jsonl_path, &next)?;
         *inner = next;
+        // Drop the write lock before firing side-effects so listeners that
+        // refetch via `get()` don't contend with us.
+        drop(inner);
+
         ulog_info!(
             "[task] status {}: {} → {} (actor={}, source={:?})",
             updated.id,
@@ -992,6 +1070,51 @@ impl TaskStore {
             actor.as_str(),
             source.map(|s| s.as_str())
         );
+
+        // CC review C3 — when the Task reaches a terminal/idle state while a
+        // linked CronTask is still scheduled, stop the CronTask so its next
+        // tick doesn't re-dispatch a stopped/blocked task. Fires for:
+        //   - stopped / blocked / archived (user / agent / system decided to halt)
+        //   - done when NOT a recurring/loop that's still within endConditions
+        //     (conservative: if the Task says done, user considers it finished
+        //     → stop the scheduler, they can `rerun` to re-arm)
+        if matches!(
+            to,
+            TaskStatus::Stopped | TaskStatus::Blocked | TaskStatus::Archived | TaskStatus::Done
+        ) {
+            if let Some(cron_id) = updated.cron_task_id.clone() {
+                let manager = crate::cron_task::get_cron_task_manager();
+                let _ = manager
+                    .stop_task(&cron_id, Some(format!("task → {}", to.as_str())))
+                    .await;
+            }
+        }
+
+        // PRD §10.2.1 step 5: append a human-readable line to progress.md.
+        // Best-effort — failure here doesn't roll back the audit entry.
+        append_progress_line(&updated, &transition);
+
+        // PRD §10.2.1 step 6: notification dispatch (desktop + bot) for
+        // subscribed transitions. Side-effects fire AFTER persist so a
+        // crash between write and notify is recoverable from disk state.
+        dispatch_notification(&updated, &transition);
+
+        // PRD §10.2.1 step 7: SSE broadcast. Renderer listens on
+        // `task:status-changed` for live refresh across all open Task Center
+        // tabs.
+        emit_task_event(
+            "task:status-changed",
+            serde_json::json!({
+                "taskId": updated.id,
+                "from": transition.from.map(|s| s.as_str()),
+                "to": transition.to.as_str(),
+                "at": transition.at,
+                "actor": transition.actor.as_str(),
+                "source": transition.source.map(|s| s.as_str()),
+                "message": transition.message.clone(),
+            }),
+        );
+
         Ok((updated, transition))
     }
 
@@ -1065,6 +1188,9 @@ impl TaskStore {
     // ---- Archive / Delete ----
 
     /// User-only archive entry. Emits `Done → Archived` with actor=user.
+    /// `update_status` already tears down the linked CronTask on terminal
+    /// states (CC review C3), so archived recurring/loop tasks won't keep
+    /// firing after archival.
     pub async fn archive(&self, id: &str, message: Option<String>) -> Result<Task, String> {
         let (task, _) = self
             .update_status(TaskUpdateStatusInput {
@@ -1079,10 +1205,11 @@ impl TaskStore {
     }
 
     /// Soft-delete. Writes a proper synthetic `→ Deleted` pseudo-transition to
-    /// `statusHistory` (PRD §10.2.2), sets `status=Deleted`, and flips the
-    /// `deleted` flag. Downstream auditors can filter `statusHistory` on
-    /// `to == Deleted` to find all removed tasks. Physical cleanup happens
-    /// out-of-band (§9.5, 30-day retention).
+    /// `statusHistory` (PRD §10.2.2), sets `status=Deleted`, flips the
+    /// `deleted` flag, and **tears down the linked CronTask** so the scheduler
+    /// stops firing against a ghost Task (CC review C1). Downstream auditors
+    /// can filter `statusHistory` on `to == Deleted` to find all removed tasks.
+    /// Physical cleanup happens out-of-band (§9.5, 30-day retention).
     pub async fn delete(&self, id: &str) -> Result<(), String> {
         let mut inner = self.inner.write().await;
         let existing = inner
@@ -1107,10 +1234,22 @@ impl TaskStore {
         updated.deleted = true;
         updated.deleted_at = Some(now);
         updated.updated_at = now;
+        updated.cron_task_id = None;
         let mut next = inner.clone();
         next.insert(updated.id.clone(), updated);
         Self::persist_locked(&self.jsonl_path, &next)?;
         *inner = next;
+        drop(inner);
+
+        // Tear down any scheduler entries linked to this task so a recurring /
+        // loop task soft-deleted by the user doesn't keep burning tokens.
+        let manager = crate::cron_task::get_cron_task_manager();
+        if let Ok(n) = manager.delete_by_task_id(id).await {
+            if n > 0 {
+                ulog_info!("[task] soft-deleted id={} + removed {} linked CronTask(s)", id, n);
+                return Ok(());
+            }
+        }
         ulog_info!("[task] soft-deleted id={}", id);
         Ok(())
     }
@@ -1234,6 +1373,313 @@ fn move_alignment_dir(src: &Path, dst: &Path) -> Result<(), String> {
     copy_dir_recursive(src, dst).map_err(|e| format!("copy: {}", e))?;
     fs::remove_dir_all(src).map_err(|e| format!("remove src: {}", e))?;
     Ok(())
+}
+
+/// PRD §11 bridge — when the CronTask scheduler concludes a Task-linked cron
+/// (endConditions / AI exit / one-shot completion), transition the linked
+/// Task to `done` with the right actor/source. Called from cron_task.rs
+/// completion paths. Safe to invoke even when no Task is linked (no-op).
+///
+/// Error paths (watchdog / SDK crash) are handled separately; this helper only
+/// runs for the "good exit" flow.
+pub async fn mark_cron_completion_if_linked(cron_task_id: &str, exit_reason: Option<&str>) {
+    // Look up the CronTask → find its Task back-pointer.
+    let ta_id = {
+        let manager = crate::cron_task::get_cron_task_manager();
+        let Some(ct) = manager.get_task(cron_task_id).await else {
+            return;
+        };
+        let Some(ta_id) = ct.task_id.clone() else {
+            return;
+        };
+        ta_id
+    };
+
+    let Some(store) = get_task_store() else {
+        return;
+    };
+    let Some(task) = store.get(&ta_id).await else {
+        return;
+    };
+
+    // Only fire for tasks still in "active" states — don't re-transition a
+    // task the user already marked done/blocked/stopped via the UI.
+    if !matches!(task.status, TaskStatus::Running | TaskStatus::Verifying) {
+        return;
+    }
+
+    // Classify the exit reason (PRD §9.1 + §12.2 caller-inference):
+    //   - `None` or "completed" / "executions" / "deadline" → endCondition → done
+    //   - explicit string from ExitCronTask tool (AI) → agent/cli → done
+    let (message, actor, source) = match exit_reason {
+        None => (
+            "cron endCondition fired".to_string(),
+            TransitionActor::System,
+            TransitionSource::EndCondition,
+        ),
+        Some(reason) => {
+            let low = reason.to_lowercase();
+            if low.contains("one-shot")
+                || low.contains("max executions")
+                || low.contains("deadline")
+                || low.contains("endcondition")
+            {
+                (
+                    reason.to_string(),
+                    TransitionActor::System,
+                    TransitionSource::EndCondition,
+                )
+            } else {
+                // AI-requested exit via ExitCronTask tool.
+                (
+                    reason.to_string(),
+                    TransitionActor::Agent,
+                    TransitionSource::Cli,
+                )
+            }
+        }
+    };
+
+    if let Err(e) = store
+        .update_status(TaskUpdateStatusInput {
+            id: ta_id.clone(),
+            status: TaskStatus::Done,
+            message: Some(message),
+            actor,
+            source: Some(source),
+        })
+        .await
+    {
+        ulog_warn!(
+            "[task] cron-linked completion for {}: update_status failed: {}",
+            ta_id,
+            e
+        );
+    }
+}
+
+/// Construct the first-message prompt for a dispatch tick (PRD §9.3.1).
+///
+/// - `dispatchOrigin='direct'`   → `执行任务：<task.md 正文>`
+/// - `dispatchOrigin='ai-aligned'` → `/task-implement` slash command (the skill
+///    reads `.task/<id>/{task,verify,progress,alignment}.md` on its own)
+///
+/// Returns `None` if the store isn't initialized or the task doesn't exist.
+/// Returns `Some(Err(...))` for unrecoverable I/O (missing task.md on a
+/// direct-path task). Callers fall back to the CronTask's stored `prompt`
+/// on `None` so legacy tasks (no `task_id` back-pointer) keep working.
+pub async fn build_dispatch_prompt(task_id: &str) -> Option<Result<String, String>> {
+    let store = get_task_store()?;
+    let task = store.get(task_id).await?;
+    Some(compose_dispatch_prompt(&task))
+}
+
+fn compose_dispatch_prompt(task: &Task) -> Result<String, String> {
+    match task.dispatch_origin {
+        TaskDispatchOrigin::AiAligned => {
+            // The task-implement skill discovers the four alignment docs from
+            // `.task/<taskId>/` on its own. We just need to invoke it.
+            Ok(format!("/task-implement {}", task.id))
+        }
+        TaskDispatchOrigin::Direct => {
+            let dir = task_docs_dir(&task.workspace_path, &task.id)?;
+            let task_md = dir.join("task.md");
+            match fs::read_to_string(&task_md) {
+                Ok(body) => {
+                    let trimmed = body.trim();
+                    if trimmed.is_empty() {
+                        Err(format!(
+                            "task.md is empty for direct-dispatch task {}",
+                            task.id
+                        ))
+                    } else {
+                        Ok(format!("执行任务：{}", trimmed))
+                    }
+                }
+                Err(e) => Err(format!(
+                    "Failed to read task.md for {} ({}): {}",
+                    task.id,
+                    task_md.display(),
+                    e
+                )),
+            }
+        }
+    }
+}
+
+/// Best-effort append to `<workspace>/.task/<taskId>/progress.md` when a
+/// status transition fires. Schema: `[ISO_TIME] [actor/source] from → to — <message>`
+/// (PRD §10.2.1 step 5). A missing progress.md is created; failures are logged
+/// and swallowed — progress.md is an *additional* human-readable view, the
+/// authoritative audit log lives in `task.statusHistory`.
+fn append_progress_line(task: &Task, t: &StatusTransition) {
+    if task.workspace_path.is_empty() {
+        return;
+    }
+    let dir = match task_docs_dir(&task.workspace_path, &task.id) {
+        Ok(p) => p,
+        Err(e) => {
+            ulog_warn!("[task] progress.md append skipped (bad path): {}", e);
+            return;
+        }
+    };
+    if let Err(e) = fs::create_dir_all(&dir) {
+        ulog_warn!("[task] progress.md mkdir failed: {}", e);
+        return;
+    }
+    let path = dir.join("progress.md");
+    let from_str = t.from.map(|s| s.as_str()).unwrap_or("—");
+    let source_str = t.source.map(|s| s.as_str()).unwrap_or("");
+    let source_suffix = if source_str.is_empty() {
+        String::new()
+    } else {
+        format!("/{}", source_str)
+    };
+    // Sanitize newlines and carriage returns so a multi-line message doesn't
+    // corrupt the one-line-per-transition format. `\n` / `\r` → `⏎` marker so
+    // the full payload is preserved and still visually distinct.
+    let msg_suffix = match t.message.as_deref() {
+        Some(m) if !m.is_empty() => {
+            let clean = m.replace('\r', "").replace('\n', " ⏎ ");
+            format!(" — {}", clean)
+        }
+        _ => String::new(),
+    };
+    let line = format!(
+        "- [{}] [{}{}] {} → {}{}\n",
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+        t.actor.as_str(),
+        source_suffix,
+        from_str,
+        t.to.as_str(),
+        msg_suffix
+    );
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                ulog_warn!("[task] progress.md write failed: {}", e);
+            }
+        }
+        Err(e) => ulog_warn!("[task] progress.md open failed: {}", e),
+    }
+}
+
+/// Default events a task subscribes to when `NotificationConfig.events` is absent.
+const DEFAULT_NOTIFICATION_EVENTS: &[&str] = &["done", "blocked", "endCondition"];
+
+/// PRD §12.2 — check the per-task subscription and dispatch desktop + bot pushes.
+/// Dispatch runs best-effort; bot push failure falls back to desktop (§12.6).
+fn dispatch_notification(task: &Task, t: &StatusTransition) {
+    // Event key — prefer the transition source if it's an `endCondition`
+    // virtual event (PRD §12.2), else use the target status.
+    let event_key: &str = match (t.source, t.to) {
+        (Some(TransitionSource::EndCondition), _) => "endCondition",
+        (_, TaskStatus::Done) => "done",
+        (_, TaskStatus::Blocked) => "blocked",
+        (_, TaskStatus::Stopped) => "stopped",
+        (_, TaskStatus::Verifying) => "verifying",
+        _ => return, // other transitions don't map to notification events
+    };
+
+    let cfg = task.notification.as_ref();
+    let subscribed: Vec<String> = cfg
+        .and_then(|c| c.events.clone())
+        .unwrap_or_else(|| {
+            DEFAULT_NOTIFICATION_EVENTS
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        });
+    if !subscribed.iter().any(|e| e == event_key) {
+        return;
+    }
+
+    // Build the message (PRD §12.3): "任务「<name>」<动词短语>" + optional
+    // `message` body. No emoji (v1.4 decision).
+    let verb = match event_key {
+        "done" => "已完成",
+        "blocked" => "已阻塞",
+        "stopped" => "已暂停",
+        "verifying" => "进入验证",
+        "endCondition" => "循环收敛",
+        _ => "状态变更",
+    };
+    let title = format!("任务「{}」{}", task.name, verb);
+    let body = t.message.clone().unwrap_or_default();
+
+    let desktop_enabled = cfg.map(|c| c.desktop).unwrap_or(true);
+    let bot_channel = cfg.and_then(|c| c.bot_channel_id.clone());
+
+    let Some(handle) = crate::logger::get_app_handle() else {
+        ulog_warn!("[task] notification skipped — no app handle");
+        return;
+    };
+
+    // Fire desktop notification first (synchronous, best-effort).
+    let fire_desktop = |title: &str, body: &str| {
+        let _ = handle.emit(
+            "notification:show",
+            serde_json::json!({
+                "title": title,
+                "body": body,
+                "taskId": task.id,
+            }),
+        );
+    };
+
+    if desktop_enabled {
+        fire_desktop(&title, &body);
+    }
+
+    if let Some(channel) = bot_channel {
+        let handle_cloned = handle.clone();
+        let bot_thread = cfg.and_then(|c| c.bot_thread.clone());
+        let summary = if body.is_empty() {
+            title.clone()
+        } else {
+            format!("{}\n{}", title, body)
+        };
+        let task_id = task.id.clone();
+        let title_owned = title.clone();
+        let desktop_was_enabled = desktop_enabled;
+        tauri::async_runtime::spawn(async move {
+            // PRD §12.6 — bot push failure falls back to desktop so the user
+            // isn't silently left without any notification. Even if the user
+            // explicitly turned off `desktop`, a bot failure that left them
+            // with zero notifications is a degraded experience we surface.
+            let delivered = crate::cron_task::deliver_task_notification_to_bot_checked(
+                &handle_cloned,
+                &channel,
+                bot_thread.as_deref(),
+                &task_id,
+                &summary,
+            )
+            .await;
+            if !delivered {
+                let fallback_body = if desktop_was_enabled {
+                    format!("(bot 推送失败) {}", summary)
+                } else {
+                    format!("(bot 推送失败，降级桌面通知) {}", summary)
+                };
+                let _ = handle_cloned.emit(
+                    "notification:show",
+                    serde_json::json!({
+                        "title": title_owned,
+                        "body": fallback_body,
+                        "taskId": task_id,
+                    }),
+                );
+            }
+        });
+    }
+}
+
+/// SSE / frontend broadcast. Uses the global AppHandle from `logger` so any
+/// module can emit without threading the handle through constructors.
+fn emit_task_event(event: &str, payload: serde_json::Value) {
+    if let Some(handle) = crate::logger::get_app_handle() {
+        let _ = handle.emit(event, payload);
+    }
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {

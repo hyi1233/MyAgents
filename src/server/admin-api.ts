@@ -1205,6 +1205,23 @@ export async function handleTaskCreateDirect(
   return wrapMgmtResponse(resp);
 }
 
+export async function handleTaskCreateFromAlignment(
+  payload: Record<string, unknown>,
+): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/create-from-alignment', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskRun(payload: { id: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/run', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskRerun(payload: { id: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/rerun', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
 export async function handleTaskUpdateStatus(
   payload: Record<string, unknown>,
 ): Promise<AdminResponse> {

@@ -17,6 +17,8 @@ import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 import { isProviderAvailable } from '@/config/configService';
 import RuntimeSelector from '@/components/RuntimeSelector';
+import ModeSegment, { type InputMode } from '@/components/task-center/ModeSegment';
+import { thoughtCreate, taskCenterAvailable } from '@/api/taskCenter';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 
 // ===== Module-level pure helpers (extracted from render body) =====
@@ -46,6 +48,20 @@ interface SimpleChatInputProps {
   /** Called when user sends message. Text is managed internally for performance.
    *  Return false to indicate rejection (input will NOT be cleared). */
   onSend: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode) => boolean | void | Promise<boolean | void>;
+  /**
+   * Enable the 任务 | 想法 mode segment above the textarea (PRD §4.1.2). When
+   * active and the user toggles to 想法 mode, Enter / send stores the text as
+   * a Thought via `thoughtCreate` and resets back to 任务 mode — instead of
+   * triggering `onSend` upstream. Defaults to `false`; Chat tab passes `true`.
+   */
+  enableThoughtMode?: boolean;
+  /**
+   * Whether this input belongs to the currently active tab. The Cmd/Ctrl+Shift+T
+   * mode toggle only fires on the active tab, so keystrokes don't silently flip
+   * mode on background tabs. Launcher-mode callers can omit this (Launcher is
+   * always the active tab when visible).
+   */
+  active?: boolean;
   onStop?: () => void; // Called when stop button is clicked
   isLoading: boolean;
   /** Session state for stop button UI ('stopping' shows disabled spinner) */
@@ -194,6 +210,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onInputChange,
   mode = 'chat',
   toolbarPrefix,
+  enableThoughtMode = false,
+  active = true,
   runtime = 'builtin',
   runtimeDetections,
   onRuntimeChange,
@@ -205,6 +223,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 }, ref) {
   const isLauncherMode = mode === 'launcher';
   const isExternalRuntime = runtime !== 'builtin';
+
+  // PRD §4.1.2 task/thought mode segment. Only enabled when the caller opts
+  // in (Chat tab does) AND the Tauri runtime is available (thought persistence
+  // requires `cmd_thought_create`).
+  const thoughtModeAvailable = enableThoughtMode && taskCenterAvailable();
+  const [inputMode, setInputMode] = useState<InputMode>('task');
 
   // Compute display modes and model name based on runtime
   const displayPermissionModes = isExternalRuntime && runtimePermissionModes
@@ -957,6 +981,22 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     sendingRef.current = true;
 
     try {
+      // PRD §4.1.2 / §4.4 — in thought mode, persist via `cmd_thought_create`
+      // instead of sending up to the AI pipeline; input clears and mode auto-
+      // reverts to 任务 on success.
+      if (thoughtModeAvailable && inputMode === 'thought' && text) {
+        try {
+          await thoughtCreate({ content: text });
+          toast.success('想法已记录，可在任务中心查看');
+          setInputValue('');
+          setImages([]);
+          setInputMode('task');
+        } catch (e) {
+          toast.error(`保存想法失败：${e}`);
+        }
+        return;
+      }
+
       const result = onSend(text, images.length > 0 ? images : undefined);
       // If onSend returns a promise, await it; if sync, use directly
       const accepted = result instanceof Promise ? await result : result;
@@ -968,7 +1008,27 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     } finally {
       sendingRef.current = false;
     }
-  }, [onSend, images, inputValue]);
+  }, [onSend, images, inputValue, thoughtModeAvailable, inputMode, toast]);
+
+  // PRD §4.1.1 / §4.1.2 hotkey: Cmd/Ctrl+Shift+T toggles task ↔ thought for
+  // chat-tab users. Launcher already handles it in BrandSection. Only the
+  // active tab's handler registers so background tabs don't silently flip
+  // their mode on a keystroke intended for the active tab.
+  useEffect(() => {
+    if (!thoughtModeAvailable || !active) return;
+    const handler = (e: KeyboardEvent) => {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        (e.key === 'T' || e.key === 't')
+      ) {
+        e.preventDefault();
+        setInputMode((m) => (m === 'task' ? 'thought' : 'task'));
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [thoughtModeAvailable, active]);
 
   // Handle keyboard navigation in file search and slash menu
   const handleKeyDown = useCallback(async (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1216,6 +1276,19 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             </div>
           )}
 
+          {/* PRD §4.1.2 — compact ModeSegment for Chat tab. Only rendered when
+              the caller opts in (enableThoughtMode). Launcher path has its own
+              larger ModeSegment rendered above the input in BrandSection. */}
+          {thoughtModeAvailable && !isLauncherMode && (
+            <div className="flex justify-center pt-2 pb-1">
+              <ModeSegment
+                value={inputMode}
+                onChange={setInputMode}
+                size="chat"
+              />
+            </div>
+          )}
+
           {/* Textarea area */}
           <div className="relative px-4 pt-3">
             <textarea
@@ -1224,7 +1297,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder={isLauncherMode ? '今天，想干点啥？' : '输入消息，使用 @ 引用文件，/ 使用技能...'}
+              placeholder={
+                thoughtModeAvailable && inputMode === 'thought'
+                  ? '此刻有什么想法？(⌘/Ctrl + ⇧ + T 切换)'
+                  : isLauncherMode
+                    ? '今天，想干点啥？'
+                    : '输入消息，使用 @ 引用文件，/ 使用技能...'
+              }
               rows={2}
               className="block w-full resize-none bg-transparent pr-8 text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
               style={{

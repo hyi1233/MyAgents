@@ -136,6 +136,11 @@ Examples:
   myagents task update-status <taskId> done --message "bundle size dropped 40%"
   myagents task update-progress <taskId> "finished step 1/3"
   myagents task append-session <taskId> <sessionId>
+  myagents task run <taskId>
+  myagents task rerun <taskId>
+  myagents task create-from-alignment <alignmentSessionId> \
+    --name "新任务" --workspaceId ws-abc --workspacePath /path/to/ws \
+    --executionMode once --sourceThoughtId <thoughtId>
   myagents thought list
   myagents plugin list
   myagents version
@@ -963,6 +968,29 @@ function buildRequestBody(
           ? (flags.tags as string).split(',').map(s => s.trim()).filter(Boolean)
           : undefined,
       };
+    }
+    if (action === 'create-from-alignment') {
+      // First positional MUST be the alignmentSessionId. Use --name for the
+      // task title (to avoid ambiguity when the user writes a task name that
+      // happens to parse as a sessionId). An empty alignmentSessionId will be
+      // rejected by the Rust layer's `validate_safe_id`.
+      return {
+        name: flags.name,
+        executor: flags.executor ?? 'agent',
+        description: flags.description,
+        workspaceId: flags.workspaceId,
+        workspacePath: flags.workspacePath,
+        alignmentSessionId: flags.alignmentSessionId ?? rest[0],
+        executionMode: flags.executionMode ?? 'once',
+        runMode: flags.runMode,
+        sourceThoughtId: flags.sourceThoughtId,
+        tags: typeof flags.tags === 'string'
+          ? (flags.tags as string).split(',').map(s => s.trim()).filter(Boolean)
+          : undefined,
+      };
+    }
+    if (action === 'run' || action === 'rerun') {
+      return { id: rest[0] || flags.id };
     }
     return {};
   }

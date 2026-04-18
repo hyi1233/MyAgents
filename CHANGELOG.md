@@ -10,24 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.69] - 2026-04-18
 
 ### Added
-- **任务中心（Task Center）**：全新的任务管理 Tab，左栏是「想法」速记流（按月分目录的 Markdown 文件 + `#tag` 自动识别），右栏是任务列表（进行中 / 待启动 / 已完成三段式），点击任务卡唤起详情 Overlay，支持状态变更历史、手动归档 / 删除。顶部导航栏新增「任务」入口。
-- **任务 / 想法 模式切换器**：启动页输入框上方新增 `任务 | 想法` 切换（`Cmd/Ctrl+Shift+T` 切换），选中「想法」后回车保存为想法而非启动对话，写完自动切回「任务」。
-- **`myagents task` CLI**：AI 可通过 shell 自管任务生命周期 —— `task list / get / update-status / update-progress / append-session / archive / delete` 覆盖 PRD §10.2.1 状态机。`actor` / `source` 由运行环境自动推断（`MYAGENTS_PORT` 在位 = AI 子进程 → `agent/cli`，否则 = 用户终端 → `user/cli`），UI 路径由 Tauri 层强制盖戳 `user/ui`，三条入口互不伪造。
-- **`myagents thought` CLI**：`thought list / create` 让 AI / 用户在 shell 中沉淀速记。
-- **状态机 + 审计链**：Task 持久化 `statusHistory: StatusTransition[]` 追加日志（`{from, to, at, actor, source, message}`），任何状态变更原子写入；崩溃恢复自动把遗留 running/verifying 迁到 blocked 并记入 statusHistory；删除写入 `→ deleted` 伪状态保留审计可溯。
-- **思考与任务双向绑定**：派发想法时 `Thought.convertedTaskIds` 自动追加任务 ID；任务软删时反向清理。
+- **任务中心（Task Center）**：全新的任务管理 Tab，左栏是「想法」速记流（按月分目录的 Markdown 文件 + `#tag` 自动识别），右栏是任务列表（进行中 / 待启动 / 已完成三段式），点击任务卡唤起详情 Overlay，支持状态变更历史、立即执行、重新派发、手动归档 / 删除、per-task 通知订阅编辑。顶部导航栏新增「任务」入口。
+- **任务 / 想法 模式切换器**：启动页 + Chat tab 输入框上方都支持 `任务 | 想法` 切换（`Cmd/Ctrl+Shift+T` 快捷键），选中「想法」后回车保存为想法而非启动对话，写完自动切回「任务」。
+- **AI 讨论路径（PRD §8.3）**：想法卡「AI 讨论」按钮打开新 Chat Tab，自动注入 `/task-alignment` skill；task-alignment 完成对齐后，Agent 调 `myagents task create-from-alignment` 把四份文档（alignment / task / verify / progress.md）迁入 `.task/<newTaskId>/` 并登记为 `dispatchOrigin='ai-aligned'` 的正式任务。
+- **执行闭环（PRD §11.1 / §9.3.1）**：`task run` / `rerun` 把 Task 登记为 **带 `task_id` 反向指针** 的 CronTask，调度器触发时**动态**构造首条消息（`direct` → "执行任务：<task.md>"；`ai-aligned` → `/task-implement`），用户中途编辑 task.md 下一次执行即生效，不用手动同步。
+- **`myagents task` / `thought` CLI**：AI 与用户通过 shell 自管任务全生命周期 —— `task list / get / run / rerun / update-status / update-progress / append-session / archive / delete / create-direct / create-from-alignment` + `thought list / create`。`actor` / `source` 由运行环境自动推断（`MYAGENTS_PORT` 存在 = AI 子进程 → `agent/cli`，否则 = 用户终端 → `user/cli`），UI 路径由 Tauri 层强制 `user/ui`，三条入口互不伪造。
+- **通知系统（PRD §12）**：每次 `update-status` 自动分发 —— 桌面通知走 Tauri `notification:show`，IM Bot 走既有 `deliver_cron_result_to_bot` 管道。per-task 订阅（默认 `done/blocked/endCondition`）+ 桌面开关 + bot channel / thread 三个维度在派发 dialog 与任务详情 Overlay 两处可配置。
+- **状态机 + 审计链 + SSE 实时同步**：Task 持久化 `statusHistory: StatusTransition[]` 追加日志（`{from, to, at, actor, source, message}`），每次 `update_status` 原子写入 + 自动 append `.task/<id>/progress.md` + 广播 SSE `task:status-changed` 事件（所有打开的任务中心 Tab 实时同步）；崩溃恢复自动把遗留 running/verifying 迁到 blocked 并记入 statusHistory；删除写入 `→ deleted` 伪状态保留审计可溯。
+- **任务 / 想法 全文搜索**：`cmd_search_thoughts` / `cmd_search_tasks` 内存索引 + 按需读 `.task/<id>/task.md`，前端左右栏搜索条直接过滤 + 后端 CLI 可调。
+- **思考与任务双向绑定**：派发想法 → `Thought.convertedTaskIds` 自动追加任务 ID；任务软删 → 反向清理。
 
 ### Architecture
 - 新增 Rust 层 `task.rs` / `thought.rs` 模块：tmp-write + `sync_all` + rename + 父目录 fsync 的 crash-durable 原子写盘；`task_docs_dir` 路径穿越硬拦截（`..` / 分隔符 / 非法字符一律拒绝）；`create_from_alignment` 事务化（JSONL 先落盘、alignment 目录再 rename、失败回滚）。
-- 新增 Bun `admin-api.ts` 任务/想法转发层 + Rust `management_api.rs` HTTP 端点：`/api/task/*` + `/api/thought/*` 与 `/api/cron/*` 同架构层次。
+- 新增 Bun `admin-api.ts` 任务/想法转发层 + Rust `management_api.rs` 12 条 HTTP 端点（`/api/task/*` + `/api/thought/*`），与 `/api/cron/*` 同架构层次；`task/run` + `task/rerun` 内部调 `execute_cron_task` 统一执行原语（PRD §11.1）。
+- `CronTask` 新增 `task_id: Option<String>` 反向指针字段（PRD §11.2）+ `find_by_task_id` / `delete_by_task_id` 辅助；scheduler tick 先查 `task_id` → `task::build_dispatch_prompt()` 覆盖 prompt（§9.3.1），用户编辑 task.md 下次触发即生效。
 - 新增 `src/shared/types/task.ts` / `thought.ts` 共享类型：`TaskRunMode` / `TaskDispatchOrigin` / `TaskEndConditions` 显式 kebab-case + `deadline` 毫秒时间戳，消除 Rust/TS 序列化契约漂移。
-- 内置 MA 小助理版本门控提升（`ADMIN_AGENT_VERSION 11 → 12`，`CLI_VERSION 4 → 5`）。
-
-### Deferred to future releases
-- CronTaskManager 自动注册（scheduled/recurring/loop 的调度器挂载）与一键「重新派发」—— 数据结构已持久化，挂调度在后续迭代完成。
-- 任务通知分发（桌面 / IM Bot 转发 statusHistory 变更）—— 复用既有 `send_task_notification` / `deliver_cron_result_to_bot` 的集成在 v0.1.70 补齐。
-- AI 讨论路径（`/task-alignment` 讨论 → `task create-from-alignment` 创建）端到端闭环 —— 数据层已实现，skill 侧指令补齐在后续版本。
-- Tantivy 的 ThoughtIndex / TaskIndex 全文检索接入。
+- 搜索层 `SearchEngine` 增加 `search_thoughts` / `search_tasks` 方法 + Tauri 命令；为 v1 规模采用线性扫描（<10k 条），避免 Tantivy 冷启动开销，后续规模扩大时可平滑切换到 Tantivy。
+- 内置 MA 小助理版本门控提升（`ADMIN_AGENT_VERSION 11 → 13`，`CLI_VERSION 4 → 6`）：`self-config/SKILL.md` 新增任务中心 CLI 操作说明，`task-alignment/SKILL.md` 补充 AI 讨论路径自动调 `task create-from-alignment` 的指令。
 
 ---
 

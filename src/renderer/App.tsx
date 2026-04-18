@@ -1545,6 +1545,108 @@ export default function App() {
     return () => window.removeEventListener(CUSTOM_EVENTS.OPEN_TASK_CENTER, handler);
   }, [handleOpenTaskCenter]);
 
+  // PRD §8.3 — "AI 讨论" flow. Open a new Chat tab, auto-dispatch the
+  // `/task-alignment` skill with the thought content + instructions to call
+  // `myagents task create-from-alignment` at the end.
+  useEffect(() => {
+    const handler = async (raw: Event) => {
+      const event = raw as CustomEvent<{
+        thoughtId: string;
+        content: string;
+        tags: string[];
+      }>;
+      const { thoughtId, content, tags } = event.detail ?? {
+        thoughtId: '',
+        content: '',
+        tags: [],
+      };
+      if (!thoughtId || !content) return;
+
+      try {
+        const currentTabs = tabsRef.current;
+        if (currentTabs.length >= MAX_TABS) {
+          toastRef.current?.error(`已达标签页上限（${MAX_TABS} 个），请先关闭一个再开始 AI 讨论`);
+          return;
+        }
+
+        // Smart workspace default — same logic as DispatchTaskDialog (PRD §8.4).
+        const projects = configProjectsRef.current.filter((p) => !p.internal);
+        if (projects.length === 0) {
+          toastRef.current?.error('还没有工作区，无法开始 AI 讨论');
+          return;
+        }
+        const lowerTags = tags.map((t) => t.toLowerCase());
+        const workspace =
+          projects.find((p) => lowerTags.includes(p.name.toLowerCase())) ??
+          projects[0];
+
+        // Pick the user's default provider (CC review W6). Fall back to the
+        // first available provider if the default isn't set or isn't present.
+        const defaultProviderId = configRef.current?.defaultProviderId;
+        const provider =
+          (defaultProviderId
+            ? appProvidersRef.current.find((p) => p.id === defaultProviderId)
+            : undefined) ?? appProvidersRef.current[0];
+        if (!provider) {
+          toastRef.current?.error('未配置模型供应商，无法开始 AI 讨论');
+          return;
+        }
+
+        // Pre-mint the alignment session id (CC review W8) so the AI doesn't
+        // have to infer a placeholder. This becomes the `.task/<id>/` subdir
+        // it writes alignment.md/task.md/verify.md/progress.md into, and the
+        // exact value the `task create-from-alignment` CLI takes.
+        const alignmentSessionId = `align-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+        const alignmentPrompt = [
+          '我想让你帮我对齐这件事（想法原文见下）。',
+          '',
+          `请按 /task-alignment 流程把四份文档写入 \`.task/${alignmentSessionId}/\` 子目录（alignment.md / task.md / verify.md / progress.md）。`,
+          '',
+          '如果讨论下来觉得值得做，请在沉淀完这四份文档后，调用 CLI 创建任务：',
+          '',
+          `\`myagents task create-from-alignment ${alignmentSessionId} --name "<任务名>" --workspaceId ${workspace.id} --workspacePath ${workspace.path} --sourceThoughtId ${thoughtId}\``,
+          '',
+          '如果不值得做或需要再想想，直接告诉我即可，不用强行创建任务。',
+          '',
+          '[想法原文]',
+          content,
+          '',
+          '请按 /task-alignment 流程跟我对话。',
+        ].join('\n');
+
+        const initialMessage: InitialMessage = {
+          text: alignmentPrompt,
+          providerId: provider.id,
+        };
+
+        const newTab = createNewTab();
+        setTabs((prev) => [...prev, newTab]);
+        setActiveTabId(newTab.id);
+        activeTabIdRef.current = newTab.id;
+
+        await handleLaunchProject(
+          workspace,
+          provider,
+          undefined,
+          initialMessage,
+        );
+
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === newTab.id ? { ...t, title: '任务讨论' } : t,
+          ),
+        );
+      } catch (err) {
+        console.error('[App] OPEN_AI_DISCUSSION failed:', err);
+      }
+    };
+    window.addEventListener(CUSTOM_EVENTS.OPEN_AI_DISCUSSION, handler);
+    return () =>
+      window.removeEventListener(CUSTOM_EVENTS.OPEN_AI_DISCUSSION, handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
+  }, []);
+
   // Listen for JUMP_TO_TAB custom event (Session singleton constraint)
   useEffect(() => {
     const handleJumpToTab = (event: CustomEvent<{ targetTabId: string; sessionId: string }>) => {

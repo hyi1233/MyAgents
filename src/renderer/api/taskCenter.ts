@@ -105,6 +105,89 @@ export function taskSetCron(id: string, cronTaskId: string | null): Promise<Task
   return inv('cmd_task_set_cron', { id, cronTaskId });
 }
 
+// ============================================================
+// Search (Task Center — v0.1.69, §13.2)
+// ============================================================
+
+export interface ThoughtSearchHit {
+  id: string;
+  snippet: string;
+  tags: string[];
+  updatedAt: number;
+}
+
+export interface ThoughtSearchResult {
+  hits: ThoughtSearchHit[];
+  total: number;
+}
+
+export interface TaskSearchHit {
+  id: string;
+  name: string;
+  snippet: string;
+  status: string;
+  workspaceId: string;
+  updatedAt: number;
+}
+
+export interface TaskSearchResult {
+  hits: TaskSearchHit[];
+  total: number;
+}
+
+export function searchThoughts(
+  query: string,
+  limit = 50,
+): Promise<ThoughtSearchResult> {
+  return inv('cmd_search_thoughts', { query, limit });
+}
+
+export function searchTasks(
+  query: string,
+  workspaceId?: string,
+  limit = 50,
+): Promise<TaskSearchResult> {
+  return inv('cmd_search_tasks', { query, workspaceId, limit });
+}
+
+// ============================================================
+// Execution triggers (renderer → Global Sidecar → Rust Management API)
+// ============================================================
+//
+// `taskRun` / `taskRerun` go through the Admin API path (Bun Sidecar forwards
+// to Rust `/api/task/run|rerun`) because the execution primitive binds a
+// CronTask to the Task Center task and kicks the Rust scheduler. The Tauri
+// IPC shortcut (`cmd_task_update_status`) would skip CronTask registration
+// and the task would never fire.
+
+interface AdminResponse<T = unknown> {
+  success: boolean;
+  data?: T;
+  error?: string;
+}
+
+async function postAdmin<T = unknown>(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<T> {
+  const { apiPostJson } = await import('@/api/apiFetch');
+  const result = await apiPostJson<AdminResponse<T>>(path, body);
+  if (!result.success) {
+    throw new Error(result.error ?? `${path} failed`);
+  }
+  return result.data as T;
+}
+
+/** Dispatch task execution (PRD §11.1 unified primitive). */
+export function taskRun(id: string): Promise<unknown> {
+  return postAdmin('/api/admin/task/run', { id });
+}
+
+/** Reset status → todo, then dispatch (PRD §10.2.2 row "rerun"). */
+export function taskRerun(id: string): Promise<unknown> {
+  return postAdmin('/api/admin/task/rerun', { id });
+}
+
 /** True if the current environment exposes Task Center commands (Tauri-only). */
 export function taskCenterAvailable(): boolean {
   return isTauri();
