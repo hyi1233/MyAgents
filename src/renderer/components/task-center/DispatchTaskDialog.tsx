@@ -12,7 +12,6 @@ import {
   Clock,
   FileText,
   Flag,
-  MessageSquare,
   Play,
   Repeat,
   Timer,
@@ -33,7 +32,6 @@ import type {
   NotificationConfig,
   Task,
   TaskExecutionMode,
-  TaskExecutor,
   TaskRunMode,
 } from '@/../shared/types/task';
 
@@ -234,10 +232,10 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
 
   const defaultName = useMemo(() => deriveTaskName(thought.content), [thought.content]);
 
-  // Form state
+  // Form state. v0.1.69 scope is AI execution only — `executor` is pinned to
+  // `'agent'`; the user-as-todo variant is a future extension.
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState('');
-  const [executor, setExecutor] = useState<TaskExecutor>('agent');
   const [workspacePath, setWorkspacePath] = useState<string>(
     defaultProject?.path ?? '',
   );
@@ -372,7 +370,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
       }
       const task = await taskCreateDirect({
         name: name.trim(),
-        executor,
+        executor: 'agent',
         description: description.trim() || undefined,
         workspaceId: workspace.id,
         workspacePath: workspace.path,
@@ -400,7 +398,6 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
     isScheduled,
     atDateTime,
     name,
-    executor,
     description,
     taskMd,
     executionMode,
@@ -426,12 +423,12 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
 
   return (
     <OverlayBackdrop onClose={onClose} className="z-[200]">
-      <div className="flex h-[80vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg">
+      <div className="flex h-[82vh] w-full max-w-2xl flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg">
         {/* ── Header ── */}
-        <div className="flex shrink-0 items-center justify-between px-6 py-4">
+        <div className="flex shrink-0 items-center justify-between border-b border-[var(--line-subtle)] px-7 py-5">
           <div className="flex items-center gap-2.5">
             <Zap className="h-4 w-4 text-[var(--accent)]" />
-            <h2 className="text-[15px] font-semibold text-[var(--ink)]">
+            <h2 className="text-[16px] font-semibold text-[var(--ink)]">
               派发为任务
             </h2>
           </div>
@@ -443,14 +440,14 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
           </button>
         </div>
 
-        {/* ── Body ── */}
-        <div className="flex-1 space-y-6 overflow-y-auto px-6 pb-6">
+        {/* ── Body — generous breathing room per design review ── */}
+        <div className="flex-1 space-y-8 overflow-y-auto px-7 py-7">
           {/* 基本信息 */}
           <div>
             <SectionHeader icon={FileText}>基本信息</SectionHeader>
-            <div className="mt-3 space-y-4">
+            <div className="mt-4 space-y-5">
               <div>
-                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
                   任务名称
                 </label>
                 <input
@@ -464,7 +461,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
               </div>
 
               <div>
-                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
                   简短描述
                   <span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span>
                 </label>
@@ -478,7 +475,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
               </div>
 
               <div>
-                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
                   执行 Agent（工作区）
                 </label>
                 <CustomSelect
@@ -487,28 +484,28 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
                   onChange={setWorkspacePath}
                   placeholder="选择工作区"
                 />
-                <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+                <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
                   使用该 Agent 的默认模型与权限配置。默认按想法标签匹配工作区。
                 </p>
               </div>
 
               <div>
-                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
                   task.md 内容
                 </label>
                 <textarea
                   value={taskMd}
                   onChange={(e) => setTaskMd(e.target.value)}
-                  rows={5}
+                  rows={6}
                   className={`${INPUT_CLS} resize-none`}
                 />
-                <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+                <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
                   AI 执行时看到的 prompt，默认取自想法原文。你可以补充细节、目标、约束。
                 </p>
               </div>
 
               <div>
-                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
                   标签
                   <span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span>
                 </label>
@@ -525,65 +522,10 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
 
           <div className="border-t border-[var(--line)]" />
 
-          {/* 执行者 + 会话策略 */}
-          <div>
-            <SectionHeader icon={MessageSquare}>执行者</SectionHeader>
-            <div className="mt-3 flex gap-2">
-              <PillButton selected={executor === 'agent'} onClick={() => setExecutor('agent')}>
-                AI 执行
-              </PillButton>
-              <PillButton selected={executor === 'user'} onClick={() => setExecutor('user')}>
-                我自己做（当 todo 用）
-              </PillButton>
-            </div>
-            <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
-              {executor === 'agent'
-                ? 'AI 按 task.md 自主执行，进度会写回任务状态和 progress.md'
-                : '把这条任务当作待办清单，不调动 AI'}
-            </p>
-
-            {showSessionStrategy && (
-              <div className="mt-4">
-                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
-                  会话策略
-                </label>
-                {isLoop ? (
-                  <p className="text-sm text-[var(--ink-muted)]">
-                    连续对话（保持上下文）— Ralph Loop 固定使用此模式
-                  </p>
-                ) : (
-                  <>
-                    <div className="flex gap-2">
-                      <PillButton
-                        selected={runMode === 'new-session'}
-                        onClick={() => setRunMode('new-session')}
-                      >
-                        新开对话
-                      </PillButton>
-                      <PillButton
-                        selected={runMode === 'single-session'}
-                        onClick={() => setRunMode('single-session')}
-                      >
-                        连续对话
-                      </PillButton>
-                    </div>
-                    <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
-                      {runMode === 'new-session'
-                        ? '每次执行创建新会话，无历史记忆，上下文干净'
-                        : '所有轮次复用同一会话，AI 能记住之前内容'}
-                    </p>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div className="border-t border-[var(--line)]" />
-
           {/* 执行模式 */}
           <div>
             <SectionHeader icon={Clock}>执行模式</SectionHeader>
-            <div className="mt-3">
+            <div className="mt-4">
               <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
                 {EXECUTION_TABS.map((t) => {
                   const Icon = t.icon;
@@ -593,7 +535,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
                       key={t.value}
                       type="button"
                       onClick={() => setExecutionMode(t.value)}
-                      className={`flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                      className={`flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-2 text-[13px] font-medium transition-colors ${
                         active
                           ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
                           : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -605,13 +547,13 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
                   );
                 })}
               </div>
-              <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
+              <p className="mt-2.5 text-[13px] text-[var(--ink-muted)]">
                 {EXECUTION_TABS.find((t) => t.value === executionMode)?.description}
               </p>
 
               {isScheduled && (
-                <div className="mt-4">
-                  <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                <div className="mt-5">
+                  <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
                     执行时间
                   </label>
                   <input
@@ -625,8 +567,8 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
               )}
 
               {isRecurring && (
-                <div className="mt-4">
-                  <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                <div className="mt-5">
+                  <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
                     周期间隔（分钟）
                   </label>
                   <input
@@ -637,9 +579,44 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
                     onChange={(e) => setIntervalMinutes(Math.max(5, Number(e.target.value) || 5))}
                     className={INPUT_CLS}
                   />
-                  <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+                  <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
                     最小 5 分钟。更复杂的 Cron 表达式请在详情 Overlay 中编辑。
                   </p>
+                </div>
+              )}
+
+              {showSessionStrategy && (
+                <div className="mt-5">
+                  <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                    会话策略
+                  </label>
+                  {isLoop ? (
+                    <p className="text-sm text-[var(--ink-muted)]">
+                      连续对话（保持上下文）— Ralph Loop 固定使用此模式
+                    </p>
+                  ) : (
+                    <>
+                      <div className="flex gap-2">
+                        <PillButton
+                          selected={runMode === 'new-session'}
+                          onClick={() => setRunMode('new-session')}
+                        >
+                          新开对话
+                        </PillButton>
+                        <PillButton
+                          selected={runMode === 'single-session'}
+                          onClick={() => setRunMode('single-session')}
+                        >
+                          连续对话
+                        </PillButton>
+                      </div>
+                      <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
+                        {runMode === 'new-session'
+                          ? '每次执行创建新会话，无历史记忆，上下文干净'
+                          : '所有轮次复用同一会话，AI 能记住之前内容'}
+                      </p>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -650,7 +627,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
               <div className="border-t border-[var(--line)]" />
               <div>
                 <SectionHeader icon={Flag}>结束条件</SectionHeader>
-                <div className="mt-3 space-y-3">
+                <div className="mt-4 space-y-3.5">
                   <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
                     <button
                       type="button"
@@ -767,7 +744,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
           {/* 任务通知 */}
           <div>
             <SectionHeader icon={Bell}>任务通知</SectionHeader>
-            <div className="mt-3 space-y-3">
+            <div className="mt-4 space-y-3.5">
               <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
                 <span className="text-sm text-[var(--ink)]">
                   每次任务状态变化时发送通知
@@ -825,9 +802,9 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
         </div>
 
         {/* ── Footer ── */}
-        <div className="flex shrink-0 items-center justify-between border-t border-[var(--line)] px-6 py-3.5">
+        <div className="flex shrink-0 items-center justify-between border-t border-[var(--line)] px-7 py-4">
           {errors.length > 0 ? (
-            <p className="text-xs text-[var(--error)]">{errors[0]}</p>
+            <p className="text-[12px] text-[var(--error)]">{errors[0]}</p>
           ) : (
             <div />
           )}
