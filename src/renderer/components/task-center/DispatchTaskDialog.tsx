@@ -446,7 +446,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
           {/* 基本信息 */}
           <div>
             <SectionHeader icon={FileText}>基本信息</SectionHeader>
-            <div className="mt-4 space-y-5">
+            <div className="mt-4 space-y-5 pl-6">
               <div>
                 <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
                   任务名称
@@ -526,7 +526,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
           {/* 执行模式 */}
           <div>
             <SectionHeader icon={Clock}>执行模式</SectionHeader>
-            <div className="mt-4">
+            <div className="mt-4 pl-6">
               <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
                 {EXECUTION_TABS.map((t) => {
                   const Icon = t.icon;
@@ -628,7 +628,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
               <div className="border-t border-[var(--line)]" />
               <div>
                 <SectionHeader icon={Flag}>结束条件</SectionHeader>
-                <div className="mt-4 space-y-3.5">
+                <div className="mt-4 space-y-3.5 pl-6">
                   <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
                     <button
                       type="button"
@@ -745,7 +745,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
           {/* 任务通知 */}
           <div>
             <SectionHeader icon={Bell}>任务通知</SectionHeader>
-            <div className="mt-4 space-y-3.5">
+            <div className="mt-4 space-y-3.5 pl-6">
               <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
                 <span className="text-sm text-[var(--ink)]">
                   每次任务状态变化时发送通知
@@ -831,24 +831,39 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
 }
 
 // Derive a concise task name from thought body:
-//   1. take the first non-empty line
-//   2. strip `#tag` runs using the shared tag parser so title/tag extraction
-//      stay in lock-step with the Rust side (was a regex that disagreed with
-//      the server's boundary rules on mid-word `#`).
-//   3. clamp to MAX_NAME_LEN codepoints (not UTF-16 code units) so we can't
-//      slice mid-surrogate and leave a dangling high/low on emoji / astral
-//      plane chars.
+//   1. walk lines in order; pick the first one whose stripped form (tags
+//      removed via the shared parser, so boundary rules match Rust) is
+//      non-empty. This handles thoughts whose first line is a pure
+//      `#tag1 #tag2` header — we scroll past it to the real title line.
+//   2. if every line is tag-only (the user really did save "#idea"
+//      alone), fall back to the first raw line so the field isn't blank.
+//   3. clamp to MAX_NAME_LEN codepoints (not UTF-16 code units) so we
+//      can't slice mid-surrogate on emoji / astral-plane chars.
 const MAX_NAME_LEN = 40;
 
-function deriveTaskName(content: string): string {
-  const firstLine = content.split('\n').find((l) => l.trim().length > 0) ?? '';
-  const stripped = splitWithTagHighlights(firstLine)
+function stripTagRuns(line: string): string {
+  return splitWithTagHighlights(line)
     .filter((seg) => seg.type !== 'tag')
     .map((seg) => seg.value)
     .join('')
     .trim();
-  const cps = Array.from(stripped);
-  if (cps.length <= MAX_NAME_LEN) return stripped;
+}
+
+function deriveTaskName(content: string): string {
+  const lines = content.split('\n').map((l) => l.trim()).filter(Boolean);
+  let candidate = '';
+  for (const line of lines) {
+    const stripped = stripTagRuns(line);
+    if (stripped) {
+      candidate = stripped;
+      break;
+    }
+  }
+  // Pure-tag thought (e.g. "#idea") — keep the tags visible rather than
+  // handing back an empty string.
+  if (!candidate && lines.length > 0) candidate = lines[0];
+  const cps = Array.from(candidate);
+  if (cps.length <= MAX_NAME_LEN) return candidate;
   return cps.slice(0, MAX_NAME_LEN - 1).join('') + '…';
 }
 
