@@ -1476,6 +1476,28 @@ impl CronTaskManager {
         Ok(updated)
     }
 
+    /// Write the `task_id` back-pointer used by the Task Center to find the
+    /// CronTask that backs a given new-model Task. Used by the legacy-upgrade
+    /// path — once the pointer is set, the legacy surfacing filter (see
+    /// `TaskListPanel.fetchLegacyCronTasks`) hides this row from the legacy
+    /// list and the Task Center drives it through the new detail overlay.
+    pub async fn set_task_id(
+        &self,
+        cron_task_id: &str,
+        task_id: Option<String>,
+    ) -> Result<CronTask, String> {
+        let mut tasks = self.tasks.write().await;
+        let task = tasks.get_mut(cron_task_id)
+            .ok_or_else(|| format!("CronTask not found: {}", cron_task_id))?;
+        task.task_id = task_id;
+        task.updated_at = Utc::now();
+        let updated = task.clone();
+        drop(tasks);
+        self.save_to_disk().await?;
+        ulog_info!("[CronTask] Set task_id: {}", cron_task_id);
+        Ok(updated)
+    }
+
     /// Start a task (begin scheduling)
     /// Can start a task in Stopped status (e.g., after creation or after previous stop)
     pub async fn start_task(&self, task_id: &str) -> Result<CronTask, String> {
@@ -2350,6 +2372,24 @@ pub async fn cmd_update_cron_task_fields(
 
     manager.get_task(&task_id).await
         .ok_or_else(|| format!("Task not found after update: {}", task_id))
+}
+
+/// Set or clear the `task_id` back-pointer on a CronTask (Task Center
+/// legacy-upgrade flow). Called after `cmd_task_create_direct` has minted a
+/// new Task that wraps this cron; passing `task_id = None` unlinks.
+#[tauri::command]
+pub async fn cmd_cron_set_task_id(
+    app_handle: tauri::AppHandle,
+    cron_task_id: String,
+    task_id: Option<String>,
+) -> Result<CronTask, String> {
+    let manager = get_cron_task_manager();
+    let updated = manager.set_task_id(&cron_task_id, task_id.clone()).await?;
+    let _ = app_handle.emit(
+        "cron:task-updated",
+        serde_json::json!({ "taskId": cron_task_id, "linkedTaskId": task_id }),
+    );
+    Ok(updated)
 }
 
 /// Task Center adapter (v0.1.69) — deliver a Task status notification to an IM

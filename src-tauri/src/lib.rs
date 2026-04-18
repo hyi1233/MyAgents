@@ -214,6 +214,7 @@ pub fn run() {
             cron_task::cmd_is_task_executing,
             cron_task::cmd_get_cron_runs,
             cron_task::cmd_update_cron_task_fields,
+            cron_task::cmd_cron_set_task_id,
             // Session activation commands (for Session singleton)
             cmd_get_session_activation,
             cmd_activate_session,
@@ -308,6 +309,8 @@ pub fn run() {
             task::cmd_task_archive,
             task::cmd_task_delete,
             task::cmd_task_set_cron,
+            task::cmd_task_read_doc,
+            task::cmd_task_write_doc,
         ])
         .setup(|app| {
             // Initialize logging FIRST — acquire_lock() and cleanup_stale_sidecars()

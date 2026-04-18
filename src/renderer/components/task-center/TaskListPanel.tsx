@@ -418,6 +418,20 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
           onChanged={() => {
             void reload();
           }}
+          onUpgraded={(upgradedTask) => {
+            // PRD §11.4 — after upgrade the legacy back-pointer is set, so
+            // next reload filters it out of the legacy list. Switch the open
+            // overlay to the new TaskDetailOverlay for continuity.
+            setSelectedLegacy(null);
+            setTasks((prev) => {
+              const idx = prev.findIndex((x) => x.id === upgradedTask.id);
+              if (idx === -1) return [upgradedTask, ...prev];
+              return prev.map((x) => (x.id === upgradedTask.id ? upgradedTask : x));
+            });
+            setSelectedTask(upgradedTask);
+            toastRef.current.success(`「${upgradedTask.name}」已升级为新版任务`);
+            void reload();
+          }}
         />
       )}
     </div>

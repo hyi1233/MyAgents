@@ -4,9 +4,12 @@
 // normal cron panel (start/stop/delete wired to the existing cron commands).
 
 import { useCallback, useState } from 'react';
-import { X, Play, Square, Trash2 } from 'lucide-react';
+import { X, Play, Square, Trash2, ArrowUpCircle } from 'lucide-react';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import { useConfig } from '@/hooks/useConfig';
+import type { Task } from '@/../shared/types/task';
+import { upgradeLegacyCron, type LegacyCronRaw } from './legacyUpgrade';
 
 const OVERLAY_Z = 200;
 
@@ -14,11 +17,15 @@ interface Props {
   legacy: Record<string, unknown>;
   onClose: () => void;
   onChanged: () => void;
+  /** Fired when the user upgrades this cron to a new-model Task. Parent
+   *  should close this overlay and open `TaskDetailOverlay` for the new id. */
+  onUpgraded?: (task: Task) => void;
 }
 
-export function LegacyCronOverlay({ legacy, onClose, onChanged }: Props) {
+export function LegacyCronOverlay({ legacy, onClose, onChanged, onUpgraded }: Props) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const { projects } = useConfig();
   useCloseLayer(() => {
     onClose();
     return true;
@@ -58,6 +65,29 @@ export function LegacyCronOverlay({ legacy, onClose, onChanged }: Props) {
     if (!window.confirm(`确认删除遗留定时任务「${name}」？此操作不可恢复。`)) return;
     void callCronCmd('cmd_delete_cron_task');
   }, [callCronCmd, name]);
+
+  const doUpgrade = useCallback(async () => {
+    if (!onUpgraded) return;
+    const sure = window.confirm(
+      `将「${name}」升级为新版任务？\n\n` +
+        `升级后：\n` +
+        `• 自动创建源想法（内容 = 原始 Prompt）\n` +
+        `• 新任务继承当前调度、结束条件、通知、运行配置\n` +
+        `• 现有调度不中断、执行历史保留\n` +
+        `• 下次打开将进入新版任务详情（支持编辑 / 审计链 / 验收标准）`,
+    );
+    if (!sure) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const { task } = await upgradeLegacyCron(legacy as LegacyCronRaw, projects);
+      onUpgraded(task);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [legacy, projects, onUpgraded, name]);
 
   return (
     <OverlayBackdrop onClose={onClose} className="z-[200]">
@@ -104,6 +134,16 @@ export function LegacyCronOverlay({ legacy, onClose, onChanged }: Props) {
               onClick={() => void callCronCmd('cmd_start_cron_task')}
             />
           )}
+          {onUpgraded && (
+            <ActionBtn
+              icon={<ArrowUpCircle className="h-3.5 w-3.5" />}
+              label="升级为新版任务"
+              variant="accent"
+              disabled={busy}
+              onClick={doUpgrade}
+            />
+          )}
+          <div className="flex-1" />
           <ActionBtn
             icon={<Trash2 className="h-3.5 w-3.5" />}
             label="删除"
@@ -144,8 +184,8 @@ export function LegacyCronOverlay({ legacy, onClose, onChanged }: Props) {
 
           <p className="mt-4 text-[12px] leading-relaxed text-[var(--ink-muted)]">
             遗留任务保留原有调度逻辑，执行记录仍可在对话 Tab 的定时面板中查看。
-            如果希望升级为新版任务（支持四份对齐文档 + 审计链 + 通知订阅），
-            请新建一条想法并通过「派发」/「AI 讨论」重新构建。
+            点击上方「升级为新版任务」即可获得完整的任务详情（可编辑 Prompt /
+            调度 / 通知、审计链、验收标准），原调度不中断。
           </p>
         </div>
       </div>
@@ -168,7 +208,7 @@ interface ActionBtnProps {
   label: string;
   onClick?: () => void;
   disabled?: boolean;
-  variant?: 'default' | 'danger';
+  variant?: 'default' | 'danger' | 'accent';
 }
 
 function ActionBtn({ icon, label, onClick, disabled, variant }: ActionBtnProps) {
@@ -177,7 +217,9 @@ function ActionBtn({ icon, label, onClick, disabled, variant }: ActionBtnProps) 
   const variantCls =
     variant === 'danger'
       ? 'text-[var(--ink-muted)] hover:bg-[var(--error-bg)] hover:text-[var(--error)]'
-      : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]';
+      : variant === 'accent'
+        ? 'text-[var(--accent-warm)] hover:bg-[var(--accent-warm-subtle)]'
+        : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]';
   return (
     <button
       type="button"

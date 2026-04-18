@@ -863,6 +863,24 @@ impl TaskStore {
         self.inner.read().await.get(id).cloned()
     }
 
+    /// Bump `updated_at` without touching any other field. Used by doc
+    /// writers (`task.md` / `verify.md`) so the main task row resorts to
+    /// the top and the UI picks up that something changed.
+    pub async fn touch(&self, id: &str) -> Result<Task, String> {
+        let mut inner = self.inner.write().await;
+        let existing = inner
+            .get(id)
+            .ok_or_else(|| String::from(TaskOpError::not_found(id)))?
+            .clone();
+        let mut updated = existing;
+        updated.updated_at = now_ms();
+        let mut next = inner.clone();
+        next.insert(updated.id.clone(), updated.clone());
+        Self::persist_locked(&self.jsonl_path, &next)?;
+        *inner = next;
+        Ok(updated)
+    }
+
     pub async fn list(&self, filter: TaskListFilter) -> Vec<Task> {
         let inner = self.inner.read().await;
         let mut out: Vec<Task> = inner.values().cloned().collect();
@@ -1880,6 +1898,85 @@ pub async fn cmd_task_set_cron(
     cron_task_id: Option<String>,
 ) -> Result<Task, String> {
     state.set_cron_task_id(&id, cron_task_id).await
+}
+
+/// Read one of the markdown documents attached to a Task.
+///
+/// - `task`: the executor prompt (`.task/<id>/task.md`). Authored by the user
+///   at dispatch, editable from the task detail overlay.
+/// - `verify`: acceptance criteria (`.task/<id>/verify.md`). Optional; may
+///   be authored by the user or produced by the alignment flow. Returns an
+///   empty string when the file does not yet exist.
+/// - `progress`: read-only execution log (`.task/<id>/progress.md`). Agents
+///   append to this file during runs; the UI renders it but does not write.
+#[tauri::command]
+pub async fn cmd_task_read_doc(
+    state: tauri::State<'_, ManagedTaskStore>,
+    id: String,
+    doc: String,
+) -> Result<String, String> {
+    let task = state
+        .get(&id)
+        .await
+        .ok_or_else(|| String::from(TaskOpError::not_found(&id)))?;
+    let filename = task_doc_filename(&doc)?;
+    let path = task_docs_dir(&task.workspace_path, &task.id)?.join(filename);
+    match fs::read_to_string(&path) {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("read {}: {}", filename, e)),
+    }
+}
+
+/// Write `task.md` or `verify.md` for a Task. `progress.md` is agent-only
+/// (the CLI / SDK tool appends to it) and is rejected here.
+///
+/// Enforces the same running/verifying lock that `TaskStore::update` uses —
+/// PRD §9.4 says all task content is frozen once execution starts.
+#[tauri::command]
+pub async fn cmd_task_write_doc(
+    state: tauri::State<'_, ManagedTaskStore>,
+    id: String,
+    doc: String,
+    content: String,
+) -> Result<(), String> {
+    let filename = task_doc_filename(&doc)?;
+    if filename == "progress.md" {
+        return Err(
+            "progress.md is appended by the agent during runs; the UI cannot edit it"
+                .to_string(),
+        );
+    }
+    let task = state
+        .get(&id)
+        .await
+        .ok_or_else(|| String::from(TaskOpError::not_found(&id)))?;
+    if matches!(task.status, TaskStatus::Running | TaskStatus::Verifying) {
+        return Err(String::from(
+            TaskOpError::update_rejected_while_running(),
+        ));
+    }
+    if task.deleted {
+        return Err(String::from(TaskOpError::already_deleted()));
+    }
+    let dir = task_docs_dir(&task.workspace_path, &task.id)?;
+    let path = dir.join(filename);
+    write_atomic_text(&path, &content)?;
+    // Bump `updated_at` so task listings re-sort and the UI notices the edit.
+    state.touch(&id).await?;
+    Ok(())
+}
+
+fn task_doc_filename(doc: &str) -> Result<&'static str, String> {
+    match doc {
+        "task" => Ok("task.md"),
+        "verify" => Ok("verify.md"),
+        "progress" => Ok("progress.md"),
+        other => Err(format!(
+            "unknown doc name: {} (expected task|verify|progress)",
+            other
+        )),
+    }
 }
 
 // ================ Tests ================

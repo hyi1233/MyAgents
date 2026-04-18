@@ -2,7 +2,7 @@
 // PRD §7.3. Uses the shared OverlayBackdrop + closeLayer Cmd+W integration.
 
 import { useCallback, useEffect, useState } from 'react';
-import { X, Play, Archive, Trash2, Square, RotateCcw, CheckCircle } from 'lucide-react';
+import { X, Play, Archive, Trash2, Square, RotateCcw, CheckCircle, Pencil } from 'lucide-react';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import {
@@ -19,6 +19,8 @@ import { TaskStatusBadge } from './TaskStatusBadge';
 import { DispatchOriginBadge } from './DispatchOriginBadge';
 import { StatusHistoryList } from './StatusHistoryList';
 import NotificationConfigEditor from './NotificationConfigEditor';
+import { TaskDocBlock } from './TaskDocBlock';
+import { TaskEditPanel } from './TaskEditPanel';
 
 const OVERLAY_Z = 200;
 
@@ -32,6 +34,10 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
   const [task, setTask] = useState<Task>(initial);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  // Bumped on every external task change so child blocks (TaskDocBlock) can
+  // reload their document contents without us having to lift the content up.
+  const [reloadToken, setReloadToken] = useState(0);
 
   useCloseLayer(() => {
     onClose();
@@ -68,7 +74,10 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
           if (evt.payload?.taskId !== task.id) return;
           try {
             const fresh = await taskGet(task.id);
-            if (fresh) setTask(fresh);
+            if (fresh) {
+              setTask(fresh);
+              setReloadToken((n) => n + 1);
+            }
           } catch {
             /* silent */
           }
@@ -168,6 +177,25 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
     }
   }, [task.id, onChanged, onClose]);
 
+  const locked = task.status === 'running' || task.status === 'verifying';
+
+  const enterEdit = useCallback(() => {
+    if (locked) return;
+    setErr(null);
+    setEditing(true);
+  }, [locked]);
+
+  const onEditSaved = useCallback(
+    (next: Task) => {
+      setTask(next);
+      onChanged?.(next);
+      setEditing(false);
+      // Docs don't move here, but bump so dependent blocks re-render cleanly.
+      setReloadToken((n) => n + 1);
+    },
+    [onChanged],
+  );
+
   return (
     <OverlayBackdrop onClose={onClose} className="z-[200]">
       <div
@@ -200,61 +228,71 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
           </button>
         </div>
 
-        {/* Action bar */}
-        <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-5 py-3">
-          {task.status === 'todo' && (
+        {/* Action bar — hidden in edit mode (the edit panel has its own footer) */}
+        {!editing && (
+          <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-5 py-3">
+            {task.status === 'todo' && (
+              <ActionBtn
+                icon={<Play className="h-3.5 w-3.5" />}
+                label="立即执行"
+                disabled={busy}
+                onClick={dispatchRun}
+              />
+            )}
+            {(task.status === 'running' || task.status === 'verifying') && (
+              <ActionBtn
+                icon={<Square className="h-3.5 w-3.5" />}
+                label="中止"
+                variant="danger"
+                disabled={busy}
+                onClick={() => runStatus('stopped')}
+              />
+            )}
+            {(task.status === 'blocked' ||
+              task.status === 'stopped' ||
+              task.status === 'done' ||
+              task.status === 'archived') && (
+              <ActionBtn
+                icon={<RotateCcw className="h-3.5 w-3.5" />}
+                label="重新派发"
+                disabled={busy}
+                onClick={dispatchRerun}
+                title="reset → todo → run (PRD §10.2.2)"
+              />
+            )}
+            {task.status === 'verifying' && (
+              <ActionBtn
+                icon={<CheckCircle className="h-3.5 w-3.5" />}
+                label="标记完成"
+                disabled={busy}
+                onClick={() => runStatus('done')}
+              />
+            )}
+            {task.status === 'done' && (
+              <ActionBtn
+                icon={<Archive className="h-3.5 w-3.5" />}
+                label="归档"
+                disabled={busy}
+                onClick={doArchive}
+              />
+            )}
             <ActionBtn
-              icon={<Play className="h-3.5 w-3.5" />}
-              label="立即执行"
-              disabled={busy}
-              onClick={dispatchRun}
+              icon={<Pencil className="h-3.5 w-3.5" />}
+              label="编辑"
+              disabled={busy || locked}
+              onClick={enterEdit}
+              title={locked ? '任务运行 / 验证中，不可编辑（PRD §9.4）' : undefined}
             />
-          )}
-          {(task.status === 'running' || task.status === 'verifying') && (
+            <div className="flex-1" />
             <ActionBtn
-              icon={<Square className="h-3.5 w-3.5" />}
-              label="中止"
+              icon={<Trash2 className="h-3.5 w-3.5" />}
+              label="删除"
               variant="danger"
               disabled={busy}
-              onClick={() => runStatus('stopped')}
+              onClick={doDelete}
             />
-          )}
-          {(task.status === 'blocked' ||
-            task.status === 'stopped' ||
-            task.status === 'done' ||
-            task.status === 'archived') && (
-            <ActionBtn
-              icon={<RotateCcw className="h-3.5 w-3.5" />}
-              label="重新派发"
-              disabled={busy}
-              onClick={dispatchRerun}
-              title="reset → todo → run (PRD §10.2.2)"
-            />
-          )}
-          {task.status === 'verifying' && (
-            <ActionBtn
-              icon={<CheckCircle className="h-3.5 w-3.5" />}
-              label="标记完成"
-              disabled={busy}
-              onClick={() => runStatus('done')}
-            />
-          )}
-          {task.status === 'done' && (
-            <ActionBtn
-              icon={<Archive className="h-3.5 w-3.5" />}
-              label="归档"
-              disabled={busy}
-              onClick={doArchive}
-            />
-          )}
-          <ActionBtn
-            icon={<Trash2 className="h-3.5 w-3.5" />}
-            label="删除"
-            variant="danger"
-            disabled={busy}
-            onClick={doDelete}
-          />
-        </div>
+          </div>
+        )}
 
         {err && (
           <div className="border-b border-[var(--error)]/30 bg-[var(--error-bg)] px-5 py-2 text-[12px] text-[var(--error)]">
@@ -264,34 +302,69 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
 
         {/* Body: scrollable */}
         <div className="flex-1 overflow-y-auto px-5 py-4">
-          <Meta task={task} />
+          {editing ? (
+            <TaskEditPanel
+              task={task}
+              onSaved={onEditSaved}
+              onCancel={() => setEditing(false)}
+              onError={setErr}
+            />
+          ) : (
+            <>
+              <Meta task={task} />
 
-          <hr className="my-4 border-[var(--line-subtle)]" />
+              <hr className="my-4 border-[var(--line-subtle)]" />
 
-          <StatusHistoryList task={task} />
+              {/* task.md — the executor prompt; editable via TaskDocBlock. */}
+              <TaskDocBlock
+                task={task}
+                doc="task"
+                title="task.md · 执行 Prompt"
+                emptyHint="还没有内容。点击「添加」写入这个任务的执行提示词。"
+                readOnly={locked}
+                reloadKey={reloadToken}
+                onError={setErr}
+              />
 
-          <hr className="my-4 border-[var(--line-subtle)]" />
+              {/* verify.md — acceptance criteria; same component handles empty state. */}
+              <TaskDocBlock
+                task={task}
+                doc="verify"
+                title="verify.md · 验收标准"
+                emptyHint="还没有验收标准。点击「添加」写一份；AI 在 verifying 阶段会用它自检。"
+                readOnly={locked}
+                reloadKey={reloadToken}
+                onError={setErr}
+              />
 
-          {/* Notification / verify / associated sessions blocks are placeholders for
-              Phase 4-5 wiring. We show their presence so users understand the
-              surface area. */}
-          <NotificationSection
-            task={task}
-            disabled={task.status === 'running' || task.status === 'verifying'}
-            onSaved={(updated) => {
-              setTask(updated);
-              onChanged?.(updated);
-            }}
-            onError={(msg) => setErr(msg)}
-          />
-          <Placeholder
-            title="验收标准 verify.md"
-            hint="Phase 5 将读取 .task/<id>/verify.md"
-          />
-          <Placeholder
-            title="关联会话"
-            hint={`${task.sessionIds.length} 个历史会话`}
-          />
+              {/* progress.md — read-only; agents append during runs. */}
+              <TaskDocBlock
+                task={task}
+                doc="progress"
+                title="progress.md · 执行日志"
+                emptyHint="还没有执行记录。AI 在执行过程中会将阶段性进度追加到此处。"
+                readOnly
+                reloadKey={reloadToken}
+                onError={setErr}
+              />
+
+              <hr className="my-4 border-[var(--line-subtle)]" />
+
+              <StatusHistoryList task={task} />
+
+              <hr className="my-4 border-[var(--line-subtle)]" />
+
+              <NotificationSection
+                task={task}
+                disabled={locked}
+                onSaved={(updated) => {
+                  setTask(updated);
+                  onChanged?.(updated);
+                }}
+                onError={(msg) => setErr(msg)}
+              />
+            </>
+          )}
         </div>
       </div>
     </OverlayBackdrop>
@@ -340,17 +413,6 @@ function Meta({ task }: { task: Task }) {
         </div>
       )}
     </dl>
-  );
-}
-
-function Placeholder({ title, hint }: { title: string; hint: string }) {
-  return (
-    <div className="mt-3 rounded-[var(--radius-lg)] border border-dashed border-[var(--line)] bg-[var(--paper)] p-3">
-      <div className="text-[12px] font-medium text-[var(--ink-secondary)]">
-        {title}
-      </div>
-      <div className="mt-0.5 text-[11px] text-[var(--ink-muted)]">{hint}</div>
-    </div>
   );
 }
 

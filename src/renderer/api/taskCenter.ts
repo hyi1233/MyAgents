@@ -105,6 +105,41 @@ export function taskSetCron(id: string, cronTaskId: string | null): Promise<Task
   return inv('cmd_task_set_cron', { id, cronTaskId });
 }
 
+/** Names of the markdown documents attached to a Task. */
+export type TaskDocName = 'task' | 'verify' | 'progress';
+
+/** Read `.task/<id>/<doc>.md`. Missing files resolve to `""` (not an error). */
+export function taskReadDoc(id: string, doc: TaskDocName): Promise<string> {
+  return inv('cmd_task_read_doc', { id, doc });
+}
+
+/**
+ * Write `.task/<id>/<doc>.md`. Allowed for `task` and `verify` only;
+ * `progress` is agent-only (the CLI / SDK tool appends during runs).
+ * Rejected while the task is running / verifying (PRD §9.4 lock).
+ */
+export function taskWriteDoc(
+  id: string,
+  doc: Exclude<TaskDocName, 'progress'>,
+  content: string,
+): Promise<void> {
+  return inv('cmd_task_write_doc', { id, doc, content });
+}
+
+/**
+ * Set or clear the `task_id` back-pointer on a CronTask. Used by the
+ * legacy-upgrade flow after `cmd_task_create_direct` has minted the new Task.
+ */
+export function cronSetTaskId(
+  cronTaskId: string,
+  taskId: string | null,
+): Promise<unknown> {
+  return inv('cmd_cron_set_task_id', {
+    cronTaskId,
+    taskId,
+  });
+}
+
 // ============================================================
 // Search (Task Center — v0.1.69, §13.2)
 // ============================================================
