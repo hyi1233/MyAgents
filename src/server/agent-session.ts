@@ -164,7 +164,7 @@ export function syncProjectUserConfig(projectDir: string): void {
   const projectSkillsDir = join(projectDir, '.claude', 'skills');
 
   if (existsSync(userSkillsDir)) {
-    mkdirSync(projectSkillsDir, { recursive: true });
+    try { mkdirSync(projectSkillsDir, { recursive: true }); } catch (e: any) { if (e?.code !== 'EEXIST') throw e; }
 
     // Read disabled list from skills-config.json
     let disabled: string[] = [];
@@ -238,7 +238,7 @@ export function syncProjectUserConfig(projectDir: string): void {
   const projectCommandsDir = join(projectDir, '.claude', 'commands');
 
   if (existsSync(userCommandsDir)) {
-    mkdirSync(projectCommandsDir, { recursive: true });
+    try { mkdirSync(projectCommandsDir, { recursive: true }); } catch (e: any) { if (e?.code !== 'EEXIST') throw e; }
 
     // Track managed command filenames for dangling symlink cleanup
     const managedCommandFiles = new Set<string>();
