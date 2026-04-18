@@ -1,30 +1,199 @@
-// DispatchTaskDialog — convert a Thought into a real Task by filling in a form.
-// Writes task.md under <workspace>/.task/<taskId>/ and persists the Task row.
-//
-// For Phase 4 we support `executionMode = 'once'` end-to-end. Scheduled /
-// recurring / loop modes persist the task + runMode + endConditions but the
-// actual CronTask registration with `CronTaskManager` is Phase 5 (cross-Rust
-// plumbing that intersects with the scheduler lifecycle).
+// DispatchTaskDialog — Full-featured modal that turns a Thought into a Task.
+// Design language aligned with `scheduled-tasks/TaskCreateModal` and
+// `cron/CronTaskSettingsModal` so the dispatch/create UX is consistent across
+// product surfaces (same section headers, same INPUT_CLS, same Toggle/Checkbox
+// helpers, same CustomSelect for channel picks, same footer layout).
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { X } from 'lucide-react';
+import {
+  Bell,
+  Calendar,
+  Check,
+  Clock,
+  FileText,
+  Flag,
+  MessageSquare,
+  Play,
+  Repeat,
+  Timer,
+  X,
+  Zap,
+} from 'lucide-react';
+import CustomSelect from '@/components/CustomSelect';
+import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
-import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
+import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
+import { useToast } from '@/components/Toast';
 import { taskCreateDirect } from '@/api/taskCenter';
 import type { Thought } from '@/../shared/types/thought';
 import type {
+  EndConditions,
+  NotificationConfig,
   Task,
   TaskExecutionMode,
   TaskExecutor,
   TaskRunMode,
-  EndConditions,
-  NotificationConfig,
 } from '@/../shared/types/task';
-import NotificationConfigEditor from './NotificationConfigEditor';
 
-const OVERLAY_Z = 200;
+/** Shared input class — identical to TaskCreateModal for visual consistency. */
+const INPUT_CLS =
+  'w-full rounded-lg border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none transition-colors';
+
+// ────────────────────────────────────────────────────────────────────────────
+// Small helpers — same API as TaskCreateModal/CronTaskSettingsModal
+
+function ToggleSwitch({
+  enabled,
+  onChange,
+}: {
+  enabled: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      onClick={() => onChange(!enabled)}
+      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors ${
+        enabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+      }`}
+    >
+      <span
+        className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-[var(--toggle-thumb)] shadow-sm transition-transform ${
+          enabled ? 'translate-x-4' : 'translate-x-0.5'
+        }`}
+      />
+    </button>
+  );
+}
+
+function Checkbox({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      className="flex items-center gap-2.5 text-[13px] text-[var(--ink)]"
+    >
+      <span
+        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
+          checked
+            ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+            : 'border-[var(--line-strong)] bg-transparent'
+        }`}
+      >
+        {checked && <Check className="h-2.5 w-2.5" />}
+      </span>
+      {label}
+    </button>
+  );
+}
+
+function SectionHeader({
+  icon: Icon,
+  children,
+}: {
+  icon?: typeof Clock;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      {Icon && <Icon className="h-4 w-4 text-[var(--ink-muted)]" />}
+      <h3 className="text-[14px] font-semibold text-[var(--ink)]">{children}</h3>
+    </div>
+  );
+}
+
+function PillButton({
+  selected,
+  onClick,
+  children,
+}: {
+  selected: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
+        selected
+          ? 'bg-[var(--accent)] text-white'
+          : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function toLocalDateTimeString(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+
+/** 执行模式 pill-tab presets, mirroring the cron ScheduleTypeTabs visual. */
+const EXECUTION_TABS: Array<{
+  value: TaskExecutionMode;
+  label: string;
+  icon: typeof Clock;
+  description: string;
+}> = [
+  {
+    value: 'once',
+    label: '立即执行',
+    icon: Play,
+    description: '创建后一次性触发，不进入调度队列',
+  },
+  {
+    value: 'scheduled',
+    label: '定时一次',
+    icon: Calendar,
+    description: '在指定时间触发一次，然后停止',
+  },
+  {
+    value: 'recurring',
+    label: '周期触发',
+    icon: Timer,
+    description: '每隔固定时间触发一次，可设置结束条件',
+  },
+  {
+    value: 'loop',
+    label: 'Ralph Loop',
+    icon: Repeat,
+    description: '完成后立即下一轮（同会话持续打磨），必须设置退出条件',
+  },
+];
+
+const NOTIFICATION_EVENTS: Array<{
+  value: NonNullable<NotificationConfig['events']>[number];
+  label: string;
+}> = [
+  { value: 'done', label: '完成' },
+  { value: 'blocked', label: '阻塞' },
+  { value: 'stopped', label: '暂停' },
+  { value: 'verifying', label: '进入验证' },
+  { value: 'endCondition', label: '循环收敛' },
+];
+
+const DEFAULT_EVENTS: NonNullable<NotificationConfig['events']> = [
+  'done',
+  'blocked',
+  'endCondition',
+];
 
 interface Props {
   thought: Thought;
@@ -38,381 +207,648 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
   useCloseLayer(() => {
     onClose();
     return true;
-  }, OVERLAY_Z);
+  }, 200);
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
 
   const visibleProjects = useMemo(
     () => projects.filter((p) => !p.internal),
     [projects],
   );
 
-  // Smart workspace default (PRD §8.4): prefer a project whose name matches any
-  // of the thought's tags (case-insensitive).
+  // PRD §8.4 — match any of the thought's tags to a workspace name.
   const defaultProject = useMemo(() => {
     if (visibleProjects.length === 0) return null;
     const lowerTags = thought.tags.map((t) => t.toLowerCase());
-    const match = visibleProjects.find((p) =>
-      lowerTags.includes(p.name.toLowerCase()),
+    return (
+      visibleProjects.find((p) =>
+        lowerTags.includes(p.name.toLowerCase()),
+      ) ?? visibleProjects[0]
     );
-    return match ?? visibleProjects[0];
   }, [thought.tags, visibleProjects]);
 
   const defaultName = useMemo(() => deriveTaskName(thought.content), [thought.content]);
 
+  // Form state
   const [name, setName] = useState(defaultName);
+  const [description, setDescription] = useState('');
   const [executor, setExecutor] = useState<TaskExecutor>('agent');
-  const [workspaceId, setWorkspaceId] = useState(defaultProject?.id ?? '');
+  const [workspacePath, setWorkspacePath] = useState<string>(
+    defaultProject?.path ?? '',
+  );
   const [executionMode, setExecutionMode] = useState<TaskExecutionMode>('once');
   const [runMode, setRunMode] = useState<TaskRunMode>('new-session');
-  const [aiCanExit, setAiCanExit] = useState(true);
-  const [maxExecutions, setMaxExecutions] = useState<number | ''>('');
-  const [deadline, setDeadline] = useState<string>('');
-  const [tagsInput, setTagsInput] = useState(thought.tags.join(', '));
-  const [descriptionInput, setDescriptionInput] = useState('');
   const [taskMd, setTaskMd] = useState(thought.content);
-  const [notification, setNotification] = useState<NotificationConfig>({
-    desktop: true,
-  });
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [tagsInput, setTagsInput] = useState(thought.tags.join(', '));
 
-  // Keep runMode in sync with execution mode defaults (PRD §9.2).
+  // Schedule-specific state (mirrors cron TaskCreateModal fields)
+  const [atDateTime, setAtDateTime] = useState(() =>
+    toLocalDateTimeString(new Date(Date.now() + 3600_000)),
+  );
+  const [intervalMinutes, setIntervalMinutes] = useState(30);
+
+  // End conditions
+  const [endConditionMode, setEndConditionMode] = useState<'forever' | 'conditional'>('forever');
+  const [deadline, setDeadline] = useState('');
+  const [maxExecutions, setMaxExecutions] = useState('');
+  const [aiCanExit, setAiCanExit] = useState(true);
+
+  // Notification — reuse the cron channel hook so the dropdown is identical.
+  const { options: deliveryOptions, hasChannels } = useDeliveryChannels(workspacePath);
+  const [notifyEnabled, setNotifyEnabled] = useState(true);
+  const [deliveryBotId, setDeliveryBotId] = useState('');
+  const [subscribedEvents, setSubscribedEvents] = useState<
+    NonNullable<NotificationConfig['events']>
+  >(DEFAULT_EVENTS);
+
+  const [busy, setBusy] = useState(false);
+
+  // Keep runMode aligned with PRD §9.2 defaults when the user flips modes.
   useEffect(() => {
     if (executionMode === 'loop') setRunMode('single-session');
     else if (executionMode === 'recurring') setRunMode('new-session');
   }, [executionMode]);
 
   const workspace = useMemo(
-    () => visibleProjects.find((p) => p.id === workspaceId) ?? null,
-    [workspaceId, visibleProjects],
+    () => visibleProjects.find((p) => p.path === workspacePath) ?? null,
+    [workspacePath, visibleProjects],
   );
 
-  const canSubmit =
-    !!workspace && name.trim().length > 0 && taskMd.trim().length > 0 && !busy;
+  const projectOptions = useMemo(
+    () =>
+      visibleProjects.map((p) => ({
+        value: p.path,
+        label: p.displayName || p.name || p.path.split('/').pop() || p.path,
+        icon: <WorkspaceIcon icon={p.icon} size={16} />,
+      })),
+    [visibleProjects],
+  );
+
+  const isScheduled = executionMode === 'scheduled';
+  const isRecurring = executionMode === 'recurring';
+  const isLoop = executionMode === 'loop';
+  const isOnce = executionMode === 'once';
+  const showEndConditions = isRecurring || isLoop;
+  const showSessionStrategy = isRecurring || isLoop;
+
+  const errors = useMemo(() => {
+    const errs: string[] = [];
+    if (!name.trim()) errs.push('请填写任务名');
+    if (!workspace) errs.push('请选择工作区');
+    if (!taskMd.trim()) errs.push('task.md 不能为空');
+    if (isScheduled) {
+      const ts = Date.parse(atDateTime);
+      if (Number.isNaN(ts) || ts <= Date.now()) errs.push('执行时间必须在未来');
+    }
+    if (isRecurring && intervalMinutes < 5) errs.push('周期间隔不能小于 5 分钟');
+    if (showEndConditions && endConditionMode === 'conditional' && !deadline && !maxExecutions && !aiCanExit) {
+      errs.push('请至少设置一个结束条件');
+    }
+    return errs;
+  }, [
+    name,
+    workspace,
+    taskMd,
+    isScheduled,
+    atDateTime,
+    isRecurring,
+    intervalMinutes,
+    showEndConditions,
+    endConditionMode,
+    deadline,
+    maxExecutions,
+    aiCanExit,
+  ]);
 
   const buildEndConditions = useCallback((): EndConditions | undefined => {
-    if (executionMode === 'once' || executionMode === 'scheduled') return undefined;
+    if (!showEndConditions) return undefined;
+    if (endConditionMode === 'forever') return { aiCanExit };
     const out: EndConditions = { aiCanExit };
-    if (typeof maxExecutions === 'number' && maxExecutions > 0) {
-      out.maxExecutions = maxExecutions;
-    }
     if (deadline) {
       const ts = Date.parse(deadline);
       if (!Number.isNaN(ts)) out.deadline = ts;
     }
+    if (maxExecutions) {
+      const n = parseInt(maxExecutions, 10);
+      if (!Number.isNaN(n) && n > 0) out.maxExecutions = n;
+    }
     return out;
-  }, [executionMode, aiCanExit, maxExecutions, deadline]);
+  }, [showEndConditions, endConditionMode, aiCanExit, deadline, maxExecutions]);
+
+  const buildNotification = useCallback((): NotificationConfig => {
+    const cfg: NotificationConfig = {
+      desktop: notifyEnabled,
+      events: subscribedEvents,
+    };
+    if (deliveryBotId) cfg.botChannelId = deliveryBotId;
+    return cfg;
+  }, [notifyEnabled, subscribedEvents, deliveryBotId]);
 
   const handleSubmit = useCallback(async () => {
-    if (!canSubmit || !workspace) return;
+    if (errors.length > 0 || busy || !workspace) return;
     setBusy(true);
-    setErr(null);
     try {
       const tags = tagsInput
         .split(/[,，]/)
         .map((t) => t.trim())
         .filter((t) => t.length > 0);
+      // Encode scheduled / recurring details via `endConditions.deadline`
+      // for scheduled mode. `recurring` gets `intervalMinutes` persisted on
+      // the CronTask side when Rust's `schedule_from_task` translates the
+      // Task (TODO: direct exec-mode interval support — today we rely on
+      // the backend's 60-min default; wiring the form's `intervalMinutes`
+      // into the backend requires a schema extension we'll land next).
+      let ec = buildEndConditions();
+      if (isScheduled) {
+        const ts = Date.parse(atDateTime);
+        if (!Number.isNaN(ts)) {
+          ec = { ...(ec ?? { aiCanExit: false }), deadline: ts };
+        }
+      }
       const task = await taskCreateDirect({
         name: name.trim(),
         executor,
-        description: descriptionInput.trim() || undefined,
+        description: description.trim() || undefined,
         workspaceId: workspace.id,
         workspacePath: workspace.path,
         taskMdContent: taskMd,
         executionMode,
-        runMode: executionMode === 'once' ? undefined : runMode,
-        endConditions: buildEndConditions(),
+        runMode: isOnce ? undefined : runMode,
+        endConditions: ec,
         sourceThoughtId: thought.id,
         tags,
-        notification,
+        notification: buildNotification(),
       });
-      toast.success(`任务「${task.name}」已创建，可在任务中心点「立即执行」`);
+      toast.success(`任务「${task.name}」已创建，可在右侧点「立即执行」派发`);
       onDispatched(task);
     } catch (e) {
-      setErr(extractErrorMessage(e));
+      toast.error(extractErrorMessage(e));
     } finally {
       setBusy(false);
     }
   }, [
-    canSubmit,
+    errors.length,
+    busy,
     workspace,
+    tagsInput,
+    buildEndConditions,
+    isScheduled,
+    atDateTime,
     name,
     executor,
-    descriptionInput,
+    description,
     taskMd,
     executionMode,
+    isOnce,
     runMode,
-    buildEndConditions,
     thought.id,
-    tagsInput,
-    notification,
+    buildNotification,
     toast,
     onDispatched,
   ]);
 
+  const toggleEvent = useCallback(
+    (ev: NonNullable<NotificationConfig['events']>[number]) => {
+      setSubscribedEvents((prev) => {
+        const set = new Set(prev);
+        if (set.has(ev)) set.delete(ev);
+        else set.add(ev);
+        return Array.from(set);
+      });
+    },
+    [],
+  );
+
   return (
     <OverlayBackdrop onClose={onClose} className="z-[200]">
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[88vh] w-[min(640px,94vw)] flex-col overflow-hidden rounded-[var(--radius-2xl)] bg-[var(--paper-elevated)] shadow-2xl"
-      >
-        {/* Header */}
-        <div className="flex items-start justify-between border-b border-[var(--line)] px-5 py-4">
-          <div>
-            <h2 className="text-[16px] font-semibold text-[var(--ink)]">
+      <div className="flex h-[80vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg">
+        {/* ── Header ── */}
+        <div className="flex shrink-0 items-center justify-between px-6 py-4">
+          <div className="flex items-center gap-2.5">
+            <Zap className="h-4 w-4 text-[var(--accent)]" />
+            <h2 className="text-[15px] font-semibold text-[var(--ink)]">
               派发为任务
             </h2>
-            <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
-              把这条想法变成一条可执行的任务
-            </p>
           </div>
           <button
-            type="button"
             onClick={onClose}
-            className="rounded-[var(--radius-md)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        {/* Body */}
-        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
-          <Field label="任务名">
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              maxLength={120}
-              className="w-full rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-[13px] text-[var(--ink)] focus:border-[var(--line-strong)] focus:outline-none"
-            />
-          </Field>
-
-          <Field label="简短描述（可选）">
-            <input
-              type="text"
-              value={descriptionInput}
-              onChange={(e) => setDescriptionInput(e.target.value)}
-              placeholder="一行话说明，任务卡会展示"
-              className="w-full rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--line-strong)] focus:outline-none"
-            />
-          </Field>
-
-          <Field label="工作区">
-            {visibleProjects.length === 0 ? (
-              <p className="text-[12px] text-[var(--ink-muted)]">
-                还没有工作区。先在 Launcher 添加一个。
-              </p>
-            ) : (
-              <select
-                value={workspaceId}
-                onChange={(e) => setWorkspaceId(e.target.value)}
-                className="w-full rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-[13px] text-[var(--ink)] focus:border-[var(--line-strong)] focus:outline-none"
-              >
-                {visibleProjects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.displayName ?? p.name} — {p.path}
-                  </option>
-                ))}
-              </select>
-            )}
-          </Field>
-
-          <Field label="执行者">
-            <Segmented
-              value={executor}
-              options={[
-                { value: 'agent', label: 'AI 执行' },
-                { value: 'user', label: '我自己做（当 todo 用）' },
-              ]}
-              onChange={(v) => setExecutor(v as TaskExecutor)}
-            />
-          </Field>
-
-          <Field label="执行模式">
-            <Segmented
-              value={executionMode}
-              options={[
-                { value: 'once', label: '立刻跑一次' },
-                { value: 'scheduled', label: '定时一次' },
-                { value: 'recurring', label: '周期触发' },
-                { value: 'loop', label: 'Ralph Loop' },
-              ]}
-              onChange={(v) => setExecutionMode(v as TaskExecutionMode)}
-            />
-            {executionMode === 'loop' && (
-              <p className="mt-1.5 text-[11px] text-[var(--ink-muted)]">
-                Loop：完成后 3 秒缓冲即再触发；AI 可主动终止。MVP 支持创建，调度注册在 Phase 5。
-              </p>
-            )}
-            {(executionMode === 'scheduled' ||
-              executionMode === 'recurring') && (
-              <p className="mt-1.5 text-[11px] text-[var(--ink-muted)]">
-                v0.1.69 MVP 先持久化字段；CronTaskManager 挂载在 Phase 5 完成。
-              </p>
-            )}
-          </Field>
-
-          {(executionMode === 'recurring' || executionMode === 'loop') && (
-            <>
-              <Field label="会话策略">
-                <Segmented
-                  value={runMode}
-                  options={[
-                    { value: 'single-session', label: '同一 session 反复打磨' },
-                    { value: 'new-session', label: '每轮新 session' },
-                  ]}
-                  onChange={(v) => setRunMode(v as TaskRunMode)}
+        {/* ── Body ── */}
+        <div className="flex-1 space-y-6 overflow-y-auto px-6 pb-6">
+          {/* 基本信息 */}
+          <div>
+            <SectionHeader icon={FileText}>基本信息</SectionHeader>
+            <div className="mt-3 space-y-4">
+              <div>
+                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                  任务名称
+                </label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  maxLength={120}
+                  placeholder="例如: 升级 OpenClaw lark 适配器到 v2.4"
+                  className={INPUT_CLS}
                 />
-              </Field>
+              </div>
 
-              <Field label="结束条件">
-                <div className="flex flex-col gap-2">
-                  <label className="flex items-center gap-2 text-[12px] text-[var(--ink)]">
-                    <input
-                      type="checkbox"
-                      checked={aiCanExit}
-                      onChange={(e) => setAiCanExit(e.target.checked)}
-                    />
-                    允许 AI 主动结束
+              <div>
+                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                  简短描述
+                  <span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span>
+                </label>
+                <input
+                  type="text"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="一行话说明，任务卡会展示"
+                  className={INPUT_CLS}
+                />
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                  执行 Agent（工作区）
+                </label>
+                <CustomSelect
+                  value={workspacePath}
+                  options={projectOptions}
+                  onChange={setWorkspacePath}
+                  placeholder="选择工作区"
+                />
+                <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+                  使用该 Agent 的默认模型与权限配置。默认按想法标签匹配工作区。
+                </p>
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                  task.md 内容
+                </label>
+                <textarea
+                  value={taskMd}
+                  onChange={(e) => setTaskMd(e.target.value)}
+                  rows={5}
+                  className={`${INPUT_CLS} resize-none`}
+                />
+                <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+                  AI 执行时看到的 prompt，默认取自想法原文。你可以补充细节、目标、约束。
+                </p>
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                  标签
+                  <span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span>
+                </label>
+                <input
+                  type="text"
+                  value={tagsInput}
+                  onChange={(e) => setTagsInput(e.target.value)}
+                  placeholder="以逗号分隔，例如 MyAgents, 维护"
+                  className={INPUT_CLS}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-[var(--line)]" />
+
+          {/* 执行者 + 会话策略 */}
+          <div>
+            <SectionHeader icon={MessageSquare}>执行者</SectionHeader>
+            <div className="mt-3 flex gap-2">
+              <PillButton selected={executor === 'agent'} onClick={() => setExecutor('agent')}>
+                AI 执行
+              </PillButton>
+              <PillButton selected={executor === 'user'} onClick={() => setExecutor('user')}>
+                我自己做（当 todo 用）
+              </PillButton>
+            </div>
+            <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+              {executor === 'agent'
+                ? 'AI 按 task.md 自主执行，进度会写回任务状态和 progress.md'
+                : '把这条任务当作待办清单，不调动 AI'}
+            </p>
+
+            {showSessionStrategy && (
+              <div className="mt-4">
+                <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                  会话策略
+                </label>
+                {isLoop ? (
+                  <p className="text-sm text-[var(--ink-muted)]">
+                    连续对话（保持上下文）— Ralph Loop 固定使用此模式
+                  </p>
+                ) : (
+                  <>
+                    <div className="flex gap-2">
+                      <PillButton
+                        selected={runMode === 'new-session'}
+                        onClick={() => setRunMode('new-session')}
+                      >
+                        新开对话
+                      </PillButton>
+                      <PillButton
+                        selected={runMode === 'single-session'}
+                        onClick={() => setRunMode('single-session')}
+                      >
+                        连续对话
+                      </PillButton>
+                    </div>
+                    <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+                      {runMode === 'new-session'
+                        ? '每次执行创建新会话，无历史记忆，上下文干净'
+                        : '所有轮次复用同一会话，AI 能记住之前内容'}
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="border-t border-[var(--line)]" />
+
+          {/* 执行模式 */}
+          <div>
+            <SectionHeader icon={Clock}>执行模式</SectionHeader>
+            <div className="mt-3">
+              <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
+                {EXECUTION_TABS.map((t) => {
+                  const Icon = t.icon;
+                  const active = executionMode === t.value;
+                  return (
+                    <button
+                      key={t.value}
+                      type="button"
+                      onClick={() => setExecutionMode(t.value)}
+                      className={`flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                        active
+                          ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
+                          : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                      }`}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                      {t.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
+                {EXECUTION_TABS.find((t) => t.value === executionMode)?.description}
+              </p>
+
+              {isScheduled && (
+                <div className="mt-4">
+                  <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                    执行时间
                   </label>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[12px] text-[var(--ink-muted)] w-20">
-                      最大轮次
-                    </span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={maxExecutions}
-                      onChange={(e) =>
-                        setMaxExecutions(
-                          e.target.value === ''
-                            ? ''
-                            : Math.max(1, Number(e.target.value)),
-                        )
-                      }
-                      placeholder="留空不限"
-                      className="w-24 rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-[13px] text-[var(--ink)] focus:border-[var(--line-strong)] focus:outline-none"
-                    />
+                  <input
+                    type="datetime-local"
+                    value={atDateTime}
+                    onChange={(e) => setAtDateTime(e.target.value)}
+                    min={toLocalDateTimeString(new Date(Date.now() + 60_000))}
+                    className={INPUT_CLS}
+                  />
+                </div>
+              )}
+
+              {isRecurring && (
+                <div className="mt-4">
+                  <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                    周期间隔（分钟）
+                  </label>
+                  <input
+                    type="number"
+                    min={5}
+                    max={10080}
+                    value={intervalMinutes}
+                    onChange={(e) => setIntervalMinutes(Math.max(5, Number(e.target.value) || 5))}
+                    className={INPUT_CLS}
+                  />
+                  <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+                    最小 5 分钟。更复杂的 Cron 表达式请在详情 Overlay 中编辑。
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {showEndConditions && (
+            <>
+              <div className="border-t border-[var(--line)]" />
+              <div>
+                <SectionHeader icon={Flag}>结束条件</SectionHeader>
+                <div className="mt-3 space-y-3">
+                  <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
+                    <button
+                      type="button"
+                      onClick={() => setEndConditionMode('forever')}
+                      className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                        endConditionMode === 'forever'
+                          ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
+                          : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                      }`}
+                    >
+                      永久运行
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEndConditionMode('conditional')}
+                      className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                        endConditionMode === 'conditional'
+                          ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
+                          : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                      }`}
+                    >
+                      条件停止
+                    </button>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[12px] text-[var(--ink-muted)] w-20">
-                      截止时间
-                    </span>
-                    <input
-                      type="datetime-local"
-                      value={deadline}
-                      onChange={(e) => setDeadline(e.target.value)}
-                      className="rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-[13px] text-[var(--ink)] focus:border-[var(--line-strong)] focus:outline-none"
+
+                  {endConditionMode === 'conditional' && (
+                    <>
+                      <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)]">
+                        <div
+                          className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5"
+                          onClick={() =>
+                            setDeadline(
+                              deadline
+                                ? ''
+                                : toLocalDateTimeString(new Date(Date.now() + 86400_000)),
+                            )
+                          }
+                        >
+                          <Checkbox
+                            checked={!!deadline}
+                            onChange={(v) =>
+                              setDeadline(
+                                v ? toLocalDateTimeString(new Date(Date.now() + 86400_000)) : '',
+                              )
+                            }
+                            label="截止时间"
+                          />
+                          <input
+                            type="datetime-local"
+                            value={deadline}
+                            onChange={(e) => setDeadline(e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                            className={`w-44 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${
+                              !deadline ? 'opacity-50' : ''
+                            }`}
+                          />
+                        </div>
+                        <div
+                          className="flex cursor-pointer items-center justify-between px-3 py-2.5"
+                          onClick={() => setMaxExecutions(maxExecutions ? '' : '10')}
+                        >
+                          <Checkbox
+                            checked={!!maxExecutions}
+                            onChange={(v) => setMaxExecutions(v ? '10' : '')}
+                            label="执行次数"
+                          />
+                          <div
+                            className="flex items-center gap-1.5"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <input
+                              type="number"
+                              min={1}
+                              max={999}
+                              value={maxExecutions || 10}
+                              onChange={(e) => setMaxExecutions(e.target.value)}
+                              className={`w-16 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-center text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${
+                                !maxExecutions ? 'opacity-50' : ''
+                              }`}
+                            />
+                            <span
+                              className={`text-sm text-[var(--ink-secondary)] ${
+                                !maxExecutions ? 'opacity-50' : ''
+                              }`}
+                            >
+                              次
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <p className="text-[13px] text-[var(--ink-muted)]">
+                        可多选，满足任一条件时任务将自动停止
+                      </p>
+                    </>
+                  )}
+
+                  <div
+                    className="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5"
+                    onClick={() => setAiCanExit(!aiCanExit)}
+                  >
+                    <Checkbox
+                      checked={aiCanExit}
+                      onChange={setAiCanExit}
+                      label="允许 AI 自主结束任务"
                     />
                   </div>
                 </div>
-              </Field>
+              </div>
             </>
           )}
 
-          <Field label="task.md 内容">
-            <textarea
-              value={taskMd}
-              onChange={(e) => setTaskMd(e.target.value)}
-              rows={5}
-              className="w-full resize-y rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-[13px] leading-relaxed text-[var(--ink)] focus:border-[var(--line-strong)] focus:outline-none"
-            />
-            <p className="mt-1 text-[11px] text-[var(--ink-muted)]">
-              AI 执行时看到的 prompt。默认取自想法原文，你可以补充细节。
-            </p>
-          </Field>
+          <div className="border-t border-[var(--line)]" />
 
-          <Field label="标签">
-            <input
-              type="text"
-              value={tagsInput}
-              onChange={(e) => setTagsInput(e.target.value)}
-              placeholder="以逗号分隔，例如 MyAgents, 维护"
-              className="w-full rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--line-strong)] focus:outline-none"
-            />
-          </Field>
+          {/* 任务通知 */}
+          <div>
+            <SectionHeader icon={Bell}>任务通知</SectionHeader>
+            <div className="mt-3 space-y-3">
+              <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
+                <span className="text-sm text-[var(--ink)]">
+                  每次任务状态变化时发送通知
+                </span>
+                <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />
+              </div>
 
-          <Field label="通知到">
-            <NotificationConfigEditor
-              value={notification}
-              onChange={setNotification}
-            />
-          </Field>
+              {notifyEnabled && (
+                <>
+                  {hasChannels && (
+                    <div className="space-y-2">
+                      <label className="text-[13px] font-medium text-[var(--ink-secondary)]">
+                        投递渠道
+                      </label>
+                      <CustomSelect
+                        value={deliveryBotId}
+                        options={deliveryOptions}
+                        onChange={setDeliveryBotId}
+                        placeholder="桌面通知（默认）"
+                      />
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    <label className="text-[13px] font-medium text-[var(--ink-secondary)]">
+                      通知事件
+                    </label>
+                    <div className="flex flex-wrap gap-1.5">
+                      {NOTIFICATION_EVENTS.map((e) => {
+                        const active = subscribedEvents.includes(e.value);
+                        return (
+                          <button
+                            key={e.value}
+                            type="button"
+                            onClick={() => toggleEvent(e.value)}
+                            aria-pressed={active}
+                            className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
+                              active
+                                ? 'bg-[var(--accent)] text-white'
+                                : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
+                            }`}
+                          >
+                            {e.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[13px] text-[var(--ink-muted)]">
+                      默认订阅「完成 / 阻塞 / 循环收敛」，足以覆盖大多数场景
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </div>
 
-        {err && (
-          <div className="border-t border-[var(--error)]/30 bg-[var(--error-bg)] px-5 py-2 text-[12px] text-[var(--error)]">
-            {err}
+        {/* ── Footer ── */}
+        <div className="flex shrink-0 items-center justify-between border-t border-[var(--line)] px-6 py-3.5">
+          {errors.length > 0 ? (
+            <p className="text-xs text-[var(--error)]">{errors[0]}</p>
+          ) : (
+            <div />
+          )}
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={onClose}
+              className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
+            >
+              取消
+            </button>
+            <button
+              onClick={() => void handleSubmit()}
+              disabled={errors.length > 0 || busy}
+              className="rounded-lg bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white transition hover:bg-[var(--accent-warm-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {busy ? '派发中…' : '派发任务'}
+            </button>
           </div>
-        )}
-
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 border-t border-[var(--line)] px-5 py-3">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={busy}
-            className="rounded-[var(--radius-md)] bg-[var(--button-secondary-bg)] px-4 py-1.5 text-[13px] font-medium text-[var(--button-secondary-text)] hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleSubmit()}
-            disabled={!canSubmit}
-            className="rounded-[var(--radius-full)] bg-[var(--button-primary-bg)] px-5 py-1.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
-          >
-            {busy ? '派发中…' : '派发任务'}
-          </button>
         </div>
       </div>
     </OverlayBackdrop>
-  );
-}
-
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div>
-      <label className="block mb-1.5 text-[12px] font-medium text-[var(--ink-secondary)]">
-        {label}
-      </label>
-      {children}
-    </div>
-  );
-}
-
-function Segmented({
-  value,
-  options,
-  onChange,
-}: {
-  value: string;
-  options: Array<{ value: string; label: string }>;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          onClick={() => onChange(o.value)}
-          aria-pressed={value === o.value}
-          className={`rounded-[var(--radius-md)] px-3 py-1 text-[12px] transition-colors ${
-            value === o.value
-              ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)] font-medium'
-              : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
-          }`}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
   );
 }
 
