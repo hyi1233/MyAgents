@@ -14,6 +14,7 @@ import Markdown from '@/components/Markdown';
 import MonacoEditor from '@/components/MonacoEditor';
 import { taskReadDoc, taskWriteDoc, type TaskDocName } from '@/api/taskCenter';
 import type { Task } from '@/../shared/types/task';
+import { extractErrorMessage } from './errors';
 
 interface Props {
   task: Task;
@@ -44,12 +45,16 @@ export function TaskDocBlock({
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
 
-  // (Re)load on task id change or external refetch. `editing` resets when
-  // the underlying task changes out from under us.
+  // (Re)load on task id change or external refetch. When the user is
+  // mid-edit we keep their draft and **skip** refreshing the preview
+  // `content` — they can resolve the conflict explicitly by saving or
+  // cancelling. The assumption: task.md / verify.md are user-authored
+  // and not touched by the agent, so the main refetch trigger (SSE
+  // status change) isn't actually racing our draft.
   useEffect(() => {
     let cancelled = false;
+    if (editing) return; // preserve in-progress edits across refetches
     setLoaded(false);
-    setEditing(false);
     void (async () => {
       try {
         const body = await taskReadDoc(task.id, doc);
@@ -65,7 +70,18 @@ export function TaskDocBlock({
     return () => {
       cancelled = true;
     };
+    // `editing` intentionally excluded — we only re-fetch on external
+    // triggers, not when the user starts/ends their own edit cycle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.id, doc, reloadKey, onError]);
+
+  // Task id swap (user clicks a different task in the list) is a harder
+  // reset — discard any in-progress edit so we're not saving the old
+  // draft into the new task's doc.
+  useEffect(() => {
+    setEditing(false);
+    setDraft('');
+  }, [task.id, doc]);
 
   const startEdit = useCallback(() => {
     setDraft(content);
@@ -160,17 +176,6 @@ export function TaskDocBlock({
       )}
     </section>
   );
-}
-
-function extractErrorMessage(e: unknown): string {
-  const s = String(e);
-  try {
-    const parsed = JSON.parse(s) as { code?: string; message?: string };
-    if (parsed && parsed.message) return parsed.message;
-  } catch {
-    /* not JSON */
-  }
-  return s;
 }
 
 export default TaskDocBlock;

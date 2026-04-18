@@ -129,14 +129,20 @@ export function taskWriteDoc(
 /**
  * Set or clear the `task_id` back-pointer on a CronTask. Used by the
  * legacy-upgrade flow after `cmd_task_create_direct` has minted the new Task.
+ *
+ * `requireNull` (default: true when linking, false when clearing) makes this
+ * a link-if-null primitive — concurrent upgrade flows racing on the same
+ * CronTask see `ALREADY_LINKED` and the losing caller can roll back.
  */
 export function cronSetTaskId(
   cronTaskId: string,
   taskId: string | null,
+  requireNull?: boolean,
 ): Promise<unknown> {
   return inv('cmd_cron_set_task_id', {
     cronTaskId,
     taskId,
+    requireNull,
   });
 }
 

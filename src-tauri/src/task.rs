@@ -863,22 +863,48 @@ impl TaskStore {
         self.inner.read().await.get(id).cloned()
     }
 
-    /// Bump `updated_at` without touching any other field. Used by doc
-    /// writers (`task.md` / `verify.md`) so the main task row resorts to
-    /// the top and the UI picks up that something changed.
-    pub async fn touch(&self, id: &str) -> Result<Task, String> {
+    /// Check-and-write `.task/<id>/<filename>` atomically with respect to
+    /// the running/verifying lock. The status check and the file write
+    /// both happen under the same write lock so a concurrent
+    /// `update_status(running)` can't slip in between and let us mutate
+    /// a doc on an already-executing task. PRD §9.4.
+    ///
+    /// On success `updated_at` is bumped so listings re-sort.
+    pub async fn write_doc(
+        &self,
+        id: &str,
+        filename: &str,
+        content: &str,
+    ) -> Result<(), String> {
         let mut inner = self.inner.write().await;
         let existing = inner
             .get(id)
             .ok_or_else(|| String::from(TaskOpError::not_found(id)))?
             .clone();
+        if existing.deleted {
+            return Err(String::from(TaskOpError::already_deleted()));
+        }
+        if matches!(existing.status, TaskStatus::Running | TaskStatus::Verifying) {
+            return Err(String::from(
+                TaskOpError::update_rejected_while_running(),
+            ));
+        }
+        // Resolve path through the sandbox guard — rejects id escape.
+        let dir = task_docs_dir(&existing.workspace_path, &existing.id)?;
+        let path = dir.join(filename);
+
+        // Persist the markdown file first. If this fails we haven't
+        // touched the JSONL yet, so the store stays consistent.
+        write_atomic_text(&path, content)?;
+
+        // Bump `updated_at` and persist under the same lock.
         let mut updated = existing;
         updated.updated_at = now_ms();
         let mut next = inner.clone();
-        next.insert(updated.id.clone(), updated.clone());
+        next.insert(updated.id.clone(), updated);
         Self::persist_locked(&self.jsonl_path, &next)?;
         *inner = next;
-        Ok(updated)
+        Ok(())
     }
 
     pub async fn list(&self, filter: TaskListFilter) -> Vec<Task> {
@@ -951,6 +977,18 @@ impl TaskStore {
             updated.notification = Some(v);
         }
         updated.updated_at = now_ms();
+
+        // Mode-transition hygiene: `run_mode` / `end_conditions` are only
+        // meaningful for recurring / loop / (conditional-scheduled). When the
+        // user flips `execution_mode → Once`, those fields would otherwise
+        // linger in the row — and worse, `ensure_cron_for_task` would copy
+        // them into any CronTask created for the next `run`. `TaskUpdateInput`
+        // uses `Option<T>` so the client can't express "clear me", so we
+        // clear them server-side the moment the mode no longer needs them.
+        if matches!(updated.execution_mode, TaskExecutionMode::Once) {
+            updated.run_mode = None;
+            updated.end_conditions = None;
+        }
 
         // Detect schedule-shape changes that invalidate the linked CronTask
         // (PRD §11.2). When any of these change, the existing CronTask's
@@ -1929,10 +1967,11 @@ pub async fn cmd_task_read_doc(
 }
 
 /// Write `task.md` or `verify.md` for a Task. `progress.md` is agent-only
-/// (the CLI / SDK tool appends to it) and is rejected here.
-///
-/// Enforces the same running/verifying lock that `TaskStore::update` uses —
-/// PRD §9.4 says all task content is frozen once execution starts.
+/// (the CLI / SDK tool appends to it) and is rejected here. The running/
+/// verifying lock is enforced atomically with the file write inside
+/// `TaskStore::write_doc` — status check and file mutation happen under
+/// the same lock so a concurrent `update_status(running)` can't land in
+/// between and let us mutate a doc that's mid-execution.
 #[tauri::command]
 pub async fn cmd_task_write_doc(
     state: tauri::State<'_, ManagedTaskStore>,
@@ -1947,24 +1986,7 @@ pub async fn cmd_task_write_doc(
                 .to_string(),
         );
     }
-    let task = state
-        .get(&id)
-        .await
-        .ok_or_else(|| String::from(TaskOpError::not_found(&id)))?;
-    if matches!(task.status, TaskStatus::Running | TaskStatus::Verifying) {
-        return Err(String::from(
-            TaskOpError::update_rejected_while_running(),
-        ));
-    }
-    if task.deleted {
-        return Err(String::from(TaskOpError::already_deleted()));
-    }
-    let dir = task_docs_dir(&task.workspace_path, &task.id)?;
-    let path = dir.join(filename);
-    write_atomic_text(&path, &content)?;
-    // Bump `updated_at` so task listings re-sort and the UI notices the edit.
-    state.touch(&id).await?;
-    Ok(())
+    state.write_doc(&id, filename, &content).await
 }
 
 fn task_doc_filename(doc: &str) -> Result<&'static str, String> {

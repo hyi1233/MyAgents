@@ -70,6 +70,13 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
+  // Serialize reload() calls — belt-and-braces alongside the server-side
+  // `cmd_cron_set_task_id` link-if-null guard. Prevents the auto-upgrade
+  // sweep from interleaving with itself when SSE events and refreshKey
+  // bumps arrive back-to-back. A trailing `pending` flag catches reloads
+  // that land during an in-flight run so we never miss a state change.
+  const reloadInflightRef = useRef(false);
+  const reloadPendingRef = useRef(false);
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [legacy, setLegacy] = useState<LegacyCronRow[]>([]);
@@ -92,6 +99,12 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
   }, []);
 
   const reload = useCallback(async () => {
+    if (reloadInflightRef.current) {
+      reloadPendingRef.current = true;
+      return;
+    }
+    reloadInflightRef.current = true;
+    reloadPendingRef.current = false;
     setLoading(true);
     try {
       const [nativeList, legacyList] = await Promise.all([
@@ -127,12 +140,38 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
       setLegacy([]);
     } finally {
       setLoading(false);
+      reloadInflightRef.current = false;
+      if (reloadPendingRef.current) {
+        // A status change landed during this run — kick another pass so
+        // we don't lose the state that arrived mid-flight.
+        reloadPendingRef.current = false;
+        void reloadRef.current?.();
+      }
     }
   }, []);
+  // Self-reference so the trailing re-kick above can call the latest
+  // closure without adding `reload` to its own dep array.
+  const reloadRef = useRef<typeof reload>(reload);
+  useEffect(() => {
+    reloadRef.current = reload;
+  }, [reload]);
 
   useEffect(() => {
     void reload();
   }, [reload, refreshKey]);
+
+  // Projects are loaded asynchronously by `useConfig()` — when Task Center
+  // mounts before config is ready, `projects=[]` and the auto-upgrade sweep
+  // finds nothing eligible. Re-kick reload the moment config transitions
+  // from empty → populated so eligible legacy rows get upgraded without
+  // having to wait for an unrelated SSE event.
+  const hadProjectsRef = useRef(projects.length > 0);
+  useEffect(() => {
+    if (!hadProjectsRef.current && projects.length > 0) {
+      hadProjectsRef.current = true;
+      void reload();
+    }
+  }, [projects.length, reload]);
 
   useEffect(() => {
     if (isSearchMode) {

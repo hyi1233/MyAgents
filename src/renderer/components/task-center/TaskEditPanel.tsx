@@ -9,8 +9,7 @@
 // backing CronTask, handled in Rust). Cancel discards the draft and rolls
 // back to read-only view.
 
-import { useCallback, useMemo, useState } from 'react';
-import { Bot, User } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { taskUpdate } from '@/api/taskCenter';
 import NotificationConfigEditor from '@/components/task-center/NotificationConfigEditor';
@@ -19,7 +18,6 @@ import type {
   NotificationConfig,
   Task,
   TaskExecutionMode,
-  TaskExecutor,
   TaskRunMode,
   TaskUpdateInput,
 } from '@/../shared/types/task';
@@ -29,6 +27,7 @@ import {
 } from './editors/EndConditionsEditor';
 import { ExecutionModeEditor } from './editors/ExecutionModeEditor';
 import { INPUT_CLS, toLocalDateTimeString } from './editors/controls';
+import { extractErrorMessage } from './errors';
 
 export interface TaskEditPanelProps {
   task: Task;
@@ -41,11 +40,9 @@ interface Draft {
   name: string;
   description: string;
   tagsInput: string;
-  executor: TaskExecutor;
   executionMode: TaskExecutionMode;
   runMode: TaskRunMode;
   atDateTime: string;
-  intervalMinutes: number;
   endConditionMode: EndConditionMode;
   deadline: string;
   maxExecutions: string;
@@ -69,11 +66,9 @@ function taskToDraft(task: Task): Draft {
     name: task.name,
     description: task.description ?? '',
     tagsInput: task.tags.join(', '),
-    executor: task.executor,
     executionMode: task.executionMode,
     runMode: task.runMode ?? 'new-session',
     atDateTime,
-    intervalMinutes: 30,
     endConditionMode,
     deadline: ec?.deadline ? toLocalDateTimeString(new Date(ec.deadline)) : '',
     maxExecutions: ec?.maxExecutions ? String(ec.maxExecutions) : '',
@@ -82,9 +77,25 @@ function taskToDraft(task: Task): Draft {
   };
 }
 
+// No-op used where the shared editor needs a setter but edit mode can't
+// persist the field (see `intervalMinutes` note below).
+const noop = () => {};
+
 export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPanelProps) {
   const [draft, setDraft] = useState<Draft>(() => taskToDraft(task));
   const [saving, setSaving] = useState(false);
+
+  // If the task transitions to running / verifying while we're editing
+  // (external SSE — scheduler fired, or another window changed status),
+  // we'd be presenting editable controls the backend will reject. Bail
+  // out of edit mode and surface why.
+  const locked = task.status === 'running' || task.status === 'verifying';
+  useEffect(() => {
+    if (locked) {
+      onError('任务已开始执行，编辑已取消（PRD §9.4）。');
+      onCancel();
+    }
+  }, [locked, onCancel, onError]);
 
   const isScheduled = draft.executionMode === 'scheduled';
   const isRecurring = draft.executionMode === 'recurring';
@@ -109,7 +120,6 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
       const ts = Date.parse(draft.atDateTime);
       if (Number.isNaN(ts) || ts <= Date.now()) errs.push('执行时间必须在未来');
     }
-    if (isRecurring && draft.intervalMinutes < 5) errs.push('周期间隔不能小于 5 分钟');
     if (
       showEndConditions &&
       draft.endConditionMode === 'conditional' &&
@@ -120,7 +130,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
       errs.push('请至少设置一个结束条件');
     }
     return errs;
-  }, [draft, isScheduled, isRecurring, showEndConditions]);
+  }, [draft, isScheduled, showEndConditions]);
 
   const buildEndConditions = useCallback((): EndConditions | undefined => {
     if (!showEndConditions) return undefined;
@@ -144,44 +154,52 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
       .map((t) => t.trim())
       .filter((t) => t.length > 0);
 
-    // Build a minimal update payload — only include fields that actually
-    // changed so Rust's schedule-shape detection doesn't spuriously detach
-    // the CronTask just because we re-sent identical executionMode.
+    // Build a partial update. `Option<T>` on the Rust side means "don't
+    // touch this field" for any key we omit — so we send only what the
+    // user actually changed. Special handling for execution-mode flips:
+    // when the mode changes, Rust's `update()` automatically clears
+    // `run_mode` / `end_conditions` on transition to `once` (PRD §9.4
+    // hygiene), so we don't need the client to express "clear me".
     const payload: TaskUpdateInput = { id: task.id };
     if (draft.name.trim() !== task.name) payload.name = draft.name.trim();
     if (draft.description.trim() !== (task.description ?? ''))
       payload.description = draft.description.trim();
     const initialTags = task.tags.join(',');
     if (tags.join(',') !== initialTags) payload.tags = tags;
-    if (draft.executor !== task.executor) payload.executor = draft.executor;
-    if (draft.executionMode !== task.executionMode)
-      payload.executionMode = draft.executionMode;
-    const nextRunMode: TaskRunMode | undefined = isLoop
-      ? 'single-session'
-      : draft.executionMode === 'once'
-        ? undefined
-        : draft.runMode;
-    if (nextRunMode !== task.runMode) payload.runMode = nextRunMode;
 
-    let ec = buildEndConditions();
-    if (isScheduled && draft.atDateTime) {
-      const ts = Date.parse(draft.atDateTime);
-      if (!Number.isNaN(ts)) {
-        ec = { ...(ec ?? { aiCanExit: false }), deadline: ts };
+    const modeChanged = draft.executionMode !== task.executionMode;
+    if (modeChanged) payload.executionMode = draft.executionMode;
+
+    // runMode / endConditions are only meaningful when the new mode needs
+    // them. For `once`, Rust clears both server-side; for recurring /
+    // loop / scheduled, we send the draft values (either because the
+    // mode flipped and we want fresh values, or because the user tweaked
+    // them within the same mode).
+    if (draft.executionMode !== 'once') {
+      const nextRunMode: TaskRunMode = isLoop ? 'single-session' : draft.runMode;
+      if (modeChanged || nextRunMode !== task.runMode) payload.runMode = nextRunMode;
+
+      let ec = buildEndConditions();
+      if (isScheduled && draft.atDateTime) {
+        const ts = Date.parse(draft.atDateTime);
+        if (!Number.isNaN(ts)) {
+          ec = { ...(ec ?? { aiCanExit: false }), deadline: ts };
+        }
       }
+      const initialEc = JSON.stringify(task.endConditions ?? null);
+      const nextEc = JSON.stringify(ec ?? null);
+      if (modeChanged || initialEc !== nextEc) payload.endConditions = ec;
     }
-    const initialEc = JSON.stringify(task.endConditions ?? null);
-    const nextEc = JSON.stringify(ec ?? null);
-    if (initialEc !== nextEc) payload.endConditions = ec;
 
     const initialNotification = JSON.stringify(task.notification ?? null);
     const nextNotification = JSON.stringify(draft.notification);
     if (initialNotification !== nextNotification)
       payload.notification = draft.notification;
 
-    // Bail out cleanly if nothing changed.
+    // Bail if nothing changed — stay in edit mode so the user isn't
+    // thrown back to read-only with no feedback.
     if (Object.keys(payload).length === 1) {
-      onCancel();
+      onError('没有需要保存的变更');
       return;
     }
 
@@ -194,7 +212,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
     } finally {
       setSaving(false);
     }
-  }, [draft, errors, saving, task, buildEndConditions, isScheduled, isLoop, onSaved, onCancel, onError]);
+  }, [draft, errors, saving, task, buildEndConditions, isScheduled, isLoop, onSaved, onError]);
 
   return (
     <div className="space-y-5">
@@ -223,22 +241,6 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
               className={INPUT_CLS}
             />
           </Field>
-          <Field label="执行者">
-            <div className="flex gap-2">
-              <ExecutorPill
-                active={draft.executor === 'agent'}
-                onClick={() => setDraft((d) => ({ ...d, executor: 'agent' }))}
-                icon={<Bot className="h-3.5 w-3.5" />}
-                label="Agent"
-              />
-              <ExecutorPill
-                active={draft.executor === 'user'}
-                onClick={() => setDraft((d) => ({ ...d, executor: 'user' }))}
-                icon={<User className="h-3.5 w-3.5" />}
-                label="用户"
-              />
-            </div>
-          </Field>
           <Field label="标签" hint="逗号分隔">
             <input
               type="text"
@@ -266,8 +268,13 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
             setRunMode={(v) => setDraft((d) => ({ ...d, runMode: v }))}
             atDateTime={draft.atDateTime}
             setAtDateTime={(v) => setDraft((d) => ({ ...d, atDateTime: v }))}
-            intervalMinutes={draft.intervalMinutes}
-            setIntervalMinutes={(v) => setDraft((d) => ({ ...d, intervalMinutes: v }))}
+            // Interval lives on the linked CronTask, not the Task itself —
+            // `cmd_task_update` has no channel for it. Surface this as
+            // read-only in edit mode; users change it from the cron panel
+            // or by dispatching a fresh task with a different interval.
+            intervalMinutes={30}
+            setIntervalMinutes={noop}
+            intervalReadOnlyNote="周期间隔由关联的定时任务维护，如需调整，请前往对话中的定时面板或重新派发。"
           />
         </div>
       </section>
@@ -361,40 +368,4 @@ function Field({
   );
 }
 
-function ExecutorPill({
-  active,
-  onClick,
-  icon,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex items-center gap-1.5 rounded-[var(--radius-md)] border px-3 py-1.5 text-[13px] font-medium transition-colors ${
-        active
-          ? 'border-[var(--accent)] bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]'
-          : 'border-[var(--line)] bg-transparent text-[var(--ink-muted)] hover:border-[var(--line-strong)]'
-      }`}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
 
-function extractErrorMessage(e: unknown): string {
-  const s = String(e);
-  try {
-    const parsed = JSON.parse(s) as { code?: string; message?: string };
-    if (parsed && parsed.message) return parsed.message;
-  } catch {
-    /* not JSON */
-  }
-  return s;
-}

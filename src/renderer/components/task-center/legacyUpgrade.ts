@@ -18,7 +18,14 @@
 //      legacy list, and the Task Center drives it through
 //      TaskDetailOverlay instead of LegacyCronOverlay.
 
-import { cronSetTaskId, taskCreateDirect, taskSetCron, thoughtCreate } from '@/api/taskCenter';
+import {
+  cronSetTaskId,
+  taskCreateDirect,
+  taskDelete,
+  taskSetCron,
+  thoughtCreate,
+  thoughtDelete,
+} from '@/api/taskCenter';
 import type { Project } from '@/config/types';
 import type {
   EndConditions,
@@ -117,7 +124,17 @@ export function canAutoUpgrade(legacy: LegacyCronRaw, projects: Project[]): bool
 
 /**
  * Upgrade one legacy cron into a new-model Task. Reuses the existing
- * CronTask — no schedule interruption — and wires both-sided back-pointers.
+ * CronTask (schedule uninterrupted) and wires both-sided back-pointers.
+ *
+ * Concurrency-safe: `cronSetTaskId` runs as a link-if-null primitive
+ * server-side, so two concurrent upgrade flows (auto sweep + manual
+ * button, or two windows) can't both "win" — the loser sees
+ * `ALREADY_LINKED` and this function rolls back the Task/Thought it
+ * optimistically created.
+ *
+ * Full rollback: if ANY step after thought-creation fails, we delete the
+ * partially-created Thought + Task before rethrowing so the next reload
+ * doesn't show orphan rows.
  */
 export async function upgradeLegacyCron(
   legacy: LegacyCronRaw,
@@ -141,6 +158,29 @@ export async function upgradeLegacyCron(
   // satisfying the v1 invariant that every Task has a `sourceThoughtId`.
   const thought = await thoughtCreate({ content: prompt });
 
+  // Rollback helper — called on any failure after the thought is minted.
+  // Each cleanup is best-effort; if a cleanup step fails we log but
+  // continue so the most recent failure doesn't mask the original error.
+  const rollback = async (taskId: string | null): Promise<void> => {
+    if (taskId) {
+      try {
+        await taskSetCron(taskId, null);
+      } catch (e) {
+        console.warn('[legacyUpgrade] rollback taskSetCron failed', e);
+      }
+      try {
+        await taskDelete(taskId);
+      } catch (e) {
+        console.warn('[legacyUpgrade] rollback taskDelete failed', e);
+      }
+    }
+    try {
+      await thoughtDelete(thought.id);
+    } catch (e) {
+      console.warn('[legacyUpgrade] rollback thoughtDelete failed', e);
+    }
+  };
+
   // Step 2: derive the input.
   const input: TaskCreateDirectInput = {
     name: deriveName(legacy),
@@ -159,24 +199,24 @@ export async function upgradeLegacyCron(
   const runtimeConfig = legacy.runtimeConfig ?? legacy.runtime_config;
   if (runtimeConfig) input.runtimeConfig = runtimeConfig;
 
-  // Step 3: create the Task. Rust will NOT touch the cron here — it only
-  // does that when `taskRun` is called.
-  const task = await taskCreateDirect(input);
+  // Step 3: create the Task. Rust will NOT touch the cron here.
+  let task: Task;
+  try {
+    task = await taskCreateDirect(input);
+  } catch (e) {
+    await rollback(null);
+    throw e;
+  }
 
-  // Step 4/5: wire both back-pointers. If step 5 fails we still have a
-  // Task and a cron-id back-pointer pointing to the wrong owner; try to
-  // roll back step 4 so the user isn't stuck with a dangling reference.
+  // Step 4/5: wire both back-pointers. cronSetTaskId runs as link-if-null
+  // server-side (see `cmd_cron_set_task_id`) — when another upgrader got
+  // there first, this rejects with ALREADY_LINKED, we tear down the
+  // partial work we created in this attempt, and surface the error.
   try {
     await taskSetCron(task.id, cronTaskId);
-    await cronSetTaskId(cronTaskId, task.id);
+    await cronSetTaskId(cronTaskId, task.id, true);
   } catch (e) {
-    // Best-effort rollback — if this also fails, at least surface the
-    // original error so the user knows what went wrong.
-    try {
-      await taskSetCron(task.id, null);
-    } catch {
-      /* ignore rollback failure */
-    }
+    await rollback(task.id);
     throw e;
   }
 

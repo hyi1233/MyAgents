@@ -1481,14 +1481,31 @@ impl CronTaskManager {
     /// path — once the pointer is set, the legacy surfacing filter (see
     /// `TaskListPanel.fetchLegacyCronTasks`) hides this row from the legacy
     /// list and the Task Center drives it through the new detail overlay.
+    ///
+    /// Concurrency guard (`require_null = true`) — when two upgrade flows
+    /// race to link the same CronTask, only the first succeeds. The second
+    /// sees `ALREADY_LINKED` and its caller can roll back the stale
+    /// Task/Thought rows it just created. Pass `require_null = false` for
+    /// explicit relink or clear operations.
     pub async fn set_task_id(
         &self,
         cron_task_id: &str,
         task_id: Option<String>,
+        require_null: bool,
     ) -> Result<CronTask, String> {
         let mut tasks = self.tasks.write().await;
         let task = tasks.get_mut(cron_task_id)
             .ok_or_else(|| format!("CronTask not found: {}", cron_task_id))?;
+        if require_null {
+            if let Some(existing) = &task.task_id {
+                if Some(existing) != task_id.as_ref() {
+                    return Err(format!(
+                        "ALREADY_LINKED: CronTask {} is already linked to Task {}",
+                        cron_task_id, existing
+                    ));
+                }
+            }
+        }
         task.task_id = task_id;
         task.updated_at = Utc::now();
         let updated = task.clone();
@@ -2377,14 +2394,25 @@ pub async fn cmd_update_cron_task_fields(
 /// Set or clear the `task_id` back-pointer on a CronTask (Task Center
 /// legacy-upgrade flow). Called after `cmd_task_create_direct` has minted a
 /// new Task that wraps this cron; passing `task_id = None` unlinks.
+///
+/// `require_null` (default `true`) makes linking a link-if-null operation —
+/// if the cron is already linked to a different Task, returns `ALREADY_LINKED`
+/// so the caller can roll back the half-created Task+Thought pair. Callers
+/// that intend to clear or relink pass `false`.
 #[tauri::command]
 pub async fn cmd_cron_set_task_id(
     app_handle: tauri::AppHandle,
     cron_task_id: String,
     task_id: Option<String>,
+    require_null: Option<bool>,
 ) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
-    let updated = manager.set_task_id(&cron_task_id, task_id.clone()).await?;
+    // Unlink / relink semantics bypass the guard; pure link-in defaults to
+    // check-if-null so concurrent upgraders don't both "win".
+    let guard = require_null.unwrap_or(task_id.is_some());
+    let updated = manager
+        .set_task_id(&cron_task_id, task_id.clone(), guard)
+        .await?;
     let _ = app_handle.emit(
         "cron:task-updated",
         serde_json::json!({ "taskId": cron_task_id, "linkedTaskId": task_id }),

@@ -27,6 +27,14 @@ export interface ExecutionModeEditorProps extends ExecutionModeState {
   setAtDateTime: (s: string) => void;
   setIntervalMinutes: (n: number) => void;
   disabled?: boolean;
+  /**
+   * When set, the "周期间隔" field is replaced with a read-only note — used
+   * by the task detail edit mode where the interval lives on the linked
+   * CronTask, not the Task itself, and so can't be written through
+   * `cmd_task_update`. Users edit the interval via the cron panel
+   * (or by dispatching a fresh task).
+   */
+  intervalReadOnlyNote?: string;
 }
 
 const EXECUTION_TABS: Array<{
@@ -71,6 +79,7 @@ export function ExecutionModeEditor({
   setAtDateTime,
   setIntervalMinutes,
   disabled,
+  intervalReadOnlyNote,
 }: ExecutionModeEditorProps) {
   const isScheduled = executionMode === 'scheduled';
   const isRecurring = executionMode === 'recurring';
@@ -137,18 +146,26 @@ export function ExecutionModeEditor({
           <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
             周期间隔（分钟）
           </label>
-          <input
-            type="number"
-            min={5}
-            max={10080}
-            value={intervalMinutes}
-            onChange={(e) => setIntervalMinutes(Math.max(5, Number(e.target.value) || 5))}
-            disabled={disabled}
-            className={INPUT_CLS}
-          />
-          <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
-            最小 5 分钟。更复杂的 Cron 表达式请在详情 Overlay 中编辑。
-          </p>
+          {intervalReadOnlyNote ? (
+            <p className="rounded-md border border-dashed border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-[12px] text-[var(--ink-muted)]">
+              {intervalReadOnlyNote}
+            </p>
+          ) : (
+            <>
+              <input
+                type="number"
+                min={5}
+                max={10080}
+                value={intervalMinutes}
+                onChange={(e) => setIntervalMinutes(Math.max(5, Number(e.target.value) || 5))}
+                disabled={disabled}
+                className={INPUT_CLS}
+              />
+              <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
+                最小 5 分钟。更复杂的 Cron 表达式请在详情 Overlay 中编辑。
+              </p>
+            </>
+          )}
         </div>
       )}
 

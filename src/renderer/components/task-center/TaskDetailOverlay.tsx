@@ -21,6 +21,7 @@ import { StatusHistoryList } from './StatusHistoryList';
 import NotificationConfigEditor from './NotificationConfigEditor';
 import { TaskDocBlock } from './TaskDocBlock';
 import { TaskEditPanel } from './TaskEditPanel';
+import { extractErrorMessage } from './errors';
 
 const OVERLAY_Z = 200;
 
@@ -534,18 +535,6 @@ function NotificationSection({
       </div>
     </div>
   );
-}
-
-function extractErrorMessage(e: unknown): string {
-  const s = String(e);
-  // Rust layer serializes TaskOpError as JSON-stringified `{code, message}`.
-  try {
-    const parsed = JSON.parse(s) as { code?: string; message?: string };
-    if (parsed && parsed.message) return parsed.message;
-  } catch {
-    /* not JSON */
-  }
-  return s;
 }
 
 export default TaskDetailOverlay;

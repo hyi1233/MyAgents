@@ -33,6 +33,7 @@ import type {
 import { ExecutionModeEditor } from './editors/ExecutionModeEditor';
 import { EndConditionsEditor, type EndConditionMode } from './editors/EndConditionsEditor';
 import { INPUT_CLS, ToggleSwitch, toLocalDateTimeString } from './editors/controls';
+import { extractErrorMessage } from './errors';
 
 function SectionHeader({
   icon: Icon,
@@ -570,17 +571,6 @@ function deriveTaskName(content: string): string {
   const cps = Array.from(candidate);
   if (cps.length <= MAX_NAME_LEN) return candidate;
   return cps.slice(0, MAX_NAME_LEN - 1).join('') + '…';
-}
-
-function extractErrorMessage(e: unknown): string {
-  const s = String(e);
-  try {
-    const parsed = JSON.parse(s) as { code?: string; message?: string };
-    if (parsed && parsed.message) return parsed.message;
-  } catch {
-    /* not JSON */
-  }
-  return s;
 }
 
 export default DispatchTaskDialog;
