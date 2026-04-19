@@ -1,12 +1,17 @@
 // ExecutionModeEditor — shared UI for picking how a task runs:
 //   • mode: once / scheduled / recurring / loop
-//   • scheduled → datetime-local
-//   • recurring → interval in minutes
+//   • scheduled → datetime-local (→ task.dispatchAt)
+//   • recurring → interval in minutes OR cron expression (advanced mode)
 //   • recurring/loop → session strategy (new-session / single-session,
 //     forced single-session for loop)
 //
 // Used by both the dispatch dialog (create flow) and the task detail overlay
 // edit mode, so the two surfaces stay aligned on scheduling semantics.
+//
+// v0.1.69: interval is now writable on edit (TaskStore.update projects into
+// the linked CronTask via update_task_fields, preserving executionCount).
+// Cron expression support is surfaced through a "高级" toggle — when on, the
+// expression takes precedence over the simple interval.
 
 import { useMemo, useState } from 'react';
 import { Calendar, Clock, Play, Repeat, Timer } from 'lucide-react';
@@ -19,6 +24,9 @@ export interface ExecutionModeState {
   runMode: TaskRunMode;
   atDateTime: string;
   intervalMinutes: number;
+  /** Empty string → simple (interval) mode; non-empty → cron expression. */
+  cronExpression: string;
+  cronTimezone: string;
 }
 
 export interface ExecutionModeEditorProps extends ExecutionModeState {
@@ -26,15 +34,9 @@ export interface ExecutionModeEditorProps extends ExecutionModeState {
   setRunMode: (m: TaskRunMode) => void;
   setAtDateTime: (s: string) => void;
   setIntervalMinutes: (n: number) => void;
+  setCronExpression: (s: string) => void;
+  setCronTimezone: (s: string) => void;
   disabled?: boolean;
-  /**
-   * When set, the "周期间隔" field is replaced with a read-only note — used
-   * by the task detail edit mode where the interval lives on the linked
-   * CronTask, not the Task itself, and so can't be written through
-   * `cmd_task_update`. Users edit the interval via the cron panel
-   * (or by dispatching a fresh task).
-   */
-  intervalReadOnlyNote?: string;
 }
 
 const EXECUTION_TABS: Array<{
@@ -74,17 +76,21 @@ export function ExecutionModeEditor({
   runMode,
   atDateTime,
   intervalMinutes,
+  cronExpression,
+  cronTimezone,
   setExecutionMode,
   setRunMode,
   setAtDateTime,
   setIntervalMinutes,
+  setCronExpression,
+  setCronTimezone,
   disabled,
-  intervalReadOnlyNote,
 }: ExecutionModeEditorProps) {
   const isScheduled = executionMode === 'scheduled';
   const isRecurring = executionMode === 'recurring';
   const isLoop = executionMode === 'loop';
   const showSessionStrategy = isRecurring || isLoop;
+  const advancedOn = cronExpression.trim().length > 0;
 
   const currentDescription = useMemo(
     () => EXECUTION_TABS.find((t) => t.value === executionMode)?.description,
@@ -143,13 +149,58 @@ export function ExecutionModeEditor({
 
       {isRecurring && (
         <div className="mt-5">
-          <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
-            周期间隔（分钟）
-          </label>
-          {intervalReadOnlyNote ? (
-            <p className="rounded-md border border-dashed border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-[12px] text-[var(--ink-muted)]">
-              {intervalReadOnlyNote}
-            </p>
+          <div className="mb-2 flex items-center justify-between">
+            <label className="text-[13px] font-medium text-[var(--ink-secondary)]">
+              {advancedOn ? 'Cron 表达式' : '周期间隔（分钟）'}
+            </label>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => {
+                if (advancedOn) {
+                  // Switching off advanced mode: clear expression so simple
+                  // interval (already in intervalMinutes state) takes over.
+                  setCronExpression('');
+                  setCronTimezone('');
+                } else {
+                  // Seed a minimal every-hour expression so the user has a
+                  // starting point instead of an empty textbox that would
+                  // re-enter simple mode on next render.
+                  setCronExpression('0 * * * *');
+                  if (!cronTimezone) setCronTimezone('Asia/Shanghai');
+                }
+              }}
+              className="text-[11px] font-medium text-[var(--accent-warm)] hover:underline disabled:opacity-50"
+            >
+              {advancedOn ? '← 返回简单模式' : '高级(Cron 表达式)'}
+            </button>
+          </div>
+
+          {advancedOn ? (
+            <>
+              <input
+                type="text"
+                value={cronExpression}
+                onChange={(e) => setCronExpression(e.target.value)}
+                placeholder="例如:0 9 * * *(每天 9 点)"
+                disabled={disabled}
+                className={`${INPUT_CLS} font-mono`}
+              />
+              <div className="mt-2 flex items-center gap-2">
+                <label className="text-[12px] text-[var(--ink-muted)] shrink-0">时区</label>
+                <input
+                  type="text"
+                  value={cronTimezone}
+                  onChange={(e) => setCronTimezone(e.target.value)}
+                  placeholder="Asia/Shanghai"
+                  disabled={disabled}
+                  className={`${INPUT_CLS} font-mono`}
+                />
+              </div>
+              <p className="mt-2 text-[12px] text-[var(--ink-muted)]">
+                标准 5 段 Cron:分 时 日 月 周。留空时区则使用系统默认。
+              </p>
+            </>
           ) : (
             <>
               <input
@@ -162,7 +213,7 @@ export function ExecutionModeEditor({
                 className={INPUT_CLS}
               />
               <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
-                最小 5 分钟。更复杂的 Cron 表达式请在详情 Overlay 中编辑。
+                最小 5 分钟。需要复杂定时(如「每天 9 点」)请切到高级模式。
               </p>
             </>
           )}

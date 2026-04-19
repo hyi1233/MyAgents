@@ -123,6 +123,8 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
     toLocalDateTimeString(new Date(Date.now() + 3600_000)),
   );
   const [intervalMinutes, setIntervalMinutes] = useState(30);
+  const [cronExpression, setCronExpression] = useState('');
+  const [cronTimezone, setCronTimezone] = useState('');
 
   // End conditions
   const [endConditionMode, setEndConditionMode] = useState<EndConditionMode>('forever');
@@ -228,19 +230,17 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
         .split(/[,，]/)
         .map((t) => t.trim())
         .filter((t) => t.length > 0);
-      // Encode scheduled / recurring details via `endConditions.deadline`
-      // for scheduled mode. `recurring` gets `intervalMinutes` persisted on
-      // the CronTask side when Rust's `schedule_from_task` translates the
-      // Task (TODO: direct exec-mode interval support — today we rely on
-      // the backend's 60-min default; wiring the form's `intervalMinutes`
-      // into the backend requires a schema extension we'll land next).
-      let ec = buildEndConditions();
-      if (isScheduled) {
-        const ts = Date.parse(atDateTime);
-        if (!Number.isNaN(ts)) {
-          ec = { ...(ec ?? { aiCanExit: false }), deadline: ts };
-        }
-      }
+      // v0.1.69 — scheduling detail lives on dedicated Task fields so the
+      // backend no longer has to deduce "when to fire" from
+      // endConditions.deadline (which means "when to stop running").
+      const ec = buildEndConditions();
+      const dispatchAt = isScheduled
+        ? (() => {
+            const ts = Date.parse(atDateTime);
+            return Number.isNaN(ts) ? undefined : ts;
+          })()
+        : undefined;
+      const advancedCron = cronExpression.trim();
       const task = await taskCreateDirect({
         name: name.trim(),
         executor: 'agent',
@@ -251,6 +251,10 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
         executionMode,
         runMode: isOnce ? undefined : runMode,
         endConditions: ec,
+        dispatchAt,
+        intervalMinutes: isRecurring && !advancedCron ? intervalMinutes : undefined,
+        cronExpression: isRecurring && advancedCron ? advancedCron : undefined,
+        cronTimezone: isRecurring && advancedCron ? cronTimezone || undefined : undefined,
         sourceThoughtId: thought.id,
         tags,
         notification: buildNotification(),
@@ -283,6 +287,10 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
     buildEndConditions,
     isScheduled,
     atDateTime,
+    isRecurring,
+    intervalMinutes,
+    cronExpression,
+    cronTimezone,
     name,
     description,
     taskMd,
@@ -421,6 +429,10 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
                 setAtDateTime={setAtDateTime}
                 intervalMinutes={intervalMinutes}
                 setIntervalMinutes={setIntervalMinutes}
+                cronExpression={cronExpression}
+                setCronExpression={setCronExpression}
+                cronTimezone={cronTimezone}
+                setCronTimezone={setCronTimezone}
               />
             </div>
           </div>

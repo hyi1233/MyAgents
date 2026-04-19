@@ -11,7 +11,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { taskUpdate } from '@/api/taskCenter';
+import CustomSelect from '@/components/CustomSelect';
+import { taskReadDoc, taskUpdate } from '@/api/taskCenter';
 import NotificationConfigEditor from '@/components/task-center/NotificationConfigEditor';
 import type {
   EndConditions,
@@ -29,6 +30,12 @@ import { ExecutionModeEditor } from './editors/ExecutionModeEditor';
 import { INPUT_CLS, toLocalDateTimeString } from './editors/controls';
 import { extractErrorMessage } from './errors';
 
+const PERMISSION_MODE_OPTIONS = [
+  { value: 'auto', label: '自动 (Auto)' },
+  { value: 'plan', label: '仅计划 (Plan)' },
+  { value: 'fullAgency', label: '完全自治 (Full Agency)' },
+];
+
 export interface TaskEditPanelProps {
   task: Task;
   onSaved: (next: Task) => void;
@@ -40,50 +47,83 @@ interface Draft {
   name: string;
   description: string;
   tagsInput: string;
+  taskMd: string;
   executionMode: TaskExecutionMode;
   runMode: TaskRunMode;
   atDateTime: string;
+  intervalMinutes: number;
+  cronExpression: string;
+  cronTimezone: string;
   endConditionMode: EndConditionMode;
   deadline: string;
   maxExecutions: string;
   aiCanExit: boolean;
   notification: NotificationConfig;
+  model: string;
+  permissionMode: string;
 }
 
-function taskToDraft(task: Task): Draft {
+function taskToDraft(task: Task, taskMd: string): Draft {
   // End-condition mode is derived: if any constraint is present, the user
   // intended "conditional"; otherwise "forever".
   const ec = task.endConditions;
   const hasConstraints = !!(ec?.deadline || ec?.maxExecutions);
   const endConditionMode: EndConditionMode = hasConstraints ? 'conditional' : 'forever';
-  // Scheduled tasks surface their target timestamp via `endConditions.deadline`
-  // (PRD §8.2 — the dispatch dialog encodes it there). Re-hydrate into the
-  // datetime-local field so edits don't lose the moment.
-  const atDateTime = task.executionMode === 'scheduled' && ec?.deadline
-    ? toLocalDateTimeString(new Date(ec.deadline))
-    : '';
+  // `dispatchAt` is now the authoritative "when to fire" timestamp for
+  // scheduled mode. Fall back to the legacy `endConditions.deadline` for
+  // rows created before the split.
+  const atSource = task.dispatchAt ?? (task.executionMode === 'scheduled' ? ec?.deadline : undefined);
+  const atDateTime = atSource ? toLocalDateTimeString(new Date(atSource)) : '';
   return {
     name: task.name,
     description: task.description ?? '',
     tagsInput: task.tags.join(', '),
+    taskMd,
     executionMode: task.executionMode,
     runMode: task.runMode ?? 'new-session',
     atDateTime,
+    intervalMinutes: task.intervalMinutes ?? 30,
+    cronExpression: task.cronExpression ?? '',
+    cronTimezone: task.cronTimezone ?? '',
     endConditionMode,
     deadline: ec?.deadline ? toLocalDateTimeString(new Date(ec.deadline)) : '',
     maxExecutions: ec?.maxExecutions ? String(ec.maxExecutions) : '',
     aiCanExit: ec?.aiCanExit ?? true,
     notification: task.notification ?? { desktop: true },
+    model: task.model ?? '',
+    permissionMode: task.permissionMode ?? 'auto',
   };
 }
 
-// No-op used where the shared editor needs a setter but edit mode can't
-// persist the field (see `intervalMinutes` note below).
-const noop = () => {};
-
 export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPanelProps) {
-  const [draft, setDraft] = useState<Draft>(() => taskToDraft(task));
+  const [draft, setDraft] = useState<Draft>(() => taskToDraft(task, ''));
   const [saving, setSaving] = useState(false);
+  const [taskMdLoaded, setTaskMdLoaded] = useState(false);
+  const isAiAligned = task.dispatchOrigin === 'ai-aligned';
+
+  // Read the current task.md body once so the user can edit the prompt
+  // in-place. AI-aligned tasks have no editable prompt here (their
+  // alignment.md is the source of truth and a separate skill).
+  useEffect(() => {
+    let cancelled = false;
+    if (isAiAligned) {
+      setTaskMdLoaded(true);
+      return;
+    }
+    void taskReadDoc(task.id, 'task')
+      .then((content) => {
+        if (cancelled) return;
+        setDraft((d) => ({ ...d, taskMd: content }));
+        setTaskMdLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setTaskMdLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task.id, isAiAligned]);
 
   // If the task transitions to running / verifying while we're editing
   // (external SSE — scheduler fired, or another window changed status),
@@ -116,9 +156,22 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
   const errors = useMemo(() => {
     const errs: string[] = [];
     if (!draft.name.trim()) errs.push('请填写任务名');
+    if (!isAiAligned && !draft.taskMd.trim()) errs.push('task.md 内容不能为空');
     if (isScheduled) {
       const ts = Date.parse(draft.atDateTime);
       if (Number.isNaN(ts) || ts <= Date.now()) errs.push('执行时间必须在未来');
+    }
+    if (isRecurring) {
+      const advancedOn = draft.cronExpression.trim().length > 0;
+      if (advancedOn) {
+        // Rust nom-cron is strict; do a shallow shape check here to catch
+        // the obvious "forgot a field" mistake before the backend would.
+        if (draft.cronExpression.trim().split(/\s+/).length !== 5) {
+          errs.push('Cron 表达式必须是 5 段(分 时 日 月 周)');
+        }
+      } else if (draft.intervalMinutes < 5) {
+        errs.push('周期间隔不能小于 5 分钟');
+      }
     }
     if (
       showEndConditions &&
@@ -130,7 +183,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
       errs.push('请至少设置一个结束条件');
     }
     return errs;
-  }, [draft, isScheduled, showEndConditions]);
+  }, [draft, isScheduled, isRecurring, showEndConditions, isAiAligned]);
 
   const buildEndConditions = useCallback((): EndConditions | undefined => {
     if (!showEndConditions) return undefined;
@@ -156,10 +209,9 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
 
     // Build a partial update. `Option<T>` on the Rust side means "don't
     // touch this field" for any key we omit — so we send only what the
-    // user actually changed. Special handling for execution-mode flips:
-    // when the mode changes, Rust's `update()` automatically clears
-    // `run_mode` / `end_conditions` on transition to `once` (PRD §9.4
-    // hygiene), so we don't need the client to express "clear me".
+    // user actually changed. Rust's `update()` takes care of clearing
+    // mode-incompatible fields when `executionMode` flips (PRD §9.4
+    // hygiene), so we just forward the draft.
     const payload: TaskUpdateInput = { id: task.id };
     if (draft.name.trim() !== task.name) payload.name = draft.name.trim();
     if (draft.description.trim() !== (task.description ?? ''))
@@ -167,29 +219,52 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
     const initialTags = task.tags.join(',');
     if (tags.join(',') !== initialTags) payload.tags = tags;
 
+    if (!isAiAligned && draft.taskMd !== '') {
+      // Only send when we successfully loaded the original so we don't
+      // stomp with an empty string.
+      payload.prompt = draft.taskMd;
+    }
+
     const modeChanged = draft.executionMode !== task.executionMode;
     if (modeChanged) payload.executionMode = draft.executionMode;
 
-    // runMode / endConditions are only meaningful when the new mode needs
-    // them. For `once`, Rust clears both server-side; for recurring /
-    // loop / scheduled, we send the draft values (either because the
-    // mode flipped and we want fresh values, or because the user tweaked
-    // them within the same mode).
     if (draft.executionMode !== 'once') {
       const nextRunMode: TaskRunMode = isLoop ? 'single-session' : draft.runMode;
       if (modeChanged || nextRunMode !== task.runMode) payload.runMode = nextRunMode;
 
-      let ec = buildEndConditions();
-      if (isScheduled && draft.atDateTime) {
-        const ts = Date.parse(draft.atDateTime);
-        if (!Number.isNaN(ts)) {
-          ec = { ...(ec ?? { aiCanExit: false }), deadline: ts };
-        }
-      }
+      const ec = buildEndConditions();
       const initialEc = JSON.stringify(task.endConditions ?? null);
       const nextEc = JSON.stringify(ec ?? null);
       if (modeChanged || initialEc !== nextEc) payload.endConditions = ec;
     }
+
+    // Scheduling detail — only forward the field relevant to the target
+    // mode so the Rust layer's mode-hygiene cleanup can do its job.
+    if (isScheduled) {
+      const ts = Date.parse(draft.atDateTime);
+      if (!Number.isNaN(ts) && ts !== task.dispatchAt) {
+        payload.dispatchAt = ts;
+      }
+    } else if (isRecurring) {
+      const advanced = draft.cronExpression.trim();
+      if (advanced) {
+        if (advanced !== (task.cronExpression ?? '')) payload.cronExpression = advanced;
+        if (draft.cronTimezone !== (task.cronTimezone ?? ''))
+          payload.cronTimezone = draft.cronTimezone;
+      } else {
+        // Simple mode — clear any cron expression the task had before.
+        if (task.cronExpression) payload.cronExpression = '';
+        if (task.cronTimezone) payload.cronTimezone = '';
+        if (draft.intervalMinutes !== (task.intervalMinutes ?? 0)) {
+          payload.intervalMinutes = draft.intervalMinutes;
+        }
+      }
+    }
+
+    // Execution overrides.
+    if (draft.model !== (task.model ?? '')) payload.model = draft.model;
+    if (draft.permissionMode !== (task.permissionMode ?? 'auto'))
+      payload.permissionMode = draft.permissionMode;
 
     const initialNotification = JSON.stringify(task.notification ?? null);
     const nextNotification = JSON.stringify(draft.notification);
@@ -212,7 +287,19 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
     } finally {
       setSaving(false);
     }
-  }, [draft, errors, saving, task, buildEndConditions, isScheduled, isLoop, onSaved, onError]);
+  }, [
+    draft,
+    errors,
+    saving,
+    task,
+    buildEndConditions,
+    isScheduled,
+    isRecurring,
+    isLoop,
+    isAiAligned,
+    onSaved,
+    onError,
+  ]);
 
   return (
     <div className="space-y-5">
@@ -253,6 +340,30 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
         </div>
       </section>
 
+      {!isAiAligned && (
+        <>
+          <div className="border-t border-[var(--line-subtle)]" />
+          <section>
+            <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+              task.md 内容
+            </h3>
+            <div className="pl-1">
+              <textarea
+                value={draft.taskMd}
+                onChange={(e) => setDraft((d) => ({ ...d, taskMd: e.target.value }))}
+                rows={8}
+                disabled={!taskMdLoaded}
+                placeholder={taskMdLoaded ? '描述任务目标、约束、上下文' : '加载中…'}
+                className={`${INPUT_CLS} resize-y font-mono text-[12.5px]`}
+              />
+              <p className="mt-2 text-[12px] text-[var(--ink-muted)]">
+                AI 执行时看到的 prompt。保存时会原子写入 .task/&lt;id&gt;/task.md。
+              </p>
+            </div>
+          </section>
+        </>
+      )}
+
       <div className="border-t border-[var(--line-subtle)]" />
 
       {/* 执行模式 */}
@@ -268,13 +379,12 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
             setRunMode={(v) => setDraft((d) => ({ ...d, runMode: v }))}
             atDateTime={draft.atDateTime}
             setAtDateTime={(v) => setDraft((d) => ({ ...d, atDateTime: v }))}
-            // Interval lives on the linked CronTask, not the Task itself —
-            // `cmd_task_update` has no channel for it. Surface this as
-            // read-only in edit mode; users change it from the cron panel
-            // or by dispatching a fresh task with a different interval.
-            intervalMinutes={30}
-            setIntervalMinutes={noop}
-            intervalReadOnlyNote="周期间隔由关联的定时任务维护，如需调整，请前往对话中的定时面板或重新派发。"
+            intervalMinutes={draft.intervalMinutes}
+            setIntervalMinutes={(v) => setDraft((d) => ({ ...d, intervalMinutes: v }))}
+            cronExpression={draft.cronExpression}
+            setCronExpression={(v) => setDraft((d) => ({ ...d, cronExpression: v }))}
+            cronTimezone={draft.cronTimezone}
+            setCronTimezone={(v) => setDraft((d) => ({ ...d, cronTimezone: v }))}
           />
         </div>
       </section>
@@ -301,6 +411,36 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
           </section>
         </>
       )}
+
+      <div className="border-t border-[var(--line-subtle)]" />
+
+      {/* 执行覆盖 */}
+      <section>
+        <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+          执行覆盖
+          <span className="ml-2 text-[10px] font-normal normal-case tracking-normal text-[var(--ink-muted)]/70">
+            留空则使用 Agent 默认值
+          </span>
+        </h3>
+        <div className="space-y-3 pl-1">
+          <Field label="模型" hint="覆盖 Agent 默认模型">
+            <input
+              type="text"
+              value={draft.model}
+              onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+              placeholder="例如: claude-opus-4-7、deepseek-chat。留空使用 Agent 默认"
+              className={INPUT_CLS}
+            />
+          </Field>
+          <Field label="权限模式">
+            <CustomSelect
+              value={draft.permissionMode || 'auto'}
+              options={PERMISSION_MODE_OPTIONS}
+              onChange={(v) => setDraft((d) => ({ ...d, permissionMode: v }))}
+            />
+          </Field>
+        </div>
+      </section>
 
       <div className="border-t border-[var(--line-subtle)]" />
 
