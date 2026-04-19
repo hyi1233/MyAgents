@@ -463,8 +463,17 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
             if (rows.length === 0) return null;
             return view === 'card' ? (
               <section key={b} className="mb-6">
-                <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-                  {BUCKETS[b].label}（{rows.length}）
+                {/* Bucket header — 16px semibold per DESIGN.md §2.2
+                    scale (text-base), count rendered as a muted sibling
+                    so the label owns the visual weight. The previous
+                    11px uppercase treatment read as a code-like overline
+                    rather than a real section title once the page had
+                    more than a handful of cards. */}
+                <h3 className="mb-3 flex items-baseline gap-2 text-base font-semibold text-[var(--ink)]">
+                  {BUCKETS[b].label}
+                  <span className="text-[13px] font-normal text-[var(--ink-muted)]">
+                    {rows.length}
+                  </span>
                 </h3>
                 <div className="grid grid-cols-2 gap-3">
                   {rows.map(renderCard)}
@@ -472,8 +481,11 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
               </section>
             ) : (
               <section key={b} className="mb-4">
-                <h3 className="mb-1 px-3 pt-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-                  {BUCKETS[b].label}（{rows.length}）
+                <h3 className="mb-1 flex items-baseline gap-2 px-3 pt-3 text-base font-semibold text-[var(--ink)]">
+                  {BUCKETS[b].label}
+                  <span className="text-[13px] font-normal text-[var(--ink-muted)]">
+                    {rows.length}
+                  </span>
                 </h3>
                 <div>{rows.map(renderRow)}</div>
               </section>
