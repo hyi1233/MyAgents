@@ -2,6 +2,7 @@
 // PRD §5 / §6.
 
 import { useCallback, useState } from 'react';
+import { ChevronRight } from 'lucide-react';
 import { ThoughtPanel } from '@/components/task-center/ThoughtPanel';
 import { TaskListPanel } from '@/components/task-center/TaskListPanel';
 import { DispatchTaskDialog } from '@/components/task-center/DispatchTaskDialog';
@@ -72,11 +73,18 @@ export default function TaskCenter({ isActive }: Props) {
 
   return (
     <div className="flex h-full flex-col bg-[var(--paper)]">
-      {/* Header */}
+      {/* Header — h-12 per DESIGN.md §7.4; 14px title per §2.2 type scale
+          (the 15px previously used is not a type-scale value). Subtitle uses
+          lucide ChevronRight instead of the Unicode `→` arrow so it sits on
+          the CJK baseline cleanly. */}
       <div className="flex h-12 items-center border-b border-[var(--line)] px-4">
-        <h1 className="text-[15px] font-semibold text-[var(--ink)]">任务中心</h1>
-        <span className="ml-3 text-[12px] text-[var(--ink-muted)]">
-          沉淀想法 → 派发任务 → 让 AI 执行
+        <h1 className="text-sm font-semibold text-[var(--ink)]">任务中心</h1>
+        <span className="ml-3 flex items-center gap-1 text-[12px] text-[var(--ink-muted)]">
+          沉淀想法
+          <ChevronRight className="h-3 w-3" strokeWidth={1.5} />
+          派发任务
+          <ChevronRight className="h-3 w-3" strokeWidth={1.5} />
+          让 AI 执行
         </span>
       </div>
 

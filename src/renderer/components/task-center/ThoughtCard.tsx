@@ -141,7 +141,7 @@ export function ThoughtCard({
   const convertedCount = thought.convertedTaskIds?.length ?? 0;
 
   return (
-    <div className="group rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] p-3 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px]">
+    <div className="group rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px]">
       {editing ? (
         <textarea
           ref={editRef}
@@ -304,7 +304,7 @@ function renderWithTagHighlights(
   // shared with Rust (`thought.tags[]`) so highlight ≡ persisted tags.
   const parts = splitWithTagHighlights(content);
   const pillCls =
-    'rounded-[3px] bg-[var(--accent-warm-subtle)] px-1 text-[var(--accent-warm)]';
+    'rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] px-1 text-[var(--accent-warm)]';
   return parts.map((p, i) => {
     if (p.type === 'tag' && p.tag) {
       const body = p.tag;

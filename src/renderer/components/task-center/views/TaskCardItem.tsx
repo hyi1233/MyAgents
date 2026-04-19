@@ -8,7 +8,7 @@
 // that context lives in the detail overlay instead) to keep the card scan-
 // friendly.
 
-import { Bot, Clock, Layers, User } from 'lucide-react';
+import { Bot, User } from 'lucide-react';
 
 import type { Task } from '@/../shared/types/task';
 import { DispatchOriginBadge } from '../DispatchOriginBadge';
@@ -33,7 +33,6 @@ export function TaskCardItem(props: TaskCardItemProps) {
   const isLegacy = !!legacy && !task;
   const status = deriveTaskRowStatus(task ?? null, legacy?.status === 'running');
   const stripeClass = stripeFor(status);
-  const Icon = isLegacy ? Clock : Layers;
   const name = task?.name ?? legacy?.name ?? '—';
   const description = task?.description ?? '';
   const tags = task?.tags ?? [];
@@ -51,13 +50,14 @@ export function TaskCardItem(props: TaskCardItemProps) {
         highlighted ? 'border-[var(--accent-warm)] shadow-sm' : 'border-[var(--line)]'
       }`}
     >
-      {stripeClass && (
-        <span className={`absolute inset-y-0 left-0 w-1 ${stripeClass}`} aria-hidden />
-      )}
-      <div className="flex min-w-0 flex-1 flex-col gap-2 px-3 py-3">
-        {/* Row 1 — icon + name + status chip + hover actions */}
+      <span className={`absolute inset-y-0 left-0 w-1 ${stripeClass}`} aria-hidden />
+      <div className="flex min-w-0 flex-1 flex-col gap-2 p-4">
+        {/* Row 1 — name + status chip + hover actions. No leading icon:
+            14 identical Layers/Clock icons down the list are noise, not
+            information. The legacy identity moves to the right-aligned
+            "遗留" chip; the active-vs-latent distinction is already
+            carried by the left status stripe + status badge. */}
         <div className="flex items-start gap-2">
-          <Icon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--ink-muted)]" />
           <div className="min-w-0 flex-1">
             <div className="line-clamp-2 text-[13px] font-medium leading-snug text-[var(--ink)]">
               {name}
@@ -119,7 +119,7 @@ export function TaskCardItem(props: TaskCardItemProps) {
             {tags.slice(0, 4).map((t) => (
               <span
                 key={t}
-                className="rounded-[3px] bg-[var(--accent-warm-subtle)] px-1 text-[10px] text-[var(--accent-warm)]"
+                className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] px-1 text-[10px] text-[var(--accent-warm)]"
               >
                 #{t}
               </span>
@@ -131,10 +131,20 @@ export function TaskCardItem(props: TaskCardItemProps) {
   );
 }
 
-function stripeFor(status: string): string | null {
-  if (status === 'running' || status === 'verifying') return 'bg-[var(--accent-warm)]';
+/**
+ * Left edge stripe color — one rule covers every status so a card never
+ * reads as "missing its left shoulder". Semantic color mirrors the status
+ * badge bucket (info/success/error/muted) so stripe + badge reinforce
+ * each other instead of conflicting.
+ */
+function stripeFor(status: string): string {
+  if (status === 'running' || status === 'verifying') return 'bg-[var(--info)]';
   if (status === 'blocked') return 'bg-[var(--error)]';
-  return null;
+  if (status === 'done' || status === 'archived') return 'bg-[var(--success)]';
+  if (status === 'stopped') return 'bg-[var(--ink-subtle)]';
+  // todo + any fallback — use the card's own border color at higher
+  // strength so the stripe exists but doesn't scream.
+  return 'bg-[var(--line-strong)]';
 }
 
 function modeLabel(m: Task['executionMode']): string {
