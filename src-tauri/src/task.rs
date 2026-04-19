@@ -1798,20 +1798,26 @@ pub fn task_docs_dir(task_id: &str) -> Result<PathBuf, String> {
 
 /// Root dir for all task documents — `~/.myagents/tasks/`.
 ///
-/// Honors `MYAGENTS_TASK_DOCS_ROOT` when set so tests (and the one-off
-/// migration script) can redirect to a tempdir without touching the real
-/// user profile. The env var MUST be an absolute path; relative values are
-/// rejected so a stray `./tasks` in CI doesn't pollute the cwd.
+/// Honors `MYAGENTS_TASK_DOCS_ROOT` **only in debug / test builds** so tests
+/// (and the one-off migration script) can redirect to a tempdir without
+/// touching the real user profile. Production builds ignore the env var to
+/// shut down the "user's shell rc or a rogue child-process env accidentally
+/// redirects application data" risk. The env var MUST be an absolute path;
+/// relative values are rejected so a stray `./tasks` in CI doesn't pollute
+/// the cwd.
 fn task_docs_root() -> Result<PathBuf, String> {
-    if let Ok(override_path) = std::env::var("MYAGENTS_TASK_DOCS_ROOT") {
-        let p = PathBuf::from(&override_path);
-        if !p.is_absolute() {
-            return Err(format!(
-                "MYAGENTS_TASK_DOCS_ROOT must be absolute, got {}",
-                override_path
-            ));
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(override_path) = std::env::var("MYAGENTS_TASK_DOCS_ROOT") {
+            let p = PathBuf::from(&override_path);
+            if !p.is_absolute() {
+                return Err(format!(
+                    "MYAGENTS_TASK_DOCS_ROOT must be absolute, got {}",
+                    override_path
+                ));
+            }
+            return Ok(p);
         }
-        return Ok(p);
     }
     let home = dirs::home_dir()
         .ok_or_else(|| "cannot resolve home dir for task docs".to_string())?;

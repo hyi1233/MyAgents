@@ -155,15 +155,30 @@ Run 'myagents <command> --help' for details on a specific command.`;
 // HTTP client
 // ---------------------------------------------------------------------------
 
+/** Cap stdin payloads at 5 MB — task.md is a prompt, not a log dump. Catches
+ *  `cat huge.log | myagents task write-doc` footguns and `cat /dev/urandom`
+ *  OOM attacks. Management API `DefaultBodyLimit` is 50 MB; we're well under. */
+const STDIN_CONTENT_MAX_BYTES = 5 * 1024 * 1024;
+
 /**
  * Read all available bytes from stdin and return as a UTF-8 string. Used by
  * `task write-doc` so agents can pipe markdown in rather than escaping it
- * through a --content flag.
+ * through a --content flag. Refuses payloads larger than STDIN_CONTENT_MAX_BYTES
+ * so a runaway producer can't OOM the CLI.
  */
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > STDIN_CONTENT_MAX_BYTES) {
+      console.error(
+        `Error: stdin exceeds ${STDIN_CONTENT_MAX_BYTES / 1024 / 1024} MB limit (task docs should be prompts, not bulk data).`,
+      );
+      process.exit(2);
+    }
+    chunks.push(buf);
   }
   return Buffer.concat(chunks).toString('utf8');
 }
@@ -175,6 +190,18 @@ async function callApi(route: string, body: Record<string, unknown> = {}): Promi
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    // Non-JSON error bodies (e.g. axum 4xx returns plain text like
+    // "Failed to deserialize query string: missing field `doc`") would
+    // crash `resp.json()` with a SyntaxError — translate to an
+    // AdminResponse-shaped error so the caller can surface it cleanly.
+    const contentType = resp.headers.get('content-type') ?? '';
+    if (!contentType.includes('application/json')) {
+      const text = await resp.text();
+      return {
+        success: false,
+        error: text.trim() || `HTTP ${resp.status} ${resp.statusText}`,
+      };
+    }
     return await resp.json() as Record<string, unknown>;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -659,19 +686,22 @@ async function main(): Promise<void> {
     const restArgs = positional.slice(2);
     const body = buildRequestBody(group, action, restArgs, flags);
 
-    // `task write-doc` reads content from stdin if no --content flag — lets
-    // agents pipe markdown in with `cat plan.md | myagents task write-doc <id> task`.
+    // `task write-doc` reads content from stdin when --content is
+    // **omitted entirely** — lets agents pipe markdown in with
+    // `cat plan.md | myagents task write-doc <id> task`. An explicit
+    // `--content ""` (empty string) is passed through unchanged so the
+    // user can clear a doc.
     if (
       group === 'task' &&
       action === 'write-doc' &&
-      (body.content === undefined || body.content === null || body.content === '')
+      (body.content === undefined || body.content === null)
     ) {
       if (!process.stdin.isTTY) {
         body.content = await readStdin();
       }
-      if (!body.content) {
+      if (body.content === undefined || body.content === null) {
         console.error(
-          'Error: write-doc requires --content "..." or piped stdin.',
+          'Error: write-doc requires --content "..." or piped stdin. Use `--content ""` to clear a doc.',
         );
         process.exit(2);
       }

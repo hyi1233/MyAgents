@@ -1593,17 +1593,23 @@ export default function App() {
         }
 
         // Pre-mint the alignment session id (CC review W8) so the AI doesn't
-        // have to infer a placeholder. This becomes the `.task/<id>/` subdir
-        // it writes alignment.md/task.md/verify.md/progress.md into, and the
-        // exact value the `task create-from-alignment` CLI takes.
+        // have to infer a placeholder. This becomes the subdir under
+        // `~/.myagents/tasks/<id>/` where alignment.md/task.md/verify.md/
+        // progress.md land, and the exact value the
+        // `task create-from-alignment` CLI takes (it renames that directory
+        // to `~/.myagents/tasks/<newTaskId>/` on promotion).
+        //
+        // v0.1.69 relocation: the task-alignment skill writes via the `Write`
+        // tool using the absolute home-dir path (task docs moved out of the
+        // workspace so moving/renaming the workspace doesn't orphan them).
         const alignmentSessionId = `align-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
         const alignmentPrompt = [
           '我想让你帮我对齐这件事（想法原文见下）。',
           '',
-          `请按 /task-alignment 流程把四份文档写入 \`.task/${alignmentSessionId}/\` 子目录（alignment.md / task.md / verify.md / progress.md）。`,
+          `请按 /task-alignment 流程把四份文档写入 \`~/.myagents/tasks/${alignmentSessionId}/\` 目录（用 Write 工具 + 绝对路径；$HOME 展开为真实 home 目录）：alignment.md / task.md / verify.md / progress.md。注意这是用户目录下的 MyAgents 应用数据，不在当前工作区。`,
           '',
-          '如果讨论下来觉得值得做，请在沉淀完这四份文档后，调用 CLI 创建任务：',
+          '如果讨论下来觉得值得做，请在沉淀完这四份文档后，调用 CLI 创建任务（CLI 会把目录重命名到 `~/.myagents/tasks/<newTaskId>/`）：',
           '',
           `\`myagents task create-from-alignment ${alignmentSessionId} --name "<任务名>" --workspaceId ${workspace.id} --workspacePath ${workspace.path} --sourceThoughtId ${thoughtId}\``,
           '',
