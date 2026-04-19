@@ -1,4 +1,9 @@
-// DispatchTaskDialog — Full-featured modal that turns a Thought into a Task.
+// DispatchTaskDialog — Full-featured modal for creating a Task.
+// Two invocation paths, single surface:
+//   • `thought` present → "派发为任务": prefills name/body/tags from the thought,
+//     links `sourceThoughtId` so the thought card knows about the derived task.
+//   • `thought` absent  → "新建任务": starts from a blank slate. Used by the
+//     Launcher recent-tasks "+" button and the Task Center overlay header.
 // Design language aligned with `scheduled-tasks/TaskCreateModal` and
 // `cron/CronTaskSettingsModal` so the dispatch/create UX is consistent across
 // product surfaces (same section headers, same INPUT_CLS, same Toggle/Checkbox
@@ -75,12 +80,22 @@ const PERMISSION_MODE_OPTIONS = [
 ];
 
 interface Props {
-  thought: Thought;
+  /** When provided, the task is derived from this thought; otherwise the dialog
+   *  starts blank and `sourceThoughtId` is omitted. */
+  thought?: Thought;
+  /** Optional workspace hint for the 'new' flow (e.g. Launcher selection). */
+  defaultWorkspacePath?: string;
   onClose: () => void;
   onDispatched: (task: Task) => void;
 }
 
-export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
+export function DispatchTaskDialog({
+  thought,
+  defaultWorkspacePath,
+  onClose,
+  onDispatched,
+}: Props) {
+  const isFromThought = !!thought;
   const toast = useToast();
   const { projects } = useConfig();
   useCloseLayer(() => {
@@ -100,18 +115,28 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
     [projects],
   );
 
-  // PRD §8.4 — match any of the thought's tags to a workspace name.
   const defaultProject = useMemo(() => {
     if (visibleProjects.length === 0) return null;
-    const lowerTags = thought.tags.map((t) => t.toLowerCase());
-    return (
-      visibleProjects.find((p) =>
+    // Explicit hint wins (e.g. Launcher passed the user's selected workspace).
+    if (defaultWorkspacePath) {
+      const explicit = visibleProjects.find((p) => p.path === defaultWorkspacePath);
+      if (explicit) return explicit;
+    }
+    // PRD §8.4 — match any of the thought's tags to a workspace name.
+    if (thought) {
+      const lowerTags = thought.tags.map((t) => t.toLowerCase());
+      const tagged = visibleProjects.find((p) =>
         lowerTags.includes(p.name.toLowerCase()),
-      ) ?? visibleProjects[0]
-    );
-  }, [thought.tags, visibleProjects]);
+      );
+      if (tagged) return tagged;
+    }
+    return visibleProjects[0];
+  }, [thought, visibleProjects, defaultWorkspacePath]);
 
-  const defaultName = useMemo(() => deriveTaskName(thought.content), [thought.content]);
+  const defaultName = useMemo(
+    () => (thought ? deriveTaskName(thought.content) : ''),
+    [thought],
+  );
 
   // Form state. v0.1.69 scope is AI execution only — `executor` is pinned to
   // `'agent'`; the user-as-todo variant is a future extension.
@@ -122,8 +147,8 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
   );
   const [executionMode, setExecutionMode] = useState<TaskExecutionMode>('once');
   const [runMode, setRunMode] = useState<TaskRunMode>('new-session');
-  const [taskMd, setTaskMd] = useState(thought.content);
-  const [tagsInput, setTagsInput] = useState(thought.tags.join(', '));
+  const [taskMd, setTaskMd] = useState(thought?.content ?? '');
+  const [tagsInput, setTagsInput] = useState(thought?.tags.join(', ') ?? '');
 
   // Schedule-specific state (mirrors cron TaskCreateModal fields)
   const [atDateTime, setAtDateTime] = useState(() =>
@@ -268,7 +293,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
         cronTimezone: isRecurring && advancedCron ? cronTimezone || undefined : undefined,
         model: modelOverride.trim() || undefined,
         permissionMode: permissionMode !== 'auto' ? permissionMode : undefined,
-        sourceThoughtId: thought.id,
+        sourceThoughtId: thought?.id,
         tags,
         notification: buildNotification(),
       });
@@ -312,7 +337,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
     executionMode,
     isOnce,
     runMode,
-    thought.id,
+    thought?.id,
     buildNotification,
     toast,
     onDispatched,
@@ -338,7 +363,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
           <div className="flex items-center gap-2.5">
             <Zap className="h-4 w-4 text-[var(--accent)]" />
             <h2 className="text-[16px] font-semibold text-[var(--ink)]">
-              派发为任务
+              {isFromThought ? '派发为任务' : '新建任务'}
             </h2>
           </div>
           <button
@@ -586,7 +611,9 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
               disabled={errors.length > 0 || busy}
               className="rounded-lg bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white transition hover:bg-[var(--accent-warm-hover)] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {busy ? '派发中…' : '派发任务'}
+              {busy
+                ? isFromThought ? '派发中…' : '创建中…'
+                : isFromThought ? '派发任务' : '创建任务'}
             </button>
           </div>
         </div>

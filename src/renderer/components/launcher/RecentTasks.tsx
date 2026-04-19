@@ -21,7 +21,7 @@ import {
     formatNextExecution,
 } from '@/types/cronTask';
 import type { Project } from '@/config/types';
-import TaskCreateModal from '@/components/scheduled-tasks/TaskCreateModal';
+import { DispatchTaskDialog } from '@/components/task-center/DispatchTaskDialog';
 
 const DISPLAY_COUNT = 5;
 /** Cron tab shows fewer items because the "新建" button takes one row's worth of height */
@@ -335,9 +335,12 @@ export default memo(function RecentTasks({
                 />
             )}
             {showCreateModal && (
-                <TaskCreateModal
+                <DispatchTaskDialog
                     onClose={() => setShowCreateModal(false)}
-                    onCreated={handleCreated}
+                    onDispatched={() => {
+                        setShowCreateModal(false);
+                        handleCreated();
+                    }}
                 />
             )}
         </div>

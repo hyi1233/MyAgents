@@ -27,7 +27,7 @@ import {
     formatScheduleDescription,
     formatNextExecution,
 } from '@/types/cronTask';
-import TaskCreateModal from '@/components/scheduled-tasks/TaskCreateModal';
+import { DispatchTaskDialog } from '@/components/task-center/DispatchTaskDialog';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import SessionSearchItem from '@/components/search/SessionSearchItem';
 
@@ -542,9 +542,12 @@ export default memo(function TaskCenterOverlay({
                 />
             )}
             {showCreateModal && (
-                <TaskCreateModal
+                <DispatchTaskDialog
                     onClose={() => setShowCreateModal(false)}
-                    onCreated={handleCreated}
+                    onDispatched={() => {
+                        setShowCreateModal(false);
+                        handleCreated();
+                    }}
                 />
             )}
         </OverlayBackdrop>
