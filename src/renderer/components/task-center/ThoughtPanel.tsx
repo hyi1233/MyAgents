@@ -140,22 +140,22 @@ export function ThoughtPanel({
             想法
           </span>
         </div>
-        <div
-          className="ml-auto"
-          // Delayed blur so clicking a tag inside the floating cloud
-          // registers before the cloud collapses. Using mousedown to
-          // detect an in-cloud click would be more robust but requires
-          // a ref + outside-click handler; this simpler delay wins for
-          // the shape of interaction the cloud needs.
-          onBlur={() => setTimeout(() => setSearchFocused(false), 120)}
-          onFocus={() => setSearchFocused(true)}
-        >
+        <div className="ml-auto">
           <SearchPill
             inputRef={searchInputRef}
             value={query}
             onChange={setQuery}
             onClear={clearSearch}
             placeholder="搜索想法…"
+            onFocus={() => setSearchFocused(true)}
+            // Delay blur so clicking a tag inside the floating cloud
+            // registers before the cloud collapses. The tag buttons use
+            // `onMouseDown` + preventDefault to re-focus the input, but
+            // that sequence still triggers a blur→focus round-trip —
+            // the 120ms grace absorbs it cleanly.
+            onBlur={() =>
+              setTimeout(() => setSearchFocused(false), 120)
+            }
           />
         </div>
 

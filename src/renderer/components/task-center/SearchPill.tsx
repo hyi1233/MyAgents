@@ -1,13 +1,19 @@
-// SearchPill — compact "always-on" search input for the task-center
-// panel headers. Pill-shaped (rounded-full) with a muted paper-inset
-// background + leading search icon + trailing clear button when there's
-// a query.
+// SearchPill — panel-header search input that grows on focus.
 //
-// Replaces the prior "click-icon to expand" search toggle across
-// ThoughtPanel and TaskListPanel — the reference mock keeps the
-// search affordance constantly visible, and a permanent pill scan-reads
-// better than a tiny icon button.
+// Two width regimes:
+//   • collapsed — compact pill (default 150px), visually lives as a
+//     quiet "search available" affordance in the row
+//   • expanded — wider input (default 320px, caller can override) that
+//     appears when the user focuses the field or has a non-empty query
+//
+// The transition is a CSS `width` animation so the pill visibly "opens
+// out" into a proper search box the moment the user commits to typing,
+// then contracts back when blurred with nothing entered. This keeps the
+// resting state scan-friendly without hiding the affordance behind an
+// icon-button toggle (which was the PR1 pattern — it required a click
+// just to reveal the input).
 
+import { useState } from 'react';
 import { Search, X } from 'lucide-react';
 import type { RefObject } from 'react';
 
@@ -18,9 +24,12 @@ interface Props {
   onChange: (next: string) => void;
   onClear?: () => void;
   placeholder?: string;
-  /** Width cap — default 200px keeps the pill out of the way in narrow
-   *  panels while still reading as a usable input. */
-  maxWidthPx?: number;
+  /** Width when resting (empty + blurred). */
+  collapsedPx?: number;
+  /** Width when focused or when `value` is non-empty. */
+  expandedPx?: number;
+  onFocus?: () => void;
+  onBlur?: () => void;
 }
 
 export function SearchPill({
@@ -29,12 +38,23 @@ export function SearchPill({
   onChange,
   onClear,
   placeholder = '搜索…',
-  maxWidthPx = 200,
+  collapsedPx = 150,
+  expandedPx = 320,
+  onFocus,
+  onBlur,
 }: Props) {
+  const [focused, setFocused] = useState(false);
+  // Focus OR a non-empty query both keep the pill expanded — so a
+  // search-in-progress doesn't collapse and clip the query the moment
+  // the user clicks a result.
+  const expanded = focused || value.length > 0;
   return (
     <div
       className="inline-flex h-7 items-center gap-1.5 rounded-full bg-[var(--paper-inset)] px-3 text-[var(--ink-muted)]"
-      style={{ maxWidth: `${maxWidthPx}px` }}
+      style={{
+        width: `${expanded ? expandedPx : collapsedPx}px`,
+        transition: 'width 200ms cubic-bezier(0.22, 1, 0.36, 1)',
+      }}
     >
       <Search className="h-3 w-3 shrink-0" strokeWidth={1.5} aria-hidden />
       <input
@@ -42,6 +62,14 @@ export function SearchPill({
         type="text"
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        onFocus={() => {
+          setFocused(true);
+          onFocus?.();
+        }}
+        onBlur={() => {
+          setFocused(false);
+          onBlur?.();
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Escape' && value && onClear) {
             e.preventDefault();
@@ -54,7 +82,14 @@ export function SearchPill({
       {value && onClear && (
         <button
           type="button"
-          onClick={onClear}
+          // mousedown, not click — the input's onBlur fires before click,
+          // and the blur would collapse the pill AND hide the X button,
+          // canceling the click. mousedown fires first and keeps focus
+          // via preventDefault below.
+          onMouseDown={(e) => {
+            e.preventDefault();
+            onClear();
+          }}
           aria-label="清空搜索"
           className="shrink-0 rounded-full p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
         >
