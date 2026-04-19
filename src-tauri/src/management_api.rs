@@ -115,6 +115,8 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/task/delete", post(task_delete_handler))
         .route("/api/task/run", post(task_run_handler))
         .route("/api/task/rerun", post(task_rerun_handler))
+        .route("/api/task/read-doc", get(task_read_doc_handler))
+        .route("/api/task/write-doc", post(task_write_doc_handler))
         .route("/api/thought/list", get(thought_list_handler))
         .route("/api/thought/create", post(thought_create_handler))
         // Bridge messages carry base64-encoded media attachments (images/files).
@@ -1453,6 +1455,99 @@ async fn task_rerun_handler(
     // fresh `todo` status.
     let req_next = TaskIdApiRequest { id: ta.id.clone() };
     task_run_handler(Json(req_next)).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskReadDocQuery {
+    id: String,
+    /// `task` | `verify` | `progress` — the md filename stem.
+    doc: String,
+}
+
+/// `GET /api/task/read-doc?id=&doc=` — used by the `myagents task show-doc`
+/// CLI so Agents running in a workspace can read a Task's markdown without
+/// hardcoding the filesystem path (task docs live in the user profile dir
+/// after v0.1.69, not in the workspace).
+async fn task_read_doc_handler(
+    axum::extract::Query(q): axum::extract::Query<TaskReadDocQuery>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({ "ok": false, "error": "task store not initialized" }));
+    };
+    let Some(ta) = store.get(&q.id).await else {
+        return Json(serde_json::json!({ "ok": false, "error": "task not found" }));
+    };
+    let filename = match q.doc.as_str() {
+        "task" => "task.md",
+        "verify" => "verify.md",
+        "progress" => "progress.md",
+        "alignment" => "alignment.md",
+        other => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("unknown doc name: {} (expected task|verify|progress|alignment)", other),
+            }));
+        }
+    };
+    let dir = match task::task_docs_dir(&ta.id) {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    let path = dir.join(filename);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Json(serde_json::json!({ "ok": true, "content": content })),
+        // Missing file is not an error for the CLI — it means "no doc yet".
+        // We still 200 and return empty content so scripting is idempotent.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Json(serde_json::json!({ "ok": true, "content": "" }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": format!("read {}: {}", filename, e),
+        })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskWriteDocRequest {
+    id: String,
+    /// `task` | `verify` — `progress` is agent-only and rejected here.
+    doc: String,
+    content: String,
+}
+
+/// `POST /api/task/write-doc` — write `task.md` or `verify.md` for a Task.
+/// Delegates to `TaskStore::write_doc`, which enforces the running/verifying
+/// lock atomically with the file write (PRD §9.4). `progress.md` is
+/// explicitly rejected here — only the runtime agent appends to it.
+async fn task_write_doc_handler(
+    Json(req): Json<TaskWriteDocRequest>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({ "ok": false, "error": "task store not initialized" }));
+    };
+    let filename = match req.doc.as_str() {
+        "task" => "task.md",
+        "verify" => "verify.md",
+        "progress" | "alignment" => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("{} is not writable via this API", req.doc),
+            }));
+        }
+        other => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("unknown doc name: {} (expected task|verify)", other),
+            }));
+        }
+    };
+    match store.write_doc(&req.id, filename, &req.content).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
 }
 
 /// Ensure a CronTask exists for this Task; create one if missing. Returns the

@@ -49,6 +49,7 @@ import {
   handleTaskList, handleTaskGet, handleTaskCreateDirect, handleTaskCreateFromAlignment,
   handleTaskUpdateStatus, handleTaskUpdateProgress, handleTaskAppendSession,
   handleTaskArchive, handleTaskDelete, handleTaskRun, handleTaskRerun,
+  handleTaskReadDoc, handleTaskWriteDoc,
   handleThoughtList, handleThoughtCreate,
 } from './admin-api';
 import { setImMediaContext } from './tools/im-media-tool';
@@ -1154,6 +1155,8 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'task/append-session') return await handleTaskAppendSession(payload as Parameters<typeof handleTaskAppendSession>[0]);
   if (route === 'task/archive') return await handleTaskArchive(payload as Parameters<typeof handleTaskArchive>[0]);
   if (route === 'task/delete') return await handleTaskDelete(payload as Parameters<typeof handleTaskDelete>[0]);
+  if (route === 'task/read-doc') return await handleTaskReadDoc(payload as Parameters<typeof handleTaskReadDoc>[0]);
+  if (route === 'task/write-doc') return await handleTaskWriteDoc(payload as Parameters<typeof handleTaskWriteDoc>[0]);
   if (route === 'thought/list') return await handleThoughtList(payload as Parameters<typeof handleThoughtList>[0]);
   if (route === 'thought/create') return await handleThoughtCreate(payload as Parameters<typeof handleThoughtCreate>[0]);
 

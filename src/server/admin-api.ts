@@ -1270,6 +1270,40 @@ export async function handleTaskDelete(payload: { id: string }): Promise<AdminRe
   return wrapMgmtResponse(resp);
 }
 
+/**
+ * Read a task's markdown doc (`task.md` / `verify.md` / `progress.md` /
+ * `alignment.md`). Missing files return `{ ok: true, content: "" }` so
+ * CLI scripting is idempotent. Task docs live under `~/.myagents/tasks/<id>/`
+ * since v0.1.69 — this endpoint is the agent-facing read path because the
+ * AI runs in the workspace cwd and can't know the user-profile dir.
+ */
+export async function handleTaskReadDoc(payload: {
+  id: string;
+  doc: string;
+}): Promise<AdminResponse> {
+  const resp = await managementApi(
+    `/api/task/read-doc${qsFrom(payload)}`,
+  );
+  if (resp.ok) {
+    return { success: true, data: { content: (resp as Record<string, unknown>).content ?? '' } };
+  }
+  return { success: false, error: String(resp.error ?? 'Failed to read task doc') };
+}
+
+/**
+ * Write `task.md` or `verify.md`. `progress.md` is agent-appended during
+ * runs and rejected here; `alignment.md` is written by the alignment
+ * skill via direct file-system access (not through this API).
+ */
+export async function handleTaskWriteDoc(payload: {
+  id: string;
+  doc: string;
+  content: string;
+}): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/write-doc', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
 export async function handleThoughtList(payload: {
   tag?: string;
   query?: string;

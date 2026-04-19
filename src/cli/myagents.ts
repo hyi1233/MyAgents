@@ -138,6 +138,9 @@ Examples:
   myagents task append-session <taskId> <sessionId>
   myagents task run <taskId>
   myagents task rerun <taskId>
+  myagents task show-doc <taskId> <task|verify|progress|alignment>
+  myagents task write-doc <taskId> <task|verify> --content "..."
+    # Or pipe from stdin: cat plan.md | myagents task write-doc <id> task
   myagents task create-from-alignment <alignmentSessionId> \
     --name "新任务" --workspaceId ws-abc --workspacePath /path/to/ws \
     --executionMode once --sourceThoughtId <thoughtId>
@@ -151,6 +154,19 @@ Run 'myagents <command> --help' for details on a specific command.`;
 // ---------------------------------------------------------------------------
 // HTTP client
 // ---------------------------------------------------------------------------
+
+/**
+ * Read all available bytes from stdin and return as a UTF-8 string. Used by
+ * `task write-doc` so agents can pipe markdown in rather than escaping it
+ * through a --content flag.
+ */
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 async function callApi(route: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
   try {
@@ -228,6 +244,17 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'task' && action === 'get') {
     printTaskDetail(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'task' && (action === 'show-doc' || action === 'read-doc')) {
+    // Print the raw markdown so agents can pipe to `cat`/`head`/`grep`.
+    // Empty content (missing file) → empty output + success exit code.
+    const data = result.data as { content?: string } | undefined;
+    process.stdout.write(data?.content ?? '');
+    return;
+  }
+  if (group === 'task' && action === 'write-doc') {
+    console.log('Task doc saved.');
     return;
   }
   if (group === 'thought' && action === 'list') {
@@ -631,6 +658,25 @@ async function main(): Promise<void> {
     // Build request body based on group/action
     const restArgs = positional.slice(2);
     const body = buildRequestBody(group, action, restArgs, flags);
+
+    // `task write-doc` reads content from stdin if no --content flag — lets
+    // agents pipe markdown in with `cat plan.md | myagents task write-doc <id> task`.
+    if (
+      group === 'task' &&
+      action === 'write-doc' &&
+      (body.content === undefined || body.content === null || body.content === '')
+    ) {
+      if (!process.stdin.isTTY) {
+        body.content = await readStdin();
+      }
+      if (!body.content) {
+        console.error(
+          'Error: write-doc requires --content "..." or piped stdin.',
+        );
+        process.exit(2);
+      }
+    }
+
     const route = buildRoute(group, action, restArgs);
     result = await callApi(route, body);
     printResult(group, action, result, jsonMode);
@@ -641,6 +687,11 @@ async function main(): Promise<void> {
 }
 
 function buildRoute(group: string, action: string, rest: string[]): string {
+  // `show-doc` is a CLI-only alias for `read-doc` — the underlying admin
+  // route is read-doc so the server stays file-operation shaped.
+  if (group === 'task' && action === 'show-doc') {
+    return 'task/read-doc';
+  }
   // Handle nested commands like "agent channel list/add/remove"
   if (group === 'agent' && action === 'channel') {
     const channelAction = rest[0] || 'list';
@@ -953,6 +1004,21 @@ function buildRequestBody(
     }
     if (action === 'archive') return { id: rest[0], message: flags.message };
     if (action === 'delete') return { id: rest[0] };
+    if (action === 'read-doc' || action === 'show-doc') {
+      // `myagents task read-doc <id> <task|verify|progress|alignment>`.
+      // Aliases: `show-doc` reads more naturally in a terminal ("show me the doc").
+      return { id: rest[0], doc: rest[1] ?? 'task' };
+    }
+    if (action === 'write-doc') {
+      // `myagents task write-doc <id> <task|verify> --content "..."`.
+      // If --content is omitted and stdin is piped, read from stdin so
+      // agents can do `cat plan.md | myagents task write-doc <id> task`.
+      return {
+        id: rest[0],
+        doc: rest[1] ?? 'task',
+        content: flags.content,
+      };
+    }
     if (action === 'create-direct') {
       return {
         name: rest[0] || flags.name,
