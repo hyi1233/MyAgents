@@ -2729,6 +2729,15 @@ pub async fn initialize_cron_manager(handle: AppHandle) {
     manager.set_app_handle(handle.clone()).await;
     ulog_info!("[CronTask] Manager initialized with app handle");
 
+    // Safety-net heal: recurring/scheduled Tasks whose schedule fields
+    // were wiped by an earlier migration bug can be repaired from the
+    // linked CronTask, which still carries the authoritative schedule.
+    // Must run before `recover_running_tasks` so the recovery pass sees
+    // the healed schedule (and `ensure_cron_for_task` doesn't silently
+    // fall back to the 60-minute default for a task the user set to
+    // "every day at 11am").
+    heal_task_schedule_fields(manager).await;
+
     // Recover running tasks (方案 A: Rust 层统一恢复)
     recover_running_tasks(&handle).await;
 
@@ -2736,6 +2745,54 @@ pub async fn initialize_cron_manager(handle: AppHandle) {
     // Frontend no longer needs to call recoverCronTasks
     let _ = handle.emit("cron:manager-ready", serde_json::json!({}));
     ulog_info!("[CronTask] Emitted cron:manager-ready event");
+}
+
+/// Scan every live CronTask, take a snapshot of its schedule, and offer it
+/// to `TaskStore` as backfill material for any linked Task with missing
+/// schedule fields. The backfill helper only writes when a field is
+/// actually empty — stable tasks are untouched.
+async fn heal_task_schedule_fields(manager: &CronTaskManager) {
+    let Some(task_store) = crate::task::get_task_store() else {
+        return;
+    };
+    let cron_tasks = manager.get_all_tasks().await;
+    // Build a lookup by cron task id so the TaskStore heal pass can answer
+    // "what schedule does this CronTask have?" without holding the cron
+    // manager lock while we iterate the Task map.
+    let snapshot: std::collections::HashMap<String, crate::task::ScheduleBackfill> = cron_tasks
+        .into_iter()
+        .filter_map(|ct| {
+            let backfill = match ct.schedule.as_ref()? {
+                CronSchedule::Every { minutes, .. } => {
+                    crate::task::ScheduleBackfill::IntervalMinutes(*minutes)
+                }
+                CronSchedule::Cron { expr, tz } => crate::task::ScheduleBackfill::Cron {
+                    expression: expr.clone(),
+                    timezone: tz.clone(),
+                },
+                CronSchedule::At { at } => crate::task::ScheduleBackfill::DispatchAt(
+                    chrono::DateTime::parse_from_rfc3339(at).ok()?.timestamp_millis(),
+                ),
+                CronSchedule::Loop => return None,
+            };
+            Some((ct.id, backfill))
+        })
+        .collect();
+
+    if snapshot.is_empty() {
+        return;
+    }
+
+    let healed = task_store
+        .heal_missing_schedule_fields(|cron_id| snapshot.get(cron_id).cloned())
+        .await;
+    if !healed.is_empty() {
+        ulog_info!(
+            "[task] safety-net heal: back-filled schedule on {} task(s) from linked CronTasks: {:?}",
+            healed.len(),
+            healed
+        );
+    }
 }
 
 /// Recover all tasks that were running before app restart (方案 A: Rust 统一恢复)

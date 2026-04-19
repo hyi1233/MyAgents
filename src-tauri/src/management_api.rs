@@ -1608,10 +1608,23 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
             && existing.run_mode == desired_run_mode
             && existing.end_conditions == desired_end_conditions;
         if compatible {
-            manager
-                .start_task(&id)
-                .await
-                .map_err(|e| format!("start_task: {}", e))?;
+            // Idempotent start: the CronTask may already be Running —
+            // e.g. if the app recovered from a crash where this Task
+            // was mid-execution, `recover_running_tasks` restarts the
+            // CronTask back to Running while the Task row may still be
+            // Todo (from a stale migration, or because the user is
+            // about to hit "立即执行" to re-bind). `start_task` errors
+            // on "already running", which surfaces as a misleading
+            // 执行失败 toast to the user. Skip the redundant
+            // start_task call when the cron is already live; the
+            // scheduler start call below is independently idempotent
+            // (see `start_task_scheduler`'s early-return).
+            if existing.status != cron_task::TaskStatus::Running {
+                manager
+                    .start_task(&id)
+                    .await
+                    .map_err(|e| format!("start_task: {}", e))?;
+            }
             manager
                 .start_task_scheduler(&id)
                 .await

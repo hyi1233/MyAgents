@@ -207,6 +207,19 @@ pub enum TaskDispatchOrigin {
     AiAligned,
 }
 
+/// Backfill payload for `TaskStore::heal_missing_schedule_fields`. The caller
+/// translates its CronTask representation into this enum so `task.rs` stays
+/// independent of `cron_task::CronSchedule`'s exact shape.
+#[derive(Debug, Clone)]
+pub enum ScheduleBackfill {
+    IntervalMinutes(u32),
+    Cron {
+        expression: String,
+        timezone: Option<String>,
+    },
+    DispatchAt(i64),
+}
+
 // ================ Struct ================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -632,8 +645,61 @@ impl TaskStore {
         let now = now_ms();
         let mut changed = false;
         for task in map.values_mut() {
-            if matches!(task.status, TaskStatus::Running | TaskStatus::Verifying) {
-                let from = task.status;
+            if !matches!(task.status, TaskStatus::Running | TaskStatus::Verifying) {
+                continue;
+            }
+            let from = task.status;
+            // Crash recovery classification matrix:
+            //
+            //   (status, mode)                         → outcome
+            //   (Running, Recurring | Loop)            → stay Running + self-loop audit
+            //   everything else (Once, Scheduled, or Verifying × any mode)
+            //                                          → Blocked + user intervention
+            //
+            // Rationale for each branch:
+            //
+            // * `Running × Recurring|Loop`: the linked CronTask's schedule
+            //   is still alive; the scheduler will fire at the next planned
+            //   trigger. The Task belongs in the "进行中" bucket (PRD §7.3)
+            //   — not "规划中" (Todo) or "已阻塞" (Blocked). A self-loop
+            //   StatusTransition (from == to == Running) records the
+            //   crash in the history; the UI renders same-from-to rows as
+            //   a single event pill without an arrow.
+            //
+            // * `Verifying × any mode`: Verifying is a hand-off state
+            //   (AI finished; verification is in progress). Demoting
+            //   silently to Running would lose that hand-off and could
+            //   cause the next scheduler tick to re-fire the task,
+            //   burning tokens and producing duplicate side effects. Safer
+            //   to escalate to Blocked so the user explicitly re-verifies
+            //   or rerans.
+            //
+            // * `Running × Once|Scheduled`: their fire window has either
+            //   passed (app died mid-run) or was explicit; they need user
+            //   intervention.
+            let keep_running = matches!(
+                (from, task.execution_mode),
+                (
+                    TaskStatus::Running,
+                    TaskExecutionMode::Recurring | TaskExecutionMode::Loop
+                )
+            );
+            if keep_running {
+                // Status unchanged (already Running); only the
+                // self-loop history entry records the event.
+                task.updated_at = now;
+                task.status_history.push(StatusTransition {
+                    from: Some(from),
+                    to: TaskStatus::Running,
+                    at: now,
+                    actor: TransitionActor::System,
+                    message: Some(
+                        "上次运行被应用重启中断,调度器将在下次计划时间继续触发"
+                            .to_string(),
+                    ),
+                    source: Some(TransitionSource::Crash),
+                });
+            } else {
                 task.status = TaskStatus::Blocked;
                 task.updated_at = now;
                 task.status_history.push(StatusTransition {
@@ -641,14 +707,14 @@ impl TaskStore {
                     to: TaskStatus::Blocked,
                     at: now,
                     actor: TransitionActor::System,
-                    // User-facing Chinese copy — this line shows up directly on the
-                    // task card as an activity-bar quote, so it needs to read as
-                    // natural product language, not an internal log string.
-                    message: Some("上次运行被应用重启中断,可重新派发以继续".to_string()),
+                    message: Some(
+                        "上次运行被应用重启中断,可重新派发以继续"
+                            .to_string(),
+                    ),
                     source: Some(TransitionSource::Crash),
                 });
-                changed = true;
             }
+            changed = true;
         }
         (map, changed)
     }
@@ -1622,6 +1688,78 @@ impl TaskStore {
 
     // ---- Convenience: append session / update progress / cron link ----
 
+    /// Post-boot safety net (PRD §9.3.3): heal recurring/scheduled tasks whose
+    /// schedule fields were lost but whose linked CronTask still carries the
+    /// authoritative schedule. Triggered from `initialize_cron_manager` after
+    /// both stores are loaded.
+    ///
+    /// We only fill missing fields — never overwrite an existing value. Once /
+    /// Loop tasks have nothing to heal (no user-visible schedule detail).
+    ///
+    /// Returns the list of task IDs that were healed, for logging.
+    pub async fn heal_missing_schedule_fields(
+        &self,
+        lookup: impl Fn(&str) -> Option<ScheduleBackfill>,
+    ) -> Vec<String> {
+        let mut inner = self.inner.write().await;
+        let mut next = inner.clone();
+        let mut healed: Vec<String> = Vec::new();
+        let now = now_ms();
+        for (id, task) in inner.iter() {
+            if task.deleted {
+                continue;
+            }
+            let needs_heal = match task.execution_mode {
+                TaskExecutionMode::Recurring => {
+                    task.cron_expression.is_none() && task.interval_minutes.is_none()
+                }
+                TaskExecutionMode::Scheduled => task.dispatch_at.is_none(),
+                TaskExecutionMode::Once | TaskExecutionMode::Loop => false,
+            };
+            if !needs_heal {
+                continue;
+            }
+            let Some(cron_id) = task.cron_task_id.as_deref() else {
+                continue;
+            };
+            let Some(backfill) = lookup(cron_id) else {
+                continue;
+            };
+            let mut updated = task.clone();
+            match (&task.execution_mode, backfill) {
+                (TaskExecutionMode::Recurring, ScheduleBackfill::IntervalMinutes(m)) => {
+                    updated.interval_minutes = Some(m);
+                }
+                (
+                    TaskExecutionMode::Recurring,
+                    ScheduleBackfill::Cron { expression, timezone },
+                ) => {
+                    updated.cron_expression = Some(expression);
+                    updated.cron_timezone = timezone;
+                }
+                (TaskExecutionMode::Scheduled, ScheduleBackfill::DispatchAt(ts)) => {
+                    updated.dispatch_at = Some(ts);
+                }
+                // Mode / backfill mismatch (e.g. linked CronTask is Loop but
+                // Task says Recurring) — skip silently; a later user edit
+                // will reconcile.
+                _ => continue,
+            }
+            updated.updated_at = now;
+            next.insert(id.clone(), updated);
+            healed.push(id.clone());
+        }
+        if healed.is_empty() {
+            return healed;
+        }
+        if let Err(e) = Self::persist_locked(&self.jsonl_path, &next) {
+            ulog_warn!("[task] heal persist failed: {}", e);
+            return Vec::new();
+        }
+        *inner = next;
+        healed
+    }
+
     pub async fn append_session(&self, id: &str, session_id: &str) -> Result<Task, String> {
         let mut inner = self.inner.write().await;
         let existing = inner
@@ -2466,6 +2604,53 @@ pub async fn cmd_task_write_doc(
         ));
     }
     state.write_doc(&id, filename, &content).await
+}
+
+/// Reveal `~/.myagents/tasks/<id>/` in the OS file manager so the user
+/// can inspect / edit `task.md`, `verify.md`, `progress.md`, `alignment.md`
+/// directly. Sandboxed through `task_docs_dir` so we can't be coerced into
+/// opening an arbitrary path. Creates the dir on demand — a fresh Task
+/// has no docs dir until its first write.
+#[tauri::command]
+pub async fn cmd_task_open_docs_dir(
+    state: tauri::State<'_, ManagedTaskStore>,
+    id: String,
+) -> Result<(), String> {
+    // Validate the task exists so the UI can't open a docs dir for a
+    // deleted / unknown task (Finder would happily open an empty dir).
+    let _task = state
+        .get(&id)
+        .await
+        .ok_or_else(|| String::from(TaskOpError::not_found(&id)))?;
+    let dir = task_docs_dir(&id)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir task dir: {}", e))?;
+    let path = dir.to_string_lossy().to_string();
+
+    // OS openers are user-visible system commands (CLAUDE.md exception);
+    // we skip `process_cmd` here and match commands.rs:cmd_open_file's
+    // pattern directly.
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("open finder: {}", e))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("open explorer: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("xdg-open: {}", e))?;
+    }
+    Ok(())
 }
 
 /// Aggregate runtime telemetry for a Task, composed from:

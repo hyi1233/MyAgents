@@ -77,59 +77,69 @@ export default function CustomSelect({
                 anchorRef={triggerRef}
                 placement="bottom-start"
                 matchAnchorWidth
-                className="max-h-60 overflow-auto py-1 shadow-md"
+                className="shadow-md"
                 // Elevated above modal backdrops since selects are often
                 // rendered inside OverlayBackdrop-wrapped dialogs.
                 zIndex={300}
             >
-                {options.map(option =>
-                    option.isSeparator ? (
-                        <div key={option.value} className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]/50">
-                            {option.label}
-                        </div>
-                    ) : (
-                        <button
-                            key={option.value}
-                            type="button"
-                            onClick={() => handleSelect(option.value)}
-                            className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
-                                option.value === value
-                                    ? 'text-[var(--accent-warm)]'
-                                    : 'text-[var(--ink)] hover:bg-[var(--paper-inset)]'
-                            }`}
-                        >
-                            {option.icon && (
-                                <span className="shrink-0">{option.icon}</span>
-                            )}
-                            <span className="min-w-0 flex-1 truncate">{option.label}</span>
-                            {option.suffix && (
-                                <span className="shrink-0">{option.suffix}</span>
-                            )}
-                            {option.value === value && (
-                                <Check className="h-3 w-3 shrink-0" />
-                            )}
-                        </button>
-                    )
-                )}
+                {/* Scroll container — Popover's DEFAULT_CHROME ships
+                    `overflow-hidden` (for rounded-corner clipping of the
+                    shadow). Putting `overflow-auto` on the same element
+                    via className gets overridden by that `overflow-hidden`
+                    in Tailwind's compiled order, which silently clipped
+                    long option lists (e.g. 24-hour picker showed only
+                    ~8 items, couldn't scroll). A nested div sidesteps the
+                    conflict: outer clips, inner scrolls. */}
+                <div className="max-h-60 overflow-y-auto py-1">
+                    {options.map(option =>
+                        option.isSeparator ? (
+                            <div key={option.value} className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]/50">
+                                {option.label}
+                            </div>
+                        ) : (
+                            <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => handleSelect(option.value)}
+                                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+                                    option.value === value
+                                        ? 'text-[var(--accent-warm)]'
+                                        : 'text-[var(--ink)] hover:bg-[var(--paper-inset)]'
+                                }`}
+                            >
+                                {option.icon && (
+                                    <span className="shrink-0">{option.icon}</span>
+                                )}
+                                <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                                {option.suffix && (
+                                    <span className="shrink-0">{option.suffix}</span>
+                                )}
+                                {option.value === value && (
+                                    <Check className="h-3 w-3 shrink-0" />
+                                )}
+                            </button>
+                        )
+                    )}
 
-                {footerAction && (
-                    <>
-                        <div className="my-1 border-t border-[var(--line)]" />
-                        <button
-                            type="button"
-                            onClick={() => {
-                                setIsOpen(false);
-                                footerAction.onClick();
-                            }}
-                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                        >
-                            {footerAction.icon && (
-                                <span className="shrink-0">{footerAction.icon}</span>
-                            )}
-                            <span>{footerAction.label}</span>
-                        </button>
-                    </>
-                )}
+                    {footerAction && (
+                        <>
+                            <div className="my-1 border-t border-[var(--line)]" />
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setIsOpen(false);
+                                    footerAction.onClick();
+                                }}
+                                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            >
+                                {footerAction.icon && (
+                                    <span className="shrink-0">{footerAction.icon}</span>
+                                )}
+                                <span>{footerAction.label}</span>
+                            </button>
+                        </>
+                    )}
+                </div>
             </Popover>
         </div>
     );
