@@ -377,7 +377,7 @@ export function ThoughtInput({
               <Hash className="h-4 w-4" />
             </button>
           </div>
-          <Tip label="保存笔记" shortcut="⌘ + Enter" align="end">
+          <Tip label="保存想法" shortcut="⌘ + Enter" align="end">
             <button
               type="button"
               onClick={() => void handleSubmit()}

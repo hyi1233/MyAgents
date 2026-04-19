@@ -1,7 +1,12 @@
 // TaskStatusBadge — status chip for the top-right of a task card.
 //
 // Rewired to match the v0.1.69 mockup:
-//   - running          → info (blue)       — 执行中
+//   - running          → success (green)   — 进行中 (green + leading dot
+//                                            = "actively in the pipeline".
+//                                            The dot is what separates it
+//                                            from `done` below, which
+//                                            reuses the same green palette
+//                                            but without a dot)
 //   - verifying        → accent-warm       — 验收中 (orange, matches the
 //                                            mockup's "verifying" chip —
 //                                            not info, because verifying
@@ -9,7 +14,7 @@
 //                                            is conceptually closer to a
 //                                            warm "attention" state than
 //                                            the cool "working" state)
-//   - done             → success (green)
+//   - done             → success (green, no dot) — 已完成
 //   - blocked          → warning (yellow)  — 已阻塞 (NOT error-red; the
 //                                            mockup uses warning for
 //                                            blocked because it's
@@ -50,9 +55,9 @@ interface StatusStyle {
 const STATUS_STYLE: Record<TaskStatus, StatusStyle> = {
   todo: { bg: 'bg-[var(--paper-inset)]', fg: 'text-[var(--ink-muted)]' },
   running: {
-    bg: 'bg-[var(--info-bg)]',
-    fg: 'text-[var(--info)]',
-    dot: 'bg-[var(--info)]',
+    bg: 'bg-[var(--success-bg)]',
+    fg: 'text-[var(--success)]',
+    dot: 'bg-[var(--success)]',
   },
   verifying: {
     bg: 'bg-[var(--accent-warm-subtle)]',
@@ -82,10 +87,15 @@ export function TaskStatusBadge({ status, compact }: Props) {
   const style = STATUS_STYLE[status];
   const label = STATUS_LABEL[status];
   const size = compact ? 'text-[10px]' : 'text-[11px]';
-  const padding = compact ? 'px-1.5 py-0.5' : 'px-2 py-0.5';
+  // Fixed height + leading-none so TaskStatusBadge and TaskCategoryBadge
+  // render at identical pixel sizes side-by-side. TaskCategoryBadge
+  // carries an h-3 icon which stretches its intrinsic line height; we
+  // clamp both here so the row stays tidy.
+  const height = compact ? 'h-[18px]' : 'h-5';
+  const padding = compact ? 'px-1.5' : 'px-2';
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-[var(--radius-sm)] font-medium ${style.bg} ${style.fg} ${padding} ${size}`}
+      className={`inline-flex items-center gap-1 rounded-[var(--radius-sm)] font-medium leading-none ${style.bg} ${style.fg} ${padding} ${height} ${size}`}
     >
       {style.dot && (
         <span

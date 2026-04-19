@@ -21,8 +21,10 @@ import {
   taskRun,
   taskUpdateStatus,
 } from '@/api/taskCenter';
+import CustomSelect, { type SelectOption } from '@/components/CustomSelect';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
+import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import type { Task, TaskStatus } from '@/../shared/types/task';
 import { canAutoUpgrade, upgradeLegacyCron, type LegacyCronRaw } from './legacyUpgrade';
 import { LegacyCronOverlay } from './LegacyCronOverlay';
@@ -88,8 +90,16 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
   const [legacy, setLegacy] = useState<LegacyCronRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
+  // Workspace filter — empty string = "全部" (no filter). Stored by
+  // workspace path (same key the Task row uses), resolved to a
+  // display name via `projects` in the option list below.
+  const [workspaceFilter, setWorkspaceFilter] = useState<string>('');
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  // When set, `TaskDetailOverlay` opens already in edit mode — used by the
+  // card/row "编辑" menu item so the user lands straight on the editor
+  // instead of the read-only detail view.
+  const [selectedTaskStartEditing, setSelectedTaskStartEditing] = useState(false);
   const [selectedLegacy, setSelectedLegacy] = useState<LegacyCronRow | null>(null);
   const [view, setView] = useState<TaskView>(loadStoredView);
   // Per-id busy flag so only the affected card/row greys out during an action,
@@ -276,8 +286,20 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
       legacy: l,
     }));
     const all = [...nativeCards, ...legacyCards];
+
+    // Two-stage filter: workspace first (strict path equality), then
+    // free-text query. Workspace defaults to '' = "全部". Path is the
+    // authoritative key both Task and legacy CronTask carry.
+    const afterWorkspace = workspaceFilter
+      ? all.filter((c) =>
+          c.kind === 'task'
+            ? c.task.workspacePath === workspaceFilter
+            : c.legacy.workspacePath === workspaceFilter,
+        )
+      : all;
+
     const filtered = needle
-      ? all.filter((c) => {
+      ? afterWorkspace.filter((c) => {
           if (c.kind === 'task') {
             const t = c.task;
             return (
@@ -288,7 +310,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
           }
           return c.legacy.name.toLowerCase().includes(needle);
         })
-      : all;
+      : afterWorkspace;
 
     const out: Record<Bucket, TaskCardLike[]> = {
       active: [],
@@ -331,14 +353,71 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
       });
     }
     return out;
-  }, [tasks, legacy, query]);
+  }, [tasks, legacy, query, workspaceFilter]);
 
   const clearSearch = useCallback(() => {
     setQuery('');
     searchInputRef.current?.blur();
   }, []);
 
+  // Options for the workspace filter — only show the workspaces that
+  // actually appear in the user's task list, so the dropdown doesn't
+  // list every project the app knows about (most of which may have
+  // zero tasks). `'' → 全部` is the always-present first entry.
+  const workspaceOptions: SelectOption[] = useMemo(() => {
+    const taskPaths = new Set<string>();
+    for (const t of tasks) if (t.workspacePath) taskPaths.add(t.workspacePath);
+    for (const l of legacy) if (l.workspacePath) taskPaths.add(l.workspacePath);
+    const opts: SelectOption[] = [{ value: '', label: '全部工作区' }];
+    for (const p of projects) {
+      if (p.internal) continue;
+      if (!taskPaths.has(p.path)) continue;
+      opts.push({
+        value: p.path,
+        label: p.displayName || p.name || p.path.split('/').pop() || p.path,
+        icon: <WorkspaceIcon icon={p.icon} size={14} />,
+      });
+    }
+    // Include any path present in tasks but NOT in `projects` (e.g. the
+    // workspace was renamed / removed since the task was created) so
+    // users can still filter to orphan tasks rather than being locked
+    // out. Label uses the tail of the path.
+    for (const path of taskPaths) {
+      if (opts.some((o) => o.value === path)) continue;
+      opts.push({
+        value: path,
+        label: `${path.split('/').pop() ?? path} (已失效)`,
+      });
+    }
+    return opts;
+  }, [tasks, legacy, projects]);
+
+  // Guard against "zombie" filter state: if the user selected a
+  // workspace, then every task in that workspace gets deleted, the
+  // option vanishes from `workspaceOptions` but `workspaceFilter` would
+  // still be set → the bucket memo filters everything out and the
+  // panel goes blank with no visible control to clear it (the dropdown
+  // itself hides when `workspaceOptions.length <= 2`). Reset the filter
+  // back to "全部" whenever its current value is no longer selectable.
+  useEffect(() => {
+    if (
+      workspaceFilter &&
+      !workspaceOptions.some((o) => o.value === workspaceFilter)
+    ) {
+      setWorkspaceFilter('');
+    }
+  }, [workspaceFilter, workspaceOptions]);
+
   const totalCount = tasks.length + legacy.length;
+
+  const openTaskDetail = (t: Task) => {
+    setSelectedTaskStartEditing(false);
+    setSelectedTask(t);
+  };
+  const openTaskForEdit = (t: Task) => {
+    setSelectedTaskStartEditing(true);
+    setSelectedTask(t);
+  };
 
   const renderCard = (c: TaskCardLike) => {
     if (c.kind === 'task') {
@@ -349,7 +428,8 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
           task={t}
           highlighted={highlightTaskId === t.id}
           busy={pendingIds.has(t.id)}
-          onOpen={() => setSelectedTask(t)}
+          onOpen={() => openTaskDetail(t)}
+          onEdit={() => openTaskForEdit(t)}
           onRun={() => handleRun(t)}
           onStop={() => handleStop(t)}
           onRerun={() => handleRerun(t)}
@@ -375,7 +455,8 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
           task={t}
           highlighted={highlightTaskId === t.id}
           busy={pendingIds.has(t.id)}
-          onOpen={() => setSelectedTask(t)}
+          onOpen={() => openTaskDetail(t)}
+          onEdit={() => openTaskForEdit(t)}
           onRun={() => handleRun(t)}
           onStop={() => handleStop(t)}
           onRerun={() => handleRerun(t)}
@@ -396,17 +477,31 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
     <div className="flex h-full flex-col">
       {/* Section header — label + persistent search pill + view toggle.
           h-12 per DESIGN.md §7.4 (aligns with TaskCenter page header).
-          The search pill is always visible (no toggle modal state) — per
-          the reference mock, searching is a constant affordance, not a
-          hidden mode the user has to enter first. */}
-      <div className="flex h-12 items-center gap-3 border-b border-[var(--line-subtle)] px-4">
+          v0.1.69 polish: bottom hairline removed; breathing room
+          below replaces it as the separator, so the right column
+          reads as a single continuous surface from header → buckets. */}
+      <div className="flex h-12 items-center gap-3 px-4">
         <div className="flex items-center gap-2">
-          <Layers className="h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
-          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+          <Layers className="h-4 w-4 text-[var(--ink-muted)]" strokeWidth={1.5} />
+          <span className="text-[16px] font-semibold text-[var(--ink)]">
             任务
           </span>
         </div>
         <div className="ml-auto flex items-center gap-2">
+          {/* Workspace filter — hidden when there's only one (or zero)
+              workspaces producing tasks; the dropdown would be pointless
+              in that case and would just eat header width. */}
+          {workspaceOptions.length > 2 && (
+            <div className="w-[160px]">
+              <CustomSelect
+                value={workspaceFilter}
+                options={workspaceOptions}
+                onChange={setWorkspaceFilter}
+                compact
+                placeholder="全部工作区"
+              />
+            </div>
+          )}
           <SearchPill
             inputRef={searchInputRef}
             value={query}
@@ -418,7 +513,13 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
         </div>
       </div>
 
-      <div className={`flex-1 overflow-y-auto ${view === 'list' ? '' : 'px-4 py-3'}`}>
+      {/* Outer padding is now uniform across card / list views. Previously
+          card used `px-4 py-3` on this wrapper while list used `px-3 pt-3`
+          on each inner section header — a 4px horizontal delta that made
+          the whole column visibly jump on view toggle. Both modes now
+          share the same left/right gutter; the list row component
+          (`TaskListRow`) keeps its own `px-3` for row-internal content. */}
+      <div className="flex-1 overflow-y-auto px-4 py-3">
         {loading ? (
           <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]">
             加载中…
@@ -433,11 +534,6 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
             if (rows.length === 0) return null;
             return view === 'card' ? (
               <section key={b} className="mb-6">
-                {/* Bucket header — 11px uppercase small-caps + count +
-                    flex-1 hairline rule (per the reference mock). The
-                    previous "big semibold" treatment was too loud — the
-                    header should read as a quiet section divider, with
-                    the task cards below carrying the visual weight. */}
                 <BucketHeader label={BUCKETS[b].label} count={rows.length} />
                 <div className="grid grid-cols-2 gap-3">
                   {rows.map(renderCard)}
@@ -445,9 +541,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
               </section>
             ) : (
               <section key={b} className="mb-4">
-                <div className="px-3 pt-3">
-                  <BucketHeader label={BUCKETS[b].label} count={rows.length} />
-                </div>
+                <BucketHeader label={BUCKETS[b].label} count={rows.length} />
                 <div>{rows.map(renderRow)}</div>
               </section>
             );
@@ -458,13 +552,18 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
       {selectedTask && (
         <TaskDetailOverlay
           task={selectedTask}
-          onClose={() => setSelectedTask(null)}
+          startEditing={selectedTaskStartEditing}
+          onClose={() => {
+            setSelectedTask(null);
+            setSelectedTaskStartEditing(false);
+          }}
           onChanged={(next) => {
             if (next === null) {
               setTasks((prev) =>
                 prev.filter((x) => x.id !== selectedTask.id),
               );
               setSelectedTask(null);
+              setSelectedTaskStartEditing(false);
             } else {
               setTasks((prev) =>
                 prev.map((x) => (x.id === next.id ? next : x)),

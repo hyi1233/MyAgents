@@ -19,6 +19,7 @@ export interface TaskListRowProps {
   highlighted?: boolean;
   busy?: boolean;
   onOpen: () => void;
+  onEdit?: () => void;
   onRun?: () => void;
   onStop?: () => void;
   onRerun?: () => void;
@@ -26,7 +27,7 @@ export interface TaskListRowProps {
 }
 
 export function TaskListRow(props: TaskListRowProps) {
-  const { task, legacy, highlighted, busy, onOpen, onRun, onStop, onRerun, onDelete } = props;
+  const { task, legacy, highlighted, busy, onOpen, onEdit, onRun, onStop, onRerun, onDelete } = props;
   const isLegacy = !!legacy && !task;
   const status = deriveTaskRowStatus(task ?? null, legacy?.status === 'running');
   const name = task?.name ?? legacy?.name ?? '—';
@@ -73,6 +74,7 @@ export function TaskListRow(props: TaskListRowProps) {
         onStop={onStop}
         onRerun={onRerun}
         onOpenDetail={onOpen}
+        onEdit={onEdit}
         onDelete={onDelete}
       />
     </button>

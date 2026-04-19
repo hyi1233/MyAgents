@@ -133,39 +133,73 @@ export function ThoughtPanel({
           per the reference mock. Tag-cloud dropdown is re-attached
           relative to this header's container so it still appears right
           under the search input, via absolute positioning. */}
-      <div className="relative flex h-12 shrink-0 items-center border-b border-[var(--line-subtle)] px-4">
-        <div className="flex items-center gap-2">
-          <Lightbulb className="h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
-          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-            想法
-          </span>
-        </div>
-        <div className="ml-auto">
-          <SearchPill
-            inputRef={searchInputRef}
-            value={query}
-            onChange={setQuery}
-            onClear={clearSearch}
-            placeholder="搜索想法…"
-            onFocus={() => setSearchFocused(true)}
-            // Delay blur so clicking a tag inside the floating cloud
-            // registers before the cloud collapses. The tag buttons use
-            // `onMouseDown` + preventDefault to re-focus the input, but
-            // that sequence still triggers a blur→focus round-trip —
-            // the 120ms grace absorbs it cleanly.
-            onBlur={() =>
-              setTimeout(() => setSearchFocused(false), 120)
-            }
-          />
-        </div>
+      {/* Panel header — v0.1.69 polish: hairline below removed;
+          the gap between this row and the content below is now
+          pure breathing room (via the input row's own padding) so
+          the column reads as one continuous surface. Vertical
+          divider between the two panels remains (handled in
+          TaskCenter.tsx). */}
+      <div className="relative flex h-12 shrink-0 items-center px-4">
+        {/* When the search pill is active (focused or has a query), the
+            "想法" label folds out of the row so the input can claim the
+            full width. We keep the label in the DOM with width:0 +
+            opacity so there's no reflow flash; the SearchPill owns the
+            animation via its own width transition. */}
+        {(() => {
+          const searchActive = searchFocused || query.length > 0;
+          return (
+            <>
+              <div
+                className="flex items-center gap-2 overflow-hidden"
+                style={{
+                  maxWidth: searchActive ? '0px' : '120px',
+                  opacity: searchActive ? 0 : 1,
+                  marginRight: searchActive ? '0' : '8px',
+                  transition:
+                    'max-width 200ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease-out, margin-right 200ms cubic-bezier(0.22, 1, 0.36, 1)',
+                  pointerEvents: searchActive ? 'none' : 'auto',
+                }}
+              >
+                <Lightbulb
+                  className="h-4 w-4 shrink-0 text-[var(--ink-muted)]"
+                  strokeWidth={1.5}
+                />
+                <span className="whitespace-nowrap text-[16px] font-semibold text-[var(--ink)]">
+                  想法
+                </span>
+              </div>
+              <div className="ml-auto flex min-w-0 flex-1 justify-end">
+                <SearchPill
+                  inputRef={searchInputRef}
+                  value={query}
+                  onChange={setQuery}
+                  onClear={clearSearch}
+                  placeholder="搜索想法…"
+                  expandedFull
+                  onFocus={() => setSearchFocused(true)}
+                  // Delay blur so clicking a tag inside the floating cloud
+                  // registers before the cloud collapses. The tag buttons use
+                  // `onMouseDown` + preventDefault to re-focus the input, but
+                  // that sequence still triggers a blur→focus round-trip —
+                  // the 120ms grace absorbs it cleanly.
+                  onBlur={() =>
+                    setTimeout(() => setSearchFocused(false), 120)
+                  }
+                />
+              </div>
+            </>
+          );
+        })()}
 
         {/* Tag cloud — floats under the search pill when focused and
-            the input is empty, anchored to the header's right edge so
-            it aligns with the pill's own width. */}
+            the input is empty. Spans the same horizontal range as the
+            expanded SearchPill (pill takes full-row width when focused
+            via `expandedFull`, which is also left-4→right-4 of this
+            header) by absolutely positioning with both edges instead
+            of a fixed pixel width. */}
         <div
-          className="absolute right-4 top-full z-30 mt-1 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] shadow-md"
+          className="absolute left-4 right-4 top-full z-30 mt-1 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] shadow-md"
           style={{
-            width: '240px',
             maxHeight: showTagCloud ? '220px' : '0px',
             opacity: showTagCloud ? 1 : 0,
             pointerEvents: showTagCloud ? 'auto' : 'none',

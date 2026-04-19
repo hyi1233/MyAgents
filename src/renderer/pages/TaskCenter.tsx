@@ -2,7 +2,6 @@
 // PRD §5 / §6.
 
 import { useCallback, useState } from 'react';
-import { ChevronRight } from 'lucide-react';
 import { ThoughtPanel } from '@/components/task-center/ThoughtPanel';
 import { TaskListPanel } from '@/components/task-center/TaskListPanel';
 import { DispatchTaskDialog } from '@/components/task-center/DispatchTaskDialog';
@@ -73,19 +72,20 @@ export default function TaskCenter({ isActive }: Props) {
 
   return (
     <div className="flex h-full flex-col bg-[var(--paper)]">
-      {/* Header — h-12 per DESIGN.md §7.4; 14px title per §2.2 type scale
-          (the 15px previously used is not a type-scale value). Subtitle uses
-          lucide ChevronRight instead of the Unicode `→` arrow so it sits on
-          the CJK baseline cleanly. */}
-      <div className="flex h-12 items-center border-b border-[var(--line)] px-4">
-        <h1 className="text-sm font-semibold text-[var(--ink)]">任务中心</h1>
-        <span className="ml-3 flex items-center gap-1 text-[12px] text-[var(--ink-muted)]">
-          沉淀想法
-          <ChevronRight className="h-3 w-3" strokeWidth={1.5} />
-          派发任务
-          <ChevronRight className="h-3 w-3" strokeWidth={1.5} />
-          让 AI 执行
-        </span>
+      {/* Page title — v0.1.69 polish:
+            • breadcrumb "沉淀想法 › 派发任务 › 让 AI 执行" removed
+              (it was scene-setting copy, redundant once the user is in
+              the tab)
+            • title bumped to 20px (type-scale §2.2 --text-xl) so it
+              reads as the page heading it is, a tier above the 14px
+              section headers inside the panels below
+            • bottom border removed; vertical breathing room (pt/pb)
+              replaces the hairline as the divider, continuing the
+              "layout over rules" direction set in the review  */}
+      <div className="flex shrink-0 items-center px-5 pt-5 pb-3">
+        <h1 className="text-[20px] font-semibold text-[var(--ink)]">
+          任务中心
+        </h1>
       </div>
 
       {/* Two-column body — each panel renders its own section header

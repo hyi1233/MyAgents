@@ -12,7 +12,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Bell,
-  Bot,
   Clock,
   FileText,
   Flag,
@@ -56,27 +55,14 @@ function SectionHeader({
   );
 }
 
-const NOTIFICATION_EVENTS: Array<{
-  value: NonNullable<NotificationConfig['events']>[number];
-  label: string;
-}> = [
-  { value: 'done', label: '完成' },
-  { value: 'blocked', label: '阻塞' },
-  { value: 'stopped', label: '暂停' },
-  { value: 'verifying', label: '进入验证' },
-  { value: 'endCondition', label: '循环收敛' },
-];
-
+// The v0.1.69 UI no longer exposes per-event subscription; every new task
+// gets the standard three-event set (done / blocked / endCondition) which
+// covers virtually all observed use cases. Backend contract unchanged —
+// `events` is still carried on the NotificationConfig payload.
 const DEFAULT_EVENTS: NonNullable<NotificationConfig['events']> = [
   'done',
   'blocked',
   'endCondition',
-];
-
-const PERMISSION_MODE_OPTIONS = [
-  { value: 'auto', label: '自动 (Auto)' },
-  { value: 'plan', label: '仅计划 (Plan)' },
-  { value: 'fullAgency', label: '完全自治 (Full Agency)' },
 ];
 
 interface Props {
@@ -158,10 +144,6 @@ export function DispatchTaskDialog({
   const [cronExpression, setCronExpression] = useState('');
   const [cronTimezone, setCronTimezone] = useState('');
 
-  // Execution overrides — optional per-task model / permission mode.
-  const [modelOverride, setModelOverride] = useState('');
-  const [permissionMode, setPermissionMode] = useState('auto');
-
   // End conditions
   const [endConditionMode, setEndConditionMode] = useState<EndConditionMode>('forever');
   const [deadline, setDeadline] = useState('');
@@ -172,9 +154,6 @@ export function DispatchTaskDialog({
   const { options: deliveryOptions, hasChannels } = useDeliveryChannels(workspacePath);
   const [notifyEnabled, setNotifyEnabled] = useState(true);
   const [deliveryBotId, setDeliveryBotId] = useState('');
-  const [subscribedEvents, setSubscribedEvents] = useState<
-    NonNullable<NotificationConfig['events']>
-  >(DEFAULT_EVENTS);
 
   const [busy, setBusy] = useState(false);
 
@@ -252,11 +231,11 @@ export function DispatchTaskDialog({
   const buildNotification = useCallback((): NotificationConfig => {
     const cfg: NotificationConfig = {
       desktop: notifyEnabled,
-      events: subscribedEvents,
+      events: DEFAULT_EVENTS,
     };
     if (deliveryBotId) cfg.botChannelId = deliveryBotId;
     return cfg;
-  }, [notifyEnabled, subscribedEvents, deliveryBotId]);
+  }, [notifyEnabled, deliveryBotId]);
 
   const handleSubmit = useCallback(async () => {
     if (errors.length > 0 || busy || !workspace) return;
@@ -291,8 +270,6 @@ export function DispatchTaskDialog({
         intervalMinutes: isRecurring && !advancedCron ? intervalMinutes : undefined,
         cronExpression: isRecurring && advancedCron ? advancedCron : undefined,
         cronTimezone: isRecurring && advancedCron ? cronTimezone || undefined : undefined,
-        model: modelOverride.trim() || undefined,
-        permissionMode: permissionMode !== 'auto' ? permissionMode : undefined,
         sourceThoughtId: thought?.id,
         tags,
         notification: buildNotification(),
@@ -329,8 +306,6 @@ export function DispatchTaskDialog({
     intervalMinutes,
     cronExpression,
     cronTimezone,
-    modelOverride,
-    permissionMode,
     name,
     description,
     taskMd,
@@ -342,18 +317,6 @@ export function DispatchTaskDialog({
     toast,
     onDispatched,
   ]);
-
-  const toggleEvent = useCallback(
-    (ev: NonNullable<NotificationConfig['events']>[number]) => {
-      setSubscribedEvents((prev) => {
-        const set = new Set(prev);
-        if (set.has(ev)) set.delete(ev);
-        else set.add(ev);
-        return Array.from(set);
-      });
-    },
-    [],
-  );
 
   return (
     <OverlayBackdrop onClose={onClose} className="z-[200]">
@@ -500,37 +463,9 @@ export function DispatchTaskDialog({
 
           <div className="border-t border-[var(--line)]" />
 
-          {/* 执行覆盖 */}
-          <div>
-            <SectionHeader icon={Bot}>执行覆盖 (可选)</SectionHeader>
-            <div className="mt-4 space-y-4 pl-6">
-              <div>
-                <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
-                  模型
-                  <span className="ml-1 font-normal text-[var(--ink-muted)]">(留空使用 Agent 默认)</span>
-                </label>
-                <input
-                  type="text"
-                  value={modelOverride}
-                  onChange={(e) => setModelOverride(e.target.value)}
-                  placeholder="例如: claude-opus-4-7、deepseek-chat"
-                  className={INPUT_CLS}
-                />
-              </div>
-              <div>
-                <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
-                  权限模式
-                </label>
-                <CustomSelect
-                  value={permissionMode}
-                  options={PERMISSION_MODE_OPTIONS}
-                  onChange={setPermissionMode}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="border-t border-[var(--line)]" />
+          {/* 执行覆盖 — hidden in v0.1.69 UI. Model / permissionMode overrides
+              are still accepted by the backend Task contract; we just don't
+              expose fields for them at create time yet. */}
 
           {/* 任务通知 */}
           <div>
@@ -543,50 +478,18 @@ export function DispatchTaskDialog({
                 <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />
               </div>
 
-              {notifyEnabled && (
-                <>
-                  {hasChannels && (
-                    <div className="space-y-2">
-                      <label className="text-[13px] font-medium text-[var(--ink-secondary)]">
-                        投递渠道
-                      </label>
-                      <CustomSelect
-                        value={deliveryBotId}
-                        options={deliveryOptions}
-                        onChange={setDeliveryBotId}
-                        placeholder="桌面通知（默认）"
-                      />
-                    </div>
-                  )}
-                  <div className="space-y-2">
-                    <label className="text-[13px] font-medium text-[var(--ink-secondary)]">
-                      通知事件
-                    </label>
-                    <div className="flex flex-wrap gap-1.5">
-                      {NOTIFICATION_EVENTS.map((e) => {
-                        const active = subscribedEvents.includes(e.value);
-                        return (
-                          <button
-                            key={e.value}
-                            type="button"
-                            onClick={() => toggleEvent(e.value)}
-                            aria-pressed={active}
-                            className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
-                              active
-                                ? 'bg-[var(--accent)] text-white'
-                                : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
-                            }`}
-                          >
-                            {e.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <p className="text-[13px] text-[var(--ink-muted)]">
-                      默认订阅「完成 / 阻塞 / 循环收敛」，足以覆盖大多数场景
-                    </p>
-                  </div>
-                </>
+              {notifyEnabled && hasChannels && (
+                <div className="space-y-2">
+                  <label className="text-[13px] font-medium text-[var(--ink-secondary)]">
+                    投递渠道
+                  </label>
+                  <CustomSelect
+                    value={deliveryBotId}
+                    options={deliveryOptions}
+                    onChange={setDeliveryBotId}
+                    placeholder="桌面通知（默认）"
+                  />
+                </div>
               )}
             </div>
           </div>

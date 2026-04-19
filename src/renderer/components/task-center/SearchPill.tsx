@@ -28,6 +28,12 @@ interface Props {
   collapsedPx?: number;
   /** Width when focused or when `value` is non-empty. */
   expandedPx?: number;
+  /** When `true`, the expanded state takes the full width of its flex
+   *  container instead of the `expandedPx` pixel value. Used by panel
+   *  headers that collapse sibling content on focus so the search field
+   *  can claim the whole row. The parent is responsible for hiding the
+   *  sibling (e.g. the "想法" label). */
+  expandedFull?: boolean;
   onFocus?: () => void;
   onBlur?: () => void;
 }
@@ -40,6 +46,7 @@ export function SearchPill({
   placeholder = '搜索…',
   collapsedPx = 150,
   expandedPx = 320,
+  expandedFull = false,
   onFocus,
   onBlur,
 }: Props) {
@@ -48,11 +55,16 @@ export function SearchPill({
   // search-in-progress doesn't collapse and clip the query the moment
   // the user clicks a result.
   const expanded = focused || value.length > 0;
+  const width = expanded
+    ? expandedFull
+      ? '100%'
+      : `${expandedPx}px`
+    : `${collapsedPx}px`;
   return (
     <div
       className="inline-flex h-7 items-center gap-1.5 rounded-full bg-[var(--paper-inset)] px-3 text-[var(--ink-muted)]"
       style={{
-        width: `${expanded ? expandedPx : collapsedPx}px`,
+        width,
         transition: 'width 200ms cubic-bezier(0.22, 1, 0.36, 1)',
       }}
     >

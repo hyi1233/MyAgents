@@ -34,6 +34,9 @@ export interface TaskCardItemProps {
   highlighted?: boolean;
   busy?: boolean;
   onOpen: () => void;
+  /** Menu "编辑" action — opens the detail overlay in edit mode. Not
+   *  wired for legacy rows (their schedule lives in the old cron UI). */
+  onEdit?: () => void;
   onRun?: () => void;
   onStop?: () => void;
   onRerun?: () => void;
@@ -41,7 +44,7 @@ export interface TaskCardItemProps {
 }
 
 export function TaskCardItem(props: TaskCardItemProps) {
-  const { task, legacy, highlighted, busy, onOpen, onRun, onStop, onRerun, onDelete } = props;
+  const { task, legacy, highlighted, busy, onOpen, onEdit, onRun, onStop, onRerun, onDelete } = props;
   const isLegacy = !!legacy && !task;
   const status = deriveTaskRowStatus(task ?? null, legacy?.status === 'running');
   const name = task?.name ?? legacy?.name ?? '—';
@@ -98,33 +101,31 @@ export function TaskCardItem(props: TaskCardItemProps) {
     <button
       type="button"
       onClick={onOpen}
-      className={`group relative flex w-full flex-col gap-2.5 rounded-[var(--radius-lg)] border bg-[var(--paper-elevated)] p-4 pr-10 text-left transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px] ${
+      className={`group relative flex w-full flex-col gap-2.5 rounded-[var(--radius-lg)] border bg-[var(--paper-elevated)] p-4 text-left transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px] ${
         highlighted ? 'border-[var(--accent-warm)] shadow-sm' : 'border-[var(--line)]'
       }`}
     >
-      {/* "…" menu — absolutely pinned to the card's top-right corner so
-          its position is stable no matter how wide the chip row gets.
-          Chip row gets `pr-10` reserved above so its rightmost chip
-          can't overlap the menu button. */}
-      <div className="absolute right-2 top-2 z-10">
-        <TaskItemActions
-          variant={isLegacy ? 'legacy' : 'task'}
-          status={status}
-          busy={busy}
-          onRun={onRun}
-          onStop={onStop}
-          onRerun={onRerun}
-          onOpenDetail={onOpen}
-          onDelete={onDelete}
-        />
-      </div>
-
-      {/* Row 1 — chip row, tags in explicit order: status first, category
-          second. Both chips are always pill-shaped; no hover-only
-          affordances in this row. */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <TaskStatusBadge status={status} compact />
+      {/* Row 1 — chips on the left, "…" pinned to the far right via
+          `ml-auto` on the menu wrapper. `ml-auto` beats `justify-between`
+          for this layout because it keeps working when the chip cluster
+          ever grows a third element or when the row gets wrapped in
+          another flex context during a refactor. */}
+      <div className="flex w-full items-center gap-1.5">
+        <TaskStatusBadge status={status} />
         <TaskCategoryBadge mode={category} legacy={isLegacy} />
+        <div className="ml-auto shrink-0">
+          <TaskItemActions
+            variant={isLegacy ? 'legacy' : 'task'}
+            status={status}
+            busy={busy}
+            onRun={onRun}
+            onStop={onStop}
+            onRerun={onRerun}
+            onOpenDetail={onOpen}
+            onEdit={onEdit}
+            onDelete={onDelete}
+          />
+        </div>
       </div>
 
       {/* Row 2 — title. 14px / weight 500 per the reference mock — the
@@ -302,17 +303,98 @@ function formatAbsolute(ts: number): string {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${hh}:${mm}`;
 }
 
+// Translate a recurring task's schedule into a one-line Chinese readout
+// for the card's meta row. Previously we punted on cron by showing the
+// raw `0 11 * * *` expression — users shouldn't have to know cron syntax
+// to read their own task list. This formatter covers the five shapes
+// the chip picker emits (daily / weekdays / specific weekdays / weekly /
+// monthly) plus interval mode; anything else (custom cron the user typed)
+// falls back to the raw string so we stay honest rather than mis-translate.
 function formatRecurring(task?: Task): string | null {
   if (!task) return null;
   if (task.cronExpression) {
-    // Show the raw expression; too-clever "每日 08:30" inference would
-    // need a cron→humanized mapper and a tz-aware clock. Keep it honest.
-    return task.cronExpression;
+    return humanizeCron(task.cronExpression) ?? task.cronExpression;
   }
   if (task.intervalMinutes) {
     const m = task.intervalMinutes;
+    if (m >= 1440 && m % 1440 === 0) return `每 ${m / 1440} 天`;
     if (m >= 60 && m % 60 === 0) return `每 ${m / 60} 小时`;
     return `每 ${m} 分钟`;
+  }
+  return null;
+}
+
+const WEEKDAY_LABEL_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+/**
+ * Render an hour:minute pair with a Chinese period label.
+ *   0-4  → 凌晨   5-8  → 早上   9-11 → 上午
+ *   12   → 中午   13-17→ 下午   18-23→ 晚上
+ * Zero minutes drop the colon so "11:00" reads as "11 点" naturally.
+ */
+function formatClockCN(hour: number, minute: number): string {
+  const period = periodOfHour(hour);
+  const display = hour === 0 ? 0 : hour > 12 ? hour - 12 : hour;
+  if (minute === 0) return `${period} ${display} 点`;
+  const mm = String(minute).padStart(2, '0');
+  return `${period} ${display}:${mm}`;
+}
+
+function periodOfHour(hour: number): string {
+  if (hour < 5) return '凌晨';
+  if (hour < 9) return '早上';
+  if (hour < 12) return '上午';
+  if (hour === 12) return '中午';
+  if (hour < 18) return '下午';
+  return '晚上';
+}
+
+/**
+ * Best-effort cron → Chinese. Covers the five shapes
+ * `CronExpressionInput`'s chip picker can emit (plus a handful of common
+ * manual patterns). Returns null for anything that doesn't match so the
+ * caller can fall back to the raw cron string honestly.
+ */
+function humanizeCron(expr: string): string | null {
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minStr, hourStr, dom, month, dow] = parts;
+  const minute = Number(minStr);
+  const hour = Number(hourStr);
+  if (!Number.isInteger(minute) || !Number.isInteger(hour)) return null;
+  if (minute < 0 || minute > 59 || hour < 0 || hour > 23) return null;
+  // Month must be `*` — we only humanize patterns that fire every month
+  // of the year. `0 8 15 1 *` is "January 15th yearly", not "every month
+  // on the 15th"; mistranslating that would be worse than showing the
+  // raw cron. Fall through to null so `formatRecurring` displays the
+  // literal expression instead.
+  if (month !== '*') return null;
+  const clock = formatClockCN(hour, minute);
+
+  // 每天        `M H * * *`
+  if (dom === '*' && dow === '*') return `每天${clock}`;
+  // 工作日      `M H * * 1-5`
+  if (dom === '*' && dow === '1-5') return `工作日${clock}`;
+  // 单一星期    `M H * * N`     (0..6, 0=Sun)
+  if (dom === '*' && /^\d$/.test(dow)) {
+    const n = Number(dow);
+    if (n >= 0 && n <= 6) return `${WEEKDAY_LABEL_CN[n]}${clock}`;
+  }
+  // 多星期      `M H * * a,b,c`
+  if (dom === '*' && /^\d(?:,\d)+$/.test(dow)) {
+    const days = dow
+      .split(',')
+      .map((d) => Number(d))
+      .filter((n) => n >= 0 && n <= 6)
+      .sort((a, b) => a - b)
+      .map((n) => WEEKDAY_LABEL_CN[n])
+      .join('、');
+    return days ? `${days} ${clock}` : null;
+  }
+  // 每月某日    `M H D * *`
+  if (/^\d+$/.test(dom) && dow === '*') {
+    const d = Number(dom);
+    if (d >= 1 && d <= 31) return `每月 ${d} 号${clock}`;
   }
   return null;
 }

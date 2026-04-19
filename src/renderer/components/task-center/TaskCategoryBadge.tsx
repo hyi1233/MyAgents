@@ -72,10 +72,14 @@ export function TaskCategoryBadge({ mode, legacy, compact }: Props) {
   const style = CATEGORY_STYLE[mode];
   const Icon = style.icon;
   const size = compact ? 'text-[10px]' : 'text-[11px]';
-  const padding = compact ? 'px-1.5 py-0.5' : 'px-2 py-0.5';
+  // Height / padding mirror TaskStatusBadge so the two chips sit
+  // perfectly aligned in the card's header row (see status-badge.tsx
+  // for the rationale on leading-none + fixed h-5).
+  const height = compact ? 'h-[18px]' : 'h-5';
+  const padding = compact ? 'px-1.5' : 'px-2';
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-[var(--radius-sm)] font-medium ${style.bg} ${style.fg} ${padding} ${size}`}
+      className={`inline-flex items-center gap-1 rounded-[var(--radius-sm)] font-medium leading-none ${style.bg} ${style.fg} ${padding} ${height} ${size}`}
     >
       <Icon className="h-3 w-3" strokeWidth={1.75} />
       {style.label}

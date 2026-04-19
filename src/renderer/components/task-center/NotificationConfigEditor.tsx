@@ -2,24 +2,25 @@
 // Used inside DispatchTaskDialog (at task creation) and TaskDetailOverlay
 // (edit after the fact). PRD §7.3 / §8.2 / §12.
 //
-// Desktop toggle + bot channel dropdown + optional bot thread (chat_id) +
-// subscribed events selector. All fields optional — blank means "use defaults".
+// Current UI surface (trimmed for v0.1.69 — the `chat_id` input and event
+// subscription pills were deemed too power-usery for a first-time user
+// and removed):
+//   • desktop toggle
+//   • bot channel dropdown
+//
+// `botThread` is still carried on `NotificationConfig`; the backend
+// projects it through to CronTask.delivery's chat_id. For now it's set
+// to `undefined` (→ server-side `_auto_` sentinel → bot router picks
+// the default chat). `events` is also preserved on the payload and
+// defaults to `['done','blocked','endCondition']` which is the same set
+// the dispatch_notification path uses. If either becomes
+// user-configurable again, re-expose here without touching backend
+// contracts.
 
 import { useMemo } from 'react';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import CustomSelect, { type SelectOption } from '@/components/CustomSelect';
 import type { NotificationConfig } from '@/../shared/types/task';
-
-const ALL_EVENTS: Array<{
-  value: NonNullable<NotificationConfig['events']>[number];
-  label: string;
-}> = [
-  { value: 'done', label: '完成' },
-  { value: 'blocked', label: '阻塞' },
-  { value: 'stopped', label: '暂停' },
-  { value: 'verifying', label: '进入验证' },
-  { value: 'endCondition', label: '循环收敛' },
-];
 
 const DEFAULT_EVENTS: NonNullable<NotificationConfig['events']> = [
   'done',
@@ -57,18 +58,6 @@ export function NotificationConfigEditor({ value, onChange }: Props) {
 
   const patch = (p: Partial<NotificationConfig>) => onChange({ ...current, ...p });
 
-  const toggleEvent = (
-    ev: NonNullable<NotificationConfig['events']>[number],
-  ) => {
-    const set = new Set(current.events ?? DEFAULT_EVENTS);
-    if (set.has(ev)) {
-      set.delete(ev);
-    } else {
-      set.add(ev);
-    }
-    patch({ events: Array.from(set) });
-  };
-
   return (
     <div className="flex flex-col gap-2.5 rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5">
       <div className="flex items-center justify-between text-[12px] text-[var(--ink)]">
@@ -91,49 +80,6 @@ export function NotificationConfigEditor({ value, onChange }: Props) {
           placeholder="不发送到 Bot"
           compact
         />
-      </div>
-
-      {current.botChannelId && (
-        <div>
-          <label className="mb-1 block text-[12px] text-[var(--ink-secondary)]">
-            具体会话 chat_id（留空默认）
-          </label>
-          <input
-            type="text"
-            value={current.botThread ?? ''}
-            onChange={(e) =>
-              patch({ botThread: e.target.value || undefined })
-            }
-            placeholder="例如飞书 chat_id / Telegram chat_id"
-            className="w-full rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper-elevated)] px-2 py-1 text-[12px] text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--line-strong)] focus:outline-none"
-          />
-        </div>
-      )}
-
-      <div>
-        <div className="mb-1 text-[12px] text-[var(--ink-secondary)]">
-          订阅哪些状态事件
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {ALL_EVENTS.map((e) => {
-            const active = (current.events ?? DEFAULT_EVENTS).includes(e.value);
-            return (
-              <button
-                key={e.value}
-                type="button"
-                onClick={() => toggleEvent(e.value)}
-                aria-pressed={active}
-                className={`rounded-[var(--radius-md)] px-2.5 py-1 text-[11px] transition-colors ${
-                  active
-                    ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)] font-medium'
-                    : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                }`}
-              >
-                {e.label}
-              </button>
-            );
-          })}
-        </div>
       </div>
     </div>
   );
