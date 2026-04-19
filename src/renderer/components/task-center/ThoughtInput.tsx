@@ -43,7 +43,11 @@ interface Props {
 
 export function ThoughtInput({
   onCreated,
-  placeholder = '此刻有什么想法？',
+  // Guide-style placeholder — tells new users both *what* to write and
+  // *how* to tag it, so the empty state doesn't look like dead space.
+  // §6.3 rules the placeholder color (--ink-muted) which is already
+  // applied by the textarea className below.
+  placeholder = '写下此刻的想法… 用 #标签 归类',
   autoFocus = false,
   existingTags = [],
 }: Props) {
@@ -254,7 +258,7 @@ export function ThoughtInput({
                 seg.type === 'tag' ? (
                   <span
                     key={i}
-                    className="rounded-[3px] bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]"
+                    className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]"
                   >
                     {seg.value}
                   </span>
@@ -274,7 +278,11 @@ export function ThoughtInput({
             onKeyDown={handleKeyDown}
             onScroll={syncScroll}
             placeholder={placeholder}
-            rows={3}
+            // 2-row default (was 3) so the empty input doesn't consume
+            // ~25% of the left panel. Longer thoughts scroll inside the
+            // textarea — the mirror overlay tracks the scroll via
+            // `syncScroll` above so highlighted `#tag` runs stay aligned.
+            rows={2}
             disabled={busy}
             autoFocus={autoFocus}
             className="relative w-full resize-none bg-transparent px-3 pt-3 text-[13px] leading-relaxed text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"

@@ -128,9 +128,9 @@ export function ThoughtPanel({
     <div className="flex h-full flex-col">
       {/* Section header — fixed-height outer wrapper so toggling between
           "label + search icon" and "search input" never shifts the layout
-          below by the 10px the two modes' natural content heights differ
-          by. Content swaps inside, frame stays put. */}
-      <div className="relative flex h-11 shrink-0 items-center border-b border-[var(--line-subtle)] px-4">
+          below. h-12 per DESIGN.md §7.4 (aligns with TaskCenter page
+          header and the TaskListPanel section header). */}
+      <div className="relative flex h-12 shrink-0 items-center border-b border-[var(--line-subtle)] px-4">
         {isSearchMode ? (
           <div className="group relative w-full">
             <div
@@ -141,7 +141,7 @@ export function ThoughtPanel({
               }`}
             >
               <div className="relative flex items-center">
-                <Search className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[var(--ink-muted)]" />
+                <Search className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
                 <input
                   ref={searchInputRef}
                   type="text"
@@ -203,7 +203,7 @@ export function ThoughtPanel({
         ) : (
           <>
             <div className="flex items-center gap-2">
-              <Lightbulb className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
+              <Lightbulb className="h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
               <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
                 想法
               </span>
@@ -214,7 +214,7 @@ export function ThoughtPanel({
               title="搜索想法"
               className="ml-auto flex h-6 w-6 items-center justify-center rounded p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
-              <Search className="h-3.5 w-3.5" />
+              <Search className="h-3.5 w-3.5" strokeWidth={1.5} />
             </button>
           </>
         )}
@@ -276,7 +276,7 @@ export function ThoughtPanel({
               : '没有匹配的想法'}
           </div>
         ) : (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-3">
             {filtered.map((t) => (
               <ThoughtCard
                 key={t.id}

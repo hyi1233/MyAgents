@@ -20,14 +20,14 @@ export function ViewToggle({ value, onChange }: Props) {
         onClick={() => onChange('card')}
         title="卡片视图"
       >
-        <LayoutGrid className="h-3.5 w-3.5" />
+        <LayoutGrid className="h-3.5 w-3.5" strokeWidth={1.5} />
       </ToggleButton>
       <ToggleButton
         active={value === 'list'}
         onClick={() => onChange('list')}
         title="列表视图"
       >
-        <List className="h-3.5 w-3.5" />
+        <List className="h-3.5 w-3.5" strokeWidth={1.5} />
       </ToggleButton>
     </div>
   );

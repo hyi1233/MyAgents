@@ -59,7 +59,11 @@ export function TaskCardItem(props: TaskCardItemProps) {
             carried by the left status stripe + status badge. */}
         <div className="flex items-start gap-2">
           <div className="min-w-0 flex-1">
-            <div className="line-clamp-2 text-[13px] font-medium leading-snug text-[var(--ink)]">
+            {/* Title 14px — one step above the 13px description/meta so
+                the three lines (title → description → meta) read as a
+                clear typographic hierarchy rather than flat weight-only
+                differentiation. §2.2 scale. */}
+            <div className="line-clamp-2 text-sm font-medium leading-snug text-[var(--ink)]">
               {name}
             </div>
           </div>
@@ -95,21 +99,34 @@ export function TaskCardItem(props: TaskCardItemProps) {
           </div>
         )}
 
-        {/* Meta row — executor / mode / dispatch origin / time, then tags */}
-        <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--ink-muted)]/80">
+        {/* Meta row — executor + dispatch origin + mode + time, all as
+            one `·`-separated line. Dispatch origin and mode are *sort
+            classifications*, not *state* — they shouldn't look like the
+            status badge. Collapsing them to plain meta text keeps the
+            only visually weighty chip in the card as the status badge
+            (which is what the user actually needs to scan). */}
+        <div className="flex items-center gap-1.5 text-[11px] text-[var(--ink-muted)]">
           {task && task.executor === 'agent' ? (
-            <Bot className="h-3.5 w-3.5 text-[var(--accent-warm)]" aria-label="Agent" />
+            <Bot className="h-3.5 w-3.5 text-[var(--accent-warm)]" aria-label="Agent" strokeWidth={1.5} />
           ) : task ? (
-            <User className="h-3.5 w-3.5 text-[var(--ink-muted)]" aria-label="User" />
+            <User className="h-3.5 w-3.5 text-[var(--ink-muted)]" aria-label="User" strokeWidth={1.5} />
           ) : null}
-          {task && <DispatchOriginBadge origin={task.dispatchOrigin} compact />}
-          {task && task.executionMode !== 'once' && (
-            <span className="rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px]">
-              {modeLabel(task.executionMode)}
-            </span>
+          {task && (
+            <>
+              <DispatchOriginBadge origin={task.dispatchOrigin} compact />
+              {task.executionMode !== 'once' && (
+                <>
+                  <MetaSep />
+                  <span>{modeLabel(task.executionMode)}</span>
+                </>
+              )}
+            </>
           )}
           {legacy?.workspacePath && (
-            <span className="truncate">{shortenPath(legacy.workspacePath)}</span>
+            <>
+              {(task?.executor || task) && <MetaSep />}
+              <span className="truncate">{shortenPath(legacy.workspacePath)}</span>
+            </>
           )}
           <span className="ml-auto">{relativeTime(updatedAt)}</span>
         </div>
@@ -128,6 +145,16 @@ export function TaskCardItem(props: TaskCardItemProps) {
         )}
       </div>
     </button>
+  );
+}
+
+/** Dot separator for the meta row. Aria-hidden — screen readers read
+ *  the surrounding text already. */
+function MetaSep() {
+  return (
+    <span className="text-[var(--ink-muted)]/50" aria-hidden>
+      ·
+    </span>
   );
 }
 

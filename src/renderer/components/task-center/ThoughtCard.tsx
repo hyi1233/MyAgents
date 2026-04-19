@@ -234,7 +234,7 @@ export function ThoughtCard({
                   title="AI 讨论 — 开新对话用 /task-alignment 聊出方案"
                   className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
                 >
-                  <MessageSquare className="h-3.5 w-3.5" />
+                  <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
                   AI 讨论
                 </button>
               )}
@@ -245,7 +245,7 @@ export function ThoughtCard({
                   title="直接派发为任务（不讨论）"
                   className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
                 >
-                  <Zap className="h-3.5 w-3.5" />
+                  <Zap className="h-3.5 w-3.5" strokeWidth={1.5} />
                   派发
                 </button>
               )}
@@ -259,7 +259,7 @@ export function ThoughtCard({
                 title="更多操作"
                 className="rounded-[var(--radius-md)] p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
               >
-                <MoreHorizontal className="h-3.5 w-3.5" />
+                <MoreHorizontal className="h-3.5 w-3.5" strokeWidth={1.5} />
               </button>
               <Popover
                 open={showMenu}

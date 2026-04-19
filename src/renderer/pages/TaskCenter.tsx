@@ -103,8 +103,11 @@ export default function TaskCenter({ isActive }: Props) {
           />
         </div>
 
-        {/* Divider */}
-        <div className="w-px bg-[var(--line)]" />
+        {/* Divider — weaker line-subtle (6% ink) so the two panels feel
+            like a continuous surface rather than two pages cut apart.
+            A full --line (10%) reads heavier than the card borders, which
+            made the split feel over-emphasized. */}
+        <div className="w-px bg-[var(--line-subtle)]" />
 
         {/* Right: Task list */}
         <div className="flex flex-1 flex-col overflow-hidden">

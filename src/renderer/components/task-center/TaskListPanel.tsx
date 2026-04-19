@@ -399,11 +399,12 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Section header — label + view toggle + search toggle. */}
+      {/* Section header — label + view toggle + search toggle.
+          h-12 per DESIGN.md §7.4 (aligns with TaskCenter page header). */}
       {isSearchMode ? (
-        <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-4 py-2">
+        <div className="flex h-12 items-center gap-2 border-b border-[var(--line-subtle)] px-4">
           <div className="relative flex flex-1 items-center">
-            <Search className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[var(--ink-muted)]" />
+            <Search className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
             <input
               ref={searchInputRef}
               type="text"
@@ -421,14 +422,14 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
               title="退出搜索"
               className="absolute right-2 flex items-center text-[var(--ink-muted)]/60 transition-colors hover:text-[var(--ink)]"
             >
-              <X className="h-3.5 w-3.5" />
+              <X className="h-3.5 w-3.5" strokeWidth={1.5} />
             </button>
           </div>
         </div>
       ) : (
-        <div className="flex items-center justify-between border-b border-[var(--line-subtle)] px-4 py-2.5">
+        <div className="flex h-12 items-center justify-between border-b border-[var(--line-subtle)] px-4">
           <div className="flex items-center gap-2">
-            <Layers className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
+            <Layers className="h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
             <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
               任务
             </span>
@@ -441,7 +442,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
               title="搜索任务"
               className="flex h-6 w-6 items-center justify-center rounded p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
-              <Search className="h-3.5 w-3.5" />
+              <Search className="h-3.5 w-3.5" strokeWidth={1.5} />
             </button>
           </div>
         </div>
@@ -465,7 +466,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
                 <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
                   {BUCKETS[b].label}（{rows.length}）
                 </h3>
-                <div className="grid grid-cols-2 gap-2.5">
+                <div className="grid grid-cols-2 gap-3">
                   {rows.map(renderCard)}
                 </div>
               </section>
