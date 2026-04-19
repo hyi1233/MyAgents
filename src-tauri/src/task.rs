@@ -2,10 +2,12 @@
 //!
 //! Tasks are workspace-scoped execution units. The primary index lives in
 //! `~/.myagents/tasks.jsonl` (one task per line, atomic full-rewrite on change).
-//! Associated markdown documents live under `<workspace>/.task/<taskId>/{task.md,
-//! verify.md, progress.md, alignment.md}`; this module manages `task.md` and
-//! `progress.md` but treats `verify.md` / `alignment.md` as externally managed
-//! (written by `/task-alignment` skill + Agent).
+//! Associated markdown documents live under `~/.myagents/tasks/<taskId>/{task.md,
+//! verify.md, progress.md, alignment.md}` (moved out of the workspace in
+//! v0.1.69 — see `task_docs_dir` doc for the rationale). This module
+//! manages `task.md` and `progress.md` but treats `verify.md` /
+//! `alignment.md` as externally managed (written by `/task-alignment` skill
+//! + Agent).
 //!
 //! See PRD `specs/prd/prd_0.1.69_task_center.md`:
 //! - §3.2 — schema
@@ -249,8 +251,9 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub workspace_id: String,
-    /// Absolute path to the workspace — needed to locate `.task/<id>/` docs and for
-    /// sidecar ensure. Stored so UI and execution don't have to resolve it separately.
+    /// Absolute path to the workspace — Sidecar cwd and AI-bash base. Task
+    /// docs live in `~/.myagents/tasks/<id>/` (user-scoped, v0.1.69+), not
+    /// here. Stored so UI and execution don't have to resolve it separately.
     #[serde(default)]
     pub workspace_path: String,
     pub execution_mode: TaskExecutionMode,
@@ -372,8 +375,8 @@ pub struct TaskCreateFromAlignmentInput {
     pub description: Option<String>,
     pub workspace_id: String,
     pub workspace_path: String,
-    /// Source directory `<workspace>/.task/<alignmentSessionId>/` — its contents
-    /// are moved (renamed) to `<workspace>/.task/<newTaskId>/`.
+    /// Source directory `~/.myagents/tasks/<alignmentSessionId>/` — its
+    /// contents are moved (renamed) to `~/.myagents/tasks/<newTaskId>/`.
     pub alignment_session_id: String,
     pub execution_mode: TaskExecutionMode,
     #[serde(default)]
@@ -433,7 +436,7 @@ pub struct TaskUpdateInput {
     #[serde(default)]
     pub notification: Option<NotificationConfig>,
     /// When `Some`, the new contents are atomically written to
-    /// `.task/<id>/task.md` under the same write lock that persists the
+    /// `~/.myagents/tasks/<id>/task.md` under the same write lock that persists the
     /// JSONL row. Empty string is rejected — prompt must have content.
     #[serde(default)]
     pub prompt: Option<String>,
@@ -823,7 +826,7 @@ impl TaskStore {
 
         // JSONL committed — now materialize the task.md payload. Failing at this
         // point leaves an orphan JSONL row, which is recoverable on next boot
-        // (the row is visible but `.task/<id>/task.md` is missing; we log loudly).
+        // (the row is visible but `~/.myagents/tasks/<id>/task.md` is missing; we log loudly).
         fs::create_dir_all(&task_dir)
             .map_err(|e| format!("Failed to create task doc dir: {}", e))?;
         let task_md = task_dir.join("task.md");
@@ -1035,7 +1038,7 @@ impl TaskStore {
         // Transactional order (PRD design):
         // 1. Persist the row to jsonl FIRST. If this fails, the alignment dir is
         //    untouched — retry is safe.
-        // 2. Move the alignment dir to `.task/<newId>/`. If this fails, we unwind
+        // 2. Move the alignment dir to `~/.myagents/tasks/<newId>/`. If this fails, we unwind
         //    the row from jsonl so the store stays consistent.
         // 3. Swap in-memory state only after both succeed.
         let mut inner = self.inner.write().await;
@@ -1082,7 +1085,7 @@ impl TaskStore {
         self.inner.read().await.get(id).cloned()
     }
 
-    /// Check-and-write `.task/<id>/<filename>` atomically with respect to
+    /// Check-and-write `~/.myagents/tasks/<id>/<filename>` atomically with respect to
     /// the running/verifying lock. The status check and the file write
     /// both happen under the same write lock so a concurrent
     /// `update_status(running)` can't slip in between and let us mutate
@@ -1819,9 +1822,12 @@ fn task_docs_root() -> Result<PathBuf, String> {
             return Ok(p);
         }
     }
-    let home = dirs::home_dir()
-        .ok_or_else(|| "cannot resolve home dir for task docs".to_string())?;
-    Ok(home.join(".myagents").join("tasks"))
+    // Route through `app_dirs::myagents_data_dir()` so future dev/prod data
+    // isolation (see `app_dirs.rs` doc — e.g. `~/.myagents-dev/` for debug
+    // builds) picks up this path automatically. Don't hardcode home dir.
+    crate::app_dirs::myagents_data_dir()
+        .map(|d| d.join("tasks"))
+        .ok_or_else(|| "cannot resolve myagents data dir for task docs".to_string())
 }
 
 /// Crash-durable atomic text write: tmp write → sync_all → rename → cleanup
@@ -1957,7 +1963,7 @@ pub async fn mark_cron_completion_if_linked(cron_task_id: &str, exit_reason: Opt
 ///
 /// - `dispatchOrigin='direct'`   → `执行任务：<task.md 正文>`
 /// - `dispatchOrigin='ai-aligned'` → `/task-implement` slash command (the skill
-///    reads `.task/<id>/{task,verify,progress,alignment}.md` on its own)
+///    reads `~/.myagents/tasks/<id>/{task,verify,progress,alignment}.md` on its own)
 ///
 /// Returns `None` if the store isn't initialized or the task doesn't exist.
 /// Returns `Some(Err(...))` for unrecoverable I/O (missing task.md on a
@@ -1973,7 +1979,7 @@ fn compose_dispatch_prompt(task: &Task) -> Result<String, String> {
     match task.dispatch_origin {
         TaskDispatchOrigin::AiAligned => {
             // The task-implement skill discovers the four alignment docs from
-            // `.task/<taskId>/` on its own. We just need to invoke it.
+            // `~/.myagents/tasks/<taskId>/` on its own. We just need to invoke it.
             Ok(format!("/task-implement {}", task.id))
         }
         TaskDispatchOrigin::Direct => {
@@ -2367,13 +2373,15 @@ pub async fn cmd_task_delete(
 
 /// Read one of the markdown documents attached to a Task.
 ///
-/// - `task`: the executor prompt (`.task/<id>/task.md`). Authored by the user
+/// - `task`: the executor prompt (`~/.myagents/tasks/<id>/task.md`). Authored by the user
 ///   at dispatch, editable from the task detail overlay.
-/// - `verify`: acceptance criteria (`.task/<id>/verify.md`). Optional; may
+/// - `verify`: acceptance criteria (`~/.myagents/tasks/<id>/verify.md`). Optional; may
 ///   be authored by the user or produced by the alignment flow. Returns an
 ///   empty string when the file does not yet exist.
-/// - `progress`: read-only execution log (`.task/<id>/progress.md`). Agents
+/// - `progress`: read-only execution log (`~/.myagents/tasks/<id>/progress.md`). Agents
 ///   append to this file during runs; the UI renders it but does not write.
+/// - `alignment`: AI-discussion decision record (`~/.myagents/tasks/<id>/alignment.md`).
+///   Written by `/task-alignment` skill directly; read-only from the UI.
 #[tauri::command]
 pub async fn cmd_task_read_doc(
     state: tauri::State<'_, ManagedTaskStore>,
@@ -2407,11 +2415,16 @@ pub async fn cmd_task_write_doc(
     content: String,
 ) -> Result<(), String> {
     let filename = task_doc_filename(&doc)?;
-    if filename == "progress.md" {
-        return Err(
-            "progress.md is appended by the agent during runs; the UI cannot edit it"
-                .to_string(),
-        );
+    // progress.md + alignment.md are not user-writable here:
+    //   - progress.md is appended by the agent during runs (via
+    //     `cmd_task_update_progress` / `myagents task update-progress`).
+    //   - alignment.md is produced by the `/task-alignment` skill via the
+    //     Write tool directly; the UI has no editor for it.
+    if filename == "progress.md" || filename == "alignment.md" {
+        return Err(format!(
+            "{} is not writable via this API (progress=agent-appended, alignment=skill-written)",
+            filename
+        ));
     }
     state.write_doc(&id, filename, &content).await
 }
@@ -2482,13 +2495,20 @@ pub async fn cmd_task_get_run_stats(
     Ok(stats)
 }
 
-fn task_doc_filename(doc: &str) -> Result<&'static str, String> {
+/// Central doc-name whitelist for all task-md entry points (Tauri IPC
+/// `cmd_task_read_doc`/`cmd_task_write_doc` + Management API
+/// `/api/task/read-doc`/`/api/task/write-doc`). Keep these in lockstep —
+/// divergence led to the v0.1.69 bug where Management API accepted
+/// `alignment` but Tauri IPC rejected it, so the renderer couldn't read
+/// alignment.md through the same path the CLI uses.
+pub fn task_doc_filename(doc: &str) -> Result<&'static str, String> {
     match doc {
         "task" => Ok("task.md"),
         "verify" => Ok("verify.md"),
         "progress" => Ok("progress.md"),
+        "alignment" => Ok("alignment.md"),
         other => Err(format!(
-            "unknown doc name: {} (expected task|verify|progress)",
+            "unknown doc name: {} (expected task|verify|progress|alignment)",
             other
         )),
     }
@@ -2502,21 +2522,26 @@ mod tests {
     use std::sync::OnceLock;
     use tempfile::tempdir;
 
-    /// Shared task-docs root for the entire test binary. Set exactly once
-    /// (via `ensure_test_docs_root()`) before any test touches
+    /// Shared task-docs root for the entire test binary. Initialised
+    /// exactly once via `ensure_test_docs_root()` before any test touches
     /// `task_docs_dir()`. Each test uses a fresh UUID task id, so writes
     /// never collide even though the root is shared.
     ///
     /// Per-test tempdir + env-var swapping doesn't work here: `cargo test`
     /// runs tests in parallel within one process, and env vars are
     /// process-global — two concurrent tests would race each other's
-    /// redirects.
+    /// redirects. `std::env::set_var` is also technically unsound when
+    /// called from multiple threads (Rust 2024 edition marks it `unsafe`
+    /// for this reason), so we call it exactly once inside
+    /// `get_or_init`'s closure.
     static TEST_DOCS_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
 
     fn ensure_test_docs_root() {
-        let dir = TEST_DOCS_ROOT
-            .get_or_init(|| tempdir().expect("create shared test docs tempdir"));
-        std::env::set_var("MYAGENTS_TASK_DOCS_ROOT", dir.path());
+        TEST_DOCS_ROOT.get_or_init(|| {
+            let dir = tempdir().expect("create shared test docs tempdir");
+            std::env::set_var("MYAGENTS_TASK_DOCS_ROOT", dir.path());
+            dir
+        });
     }
 
     fn sample_direct_input(ws: &PathBuf) -> TaskCreateDirectInput {

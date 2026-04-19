@@ -376,7 +376,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
                     className={`${INPUT_CLS} resize-y font-mono text-[12.5px]`}
                   />
                   <p className="mt-2 text-[12px] text-[var(--ink-muted)]">
-                    AI 执行时看到的 prompt。保存时会原子写入 .task/&lt;id&gt;/task.md。
+                    AI 执行时看到的 prompt。保存时会原子写入 ~/.myagents/tasks/&lt;id&gt;/task.md(用户目录下的应用数据,不在工作区)。
                   </p>
                 </>
               )}

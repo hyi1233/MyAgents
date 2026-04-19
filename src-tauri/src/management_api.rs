@@ -1342,7 +1342,7 @@ async fn task_create_from_alignment_handler(
 ///   creates one with `task_id` reverse pointer if none exists, starts it,
 ///   and kicks the scheduler. The scheduler's first tick calls
 ///   `execute_cron_task()` which builds the first-message prompt dynamically
-///   from `dispatchOrigin` + `.task/<id>/task.md` (PRD §9.3.1).
+///   from `dispatchOrigin` + `~/.myagents/tasks/<id>/task.md` (PRD §9.3.1).
 /// - On successful dispatch transitions `todo → running` via TaskStore.
 /// - For `executionMode = 'once'` the CronTask is `At { at: now }` so it fires
 ///   once and stays stopped after.
@@ -1478,17 +1478,13 @@ async fn task_read_doc_handler(
     let Some(ta) = store.get(&q.id).await else {
         return Json(serde_json::json!({ "ok": false, "error": "task not found" }));
     };
-    let filename = match q.doc.as_str() {
-        "task" => "task.md",
-        "verify" => "verify.md",
-        "progress" => "progress.md",
-        "alignment" => "alignment.md",
-        other => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": format!("unknown doc name: {} (expected task|verify|progress|alignment)", other),
-            }));
-        }
+    // Delegate to `task::task_doc_filename` so the Management API, Tauri
+    // IPC, and any future doc-reading surface all share one whitelist —
+    // preventing the v0.1.69 drift where Management accepted `alignment`
+    // but Tauri IPC rejected it.
+    let filename = match task::task_doc_filename(&q.doc) {
+        Ok(f) => f,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
     let dir = match task::task_docs_dir(&ta.id) {
         Ok(p) => p,
@@ -1528,22 +1524,23 @@ async fn task_write_doc_handler(
     let Some(store) = task::get_task_store() else {
         return Json(serde_json::json!({ "ok": false, "error": "task store not initialized" }));
     };
-    let filename = match req.doc.as_str() {
-        "task" => "task.md",
-        "verify" => "verify.md",
-        "progress" | "alignment" => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": format!("{} is not writable via this API", req.doc),
-            }));
-        }
-        other => {
-            return Json(serde_json::json!({
-                "ok": false,
-                "error": format!("unknown doc name: {} (expected task|verify)", other),
-            }));
-        }
+    // Central whitelist via `task::task_doc_filename` — same contract as
+    // read-doc. Then refuse writing progress.md / alignment.md (the Tauri
+    // `cmd_task_write_doc` enforces the same rule, keeping both entry
+    // points aligned).
+    let filename = match task::task_doc_filename(&req.doc) {
+        Ok(f) => f,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
+    if filename == "progress.md" || filename == "alignment.md" {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!(
+                "{} is not writable via this API (progress=agent-appended, alignment=skill-written)",
+                filename
+            ),
+        }));
+    }
     match store.write_doc(&req.id, filename, &req.content).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
@@ -1654,7 +1651,7 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
     let config = cron_task::CronTaskConfig {
         workspace_path: ta.workspace_path.clone(),
         session_id,
-        prompt: format!("(dynamic — built from .task/{}/task.md at dispatch)", ta.id),
+        prompt: format!("(dynamic — built from ~/.myagents/tasks/{}/task.md at dispatch)", ta.id),
         interval_minutes,
         end_conditions,
         run_mode,

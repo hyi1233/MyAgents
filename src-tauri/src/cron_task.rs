@@ -1942,10 +1942,10 @@ async fn execute_task_directly(
     let execution_number = task.execution_count + 1;
 
     // PRD §9.3.1: if this CronTask is linked to a Task Center task, construct
-    // the prompt dynamically from the latest `.task/<id>/task.md` / alignment
-    // state instead of using the CronTask's frozen `prompt` field. This lets
-    // the user edit task.md between firings and the next execution picks up
-    // the change.
+    // the prompt dynamically from the latest `~/.myagents/tasks/<id>/task.md`
+    // (or alignment state) instead of using the CronTask's frozen `prompt`
+    // field. This lets the user edit task.md between firings and the next
+    // execution picks up the change.
     //
     // Short-circuit + block guards (CC review C1c + C2):
     //   - linked Task is deleted / archived / in terminal state → skip this
