@@ -605,6 +605,30 @@ export default function TabProvider({
         });
     }, [setStreamingMessage]);
 
+    /**
+     * Drain any RAF-batched text chunks into the React update queue BEFORE a new content block
+     * starts (tool_use / server_tool_use / thinking).
+     *
+     * Without this, the handler race goes:
+     *   1. chat:message-chunk pushes into pendingChunksRef + schedules RAF  (NO state update yet)
+     *   2. chat:tool-use-start runs synchronously and setStreamingMessage-appends a tool block
+     *   3. RAF fires → flushPendingChunks sees tool block as last, so it opens a NEW text block
+     *      after the tool — splitting what was logically one continuous SDK text block into
+     *      [text-head] [tool] [text-tail] with the tool card wedged mid-sentence.
+     *
+     * Calling this before any block-starting handler enqueues the pending-text updater first,
+     * so React applies `merge-into-last-text-block` before `append-new-block`.
+     */
+    const flushPendingChunksNow = useCallback(() => {
+        if (rafIdRef.current) {
+            cancelAnimationFrame(rafIdRef.current);
+            rafIdRef.current = null;
+        }
+        if (pendingChunksRef.current.length > 0) {
+            flushPendingChunks();
+        }
+    }, [flushPendingChunks]);
+
     // Cleanup RAF on unmount
     useEffect(() => {
         return () => { if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current); };
@@ -917,6 +941,10 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping thinking-start (new session, stale event)');
                     break;
                 }
+                // Drain RAF-batched text chunks before opening a new thinking block,
+                // otherwise the trailing text of the previous text block lands AFTER the
+                // thinking block (see flushPendingChunksNow docstring).
+                flushPendingChunksNow();
                 const { index } = data as { index: number };
                 setStreamingMessage(prev => {
                     const thinkingBlock: ContentBlock = {
@@ -969,6 +997,10 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping tool-use-start (new session, stale event)');
                     break;
                 }
+                // Drain RAF-batched text chunks before opening the tool block, otherwise the
+                // tool card ends up wedged inside a single SDK text block (see
+                // flushPendingChunksNow docstring — this is the primary bug the helper fixes).
+                flushPendingChunksNow();
                 const tool = data as ToolUse;
 
                 // Track tool_use event
@@ -1022,6 +1054,9 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping server-tool-use-start (new session, stale event)');
                     break;
                 }
+                // Drain RAF-batched text chunks before opening the tool block (see
+                // flushPendingChunksNow docstring).
+                flushPendingChunksNow();
                 const tool = data as ToolUse;
 
                 // Track tool_use event (server-side tools)
@@ -1819,7 +1854,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, clearSessionActive, resetPaginationState]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, flushPendingChunksNow, clearSessionActive, resetPaginationState]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
