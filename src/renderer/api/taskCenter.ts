@@ -124,6 +124,15 @@ export function taskWriteDoc(
 }
 
 /**
+ * Reveal `~/.myagents/tasks/<id>/` in the OS file manager. Creates the
+ * directory on demand for tasks that haven't written any doc yet.
+ * Tauri-only (no browser fallback — the editor surface is desktop).
+ */
+export function taskOpenDocsDir(id: string): Promise<void> {
+  return inv('cmd_task_open_docs_dir', { id });
+}
+
+/**
  * Aggregate runtime telemetry for the detail overlay — execution count,
  * last-run result, linked CronTask scheduler status. Composed server-side
  * from `TaskStore` + `CronTaskManager` + `cron_runs/<cronId>.jsonl`.

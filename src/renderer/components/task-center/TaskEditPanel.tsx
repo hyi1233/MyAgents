@@ -9,11 +9,17 @@
 // backing CronTask, handled in Rust). Cancel discards the draft and rolls
 // back to read-only view.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FolderOpen } from 'lucide-react';
 
-import CustomSelect from '@/components/CustomSelect';
-import { taskReadDoc, taskUpdate } from '@/api/taskCenter';
+import {
+  taskOpenDocsDir,
+  taskReadDoc,
+  taskUpdate,
+  taskWriteDoc,
+} from '@/api/taskCenter';
 import NotificationConfigEditor from '@/components/task-center/NotificationConfigEditor';
+import { useToast } from '@/components/Toast';
 import type {
   EndConditions,
   NotificationConfig,
@@ -30,14 +36,17 @@ import { ExecutionModeEditor } from './editors/ExecutionModeEditor';
 import { INPUT_CLS, toLocalDateTimeString } from './editors/controls';
 import { extractErrorMessage } from './errors';
 
-const PERMISSION_MODE_OPTIONS = [
-  { value: 'auto', label: '自动 (Auto)' },
-  { value: 'plan', label: '仅计划 (Plan)' },
-  { value: 'fullAgency', label: '完全自治 (Full Agency)' },
-];
+/** Which section/field the edit panel should scroll to + focus on open.
+ *  Exported so callers (e.g. TaskDetailOverlay's inline "编辑" buttons)
+ *  can pass a specific target without magic strings. `null` / undefined
+ *  = open at the top (basic-info section).
+ */
+export type FocusDoc = 'task' | 'verify' | 'notification';
 
 export interface TaskEditPanelProps {
   task: Task;
+  /** If set, the panel scroll-focuses this section on mount. */
+  focusDoc?: FocusDoc | null;
   onSaved: (next: Task) => void;
   onCancel: () => void;
   onError: (msg: string) => void;
@@ -48,6 +57,7 @@ interface Draft {
   description: string;
   tagsInput: string;
   taskMd: string;
+  verifyMd: string;
   executionMode: TaskExecutionMode;
   runMode: TaskRunMode;
   atDateTime: string;
@@ -79,6 +89,7 @@ function taskToDraft(task: Task, taskMd: string): Draft {
     description: task.description ?? '',
     tagsInput: task.tags.join(', '),
     taskMd,
+    verifyMd: '',
     executionMode: task.executionMode,
     runMode: task.runMode ?? 'new-session',
     atDateTime,
@@ -95,7 +106,13 @@ function taskToDraft(task: Task, taskMd: string): Draft {
   };
 }
 
-export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPanelProps) {
+export function TaskEditPanel({
+  task,
+  focusDoc = null,
+  onSaved,
+  onCancel,
+  onError,
+}: TaskEditPanelProps) {
   const [draft, setDraft] = useState<Draft>(() => taskToDraft(task, ''));
   const [saving, setSaving] = useState(false);
   // Tri-state: null (loading) | true (loaded) | false (failed) — separate
@@ -103,31 +120,102 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
   // overwrite their existing task.md with an empty string (C2 review).
   const [taskMdReadState, setTaskMdReadState] =
     useState<'loading' | 'ok' | 'failed'>('loading');
+  // verify.md reads are allowed to return "" (verify is optional); we only
+  // track ok/failed so a failed read doesn't let the user save an empty
+  // body that would wipe an existing file (PRD §9.4).
+  const [verifyMdReadState, setVerifyMdReadState] =
+    useState<'loading' | 'ok' | 'failed'>('loading');
+  // The initial verify.md body (as loaded from disk) — kept in a ref so
+  // `handleSave` can diff against it without re-triggering when only
+  // `draft.verifyMd` changes. Updated after a successful write so a
+  // second save only persists further edits.
+  const verifyMdInitialRef = useRef('');
   const isAiAligned = task.dispatchOrigin === 'ai-aligned';
+  const toast = useToast();
 
-  // Read the current task.md body once so the user can edit the prompt
-  // in-place. AI-aligned tasks have no editable prompt here (their
-  // alignment.md is the source of truth and a separate skill).
+  // Refs for `focusDoc` — scroll-into-view + caret focus on open. Effect
+  // runs on mount only (focusDoc is an intent, not a live mode). For
+  // task.md / verify.md we also select so the user can start typing
+  // immediately to replace content; for notification we only scroll.
+  const taskMdRef = useRef<HTMLTextAreaElement | null>(null);
+  const verifyMdRef = useRef<HTMLTextAreaElement | null>(null);
+  const notificationRef = useRef<HTMLDivElement | null>(null);
+  // Fire-once latch: once we've scrolled + focused for a given focusDoc
+  // value, don't fire again if read-state re-renders push the effect.
+  const focusAppliedRef = useRef<FocusDoc | null>(null);
+  useEffect(() => {
+    if (!focusDoc) {
+      focusAppliedRef.current = null;
+      return;
+    }
+    if (focusAppliedRef.current === focusDoc) return;
+    // Gate on the relevant doc being loaded — focusing a disabled
+    // textarea is a no-op, so firing too early (before the filesystem
+    // read lands) silently misses. Previously this was a hard-coded
+    // 80ms timeout, which is both flaky on slow disks and a magic
+    // number. Now we wait until the textarea is enabled.
+    if (focusDoc === 'task' && taskMdReadState === 'loading') return;
+    if (focusDoc === 'verify' && verifyMdReadState === 'loading') return;
+    // Defer to next frame so the refs are wired and layout is settled.
+    const raf = requestAnimationFrame(() => {
+      const el =
+        focusDoc === 'task' ? taskMdRef.current
+          : focusDoc === 'verify' ? verifyMdRef.current
+            : focusDoc === 'notification' ? notificationRef.current
+              : null;
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (el instanceof HTMLTextAreaElement) {
+        el.focus({ preventScroll: true });
+      }
+      focusAppliedRef.current = focusDoc;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [focusDoc, taskMdReadState, verifyMdReadState]);
+
+  // Read the current task.md + verify.md bodies once so the user can
+  // edit both in-place. AI-aligned tasks have no editable prompt here
+  // (their alignment.md is the source of truth and a separate skill) —
+  // but they can still author verify.md for the verification step.
   useEffect(() => {
     let cancelled = false;
     if (isAiAligned) {
       setTaskMdReadState('ok');
-      return;
+    } else {
+      void taskReadDoc(task.id, 'task')
+        .then((content) => {
+          if (cancelled) return;
+          setDraft((d) => ({ ...d, taskMd: content }));
+          setTaskMdReadState('ok');
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setTaskMdReadState('failed');
+        });
     }
-    void taskReadDoc(task.id, 'task')
+    void taskReadDoc(task.id, 'verify')
       .then((content) => {
         if (cancelled) return;
-        setDraft((d) => ({ ...d, taskMd: content }));
-        setTaskMdReadState('ok');
+        setDraft((d) => ({ ...d, verifyMd: content }));
+        verifyMdInitialRef.current = content;
+        setVerifyMdReadState('ok');
       })
       .catch(() => {
         if (cancelled) return;
-        setTaskMdReadState('failed');
+        setVerifyMdReadState('failed');
       });
     return () => {
       cancelled = true;
     };
   }, [task.id, isAiAligned]);
+
+  const handleOpenDocsDir = useCallback(async () => {
+    try {
+      await taskOpenDocsDir(task.id);
+    } catch (e) {
+      toast.error(extractErrorMessage(e));
+    }
+  }, [task.id, toast]);
 
   // If the task transitions to running / verifying while we're editing
   // (external SSE — scheduler fired, or another window changed status),
@@ -164,6 +252,8 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
       errs.push('task.md 读取失败，无法保存（以免覆盖原内容）');
     if (!isAiAligned && taskMdReadState === 'ok' && !draft.taskMd.trim())
       errs.push('task.md 内容不能为空');
+    if (verifyMdReadState === 'failed')
+      errs.push('verify.md 读取失败，无法保存（以免覆盖原内容）');
     if (isScheduled) {
       const ts = Date.parse(draft.atDateTime);
       if (Number.isNaN(ts) || ts <= Date.now()) errs.push('执行时间必须在未来');
@@ -190,7 +280,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
       errs.push('请至少设置一个结束条件');
     }
     return errs;
-  }, [draft, isScheduled, isRecurring, showEndConditions, isAiAligned, taskMdReadState]);
+  }, [draft, isScheduled, isRecurring, showEndConditions, isAiAligned, taskMdReadState, verifyMdReadState]);
 
   const buildEndConditions = useCallback((): EndConditions | undefined => {
     if (!showEndConditions) return undefined;
@@ -279,17 +369,43 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
     if (initialNotification !== nextNotification)
       payload.notification = draft.notification;
 
+    // verify.md is NOT part of the Task row update — it's a separate
+    // `write_doc` call. Compute change here so we know whether to
+    // short-circuit "no changes" AND whether to spend a second IPC call.
+    // `verifyMdInitial` is what we loaded from disk; draft starts equal,
+    // so a plain string comparison catches edits.
+    const verifyChanged =
+      verifyMdReadState === 'ok' && draft.verifyMd !== verifyMdInitialRef.current;
+
     // Bail if nothing changed — stay in edit mode so the user isn't
     // thrown back to read-only with no feedback.
-    if (Object.keys(payload).length === 1) {
+    if (Object.keys(payload).length === 1 && !verifyChanged) {
       onError('没有需要保存的变更');
       return;
     }
 
     setSaving(true);
     try {
-      const updated = await taskUpdate(payload);
-      onSaved(updated);
+      // verify.md first: the TaskStore::update path re-reads the row and
+      // may bump `updated_at`, but verify.md writes go through a separate
+      // atomic write. Writing verify.md first means a mid-flight failure
+      // leaves metadata untouched (easier to reason about).
+      if (verifyChanged) {
+        await taskWriteDoc(task.id, 'verify', draft.verifyMd);
+        verifyMdInitialRef.current = draft.verifyMd;
+      }
+      // If only verify.md changed, skip the Task row update (payload
+      // would have only `id` in it and the Rust-side `update()` bumps
+      // `updated_at` even with an empty diff).
+      if (Object.keys(payload).length > 1) {
+        const updated = await taskUpdate(payload);
+        onSaved(updated);
+      } else {
+        // verify.md-only edit: refetch the task so `onSaved` hands back
+        // a row with a fresh `updated_at`. `taskWriteDoc` already bumped
+        // it on the backend.
+        onSaved({ ...task, updatedAt: Date.now() });
+      }
     } catch (e) {
       onError(extractErrorMessage(e));
     } finally {
@@ -306,6 +422,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
     isLoop,
     isAiAligned,
     taskMdReadState,
+    verifyMdReadState,
     onSaved,
     onError,
   ]);
@@ -314,7 +431,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
     <div className="space-y-5">
       {/* 基本信息 */}
       <section>
-        <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+        <h3 className="mb-3 text-[14px] font-semibold text-[var(--ink)]">
           基本信息
         </h3>
         <div className="space-y-3 pl-1">
@@ -353,9 +470,11 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
         <>
           <div className="border-t border-[var(--line-subtle)]" />
           <section>
-            <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-              task.md 内容
-            </h3>
+            <DocSectionHeader
+              title="task.md 内容"
+              path={`~/.myagents/tasks/${task.id}/task.md`}
+              onOpenFolder={handleOpenDocsDir}
+            />
             <div className="pl-1">
               {taskMdReadState === 'failed' ? (
                 <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-[12px] text-[var(--error)]">
@@ -364,6 +483,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
               ) : (
                 <>
                   <textarea
+                    ref={taskMdRef}
                     value={draft.taskMd}
                     onChange={(e) => setDraft((d) => ({ ...d, taskMd: e.target.value }))}
                     rows={8}
@@ -376,7 +496,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
                     className={`${INPUT_CLS} resize-y font-mono text-[13px]`}
                   />
                   <p className="mt-2 text-[12px] text-[var(--ink-muted)]">
-                    AI 执行时看到的 prompt。保存时会原子写入 ~/.myagents/tasks/&lt;id&gt;/task.md(用户目录下的应用数据,不在工作区)。
+                    AI 执行时看到的 prompt。保存时会原子写入上方路径。
                   </p>
                 </>
               )}
@@ -385,11 +505,52 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
         </>
       )}
 
+      {/* verify.md — optional checklist the agent reads when the task
+          enters the "verify" phase. Editable here regardless of
+          dispatchOrigin (AI-aligned tasks still need a verification
+          script even though their task.md is synthesized from
+          alignment.md). */}
+      <div className="border-t border-[var(--line-subtle)]" />
+      <section>
+        <DocSectionHeader
+          title="verify.md 内容"
+          hint="可选"
+          path={`~/.myagents/tasks/${task.id}/verify.md`}
+          onOpenFolder={handleOpenDocsDir}
+        />
+        <div className="pl-1">
+          {verifyMdReadState === 'failed' ? (
+            <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-[12px] text-[var(--error)]">
+              verify.md 读取失败。为避免覆盖原内容，编辑已锁定。
+            </div>
+          ) : (
+            <>
+              <textarea
+                ref={verifyMdRef}
+                value={draft.verifyMd}
+                onChange={(e) => setDraft((d) => ({ ...d, verifyMd: e.target.value }))}
+                rows={6}
+                disabled={verifyMdReadState !== 'ok'}
+                placeholder={
+                  verifyMdReadState === 'ok'
+                    ? '验收清单(可选)——如:「curl /health 应返回 200」「npm test 全绿」'
+                    : '加载中…'
+                }
+                className={`${INPUT_CLS} resize-y font-mono text-[13px]`}
+              />
+              <p className="mt-2 text-[12px] text-[var(--ink-muted)]">
+                任务进入「验证中」阶段时 AI 读取此清单判定是否完成。留空则跳过验证阶段。
+              </p>
+            </>
+          )}
+        </div>
+      </section>
+
       <div className="border-t border-[var(--line-subtle)]" />
 
       {/* 执行模式 */}
       <section>
-        <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+        <h3 className="mb-3 text-[14px] font-semibold text-[var(--ink)]">
           执行模式
         </h3>
         <div className="pl-1">
@@ -414,7 +575,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
         <>
           <div className="border-t border-[var(--line-subtle)]" />
           <section>
-            <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+            <h3 className="mb-3 text-[14px] font-semibold text-[var(--ink)]">
               结束条件
             </h3>
             <div className="pl-1">
@@ -435,39 +596,17 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
 
       <div className="border-t border-[var(--line-subtle)]" />
 
-      {/* 执行覆盖 */}
-      <section>
-        <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-          执行覆盖
-          <span className="ml-2 text-[10px] font-normal normal-case tracking-normal text-[var(--ink-muted)]/70">
-            留空则使用 Agent 默认值
-          </span>
-        </h3>
-        <div className="space-y-3 pl-1">
-          <Field label="模型" hint="覆盖 Agent 默认模型">
-            <input
-              type="text"
-              value={draft.model}
-              onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
-              placeholder="例如: claude-opus-4-7、deepseek-chat。留空使用 Agent 默认"
-              className={INPUT_CLS}
-            />
-          </Field>
-          <Field label="权限模式">
-            <CustomSelect
-              value={draft.permissionMode || 'auto'}
-              options={PERMISSION_MODE_OPTIONS}
-              onChange={(v) => setDraft((d) => ({ ...d, permissionMode: v }))}
-            />
-          </Field>
-        </div>
-      </section>
-
-      <div className="border-t border-[var(--line-subtle)]" />
+      {/* 执行覆盖 — hidden in v0.1.69 UI. Model / permissionMode overrides
+          are still carried on the Task row and honored by the scheduler
+          (ensure_cron_for_task reads Task.model / Task.permissionMode);
+          we just don't expose a field for them in this editor yet. The
+          `draft.model` / `draft.permissionMode` state initial values
+          come from the Task, so a task with existing overrides will
+          keep them. */}
 
       {/* 通知 */}
-      <section>
-        <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+      <section ref={notificationRef}>
+        <h3 className="mb-3 text-[14px] font-semibold text-[var(--ink)]">
           通知
         </h3>
         <div className="pl-1">
@@ -525,6 +664,69 @@ function Field({
         {required && <span className="ml-1 text-[var(--accent-warm)]">*</span>}
       </label>
       {children}
+    </div>
+  );
+}
+
+/**
+ * Section header for a task document editor (task.md / verify.md):
+ *   - left: uppercased section title (matches other edit-panel sections)
+ *   - center/right: the absolute file path the editor will write to,
+ *     truncated on narrow widths
+ *   - trailing: "打开文件夹" button that reveals the enclosing directory
+ *     in Finder / Explorer / xdg-open so the user can inspect / edit the
+ *     file with their preferred editor.
+ *
+ * Keeping the path visible is important because tasks are now user-data
+ * (under `~/.myagents/tasks/<id>/`, PRD §9.3) — the mental model "the
+ * file lives on disk, I can open it" should be reinforced, not hidden.
+ */
+function DocSectionHeader({
+  title,
+  hint,
+  path,
+  onOpenFolder,
+}: {
+  title: string;
+  hint?: string;
+  path: string;
+  onOpenFolder: () => void;
+}) {
+  return (
+    <div className="mb-3">
+      {/* Title on its own row — 14px semibold, same as every other
+          in-overlay section header (基本信息 / 执行模式 / 结束条件 /
+          通知). That puts it one step above field labels (13px
+          medium) and one step below the overlay's own title (16px),
+          which is the hierarchy users expect inside a modal. */}
+      <h3 className="text-[14px] font-semibold text-[var(--ink)]">
+        {title}
+        {hint && (
+          <span className="ml-2 text-[12px] font-normal text-[var(--ink-muted)]/70">
+            {hint}
+          </span>
+        )}
+      </h3>
+      {/* Path + 打开文件夹 on a dedicated row below the title. Prior
+          layout crammed all three into one row which meant the path
+          visually competed with the title for gravity. */}
+      <div className="mt-1 flex items-center gap-2">
+        <span
+          className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--ink-muted)]/70"
+          title={path}
+        >
+          {path}
+        </span>
+        <button
+          type="button"
+          onClick={onOpenFolder}
+          title="在文件管理器中打开该任务的文档目录"
+          className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+        >
+          <FolderOpen className="h-3 w-3" />
+          打开文件夹
+        </button>
+      </div>
     </div>
   );
 }
