@@ -101,10 +101,6 @@ export function taskDelete(id: string): Promise<void> {
   return inv('cmd_task_delete', { id });
 }
 
-export function taskSetCron(id: string, cronTaskId: string | null): Promise<Task> {
-  return inv('cmd_task_set_cron', { id, cronTaskId });
-}
-
 /** Names of the markdown documents attached to a Task. */
 export type TaskDocName = 'task' | 'verify' | 'progress';
 
@@ -127,22 +123,25 @@ export function taskWriteDoc(
 }
 
 /**
- * Set or clear the `task_id` back-pointer on a CronTask. Used by the
- * legacy-upgrade flow after `cmd_task_create_direct` has minted the new Task.
- *
- * `requireNull` (default: true when linking, false when clearing) makes this
- * a link-if-null primitive — concurrent upgrade flows racing on the same
- * CronTask see `ALREADY_LINKED` and the losing caller can roll back.
+ * Upgrade one legacy CronTask (no `task_id` back-pointer) to a new-model
+ * Task in a single atomic Rust call. The primitive handles thought
+ * creation, schedule / end-condition / run-mode type conversions, both
+ * back-pointers, and rollback on any step failure — see
+ * `src-tauri/src/legacy_upgrade.rs` for why this needed to move out of
+ * the renderer. Returns the new Task + the id of the Thought that was
+ * auto-created to satisfy the v1 `sourceThoughtId` invariant.
  */
-export function cronSetTaskId(
+export interface TaskUpgradeLegacyResult {
+  task: Task;
+  thoughtId: string;
+}
+export function taskUpgradeLegacyCron(
   cronTaskId: string,
-  taskId: string | null,
-  requireNull?: boolean,
-): Promise<unknown> {
-  return inv('cmd_cron_set_task_id', {
+  workspaceId: string,
+): Promise<TaskUpgradeLegacyResult> {
+  return inv('cmd_task_upgrade_legacy_cron', {
     cronTaskId,
-    taskId,
-    requireNull,
+    workspaceId,
   });
 }
 

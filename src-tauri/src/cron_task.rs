@@ -2391,35 +2391,6 @@ pub async fn cmd_update_cron_task_fields(
         .ok_or_else(|| format!("Task not found after update: {}", task_id))
 }
 
-/// Set or clear the `task_id` back-pointer on a CronTask (Task Center
-/// legacy-upgrade flow). Called after `cmd_task_create_direct` has minted a
-/// new Task that wraps this cron; passing `task_id = None` unlinks.
-///
-/// `require_null` (default `true`) makes linking a link-if-null operation —
-/// if the cron is already linked to a different Task, returns `ALREADY_LINKED`
-/// so the caller can roll back the half-created Task+Thought pair. Callers
-/// that intend to clear or relink pass `false`.
-#[tauri::command]
-pub async fn cmd_cron_set_task_id(
-    app_handle: tauri::AppHandle,
-    cron_task_id: String,
-    task_id: Option<String>,
-    require_null: Option<bool>,
-) -> Result<CronTask, String> {
-    let manager = get_cron_task_manager();
-    // Unlink / relink semantics bypass the guard; pure link-in defaults to
-    // check-if-null so concurrent upgraders don't both "win".
-    let guard = require_null.unwrap_or(task_id.is_some());
-    let updated = manager
-        .set_task_id(&cron_task_id, task_id.clone(), guard)
-        .await?;
-    let _ = app_handle.emit(
-        "cron:task-updated",
-        serde_json::json!({ "taskId": cron_task_id, "linkedTaskId": task_id }),
-    );
-    Ok(updated)
-}
-
 /// Task Center adapter (v0.1.69) — deliver a Task status notification to an IM
 /// Bot via the existing cron delivery pipeline. The caller supplies the bot
 /// channel id and (optional) chat thread; platform is looked up on the fly.

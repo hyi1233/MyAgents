@@ -1929,15 +1929,6 @@ pub async fn cmd_task_delete(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn cmd_task_set_cron(
-    state: tauri::State<'_, ManagedTaskStore>,
-    id: String,
-    cron_task_id: Option<String>,
-) -> Result<Task, String> {
-    state.set_cron_task_id(&id, cron_task_id).await
-}
-
 /// Read one of the markdown documents attached to a Task.
 ///
 /// - `task`: the executor prompt (`.task/<id>/task.md`). Authored by the user

@@ -9,6 +9,7 @@ pub mod cron_task;
 pub mod im;
 pub mod local_http;
 pub mod logger;
+pub mod legacy_upgrade;
 pub mod management_api;
 pub mod process_cmd;
 mod proxy_config;
@@ -214,7 +215,6 @@ pub fn run() {
             cron_task::cmd_is_task_executing,
             cron_task::cmd_get_cron_runs,
             cron_task::cmd_update_cron_task_fields,
-            cron_task::cmd_cron_set_task_id,
             // Session activation commands (for Session singleton)
             cmd_get_session_activation,
             cmd_activate_session,
@@ -308,9 +308,9 @@ pub fn run() {
             task::cmd_task_append_session,
             task::cmd_task_archive,
             task::cmd_task_delete,
-            task::cmd_task_set_cron,
             task::cmd_task_read_doc,
             task::cmd_task_write_doc,
+            legacy_upgrade::cmd_task_upgrade_legacy_cron,
         ])
         .setup(|app| {
             // Initialize logging FIRST — acquire_lock() and cleanup_stale_sidecars()
