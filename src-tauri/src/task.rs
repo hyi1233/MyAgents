@@ -2436,28 +2436,14 @@ pub async fn cmd_task_get_run_stats(
             }
         }
 
-        // Tail of `cron_runs/<cronId>.jsonl` — most recent run result.
-        if let Some(home) = dirs::home_dir() {
-            let runs_path = home
-                .join(".myagents")
-                .join("cron_runs")
-                .join(format!("{}.jsonl", cron_id));
-            if let Ok(file) = fs::File::open(&runs_path) {
-                let reader = BufReader::new(file);
-                let mut last_line: Option<String> = None;
-                for line in reader.lines().flatten() {
-                    if !line.trim().is_empty() {
-                        last_line = Some(line);
-                    }
-                }
-                if let Some(line) = last_line {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
-                        stats.last_success = val.get("ok").and_then(|v| v.as_bool());
-                        stats.last_duration_ms =
-                            val.get("durationMs").and_then(|v| v.as_i64());
-                    }
-                }
-            }
+        // Delegate to `cron_task::read_cron_runs`, which owns the JSONL
+        // file layout — keeps `task.rs` out of CronTask's private storage
+        // schema and reuses the existing reverse-tail reader (already
+        // used by `cmd_get_cron_runs`).
+        let runs = crate::cron_task::read_cron_runs(cron_id, 1);
+        if let Some(last) = runs.last() {
+            stats.last_success = Some(last.ok);
+            stats.last_duration_ms = Some(last.duration_ms as i64);
         }
     }
 

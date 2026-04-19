@@ -90,7 +90,15 @@ export function ExecutionModeEditor({
   const isRecurring = executionMode === 'recurring';
   const isLoop = executionMode === 'loop';
   const showSessionStrategy = isRecurring || isLoop;
-  const advancedOn = cronExpression.trim().length > 0;
+
+  // Advanced mode is user-intent-driven (explicit toggle), not derived from
+  // whether `cronExpression` is non-empty. Otherwise clearing the textbox
+  // mid-edit (to rewrite) would snap the UI back to simple-interval mode
+  // and discard the user's intent. Seed `true` if the Task arrived with a
+  // non-empty expression.
+  const [advancedOn, setAdvancedOn] = useState(
+    () => cronExpression.trim().length > 0,
+  );
 
   const currentDescription = useMemo(
     () => EXECUTION_TABS.find((t) => t.value === executionMode)?.description,
@@ -158,15 +166,21 @@ export function ExecutionModeEditor({
               disabled={disabled}
               onClick={() => {
                 if (advancedOn) {
-                  // Switching off advanced mode: clear expression so simple
-                  // interval (already in intervalMinutes state) takes over.
+                  // Turn off: stop treating the expression as authoritative
+                  // AND clear it so the simple-interval save path isn't
+                  // surprised by a stale non-empty cron field. Keep the
+                  // intervalMinutes value untouched (user's pre-advanced
+                  // choice still lives).
+                  setAdvancedOn(false);
                   setCronExpression('');
                   setCronTimezone('');
                 } else {
-                  // Seed a minimal every-hour expression so the user has a
-                  // starting point instead of an empty textbox that would
-                  // re-enter simple mode on next render.
-                  setCronExpression('0 * * * *');
+                  // Turn on: seed a safe starting expression if the field
+                  // is empty. We only seed when empty so users who return
+                  // to advanced after clearing-to-rewrite don't get their
+                  // in-progress edit overwritten.
+                  setAdvancedOn(true);
+                  if (!cronExpression.trim()) setCronExpression('0 * * * *');
                   if (!cronTimezone) setCronTimezone('Asia/Shanghai');
                 }
               }}
