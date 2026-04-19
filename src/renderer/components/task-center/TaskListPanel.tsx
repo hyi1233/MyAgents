@@ -440,7 +440,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
               type="button"
               onClick={() => setIsSearchMode(true)}
               title="搜索任务"
-              className="flex h-6 w-6 items-center justify-center rounded p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+              className="flex h-6 w-6 items-center justify-center rounded-[var(--radius-sm)] p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
               <Search className="h-3.5 w-3.5" strokeWidth={1.5} />
             </button>
