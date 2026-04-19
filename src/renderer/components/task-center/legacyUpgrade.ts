@@ -67,8 +67,12 @@ export interface LegacyCronRaw {
   notifyEnabled?: boolean;
   notify_enabled?: boolean;
   delivery?: { botId?: string; chatId?: string; platform?: string };
-  runMode?: TaskRunMode;
-  run_mode?: TaskRunMode;
+  // The cron side serializes `run_mode` as snake_case (`single_session`
+  // / `new_session`) because its Rust enum uses `rename_all =
+  // "snake_case"`, while Task's enum uses kebab-case. Declared as
+  // unknown to force callers through `transformLegacyRunMode`.
+  runMode?: unknown;
+  run_mode?: unknown;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
   runtime_config?: RuntimeConfigSnapshot;
@@ -88,6 +92,27 @@ function deriveExecutionMode(
   // 'every' / 'cron' / unknown → treat as recurring (matches the current
   // legacy overlay's `describeSchedule` fallback).
   return 'recurring';
+}
+
+/**
+ * Normalise a legacy CronTask `run_mode` to the Task enum shape. The two
+ * Rust types disagree:
+ *   • `cron_task::RunMode` uses `#[serde(rename_all = "snake_case")]`
+ *     → wire: `"single_session"` / `"new_session"`
+ *   • `task::TaskRunMode` uses explicit `rename = "single-session" /
+ *     "new-session"` → wire: kebab case
+ * Passing the snake form into `cmd_task_create_direct` triggers
+ * `unknown variant 'single_session', expected 'single-session' or
+ * 'new-session'` from serde. We translate at the boundary.
+ */
+function transformLegacyRunMode(raw: unknown): TaskRunMode {
+  if (typeof raw !== 'string') return 'new-session';
+  // Already kebab (some wires might have been written with the Task-
+  // style encoding) — pass through unchanged.
+  if (raw === 'single-session' || raw === 'new-session') return raw;
+  if (raw === 'single_session') return 'single-session';
+  if (raw === 'new_session') return 'new-session';
+  return 'new-session';
 }
 
 /**
@@ -228,7 +253,7 @@ export async function upgradeLegacyCron(
     workspacePath,
     taskMdContent: prompt,
     executionMode: deriveExecutionMode(legacy.schedule),
-    runMode: legacy.runMode ?? legacy.run_mode ?? 'new-session',
+    runMode: transformLegacyRunMode(legacy.runMode ?? legacy.run_mode),
     // `transformLegacyEndConditions` converts the cron-side ISO
     // `deadline` into the Task-side ms-epoch representation — without
     // this, Rust's serde rejects `taskCreateDirect` with
