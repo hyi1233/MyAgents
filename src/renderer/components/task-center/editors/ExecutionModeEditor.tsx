@@ -1,22 +1,25 @@
 // ExecutionModeEditor — shared UI for picking how a task runs:
 //   • mode: once / scheduled / recurring / loop
 //   • scheduled → datetime-local (→ task.dispatchAt)
-//   • recurring → interval in minutes OR cron expression (advanced mode)
+//   • recurring → CronExpressionInput with 5-chip picker:
+//       固定周期 (intervalMinutes) | 每天 | 工作日 | 每周 | 每月
+//     plus an escape hatch to raw cron expression inside the child.
 //   • recurring/loop → session strategy (new-session / single-session,
 //     forced single-session for loop)
 //
 // Used by both the dispatch dialog (create flow) and the task detail overlay
 // edit mode, so the two surfaces stay aligned on scheduling semantics.
 //
-// v0.1.69: interval is now writable on edit (TaskStore.update projects into
-// the linked CronTask via update_task_fields, preserving executionCount).
-// Cron expression support is surfaced through a "高级" toggle — when on, the
-// expression takes precedence over the simple interval.
+// v0.1.69 refactor: the prior outer "简单 / 高级" toggle was removed — the
+// "简单 = every N minutes" path is now the 固定周期 chip inside the same
+// CronExpressionInput the "高级" path always used. One component, one chip
+// row, one mental model.
 
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Calendar, Clock, Play, Repeat, Timer } from 'lucide-react';
 
 import type { TaskExecutionMode, TaskRunMode } from '@/../shared/types/task';
+import CronExpressionInput from '@/components/scheduled-tasks/CronExpressionInput';
 import { INPUT_CLS, PillButton, toLocalDateTimeString } from './controls';
 
 export interface ExecutionModeState {
@@ -91,13 +94,26 @@ export function ExecutionModeEditor({
   const isLoop = executionMode === 'loop';
   const showSessionStrategy = isRecurring || isLoop;
 
-  // Advanced mode is user-intent-driven (explicit toggle), not derived from
-  // whether `cronExpression` is non-empty. Otherwise clearing the textbox
-  // mid-edit (to rewrite) would snap the UI back to simple-interval mode
-  // and discard the user's intent. Seed `true` if the Task arrived with a
-  // non-empty expression.
-  const [advancedOn, setAdvancedOn] = useState(
-    () => cronExpression.trim().length > 0,
+  // Seed the timezone on first render if the recurring task doesn't
+  // have one yet — `CronExpressionInput` picks its displayed tz from
+  // the `tz` prop, so a pristine task with empty tz would land on a
+  // blank entry. This is a one-time nudge; subsequent user changes
+  // flow through `handleCronChange`.
+  useEffect(() => {
+    if (isRecurring && !cronTimezone) {
+      setCronTimezone(
+        Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRecurring]);
+
+  const handleCronChange = useCallback(
+    (expr: string, tz: string) => {
+      setCronExpression(expr);
+      setCronTimezone(tz);
+    },
+    [setCronExpression, setCronTimezone],
   );
 
   const currentDescription = useMemo(
@@ -157,80 +173,21 @@ export function ExecutionModeEditor({
 
       {isRecurring && (
         <div className="mt-5">
-          <div className="mb-2 flex items-center justify-between">
-            <label className="text-[13px] font-medium text-[var(--ink-secondary)]">
-              {advancedOn ? 'Cron 表达式' : '周期间隔（分钟）'}
-            </label>
-            <button
-              type="button"
-              disabled={disabled}
-              onClick={() => {
-                if (advancedOn) {
-                  // Turn off: stop treating the expression as authoritative
-                  // AND clear it so the simple-interval save path isn't
-                  // surprised by a stale non-empty cron field. Keep the
-                  // intervalMinutes value untouched (user's pre-advanced
-                  // choice still lives).
-                  setAdvancedOn(false);
-                  setCronExpression('');
-                  setCronTimezone('');
-                } else {
-                  // Turn on: seed a safe starting expression if the field
-                  // is empty. We only seed when empty so users who return
-                  // to advanced after clearing-to-rewrite don't get their
-                  // in-progress edit overwritten.
-                  setAdvancedOn(true);
-                  if (!cronExpression.trim()) setCronExpression('0 * * * *');
-                  if (!cronTimezone) setCronTimezone('Asia/Shanghai');
-                }
-              }}
-              className="text-[11px] font-medium text-[var(--accent-warm)] hover:underline disabled:opacity-50"
-            >
-              {advancedOn ? '← 返回简单模式' : '高级(Cron 表达式)'}
-            </button>
-          </div>
-
-          {advancedOn ? (
-            <>
-              <input
-                type="text"
-                value={cronExpression}
-                onChange={(e) => setCronExpression(e.target.value)}
-                placeholder="例如:0 9 * * *(每天 9 点)"
-                disabled={disabled}
-                className={`${INPUT_CLS} font-mono`}
-              />
-              <div className="mt-2 flex items-center gap-2">
-                <label className="text-[12px] text-[var(--ink-muted)] shrink-0">时区</label>
-                <input
-                  type="text"
-                  value={cronTimezone}
-                  onChange={(e) => setCronTimezone(e.target.value)}
-                  placeholder="Asia/Shanghai"
-                  disabled={disabled}
-                  className={`${INPUT_CLS} font-mono`}
-                />
-              </div>
-              <p className="mt-2 text-[12px] text-[var(--ink-muted)]">
-                标准 5 段 Cron:分 时 日 月 周。留空时区则使用系统默认。
-              </p>
-            </>
-          ) : (
-            <>
-              <input
-                type="number"
-                min={5}
-                max={10080}
-                value={intervalMinutes}
-                onChange={(e) => setIntervalMinutes(Math.max(5, Number(e.target.value) || 5))}
-                disabled={disabled}
-                className={INPUT_CLS}
-              />
-              <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
-                最小 5 分钟。需要复杂定时(如「每天 9 点」)请切到高级模式。
-              </p>
-            </>
-          )}
+          {/* v0.1.69: the prior "简单 / 高级" outer toggle and its
+              title row were collapsed — every recurring schedule is
+              now picked through the same chip row inside
+              CronExpressionInput. 「固定周期」 chip (5th) takes over
+              what used to be "simple mode" (every N minutes);
+              daily/weekdays/weekly/monthly remain as-is. The escape
+              hatch to raw cron stays available via the child's
+              internal "使用 Cron 表达式" button. */}
+          <CronExpressionInput
+            expr={cronExpression}
+            tz={cronTimezone}
+            onChange={handleCronChange}
+            intervalMinutes={intervalMinutes}
+            onIntervalChange={setIntervalMinutes}
+          />
         </div>
       )}
 
