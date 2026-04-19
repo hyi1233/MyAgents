@@ -754,6 +754,18 @@ impl TaskStore {
         // Validate workspace_path + name up front so we don't half-write.
         let workspace_path = canonicalize_workspace_path(&input.workspace_path)?;
         validate_task_name(&input.name)?;
+        // Cron expression validation at the boundary — same contract as
+        // `update()`; ensures the scheduler never gets handed a malformed
+        // expression that would make it die silently at first fire.
+        if let Some(expr) = input.cron_expression.as_deref() {
+            if !expr.trim().is_empty() {
+                crate::cron_task::validate_cron_expression(
+                    expr,
+                    input.cron_timezone.as_deref(),
+                )
+                .map_err(|e| format!("cron expression invalid: {}", e))?;
+            }
+        }
         let now = now_ms();
         let id = Uuid::new_v4().to_string();
         // task_docs_dir() internally validates `id`, but `id` is our freshly-minted
@@ -1226,13 +1238,35 @@ impl TaskStore {
             }
             TaskExecutionMode::Scheduled => {
                 // Scheduled only needs dispatch_at; clear recurring knobs.
+                // Also strip any legacy `endConditions.deadline` that a
+                // pre-v0.1.69 row might be carrying — once dispatch_at is
+                // populated (either by the user editing or by the
+                // legacy-upgrade path), the deadline has no remaining
+                // meaning here and only confuses later readers that still
+                // treat `endConditions.deadline` as "when to stop running".
                 updated.interval_minutes = None;
                 updated.cron_expression = None;
                 updated.cron_timezone = None;
+                if let Some(ref mut ec) = updated.end_conditions {
+                    ec.deadline = None;
+                }
             }
             TaskExecutionMode::Recurring | TaskExecutionMode::Loop => {
                 // dispatch_at belongs to Scheduled only.
                 updated.dispatch_at = None;
+            }
+        }
+
+        // Validate cron_expression at the boundary so malformed input can't
+        // reach the scheduler (it would silently die at first fire, leaving
+        // the task "running" but never ticking).
+        if let Some(expr) = updated.cron_expression.as_deref() {
+            if !expr.trim().is_empty() {
+                crate::cron_task::validate_cron_expression(
+                    expr,
+                    updated.cron_timezone.as_deref(),
+                )
+                .map_err(|e| format!("cron expression invalid: {}", e))?;
             }
         }
 

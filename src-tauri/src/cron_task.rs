@@ -39,6 +39,18 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
+/// Validate a cron expression (and optional timezone) at data-boundary time
+/// so bad input is rejected when saved, not silently swallowed at next fire
+/// (which would leave the scheduler dead and the task status "running" with
+/// no tick). Returns `Ok(())` when the expression parses and the tz (if
+/// supplied) is an IANA id we recognize.
+pub fn validate_cron_expression(expr: &str, tz: Option<&str>) -> Result<(), String> {
+    // `next_cron_fire_time` already does both checks and throws away the
+    // result; reuse it so the validator stays in lockstep with the runtime
+    // parser — no way for validation to diverge from execution.
+    next_cron_fire_time(expr, tz).map(|_| ())
+}
+
 /// Parse a cron expression and compute the next fire time as a wall-clock UTC timestamp.
 /// Accepts standard 5-field cron expressions (min hour dom month dow) and
 /// converts to the 7-field format required by the `cron` crate (sec min hour dom month dow year).

@@ -98,7 +98,11 @@ function taskToDraft(task: Task, taskMd: string): Draft {
 export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPanelProps) {
   const [draft, setDraft] = useState<Draft>(() => taskToDraft(task, ''));
   const [saving, setSaving] = useState(false);
-  const [taskMdLoaded, setTaskMdLoaded] = useState(false);
+  // Tri-state: null (loading) | true (loaded) | false (failed) — separate
+  // from just "loaded" so a read failure doesn't silently let the user
+  // overwrite their existing task.md with an empty string (C2 review).
+  const [taskMdReadState, setTaskMdReadState] =
+    useState<'loading' | 'ok' | 'failed'>('loading');
   const isAiAligned = task.dispatchOrigin === 'ai-aligned';
 
   // Read the current task.md body once so the user can edit the prompt
@@ -107,18 +111,18 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
   useEffect(() => {
     let cancelled = false;
     if (isAiAligned) {
-      setTaskMdLoaded(true);
+      setTaskMdReadState('ok');
       return;
     }
     void taskReadDoc(task.id, 'task')
       .then((content) => {
         if (cancelled) return;
         setDraft((d) => ({ ...d, taskMd: content }));
-        setTaskMdLoaded(true);
+        setTaskMdReadState('ok');
       })
       .catch(() => {
         if (cancelled) return;
-        setTaskMdLoaded(true);
+        setTaskMdReadState('failed');
       });
     return () => {
       cancelled = true;
@@ -156,7 +160,10 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
   const errors = useMemo(() => {
     const errs: string[] = [];
     if (!draft.name.trim()) errs.push('请填写任务名');
-    if (!isAiAligned && !draft.taskMd.trim()) errs.push('task.md 内容不能为空');
+    if (!isAiAligned && taskMdReadState === 'failed')
+      errs.push('task.md 读取失败，无法保存（以免覆盖原内容）');
+    if (!isAiAligned && taskMdReadState === 'ok' && !draft.taskMd.trim())
+      errs.push('task.md 内容不能为空');
     if (isScheduled) {
       const ts = Date.parse(draft.atDateTime);
       if (Number.isNaN(ts) || ts <= Date.now()) errs.push('执行时间必须在未来');
@@ -183,7 +190,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
       errs.push('请至少设置一个结束条件');
     }
     return errs;
-  }, [draft, isScheduled, isRecurring, showEndConditions, isAiAligned]);
+  }, [draft, isScheduled, isRecurring, showEndConditions, isAiAligned, taskMdReadState]);
 
   const buildEndConditions = useCallback((): EndConditions | undefined => {
     if (!showEndConditions) return undefined;
@@ -219,9 +226,10 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
     const initialTags = task.tags.join(',');
     if (tags.join(',') !== initialTags) payload.tags = tags;
 
-    if (!isAiAligned && draft.taskMd !== '') {
-      // Only send when we successfully loaded the original so we don't
-      // stomp with an empty string.
+    if (!isAiAligned && taskMdReadState === 'ok') {
+      // Only persist when we actually loaded the current body — a failed
+      // read must not let the user overwrite with whatever's in the
+      // textarea (could be the empty default).
       payload.prompt = draft.taskMd;
     }
 
@@ -297,6 +305,7 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
     isRecurring,
     isLoop,
     isAiAligned,
+    taskMdReadState,
     onSaved,
     onError,
   ]);
@@ -348,17 +357,29 @@ export function TaskEditPanel({ task, onSaved, onCancel, onError }: TaskEditPane
               task.md 内容
             </h3>
             <div className="pl-1">
-              <textarea
-                value={draft.taskMd}
-                onChange={(e) => setDraft((d) => ({ ...d, taskMd: e.target.value }))}
-                rows={8}
-                disabled={!taskMdLoaded}
-                placeholder={taskMdLoaded ? '描述任务目标、约束、上下文' : '加载中…'}
-                className={`${INPUT_CLS} resize-y font-mono text-[12.5px]`}
-              />
-              <p className="mt-2 text-[12px] text-[var(--ink-muted)]">
-                AI 执行时看到的 prompt。保存时会原子写入 .task/&lt;id&gt;/task.md。
-              </p>
+              {taskMdReadState === 'failed' ? (
+                <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-[12px] text-[var(--error)]">
+                  task.md 读取失败。为避免覆盖原内容，编辑已锁定。请关闭重试，或检查磁盘权限后再打开此任务。
+                </div>
+              ) : (
+                <>
+                  <textarea
+                    value={draft.taskMd}
+                    onChange={(e) => setDraft((d) => ({ ...d, taskMd: e.target.value }))}
+                    rows={8}
+                    disabled={taskMdReadState !== 'ok'}
+                    placeholder={
+                      taskMdReadState === 'ok'
+                        ? '描述任务目标、约束、上下文'
+                        : '加载中…'
+                    }
+                    className={`${INPUT_CLS} resize-y font-mono text-[12.5px]`}
+                  />
+                  <p className="mt-2 text-[12px] text-[var(--ink-muted)]">
+                    AI 执行时看到的 prompt。保存时会原子写入 .task/&lt;id&gt;/task.md。
+                  </p>
+                </>
+              )}
             </div>
           </section>
         </>
