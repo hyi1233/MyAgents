@@ -164,18 +164,19 @@ export default memo(function BrandSection({
     // PRD §4.1.1 hotkeys:
     //   • Cmd/Ctrl+Shift+T toggles mode globally while the Launcher is
     //     mounted — an explicit chord, safe to listen on `window`.
-    //   • Plain Tab also toggles, but only when (a) no editable target
-    //     has focus, (b) no overlay is open (Cmd+W stack), and (c) focus
-    //     is inside the Launcher subtree or on `<body>`. These guards
-    //     keep Tab's default focus-nav semantics everywhere else.
+    //   • Plain Tab toggles too, and — crucially — fires even when the
+    //     textarea is focused. The tooltip on the ModeSegment buttons
+    //     ("按 Tab 切换到「任务」") promises this behaviour; guarding
+    //     against editable targets like earlier iterations did made the
+    //     tooltip a lie the moment mount-time focus landed the caret in
+    //     the textarea. Child components that legitimately need to
+    //     consume Tab (SimpleChatInput's slash-menu / file-search
+    //     autocomplete) call `event.stopPropagation()` inside their
+    //     onKeyDown handlers — React's `stopPropagation` halts the
+    //     underlying native bubble, so this window listener truly won't
+    //     fire when a child has first claim on the Tab keystroke.
     useEffect(() => {
         if (!modeSegmentEnabled) return;
-        const isEditableTarget = (t: EventTarget | null): boolean => {
-            if (!(t instanceof HTMLElement)) return false;
-            if (t.isContentEditable) return true;
-            const tag = t.tagName;
-            return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
-        };
         const handler = (e: KeyboardEvent) => {
             if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
                 e.preventDefault();
@@ -188,7 +189,6 @@ export default memo(function BrandSection({
                 e.ctrlKey ||
                 e.altKey ||
                 e.shiftKey ||
-                isEditableTarget(e.target) ||
                 hasOverlayLayer()
             ) {
                 return;

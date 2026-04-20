@@ -1099,6 +1099,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       // Tab or Enter to select
       if (event.key === 'Enter' || event.key === 'Tab') {
         event.preventDefault();
+        // `stopPropagation` — when the slash menu consumes Tab for
+        // autocomplete, prevent the event from reaching window-level
+        // handlers (e.g. the Launcher `BrandSection`'s mode toggle).
+        // Without this, Tab would both autocomplete AND toggle the
+        // segment, a double-effect. React's `stopPropagation` also
+        // stops the underlying native bubble, so the window listener
+        // truly won't fire.
+        event.stopPropagation();
         const selected = filteredSlashCommands[selectedSlashIndex];
         if (selected && slashPosition !== null) {
           // Trigger skill copy if user-level skill
@@ -1135,6 +1143,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       // Tab or Enter to select file
       if (event.key === 'Enter' || event.key === 'Tab') {
         event.preventDefault();
+        // Same rationale as the slash-menu path above — stop native
+        // bubble so window-level Tab handlers (BrandSection's mode
+        // toggle) don't fire when the file-search menu is the owner
+        // of this Tab keystroke.
+        event.stopPropagation();
         const selected = fileSearchResults[selectedFileIndex];
         if (selected && atPosition !== null) {
           // Replace @query with @path
