@@ -248,15 +248,9 @@ When the user's first message contains a parameter dictionary shaped like:
 - sourceThoughtId: <uuid>
 ```
 
-…you are in **Task Center mode** — the user arrived via the "AI 讨论"
-button on a thought card. The four parameters are everything you need
-to sink the alignment into the Task Center. Remember them; they're used
-twice (directory path for docs + CLI args for task creation).
+…you are in **Task Center mode** — the user arrived via the "AI 讨论" button on a thought card. The four parameters are everything you need to sink the alignment into the Task Center; they're used twice (directory path for docs + CLI args for task creation).
 
-If no such dictionary is present, fall through to **Manual mode** — the
-user invoked `/task-alignment` directly. Write the four docs to `.task/`
-relative to the current working directory and stop; no CLI call is
-appropriate, there's no task-entity to create.
+If no such dictionary is present, fall through to **Manual mode** — the user invoked `/task-alignment` directly. Write the four docs to `.task/` relative to the current working directory and stop; no CLI call is appropriate, there's no task-entity to create.
 
 ### Where to write (Task Center mode)
 
@@ -264,27 +258,19 @@ All four documents go to `~/.myagents/tasks/<alignmentSessionId>/`:
 
 - Use the `Write` tool with an **absolute** path.
 - Expand `~` to the real home dir — in bash use `$HOME`.
-- This directory lives outside the workspace: task docs are user-scoped
-  application data, not project content.
+- This directory lives outside the workspace: task docs are user-scoped application data, not project content.
 - The docs are AI-owned end-to-end; program code never writes to them.
-- The `create-from-alignment` CLI (below) promotes this exact directory
-  by renaming it to `~/.myagents/tasks/<newTaskId>/`.
+- The `create-from-alignment` CLI (below) promotes this exact directory by renaming it to `~/.myagents/tasks/<newTaskId>/`.
 
 ### How to dialog
 
-**Before writing any file**, actually have the alignment conversation —
-understand goals, scope, verification criteria, emphasis points. The 4
-docs are sinks, not starting points. Ask the user questions; don't race
-to commit a plan in the first turn.
+**Before writing any file**, actually have the alignment conversation — understand goals, scope, verification criteria, emphasis points. The four docs are sinks, not starting points. Ask the user questions; don't race to commit a plan in the first turn.
 
 ### Four possible outcomes
 
-A good alignment ends in one of these four places. Pick the right one
-based on where the conversation actually lands; don't force the "create
-task" outcome if the discussion shows another path.
+A good alignment ends in one of these four places. Pick the right one based on where the conversation actually lands; don't force the "create task" outcome if the discussion shows another path.
 
-**① Worth doing — create the task.** Scope is clear and the user
-agrees it's worth the investment. After writing all four docs, invoke:
+**① Worth doing — create the task.** Scope is clear and the user agrees it's worth the investment. After writing all four docs, invoke:
 
 ```bash
 myagents task create-from-alignment <alignmentSessionId> \
@@ -294,51 +280,21 @@ myagents task create-from-alignment <alignmentSessionId> \
   --sourceThoughtId <sourceThoughtId>
 ```
 
-Substitute the four values from the prompt's parameter dictionary;
-pick `--name` yourself based on the task. The CLI renames the docs
-directory to `~/.myagents/tasks/<newTaskId>/`, backfills the source
-thought's `convertedTaskIds`, and registers the task with
-`dispatchOrigin=ai-aligned`. Then tell the user:
-「已创建任务『XXX』，可在「任务」面板查看。需要现在派发执行吗？」
-If yes → `myagents task run <newTaskId>`.
+Substitute the four values from the prompt's parameter dictionary; pick `--name` yourself based on the task. The CLI renames the docs directory to `~/.myagents/tasks/<newTaskId>/`, backfills the source thought's `convertedTaskIds`, and registers the task with `dispatchOrigin=ai-aligned`. Then tell the user: 「已创建任务『XXX』，可在「任务」面板查看。需要现在派发执行吗？」If yes → `myagents task run <newTaskId>`.
 
-**② Should be split.** The "one thought" actually bundles multiple
-independent tasks. Don't force them into a single alignment.md. Explain
-the split to the user, then:
+**② Should be split.** The "one thought" actually bundles multiple independent tasks. Don't force them into a single alignment.md. Explain the split to the user, then:
 
-- Pick the sharpest slice they want to pursue first and alignment that
-  one via the CLI call above.
-- For the other slices, do NOT create tasks in this conversation. Tell
-  the user they can re-trigger `/task-alignment` on the remaining ideas
-  separately (from the thought card again, or as a manual flow). This
-  keeps each task-entity focused and avoids the "mega-task that never
-  finishes" trap.
+- Pick the sharpest slice they want to pursue first and alignment that one via the CLI call above.
+- For the other slices, do NOT create tasks in this conversation. Tell the user they can re-trigger `/task-alignment` on the remaining ideas separately (from the thought card again, or as a manual flow). This keeps each task-entity focused and avoids the "mega-task that never finishes" trap.
 
-**③ Needs upstream work first.** The idea is real but the user can't
-commit to scope without more information — e.g. "first I need to run
-the profiler to see where the bottleneck actually is" before we can
-plan the fix. Don't create a task prematurely. Instead:
+**③ Needs upstream work first.** The idea is real but the user can't commit to scope without more information — e.g. "first I need to run the profiler to see where the bottleneck actually is" before we can plan the fix. Don't create a task prematurely. Instead:
 
-- Capture the reasoning and the upstream step in alignment.md anyway
-  (useful context even if no task is minted yet).
-- Tell the user: 「目前讨论还缺 X，我建议先做 Y 再来对齐。需要我留下
-  这些文档以便下次再对齐时复用吗?」
-- Leave the docs in `~/.myagents/tasks/<alignmentSessionId>/` without
-  calling the CLI. The directory persists; a later `/task-alignment`
-  can reference it.
+- Capture the reasoning and the upstream step in alignment.md anyway (useful context even if no task is minted yet).
+- Tell the user: 「目前讨论还缺 X，我建议先做 Y 再来对齐。需要我留下这些文档以便下次再对齐时复用吗?」
+- Leave the docs in `~/.myagents/tasks/<alignmentSessionId>/` without calling the CLI. The directory persists; a later `/task-alignment` can reference it.
 
-**④ Not worth doing.** The discussion revealed this isn't valuable
-enough right now. Don't call the CLI — leave the docs in place as a
-record of the "why not", explain briefly, and stop. The originating
-thought stays on the Task Center left column, unconverted. This is a
-feature, not a failure; a thought that surfaces and gets rejected is
-still worth capturing the rejection for.
+**④ Not worth doing.** The discussion revealed this isn't valuable enough right now. Don't call the CLI — leave the docs in place as a record of the "why not", explain briefly, and stop. The originating thought stays on the Task Center left column, unconverted. This is a feature, not a failure; a thought that surfaces and gets rejected is still worth capturing the rejection for.
 
 ### What lives where (skill vs prompt contract)
 
-The prompt deliberately stays lean — it only supplies the parameter
-dictionary and the raw thought text. Everything procedural (doc
-layout, Write tool conventions, CLI syntax, outcome handling) lives
-here in the skill. If you feel like the prompt "didn't tell you how
-to do X", check this section first — the answer is almost always
-already encoded as a skill rule.
+The prompt deliberately stays lean — it only supplies the parameter dictionary and the raw thought text. Everything procedural (doc layout, Write tool conventions, CLI syntax, outcome handling) lives here in the skill. If you feel like the prompt "didn't tell you how to do X", check this section first — the answer is almost always already encoded as a skill rule.
