@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react';
 import { ArrowRight } from 'lucide-react';
 import { thoughtList } from '@/api/taskCenter';
+import { relativeTime } from '@/utils/taskCenterUtils';
 import type { Thought } from '@/../shared/types/thought';
 
 interface Props {
@@ -112,19 +113,6 @@ function firstNonEmptyLine(s: string): string {
     if (line) return line;
   }
   return '';
-}
-
-function relativeTime(ts: number): string {
-  if (!ts) return '';
-  const diff = Date.now() - ts;
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 1) return '刚刚';
-  if (mins < 60) return `${mins}分钟前`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}小时前`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days}天前`;
-  return new Date(ts).toLocaleDateString();
 }
 
 export default RecentThoughtsRow;

@@ -1,25 +1,25 @@
 // ModeSegment — "任务 / 想法" mode declaration switcher.
-// Shown above the input box on Launcher (big centered) and Chat (compact).
+// Shown above the input box on Launcher (the only current caller).
 //
 // v0.1.69 redesign: replaced the prior "text | text" pipe layout with the
 // macOS-settings-style icon segmented control (variant F in the
 // `specs/playground/mode-segment.html` sandbox). The segmented control
 // reads as one affordance rather than two free-floating buttons — it's
 // clearer that these are mutually-exclusive modes of a single surface.
+// (Chat surface previously used a "compact" variant; after the v0.1.69
+// review round the Chat input bar was simplified and no longer mounts
+// this component.)
 //
-// Icons reuse the ones the rest of the task center already associates with
-// each domain:
-//   • 任务 → Layers (same as `TaskListPanel` header)
-//   • 想法 → Lightbulb (same as `ThoughtPanel` header)
-// so the switcher's icons foreshadow what the user gets after clicking.
-//
-// Sizing: per the v0.1.69 redesign brief, the segmented control renders
-// at 14px regardless of the `size` prop — the prior 18px/13px dual scale
-// was readable in isolation but created a distracting mismatch with the
-// surrounding 13–14px input toolbar. The `size` prop is retained in the
-// props signature for API compatibility; it currently has no visual effect.
+// Icons:
+//   • 任务 → Sparkles — "AI 执行感觉"; distinct from the Task Center page
+//            header (Layers) so the launcher's switcher foreshadows "把
+//            任务交给 AI 做" rather than "浏览任务列表". The prior Layers
+//            icon read as "列表 / 堆叠" which was a type mismatch with
+//            launcher's dispatch intent.
+//   • 想法 → Lightbulb (same as `ThoughtPanel` header) — ideation pairs
+//            naturally with the Sparkles execute affordance.
 
-import { Layers, Lightbulb } from 'lucide-react';
+import { Lightbulb, Sparkles } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 export type InputMode = 'task' | 'thought';
@@ -27,12 +27,6 @@ export type InputMode = 'task' | 'thought';
 interface ModeSegmentProps {
   value: InputMode;
   onChange: (mode: InputMode) => void;
-  /**
-   * Retained for API compatibility with prior callers. The v0.1.69
-   * redesign renders at a fixed 14px scale for both surfaces; callers
-   * can keep passing `'launcher'` / `'chat'` without breakage.
-   */
-  size?: 'launcher' | 'chat';
   /** Optional slot on the right side (e.g. info tooltip). */
   suffix?: ReactNode;
   /**
@@ -75,7 +69,7 @@ export function ModeSegment({
           title={taskTitle}
           className={`${baseBtn} ${value === 'task' ? activeBtn : inactiveBtn}`}
         >
-          <Layers className="h-3.5 w-3.5" strokeWidth={1.75} />
+          <Sparkles className="h-3.5 w-3.5" strokeWidth={1.75} />
           任务
         </button>
         <button

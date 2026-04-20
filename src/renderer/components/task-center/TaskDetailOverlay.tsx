@@ -7,7 +7,6 @@ import {
   Bell,
   Bot,
   CheckCircle,
-  MoreHorizontal,
   Pencil,
   Play,
   RotateCcw,
@@ -17,7 +16,7 @@ import {
 } from 'lucide-react';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
-import { Popover } from '@/components/ui/Popover';
+import { DropdownMenu, type DropdownMenuItem, type DropdownMenuSection } from '@/components/ui/DropdownMenu';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { useConfig } from '@/hooks/useConfig';
@@ -523,9 +522,9 @@ export function TaskDetailOverlay({
 }
 
 /** OverflowMenu — "⋯" button with all secondary actions (标记完成,
- *  归档, 同步到 Agent, 删除). Centralises the actions that used to live
- *  as inline buttons on the ActionBar; v0.1.69 review said the bar
- *  had too many competing targets. */
+ *  归档, 同步到 Agent, 删除). Wraps the shared `DropdownMenu` primitive
+ *  with task-specific section layout: secondary actions first, delete
+ *  separated in its own danger group. */
 function OverflowMenu({
   status,
   busy,
@@ -545,110 +544,56 @@ function OverflowMenu({
   onSyncToAgent: () => void;
   onDelete: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const btnRef = useRef<HTMLButtonElement>(null);
   const canMarkDone = status === 'verifying';
   const canArchive = status === 'done';
-  // If neither secondary action applies and delete is always-available,
-  // we still render the menu — delete alone is a legit reason to exist.
-  return (
-    <>
-      <button
-        ref={btnRef}
-        type="button"
-        disabled={busy}
-        onClick={() => setOpen((v) => !v)}
-        className="flex h-8 w-8 items-center justify-center rounded-[var(--radius-md)] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
-        title="更多操作"
-      >
-        <MoreHorizontal className="h-4 w-4" />
-      </button>
-      <Popover
-        open={open}
-        onClose={() => setOpen(false)}
-        anchorRef={btnRef}
-        placement="bottom-end"
-        className="min-w-[160px] py-1"
-        zIndex={OVERLAY_Z + 1}
-      >
-        {canMarkDone && (
-          <MenuItem
-            icon={<CheckCircle className="h-3.5 w-3.5" />}
-            label="标记完成"
-            onClick={() => {
-              setOpen(false);
-              onMarkDone();
-            }}
-          />
-        )}
-        {canArchive && (
-          <MenuItem
-            icon={<Archive className="h-3.5 w-3.5" />}
-            label="归档"
-            onClick={() => {
-              setOpen(false);
-              onArchive();
-            }}
-          />
-        )}
-        {canSyncToAgent && (
-          <MenuItem
-            icon={<Bot className="h-3.5 w-3.5" />}
-            label={syncing ? '同步中…' : '同步到 Agent'}
-            title="把该任务的模型 / 权限覆盖写回所属 Agent 的默认配置"
-            onClick={() => {
-              setOpen(false);
-              onSyncToAgent();
-            }}
-            disabled={syncing}
-          />
-        )}
-        {(canMarkDone || canArchive || canSyncToAgent) && (
-          <div className="my-1 border-t border-[var(--line-subtle)]" />
-        )}
-        <MenuItem
-          icon={<Trash2 className="h-3.5 w-3.5" />}
-          label="删除"
-          danger
-          onClick={() => {
-            setOpen(false);
-            onDelete();
-          }}
-        />
-      </Popover>
-    </>
-  );
-}
 
-function MenuItem({
-  icon,
-  label,
-  title,
-  onClick,
-  disabled,
-  danger,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  title?: string;
-  onClick: () => void;
-  disabled?: boolean;
-  danger?: boolean;
-}) {
-  const color = danger
-    ? 'text-[var(--error)] hover:bg-[var(--error-bg)]'
-    : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]';
+  const secondary: DropdownMenuItem[] = [];
+  if (canMarkDone) {
+    secondary.push({
+      icon: <CheckCircle className="h-3.5 w-3.5" />,
+      label: '标记完成',
+      onClick: onMarkDone,
+    });
+  }
+  if (canArchive) {
+    secondary.push({
+      icon: <Archive className="h-3.5 w-3.5" />,
+      label: '归档',
+      onClick: onArchive,
+    });
+  }
+  if (canSyncToAgent) {
+    secondary.push({
+      icon: <Bot className="h-3.5 w-3.5" />,
+      label: syncing ? '同步中…' : '同步到 Agent',
+      title: '把该任务的模型 / 权限覆盖写回所属 Agent 的默认配置',
+      onClick: onSyncToAgent,
+      disabled: syncing,
+    });
+  }
+
+  const sections: DropdownMenuSection[] = [
+    { items: secondary },
+    {
+      items: [
+        {
+          icon: <Trash2 className="h-3.5 w-3.5" />,
+          label: '删除',
+          onClick: onDelete,
+          danger: true,
+        },
+      ],
+    },
+  ];
+
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      title={title}
-      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] disabled:cursor-not-allowed disabled:opacity-50 ${color}`}
-    >
-      {icon}
-      {label}
-    </button>
+    <DropdownMenu
+      sections={sections}
+      size="md"
+      disabled={busy}
+      minWidth={160}
+      zIndex={OVERLAY_Z + 1}
+    />
   );
 }
 
@@ -709,12 +654,18 @@ function ActionBtn({
   title,
   variant,
 }: ActionBtnProps) {
+  // Disabled state uses `ink-subtle` (a lighter fade) + explicit hover
+  // overrides so CSS `:hover` doesn't still tint the button orange/red —
+  // prior `disabled:opacity-50` alone kept the ink-muted tone close enough
+  // to the active state that users read it as clickable (PRD §9.4 "锁定
+  // 态视觉" feedback; without the override the hover background still
+  // flashed on mouse-over).
   const base =
-    'flex items-center gap-1.5 rounded-[var(--radius-md)] px-2.5 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50';
+    'flex items-center gap-1.5 rounded-[var(--radius-md)] px-2.5 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:text-[var(--ink-subtle)] disabled:hover:bg-transparent';
   const variantCls =
     variant === 'danger'
-      ? 'text-[var(--ink-muted)] hover:bg-[var(--error-bg)] hover:text-[var(--error)]'
-      : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]';
+      ? 'text-[var(--ink-muted)] hover:bg-[var(--error-bg)] hover:text-[var(--error)] disabled:hover:text-[var(--ink-subtle)]'
+      : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:hover:text-[var(--ink-subtle)]';
   return (
     <button
       type="button"

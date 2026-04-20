@@ -8,6 +8,7 @@
 // visual vocabulary.
 
 import type { Task, TaskExecutionMode } from '@/../shared/types/task';
+import { relativeTime } from '@/utils/taskCenterUtils';
 import { TaskCategoryBadge } from '../TaskCategoryBadge';
 import { TaskStatusBadge } from '../TaskStatusBadge';
 import { TaskItemActions, deriveTaskRowStatus } from './TaskItemActions';
@@ -96,17 +97,4 @@ function inferLegacyCategory(legacy?: LegacyCronRow): TaskExecutionMode {
 function shortenPath(p: string): string {
   const parts = p.replace(/\\/g, '/').split('/').filter(Boolean);
   return parts[parts.length - 1] ?? p;
-}
-
-function relativeTime(ts: number): string {
-  if (!ts) return '';
-  const diff = Date.now() - ts;
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 1) return '刚刚';
-  if (mins < 60) return `${mins}分钟前`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}小时前`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days}天前`;
-  return new Date(ts).toLocaleDateString();
 }

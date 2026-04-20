@@ -371,6 +371,20 @@ struct CronTaskStore {
 
 const MAX_RUN_RECORDS: usize = 500;
 
+/// Sentinel prefix used by `execute_task_directly` to flag an `Err` that is
+/// NOT an execution failure but a deliberate "linked Task is in terminal
+/// state, we've already called `stop_task`" short-circuit (v0.1.69 H2
+/// cross-review follow-up).
+///
+/// The outer scheduler loop detects this prefix and skips:
+///   1. writing a failure record to `cron_runs/<id>.jsonl`
+///   2. setting `task.last_error`
+///   3. emitting `cron:execution-error`
+/// — without it, the graceful terminal-state stop would still surface to the
+/// UI as a failed tick, giving the user a misleading "最近一次失败" badge
+/// seconds before the task's real status flips to Stopped.
+const TERMINAL_STOP_SENTINEL: &str = "__TERMINAL_STOP__:";
+
 /// A single execution record for a cron task
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -530,20 +544,49 @@ pub struct CronRecoveryFailedTask {
     pub error: String,
 }
 
-/// Compute the next execution time for a cron task (enrichment helper)
-/// Returns an ISO 8601 string or None if the task is stopped or cannot be computed
+/// Compute the next execution time for a cron task (enrichment helper).
+/// Returns an RFC3339 string or None if the task is stopped / no schedule.
+///
+/// v0.1.69 cross-review: past-due values (cold start before first execution,
+/// or catch-up after system sleep) used to be returned verbatim — e.g. an
+/// `At` task whose target time has passed returned the stale timestamp, a
+/// cold-started `Every` task returned `created_at + interval` even though
+/// the scheduler actually fires `~2 s` after spawn. SummaryCard now prefers
+/// this value over its own cron-parser, so stale timestamps would show
+/// "下次触发 5 分钟前" — obviously wrong. Fix: clamp any past-due result
+/// forward to match the scheduler's own "fire in 2s / 5s" fallback in
+/// `start_task_scheduler`'s `initial_target` block, so the UI and the
+/// scheduler agree.
 fn compute_next_execution(task: &CronTask) -> Option<String> {
     if task.status != TaskStatus::Running {
         return None;
     }
 
+    // Mirror of scheduler's `initial_target` fallback (cron_task.rs ~912):
+    // cold-start / first-execution with no better signal fires +2s; past-due
+    // fires +5s. `clamp_forward` keeps `compute_next_execution` in lockstep
+    // with those minimums so the UI never displays a moment in the past.
+    fn clamp_forward(candidate: DateTime<Utc>, min_ahead_secs: i64) -> DateTime<Utc> {
+        let min_target = Utc::now() + chrono::Duration::seconds(min_ahead_secs);
+        if candidate > min_target {
+            candidate
+        } else {
+            min_target
+        }
+    }
+
     match &task.schedule {
         Some(CronSchedule::At { at }) => {
-            // One-shot: the target time itself
-            Some(at.clone())
+            // One-shot. Past-due → scheduler fires in ~2s after spawn.
+            match DateTime::parse_from_rfc3339(at)
+                .or_else(|_| DateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S"))
+            {
+                Ok(target) => Some(clamp_forward(target.with_timezone(&Utc), 2).to_rfc3339()),
+                Err(_) => None,
+            }
         }
         Some(CronSchedule::Every { minutes, start_at }) => {
-            // If start_at is set and in the future, use it as next execution
+            // Explicit `start_at` (future) wins for the first execution.
             if let Some(ref sa) = start_at {
                 if let Ok(parsed) = DateTime::parse_from_rfc3339(sa) {
                     let target = parsed.with_timezone(&Utc);
@@ -552,9 +595,16 @@ fn compute_next_execution(task: &CronTask) -> Option<String> {
                     }
                 }
             }
+            // First ever run with no last_executed_at → scheduler fires +2s.
+            if task.execution_count == 0 && task.last_executed_at.is_none() {
+                return Some(
+                    (Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
+                );
+            }
             let base = task.last_executed_at.unwrap_or(task.created_at);
             let next = base + chrono::Duration::minutes(*minutes as i64);
-            Some(next.to_rfc3339())
+            // Past-due (catch-up after sleep) → scheduler fires +5s.
+            Some(clamp_forward(next, 5).to_rfc3339())
         }
         Some(CronSchedule::Cron { expr, tz }) => {
             match next_cron_fire_time(expr, tz.as_deref()) {
@@ -567,10 +617,15 @@ fn compute_next_execution(task: &CronTask) -> Option<String> {
             None
         }
         None => {
-            // Legacy: use interval_minutes
+            // Legacy: use interval_minutes — same cold-start clamp as `Every`.
+            if task.execution_count == 0 && task.last_executed_at.is_none() {
+                return Some(
+                    (Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
+                );
+            }
             let base = task.last_executed_at.unwrap_or(task.created_at);
             let next = base + chrono::Duration::minutes(task.interval_minutes as i64);
-            Some(next.to_rfc3339())
+            Some(clamp_forward(next, 5).to_rfc3339())
         }
     }
 }
@@ -718,16 +773,46 @@ impl CronTaskManager {
             return Err(format!("Task {} is not in running status", task_id));
         }
 
-        // Check if scheduler is already running for this task
-        {
-            let active = self.active_schedulers.read().await;
-            if active.contains(task_id) {
+        // Liveness check + reservation must be atomic.
+        //
+        // Why a single critical section (v0.1.69 M2 → cross-review follow-up):
+        // The prior shape split the check (read `active_schedulers`), the
+        // cleanup (write both maps), and the spawn+store (separate `tokio::spawn`
+        // followed by `scheduler_handles.write()`) into three serialisable
+        // sections. Two concurrent callers for the same task_id could each
+        // observe the other's intermediate state:
+        //   - both see `active` without the task_id → both insert → both spawn
+        //     → the second `scheduler_handles.insert()` overwrites the first
+        //     JoinHandle → first tokio task orphaned, un-joinable, running
+        //     forever in parallel with the second.
+        //   - one sees "active but handle missing" (caller A between its own
+        //     active-insert and handle-insert) and judges that entry stale,
+        //     cleaning it up and spawning a duplicate.
+        // Fix: hold `scheduler_handles.write()` across the whole flow
+        // (check → cleanup → reserve → spawn → store). The scheduler body
+        // itself never touches `scheduler_handles`, and `shutdown_all()` (the
+        // only other writer) already expects to wait for in-flight starts —
+        // so holding the write lock across `tokio::spawn` is safe.
+        //
+        // `active_schedulers` is retained as legacy bookkeeping used by
+        // shutdown paths elsewhere; we keep it synced inside the same
+        // critical section.
+        let mut handles_guard = self.scheduler_handles.write().await;
+        if let Some(existing) = handles_guard.get(task_id) {
+            if !existing.is_finished() {
                 ulog_info!("[CronTask] Scheduler already running for task {}, skipping", task_id);
                 return Ok(());
             }
+            // Stale: previous tokio task panicked / aborted / returned early
+            // without passing through our cleanup path. Drop the dead handle
+            // before respawning so the `.insert()` at the end overwrites a
+            // known-finished entry (never a live one).
+            ulog_warn!(
+                "[CronTask] Scheduler handle for task {} was finished — respawning",
+                task_id
+            );
+            handles_guard.remove(task_id);
         }
-
-        // Mark scheduler as active
         {
             let mut active = self.active_schedulers.write().await;
             active.insert(task_id.to_string());
@@ -747,7 +832,6 @@ impl CronTaskManager {
         };
         let last_executed = task.last_executed_at;
         let execution_count = task.execution_count;
-        let scheduler_handles = Arc::clone(&self.scheduler_handles);
         let task_id_for_handle = task_id.to_string();
 
         // Spawn the scheduler loop and store the JoinHandle for graceful shutdown
@@ -1019,6 +1103,11 @@ impl CronTaskManager {
                 // Record execution history to JSONL
                 // Cap content at 2000 chars to prevent JSONL bloat (500 records * large output)
                 const MAX_CONTENT_LEN: usize = 2000;
+                // Detect graceful terminal-state short-circuit (H2 sentinel).
+                // Pulled out of the match below so every side-effect arm can
+                // short-circuit uniformly without re-parsing the prefix.
+                let terminal_stop = matches!(&execution_result, Err(e) if e.starts_with(TERMINAL_STOP_SENTINEL));
+
                 match &execution_result {
                     Ok((success, _, output_text, _)) => {
                         let run_record = CronRunRecord {
@@ -1044,6 +1133,11 @@ impl CronTaskManager {
                             ulog_warn!("[CronTask] Failed to record run: {}", e);
                         }
                     }
+                    Err(_) if terminal_stop => {
+                        // Graceful stop — `stop_task()` was already called
+                        // inside `execute_task_directly`. Skipping the
+                        // JSONL write keeps "最近一次" stats clean.
+                    }
                     Err(ref e) => {
                         let run_record = CronRunRecord {
                             ts: Utc::now().timestamp_millis(),
@@ -1064,6 +1158,12 @@ impl CronTaskManager {
                             "taskId": task_id_owned,
                             "message": format!("execute_task_directly completed: task_success={}", success)
                         }));
+                    }
+                    Err(_) if terminal_stop => {
+                        // Already logged at `ulog_warn!` inside the guard —
+                        // no additional "failed" log/emit so the user's log
+                        // timeline shows one clean stop, not a stop + a
+                        // redundant failure.
                     }
                     Err(ref e) => {
                         ulog_warn!("[CronTask] execute_task_directly failed for task {}: {}", task_id_owned, e);
@@ -1184,6 +1284,21 @@ impl CronTaskManager {
                             break;
                         }
                     }
+                    Err(e) if e.starts_with(TERMINAL_STOP_SENTINEL) => {
+                        // Graceful stop via H2 sentinel — `stop_task()` was
+                        // already called inside `execute_task_directly`, so
+                        // the CronTask is now Stopped. The next loop
+                        // iteration's status check (line ~964) will break.
+                        // Skip `last_error` + `cron:execution-error` so the
+                        // UI doesn't briefly show this as a failed tick.
+                        // Also skip the Ralph Loop backoff branch — this is
+                        // a terminal stop, not a retryable failure.
+                        ulog_info!(
+                            "[CronTask] Task {} exited via terminal-stop sentinel: {}",
+                            task_id_owned,
+                            e.trim_start_matches(TERMINAL_STOP_SENTINEL)
+                        );
+                    }
                     Err(e) => {
                         ulog_error!("[CronTask] Task {} execution failed: {}", task_id_owned, e);
                         // Update last_error
@@ -1279,11 +1394,13 @@ impl CronTaskManager {
             ulog_info!("[CronTask] Scheduler loop exited for task {}", task_id_owned);
         });
 
-        // Store JoinHandle for graceful shutdown
-        {
-            let mut handles = scheduler_handles.write().await;
-            handles.insert(task_id_for_handle, handle);
-        }
+        // Store JoinHandle under the same critical section that gated the
+        // liveness check above — no race window between `tokio::spawn` and
+        // the insert. `handles_guard` is released when `start_task_scheduler`
+        // returns; the spawned task is already running, so no work is
+        // blocked on this release.
+        handles_guard.insert(task_id_for_handle, handle);
+        drop(handles_guard);
 
         Ok(())
     }
@@ -1949,7 +2066,13 @@ async fn execute_task_directly(
     //
     // Short-circuit + block guards (CC review C1c + C2):
     //   - linked Task is deleted / archived / in terminal state → skip this
-    //     tick and stop the CronTask so it doesn't fire again
+    //     tick AND actually stop the CronTask (status=Stopped + release
+    //     sidecar ownership + emit event) so subsequent scheduler iterations
+    //     exit via the `status != Running` break on line ~934.
+    //     Without this the scheduler would keep firing every tick, each time
+    //     hitting this guard, returning Err, recording a failed run, and
+    //     trying again next interval — a silent error loop that burns disk
+    //     on `~/.myagents/cron_runs/` and spams the unified log. (v0.1.69 H2)
     //   - task.md missing / empty for a direct task → transition the Task to
     //     Blocked with the error as message (rather than sending a meaningless
     //     placeholder prompt to the model)
@@ -1966,17 +2089,39 @@ async fn execute_task_directly(
                             | crate::task::TaskStatus::Done
                     )
                 {
-                    ulog_warn!(
-                        "[CronTask] task {} linked to Task {} in terminal state '{}' — skipping tick and stopping CronTask",
-                        task.id,
+                    let reason = format!(
+                        "linked Task {} in terminal state '{}'",
                         ta_id,
                         ta.status.as_str()
                     );
-                    return Err(format!(
-                        "linked Task {} is in terminal state '{}'",
-                        ta_id,
-                        ta.status.as_str()
-                    ));
+                    ulog_warn!(
+                        "[CronTask] task {} {} — stopping CronTask to prevent scheduler loop",
+                        task.id,
+                        reason
+                    );
+                    // Actually stop — flips status to Stopped + releases
+                    // sidecar + emits `cron:task-stopped`. The scheduler's
+                    // next iteration reads the new status and breaks.
+                    // Failure to stop is logged but non-fatal: even without
+                    // the manager update, returning Err still aborts this
+                    // tick; worst case we fall back to the old loop
+                    // behavior instead of crashing.
+                    let stop_result = get_cron_task_manager()
+                        .stop_task(&task.id, Some(reason.clone()))
+                        .await;
+                    if let Err(e) = stop_result {
+                        ulog_error!(
+                            "[CronTask] failed to stop task {} after terminal-state detection: {}",
+                            task.id,
+                            e
+                        );
+                    }
+                    // Wrap the reason with the sentinel so the outer
+                    // scheduler loop recognises this as a graceful stop
+                    // (not a real execution failure) and skips recording
+                    // a failure / setting last_error / emitting
+                    // execution-error. See `TERMINAL_STOP_SENTINEL` docs.
+                    return Err(format!("{}{}", TERMINAL_STOP_SENTINEL, reason));
                 }
             }
         }

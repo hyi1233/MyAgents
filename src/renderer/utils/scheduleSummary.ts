@@ -15,6 +15,7 @@
 // Chinese + computing the next trigger time + a rough countdown.
 
 import type { Task, TaskExecutionMode } from '@/../shared/types/task';
+import { humanizeCron } from '@/utils/taskCenterUtils';
 
 export interface ScheduleSummary {
   /** Execution mode (passed through from the Task — consumer picks the icon). */
@@ -74,6 +75,21 @@ export async function summarizeSchedule(
   // recurring
   if (task.cronExpression) {
     const expr = task.cronExpression.trim();
+    // `cronExpression` can be `'   '` (all-whitespace from a half-edited
+    // form) — empty after trim. Fall through to the `intervalMinutes`
+    // branch (or "未设置") rather than showing "周期 · " with an empty
+    // expression, which reads as a bug.
+    if (expr.length === 0) {
+      if (task.intervalMinutes) {
+        const mins = task.intervalMinutes;
+        return {
+          mode,
+          title: formatInterval(mins),
+          next: formatIntervalNext(mins, task.lastExecutedAt ?? null, nextExecutionAtMs),
+        };
+      }
+      return { mode, title: '周期 · 未设置' };
+    }
     const tz = task.cronTimezone?.trim() || undefined;
     const title = await describeCron(expr);
     const next = await computeNextCronFire(expr, tz, nextExecutionAtMs);
@@ -131,6 +147,13 @@ function formatInterval(mins: number): string {
 }
 
 async function describeCron(expr: string): Promise<string | null> {
+  // Prefer the "speakable Chinese" humanizer (shared with TaskCardItem) so
+  // the card meta-row and the overlay headline read identically — "每天上午
+  // 11 点" instead of cronstrue's stiff "在 8:00, 每天". humanizeCron
+  // returns null for exotic cron shapes (ranges, steps, yearly), which
+  // falls through to cronstrue as a best-effort translator.
+  const human = humanizeCron(expr);
+  if (human) return human;
   try {
     const mod = await import('cronstrue/i18n');
     const toStr = mod.toString as (e: string, o?: Record<string, unknown>) => string;

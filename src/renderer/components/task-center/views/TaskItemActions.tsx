@@ -12,10 +12,9 @@
 // and 删除 since their other lifecycle operations live in the separate
 // LegacyCronOverlay.
 
-import { useRef, useState } from 'react';
-import { MoreHorizontal, Pencil, Play, RotateCcw, Square, Trash2 } from 'lucide-react';
+import { Pencil, Play, RotateCcw, Square, Trash2 } from 'lucide-react';
 
-import { Popover } from '@/components/ui/Popover';
+import { DropdownMenu, type DropdownMenuItem, type DropdownMenuSection } from '@/components/ui/DropdownMenu';
 import type { Task, TaskStatus } from '@/../shared/types/task';
 
 export interface TaskItemActionsProps {
@@ -50,101 +49,60 @@ export function TaskItemActions({
   onEdit,
   onDelete,
 }: TaskItemActionsProps) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuBtnRef = useRef<HTMLButtonElement>(null);
+  const primary =
+    variant === 'legacy'
+      ? null
+      : primaryActionFor(status, { onRun, onStop, onRerun });
 
-  const primary = variant === 'legacy'
-    ? null
-    : primaryActionFor(status, { onRun, onStop, onRerun });
+  // Menu ordering (v0.1.69):
+  //   1. 编辑 (task variant) — clicking the card already opens the detail
+  //      view, so the menu skips 打开详情 and lands the user directly on
+  //      the editor instead.
+  //   2. Primary lifecycle action — 立即执行 / 中止 / 重新派发,
+  //      depending on current status (see `primaryActionFor` below).
+  //   3. 删除 — separated visually by the danger tint.
+  // Legacy rows still need 打开详情 because their editor lives in
+  // LegacyCronOverlay, which is reached through the detail view.
+  const primaryGroup: DropdownMenuItem[] = [];
+  if (variant === 'task' && onEdit) {
+    primaryGroup.push({
+      icon: <Pencil className="h-3.5 w-3.5" />,
+      label: '编辑',
+      onClick: onEdit,
+    });
+  }
+  if (variant === 'legacy') {
+    primaryGroup.push({
+      label: '打开详情',
+      onClick: onOpenDetail,
+    });
+  }
+  if (primary?.handler) {
+    primaryGroup.push({
+      icon: primary.icon,
+      label: primary.title,
+      onClick: primary.handler,
+      className: primary.menuClassName,
+    });
+  }
 
-  return (
-    <div
-      className="flex items-center"
-      onClick={(e) => e.stopPropagation()}
-    >
-      <button
-        ref={menuBtnRef}
-        type="button"
-        disabled={busy}
-        onClick={(e) => {
-          e.stopPropagation();
-          setMenuOpen((v) => !v);
-        }}
-        title="更多操作"
-        className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
-      >
-        <MoreHorizontal className="h-3.5 w-3.5" />
-      </button>
-      <Popover
-        open={menuOpen}
-        onClose={() => setMenuOpen(false)}
-        anchorRef={menuBtnRef}
-        placement="bottom-end"
-        className="min-w-[140px] py-1"
-      >
-        {/* Menu ordering (v0.1.69):
-              1. 编辑 (task variant) — clicking the card already opens the
-                 detail view, so the menu skips 打开详情 and lands the user
-                 directly on the editor instead.
-              2. Primary lifecycle action — 立即执行 / 中止 / 重新派发,
-                 depending on current status (see `primaryActionFor` below).
-              3. 删除 — separated visually via `--error` tint.
-            Legacy rows still need 打开详情 because their editor lives in
-            LegacyCronOverlay, which is reached through the detail view. */}
-        {variant === 'task' && onEdit && (
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              onEdit();
-            }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-          >
-            <Pencil className="h-3.5 w-3.5" />
-            编辑
-          </button>
-        )}
-        {variant === 'legacy' && (
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              onOpenDetail();
-            }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-          >
-            打开详情
-          </button>
-        )}
-        {primary && (
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              primary.handler?.();
-            }}
-            className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] ${primary.menuClassName}`}
-          >
-            {primary.icon}
-            {primary.title}
-          </button>
-        )}
-        {onDelete && (
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              onDelete();
-            }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--error)] hover:bg-[var(--error-bg)]"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            删除
-          </button>
-        )}
-      </Popover>
-    </div>
-  );
+  const destructiveGroup: DropdownMenuItem[] = onDelete
+    ? [
+        {
+          icon: <Trash2 className="h-3.5 w-3.5" />,
+          label: '删除',
+          onClick: onDelete,
+          danger: true,
+        },
+      ]
+    : [];
+
+  const sections: DropdownMenuSection[] = [
+    { items: primaryGroup },
+    { items: destructiveGroup },
+  ];
+
+  return <DropdownMenu sections={sections} size="sm" disabled={busy} minWidth={140} />;
 }
 
 interface PrimaryAction {

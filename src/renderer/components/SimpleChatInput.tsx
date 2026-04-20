@@ -146,6 +146,11 @@ interface SimpleChatInputProps {
 const LINE_HEIGHT = 26; // px per line (text-base 16px * leading-relaxed 1.625 = 26px)
 const MAX_LINES_COLLAPSED = 3;
 const MAX_LINES_EXPANDED = 12;
+// Launcher shows the input as the page's primary affordance — an extra row
+// (3 vs 2) reduces visual compression and signals "there's room to write a
+// full thought", matching the spacious Launcher layout. Chat tabs keep the
+// 2-row default to preserve screen real estate for the message stream.
+const LAUNCHER_MIN_LINES = 3;
 const MAX_IMAGES = 5;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
 
@@ -222,6 +227,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onForceExecuteQueued,
 }, ref) {
   const isLauncherMode = mode === 'launcher';
+  // Launcher-vs-Chat minimum row count, referenced by both the auto-resize
+  // effect and the textarea `rows` / min/max style props. Keep as a single
+  // derived constant so a later tweak (e.g. bump to 4) propagates everywhere
+  // without the three-site scan the prior duplicated ternary required.
+  const effectiveMinLines = isLauncherMode ? LAUNCHER_MIN_LINES : 2;
   const isExternalRuntime = runtime !== 'builtin';
 
   // PRD §4.2 — when the caller declares thought-mode, the input behaves as a
@@ -376,8 +386,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       textarea.style.height = `${LINE_HEIGHT * MAX_LINES_EXPANDED}px`;
     } else {
       textarea.style.height = 'auto';
-      const minHeight = LINE_HEIGHT * 2;
-      const maxHeight = LINE_HEIGHT * MAX_LINES_COLLAPSED;
+      const minHeight = LINE_HEIGHT * effectiveMinLines;
+      const maxHeight = LINE_HEIGHT * Math.max(MAX_LINES_COLLAPSED, effectiveMinLines);
       const scrollHeight = textarea.scrollHeight;
       textarea.style.height = `${Math.max(minHeight, Math.min(scrollHeight, maxHeight))}px`;
     }
@@ -1280,11 +1290,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     ? '今天，想干点啥？'
                     : '输入消息，使用 @ 引用文件，/ 使用技能...'
               }
-              rows={2}
+              rows={effectiveMinLines}
               className="block w-full resize-none bg-transparent pr-8 text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
               style={{
-                minHeight: `${LINE_HEIGHT * 2}px`,
-                maxHeight: `${LINE_HEIGHT * (isExpanded ? MAX_LINES_EXPANDED : MAX_LINES_COLLAPSED)}px`,
+                minHeight: `${LINE_HEIGHT * effectiveMinLines}px`,
+                maxHeight: `${LINE_HEIGHT * (isExpanded ? MAX_LINES_EXPANDED : Math.max(MAX_LINES_COLLAPSED, effectiveMinLines))}px`,
                 overflowY: 'auto',
                 // Explicit property list + `height` so collapse animates
                 // symmetrically to expand (WebKit textareas sometimes drop the

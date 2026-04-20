@@ -188,9 +188,14 @@ export default memo(function BrandSection({
 
     return (
         <section ref={sectionRef} className="flex flex-1 flex-col items-center px-12">
-            {/* Upper area: Brand Name + Slogans */}
+            {/* Upper area: Brand Name + Slogans as ONE visual group.
+                `mb-2` tightens the title↔slogan gap so they read as a
+                paired brand block rather than two free-floating lines;
+                the larger breathing room below that group (on the
+                ModeSegment wrapper) separates "who we are" from "what
+                you're about to do". */}
             <div className="flex flex-1 flex-col items-center justify-center">
-                <h1 className="brand-title mb-5 text-[2.5rem] text-[var(--ink)] md:text-[3.5rem]">
+                <h1 className="brand-title mb-2 text-[2.5rem] text-[var(--ink)] md:text-[3.5rem]">
                     MyAgents
                 </h1>
                 <p className="brand-slogan text-center text-[15px] text-[var(--ink-muted)] md:text-[17px]">
@@ -199,14 +204,17 @@ export default memo(function BrandSection({
             </div>
 
             {/* Mode declaration: 任务 / 想法 (see DESIGN.md §6.8, PRD §4.1).
+                `mt-6 mb-6` opens breathing room above (separating from
+                the brand group) and below (separating from the input
+                affordance) — deliberately generous so the Launcher
+                doesn't feel compressed even with the newly 3-row input.
                 `tabSwitchHint` surfaces the Tab-toggle shortcut as a hover
                 tooltip, matching the global handler installed above. */}
             {modeSegmentEnabled && (
-                <div className="mt-3 mb-4">
+                <div className="mt-6 mb-6">
                     <ModeSegment
                         value={mode}
                         onChange={setMode}
-                        size="launcher"
                         tabSwitchHint
                     />
                 </div>

@@ -23,6 +23,7 @@ import { Folder } from 'lucide-react';
 
 import { taskGetRunStats } from '@/api/taskCenter';
 import type { Task, TaskExecutionMode, TaskRunStats } from '@/../shared/types/task';
+import { humanizeCron, relativeTime } from '@/utils/taskCenterUtils';
 import { TaskCategoryBadge } from '../TaskCategoryBadge';
 import { TaskStatusBadge } from '../TaskStatusBadge';
 import { TaskItemActions, deriveTaskRowStatus } from './TaskItemActions';
@@ -324,90 +325,3 @@ function formatRecurring(task?: Task): string | null {
   return null;
 }
 
-const WEEKDAY_LABEL_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-
-/**
- * Render an hour:minute pair with a Chinese period label.
- *   0-4  → 凌晨   5-8  → 早上   9-11 → 上午
- *   12   → 中午   13-17→ 下午   18-23→ 晚上
- * Zero minutes drop the colon so "11:00" reads as "11 点" naturally.
- */
-function formatClockCN(hour: number, minute: number): string {
-  const period = periodOfHour(hour);
-  const display = hour === 0 ? 0 : hour > 12 ? hour - 12 : hour;
-  if (minute === 0) return `${period} ${display} 点`;
-  const mm = String(minute).padStart(2, '0');
-  return `${period} ${display}:${mm}`;
-}
-
-function periodOfHour(hour: number): string {
-  if (hour < 5) return '凌晨';
-  if (hour < 9) return '早上';
-  if (hour < 12) return '上午';
-  if (hour === 12) return '中午';
-  if (hour < 18) return '下午';
-  return '晚上';
-}
-
-/**
- * Best-effort cron → Chinese. Covers the five shapes
- * `CronExpressionInput`'s chip picker can emit (plus a handful of common
- * manual patterns). Returns null for anything that doesn't match so the
- * caller can fall back to the raw cron string honestly.
- */
-function humanizeCron(expr: string): string | null {
-  const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 5) return null;
-  const [minStr, hourStr, dom, month, dow] = parts;
-  const minute = Number(minStr);
-  const hour = Number(hourStr);
-  if (!Number.isInteger(minute) || !Number.isInteger(hour)) return null;
-  if (minute < 0 || minute > 59 || hour < 0 || hour > 23) return null;
-  // Month must be `*` — we only humanize patterns that fire every month
-  // of the year. `0 8 15 1 *` is "January 15th yearly", not "every month
-  // on the 15th"; mistranslating that would be worse than showing the
-  // raw cron. Fall through to null so `formatRecurring` displays the
-  // literal expression instead.
-  if (month !== '*') return null;
-  const clock = formatClockCN(hour, minute);
-
-  // 每天        `M H * * *`
-  if (dom === '*' && dow === '*') return `每天${clock}`;
-  // 工作日      `M H * * 1-5`
-  if (dom === '*' && dow === '1-5') return `工作日${clock}`;
-  // 单一星期    `M H * * N`     (0..6, 0=Sun)
-  if (dom === '*' && /^\d$/.test(dow)) {
-    const n = Number(dow);
-    if (n >= 0 && n <= 6) return `${WEEKDAY_LABEL_CN[n]}${clock}`;
-  }
-  // 多星期      `M H * * a,b,c`
-  if (dom === '*' && /^\d(?:,\d)+$/.test(dow)) {
-    const days = dow
-      .split(',')
-      .map((d) => Number(d))
-      .filter((n) => n >= 0 && n <= 6)
-      .sort((a, b) => a - b)
-      .map((n) => WEEKDAY_LABEL_CN[n])
-      .join('、');
-    return days ? `${days} ${clock}` : null;
-  }
-  // 每月某日    `M H D * *`
-  if (/^\d+$/.test(dom) && dow === '*') {
-    const d = Number(dom);
-    if (d >= 1 && d <= 31) return `每月 ${d} 号${clock}`;
-  }
-  return null;
-}
-
-function relativeTime(ts: number): string {
-  if (!ts) return '';
-  const diff = Date.now() - ts;
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 1) return '刚刚';
-  if (mins < 60) return `${mins} 分钟前`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs} 小时前`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days} 天前`;
-  return new Date(ts).toLocaleDateString();
-}

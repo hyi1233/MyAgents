@@ -254,6 +254,12 @@ export interface TaskRunStats {
   cronTaskId?: string;
   /** Number of SDK sessions this task has spanned. */
   sessionCount: number;
+  /** Next scheduled fire (ms since epoch). Parsed server-side from
+   *  `CronTask.next_execution_at` so the frontend avoids cron-parser /
+   *  timezone math — reflects what Rust will actually run. Absent when
+   *  the task has no active cron binding or the schedule is not
+   *  recurring / scheduled. */
+  nextExecutionAt?: number;
 }
 
 /**

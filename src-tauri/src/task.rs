@@ -2670,6 +2670,12 @@ pub struct TaskRunStats {
     pub cron_status: Option<String>,
     pub cron_task_id: Option<String>,
     pub session_count: usize,
+    /// Next scheduled fire time (ms since epoch). Parsed from the enriched
+    /// CronTask's `next_execution_at` RFC3339 string — bypasses the
+    /// frontend's `cron-parser` / timezone arithmetic so the overlay's
+    /// "下次触发" readout matches what the Rust scheduler will actually
+    /// run, avoiding tz / DST drift.
+    pub next_execution_at: Option<i64>,
 }
 
 #[tauri::command]
@@ -2690,6 +2696,7 @@ pub async fn cmd_task_get_run_stats(
         cron_status: None,
         cron_task_id: task.cron_task_id.clone(),
         session_count: task.session_ids.len(),
+        next_execution_at: None,
     };
 
     if let Some(cron_id) = task.cron_task_id.as_deref() {
@@ -2702,6 +2709,15 @@ pub async fn cmd_task_get_run_stats(
                 // the Task's `last_executed_at` only refreshes on status
                 // transitions.
                 stats.last_executed_at = Some(ts.timestamp_millis());
+            }
+            // Forward the Rust-computed next fire (parsed from the
+            // enriched `next_execution_at` RFC3339 string) so the
+            // frontend doesn't need cron-parser + tz math. `get_task`
+            // already ran `enrich_task` which populated this field.
+            if let Some(s) = ct.next_execution_at.as_deref() {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                    stats.next_execution_at = Some(dt.timestamp_millis());
+                }
             }
         }
 

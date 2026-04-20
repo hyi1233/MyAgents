@@ -26,6 +26,7 @@ import {
   summarizeSchedule,
   type ScheduleSummary,
 } from '@/utils/scheduleSummary';
+import { relativeTime } from '@/utils/taskCenterUtils';
 import type { Task, TaskExecutionMode, TaskRunStats } from '@/../shared/types/task';
 
 interface Props {
@@ -58,15 +59,19 @@ export function SummaryCard({ task, stats }: Props) {
   }, [workspace?.agentId, statuses]);
 
   const [schedule, setSchedule] = useState<ScheduleSummary | null>(null);
+  // Prefer the Rust-computed next fire (from `stats.nextExecutionAt`) so
+  // the overlay and the scheduler agree on what "下次触发" means — avoids
+  // cron-parser / tz drift between the two layers.
+  const nextExecutionAt = stats?.nextExecutionAt;
   useEffect(() => {
     let cancelled = false;
-    void summarizeSchedule(task).then((s) => {
+    void summarizeSchedule(task, nextExecutionAt).then((s) => {
       if (!cancelled) setSchedule(s);
     });
     return () => {
       cancelled = true;
     };
-  }, [task]);
+  }, [task, nextExecutionAt]);
 
   const modeMeta = MODE_META[task.executionMode];
   const ScheduleIcon = modeMeta.icon;
@@ -256,18 +261,6 @@ function MetaRow({
       </dd>
     </>
   );
-}
-
-function relativeTime(ts: number): string {
-  const diff = Date.now() - ts;
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 1) return '刚刚';
-  if (mins < 60) return `${mins}分钟前`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}小时前`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days}天前`;
-  return new Date(ts).toLocaleDateString();
 }
 
 export default SummaryCard;
