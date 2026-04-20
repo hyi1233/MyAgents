@@ -99,27 +99,35 @@ export default memo(function BrandSection({
     // Gracefully degrade in browser dev mode — ModeSegment is Tauri-only.
     const modeSegmentEnabled = taskCenterAvailable();
 
-    // Ref into SimpleChatInput so the ModeSegment's click handler can
-    // auto-focus the textarea. Without this the user has to click the
-    // tab then click the input; the v0.1.69 UX round asks that a tab
-    // click leave the caret blinking in the box, ready for typing.
+    // Ref into SimpleChatInput — used ONLY for mount-time focus (below).
+    // Intentionally NOT used inside the ModeSegment click handler: see
+    // `utils/focusRetention.ts`. Calling `.focus()` from within a click
+    // handler (even inside `requestAnimationFrame`) races the macOS
+    // WebKit touchpad-tap event synthesis and can drop the click entirely.
+    // ModeSegment buttons instead use `retainFocusOnMouseDown` so the
+    // textarea never loses focus in the first place — no rAF, no race.
     const inputRef = useRef<SimpleChatInputHandle>(null);
-    // Single helper used by BOTH the segment click path (explicit next
-    // mode) and the Tab / Cmd+Shift+T keyboard paths (toggle). Without
-    // this the two call sites diverged on `setMode(next)` vs
-    // `setMode((m) => ...)` and future work added to one (analytics,
-    // side effects) would silently skip the other (v0.1.69 cross-review
-    // N4). Defer focus to the next paint so React's state commit and
-    // any downstream auto-resize (placeholder swap, row count change)
-    // land before the caret is planted — Safari occasionally eats the
-    // focus while the textarea is mid-reflow.
+    // Single helper for BOTH the segment click path (explicit mode) and
+    // the keyboard paths (Tab / Cmd+Shift+T toggle). Without this the
+    // two call sites diverged on `setMode(next)` vs `setMode((m) => …)`
+    // and future work added to one would silently skip the other.
     const setModeAndFocus = useCallback((next: InputMode | 'toggle') => {
         if (next === 'toggle') {
             setMode((m) => (m === 'task' ? 'thought' : 'task'));
         } else {
             setMode(next);
         }
-        requestAnimationFrame(() => inputRef.current?.focus());
+    }, []);
+
+    // Mount-time focus — drops the caret in the textarea the first time
+    // the Launcher renders so the user can start typing immediately.
+    // Runs on mount only (empty deps), not inside an interaction event,
+    // so it doesn't race touchpad-tap click synthesis. Subsequent mode
+    // switches DON'T re-focus — `retainFocusOnMouseDown` on ModeSegment
+    // buttons keeps the existing focus in place so re-focusing would be
+    // a no-op anyway.
+    useEffect(() => {
+        inputRef.current?.focus();
     }, []);
 
     const handleSend = useCallback(

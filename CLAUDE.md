@@ -216,6 +216,7 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 | 新增手写 shim 不加入 `_handwritten.json` | `generate:sdk-shims` 下次运行覆盖手写文件 | 手写 shim MUST 同步加入 `sdk-shim/plugin-sdk/_handwritten.json` |
 | 新增 overlay/可关闭面板不调用 `useCloseLayer` | Cmd+W 跳过该面板直接关 Tab | 在组件内调用 `useCloseLayer(() => { onClose(); return true; }, zIndex)`，zIndex 取组件 CSS z-index 值 |
 | Overlay 遮罩层用裸 `<div>` + 手写 `onClick`/`onMouseDown` | 选中文字拖拽到面板外松手会误关闭 | 使用 `<OverlayBackdrop>` 组件（`@/components/OverlayBackdrop`），内置 `onMouseDown` + target guard |
+| 在 onClick 里用 `requestAnimationFrame(() => otherEl.focus())` 抢夺焦点 | macOS WebKit 触摸板 tap 事件合成在 <16ms 内完成，rAF 夺焦会插入 click 合成窗口 → WebKit 判定交互被打断 → 吞掉 click（物理按下正常、轻按首次无效，极隐蔽） | 按钮如果不该抢焦点，改用 `onMouseDown={retainFocusOnMouseDown}`（`@/utils/focusRetention`），原焦点元素天然保持聚焦，不需要再 rAF 夺回 |
 
 ---
 
