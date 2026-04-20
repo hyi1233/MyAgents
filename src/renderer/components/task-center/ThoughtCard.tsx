@@ -19,6 +19,7 @@ import {
 import {
   MessageSquare,
   MoreHorizontal,
+  Pencil,
   Trash2,
   Zap,
 } from 'lucide-react';
@@ -141,7 +142,102 @@ export function ThoughtCard({
   const convertedCount = thought.convertedTaskIds?.length ?? 0;
 
   return (
+    // Card rhythm (DESIGN.md §6.2 compact card):
+    //   p-4          — 16px all sides (border → inner content gutter)
+    //   mb-2 between meta row and body — 8px, tight enough that the
+    //                  meta row reads as part of the same card, not a
+    //                  stray header.
+    //   mt-3 between body and footer (expand toggle / inline-edit
+    //                  action bar) — 12px, the larger step that visually
+    //                  separates "read" from "act".
     <div className="group rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px]">
+      {/* Top meta row — time + derived-task count on the left, action
+          cluster on the right. Moved from the bottom of the card (prior
+          iteration) so status reads first, before the user commits to
+          reading the full body. */}
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[11px] text-[var(--ink-muted)]/60">
+          {formatRelative(thought.updatedAt)}
+          {convertedCount > 0 && (
+            <span className="ml-2 text-[var(--accent-warm)]">
+              已派生 {convertedCount} 个任务
+            </span>
+          )}
+        </span>
+        {!editing && (
+          <div className="flex shrink-0 items-center gap-1">
+            {/* Primary actions (派发 / AI 讨论) — hover-only to keep the
+                 resting card uncluttered. */}
+            <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+              {onDiscuss && (
+                <button
+                  type="button"
+                  onClick={() => onDiscuss(thought)}
+                  title="AI 讨论 — 开新对话用 /task-alignment 聊出方案"
+                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
+                >
+                  <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
+                  AI 讨论
+                </button>
+              )}
+              {onDispatch && (
+                <button
+                  type="button"
+                  onClick={() => onDispatch(thought)}
+                  title="直接派发为任务（不讨论）"
+                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
+                >
+                  <Zap className="h-3.5 w-3.5" strokeWidth={1.5} />
+                  派发
+                </button>
+              )}
+            </div>
+            {/* "更多" — always visible so the user has a permanent
+                 handle on secondary actions (编辑 / 删除) without having
+                 to hover-discover. Sits outside the hover-only cluster
+                 so its opacity stays 100%. */}
+            <button
+              ref={menuAnchorRef}
+              type="button"
+              onClick={() => setShowMenu((v) => !v)}
+              disabled={busy}
+              title="更多操作"
+              className="flex h-6 w-6 items-center justify-center rounded-[var(--radius-md)] text-[var(--ink-muted)]/70 transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            >
+              <MoreHorizontal className="h-3.5 w-3.5" strokeWidth={1.5} />
+            </button>
+            <Popover
+              open={showMenu}
+              onClose={() => setShowMenu(false)}
+              anchorRef={menuAnchorRef}
+              placement="bottom-end"
+              className="min-w-[120px] py-1"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMenu(false);
+                  enterEdit();
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+              >
+                <Pencil className="h-3.5 w-3.5" strokeWidth={1.5} />
+                编辑
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDelete()}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--error)] hover:bg-[var(--error-bg)]"
+              >
+                <Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+                删除
+              </button>
+            </Popover>
+          </div>
+        )}
+      </div>
+
+      {/* Body — thought content or edit textarea. */}
       {editing ? (
         <textarea
           ref={editRef}
@@ -193,104 +289,31 @@ export function ThoughtCard({
         <div className="mt-2 text-[11px] text-[var(--error)]">{error}</div>
       )}
 
-      <div className="mt-2 flex items-center justify-between">
-        <span className="text-[11px] text-[var(--ink-muted)]/60">
-          {formatRelative(thought.updatedAt)}
-          {convertedCount > 0 && (
-            <span className="ml-2 text-[var(--accent-warm)]">
-              已派生 {convertedCount} 个任务
-            </span>
-          )}
-        </span>
-        <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-          {editing ? (
-            <>
-              <button
-                type="button"
-                onClick={() => {
-                  setDraft(thought.content);
-                  setEditing(false);
-                }}
-                disabled={busy}
-                className="rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleSave()}
-                disabled={busy}
-                className="rounded-[var(--radius-md)] bg-[var(--accent-warm)] px-2.5 py-1 text-[12px] font-medium text-white hover:bg-[var(--accent-warm-hover)]"
-              >
-                保存
-              </button>
-            </>
-          ) : (
-            <>
-              {onDiscuss && (
-                <button
-                  type="button"
-                  onClick={() => onDiscuss(thought)}
-                  title="AI 讨论 — 开新对话用 /task-alignment 聊出方案"
-                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
-                >
-                  <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
-                  AI 讨论
-                </button>
-              )}
-              {onDispatch && (
-                <button
-                  type="button"
-                  onClick={() => onDispatch(thought)}
-                  title="直接派发为任务（不讨论）"
-                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
-                >
-                  <Zap className="h-3.5 w-3.5" strokeWidth={1.5} />
-                  派发
-                </button>
-              )}
-              {/* More menu — houses destructive actions so they're not
-                  one-click-adjacent to the primary 派发 affordance. */}
-              <button
-                ref={menuAnchorRef}
-                type="button"
-                onClick={() => setShowMenu((v) => !v)}
-                disabled={busy}
-                title="更多操作"
-                className="rounded-[var(--radius-md)] p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-              >
-                <MoreHorizontal className="h-3.5 w-3.5" strokeWidth={1.5} />
-              </button>
-              <Popover
-                open={showMenu}
-                onClose={() => setShowMenu(false)}
-                anchorRef={menuAnchorRef}
-                placement="bottom-end"
-                className="min-w-[120px] py-1"
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMenu(false);
-                    enterEdit();
-                  }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                >
-                  编辑
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleDelete()}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--error)] hover:bg-[var(--error-bg)]"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  删除
-                </button>
-              </Popover>
-            </>
-          )}
+      {/* Inline edit action bar — only in edit mode. Sits at the bottom
+          so the edit flow reads top-down: textarea → save/cancel. */}
+      {editing && (
+        <div className="mt-3 flex items-center justify-end gap-1">
+          <button
+            type="button"
+            onClick={() => {
+              setDraft(thought.content);
+              setEditing(false);
+            }}
+            disabled={busy}
+            className="rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleSave()}
+            disabled={busy}
+            className="rounded-[var(--radius-md)] bg-[var(--accent-warm)] px-2.5 py-1 text-[12px] font-medium text-white hover:bg-[var(--accent-warm-hover)]"
+          >
+            保存
+          </button>
         </div>
-      </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
+import { AlertCircle, ChevronDown, ChevronUp, Loader, NotebookPen, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import Tip from '@/components/Tip';
@@ -1913,14 +1913,20 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 // and is crucial because thought mode swaps the usual
                 // "Enter sends" contract (Enter is a newline there).
                 thoughtModeActive ? (
-                  <Tip label="保存想法" shortcut="⌘ + Enter" align="end">
+                  // Thought mode: swap the paper-plane for a notebook-pen
+                  // icon — "send" implies dispatching to a recipient,
+                  // but saving a thought is a local memo. `NotebookPen`
+                  // matches the "记录想法" affordance the tooltip
+                  // promises. Kept on the same accent-warm pill so the
+                  // call-to-action weight is identical to other modes.
+                  <Tip label="记录想法" shortcut="⌘ + Enter" align="end">
                     <button
                       type="button"
                       onClick={handleSend}
                       disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
                       className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
                     >
-                      <Send className="h-4 w-4" />
+                      <NotebookPen className="h-4 w-4" />
                     </button>
                   </Tip>
                 ) : (

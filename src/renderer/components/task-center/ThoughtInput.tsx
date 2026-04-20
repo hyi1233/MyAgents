@@ -18,7 +18,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Hash, Send } from 'lucide-react';
+import { Hash, NotebookPen } from 'lucide-react';
 import { thoughtCreate } from '@/api/taskCenter';
 import Tip from '@/components/Tip';
 import { Popover } from '@/components/ui/Popover';
@@ -398,14 +398,14 @@ export function ThoughtInput({
               <Hash className="h-4 w-4" />
             </button>
           </div>
-          <Tip label="保存想法" shortcut="⌘ + Enter" align="end">
+          <Tip label="记录想法" shortcut="⌘ + Enter" align="end">
             <button
               type="button"
               onClick={() => void handleSubmit()}
               disabled={!canSend}
               className="rounded-lg bg-[var(--accent)] p-1.5 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
             >
-              <Send className="h-4 w-4" />
+              <NotebookPen className="h-4 w-4" />
             </button>
           </Tip>
         </div>
