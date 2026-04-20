@@ -95,7 +95,12 @@ export function TaskStatusBadge({ status, compact }: Props) {
   const padding = compact ? 'px-1.5' : 'px-2';
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-[var(--radius-sm)] font-medium leading-none ${style.bg} ${style.fg} ${padding} ${height} ${size}`}
+      // `whitespace-nowrap` + `shrink-0` keep 2-character labels like
+      // 「待启动」/「进行中」 on one line even when the parent row is a
+      // tight flex layout (TaskDetailOverlay header with a long task
+      // name). Without them CJK wraps as 待启\n动 when the row budget
+      // is tight.
+      className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[var(--radius-sm)] font-medium leading-none ${style.bg} ${style.fg} ${padding} ${height} ${size}`}
     >
       {style.dot && (
         <span

@@ -340,7 +340,7 @@ export function TaskDetailOverlay({
       {showDeleteConfirm && (
         <ConfirmDialog
           title="删除任务"
-          message={`确定删除任务「${task.name}」？软删除后 30 天内可恢复。`}
+          message={`确定删除任务「${task.name}」？此操作不可撤销。`}
           confirmText="删除"
           cancelText="取消"
           confirmVariant="danger"
