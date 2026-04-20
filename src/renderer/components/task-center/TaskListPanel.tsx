@@ -11,7 +11,7 @@
 // their "remain in source chat tab" management pattern.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Layers, Plus } from 'lucide-react';
+import { CheckSquare, Plus } from 'lucide-react';
 
 import {
   taskCenterAvailable,
@@ -512,7 +512,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
           reads as a single continuous surface from header → buckets. */}
       <div className="flex h-12 items-center gap-3 px-4">
         <div className="flex items-center gap-2">
-          <Layers className="h-4 w-4 text-[var(--ink-muted)]" strokeWidth={1.5} />
+          <CheckSquare className="h-4 w-4 text-[var(--ink-muted)]" strokeWidth={1.5} />
           <span className="text-[16px] font-semibold text-[var(--ink)]">
             任务
           </span>
