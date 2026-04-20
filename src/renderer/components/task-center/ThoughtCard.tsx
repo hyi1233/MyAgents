@@ -154,8 +154,22 @@ export function ThoughtCard({
       {/* Top meta row — time + derived-task count on the left, action
           cluster on the right. Moved from the bottom of the card (prior
           iteration) so status reads first, before the user commits to
-          reading the full body. */}
-      <div className="mb-2 flex items-center justify-between gap-2">
+          reading the full body.
+
+          Row height is driven by the 11px text (≈ 20px with the 14px
+          icon). The `⋯` button is `h-5 w-5` (20px) rather than the
+          toolbar default `h-6 w-6`; larger would force the whole row
+          taller than the text needs, pushing the body down and making
+          the top padding read as larger than the bottom `p-4` — the
+          card felt lopsided.
+
+          Always-rendered meta row (rendered in BOTH preview and edit
+          modes — only the right-side action cluster hides in edit).
+          Prior shape hid the whole row on `!editing`, which yanked the
+          textarea up by ~24px on double-click — jitter the user saw
+          as the card "jumping". Consistent structure across states
+          means no reflow on mode transitions. */}
+      <div className="mb-2 flex h-5 items-center justify-between gap-2">
         <span className="min-w-0 truncate text-[11px] text-[var(--ink-muted)]/60">
           {formatRelative(thought.updatedAt)}
           {convertedCount > 0 && (
@@ -174,7 +188,7 @@ export function ThoughtCard({
                   type="button"
                   onClick={() => onDiscuss(thought)}
                   title="AI 讨论 — 开新对话用 /task-alignment 聊出方案"
-                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
+                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
                 >
                   <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
                   AI 讨论
@@ -185,7 +199,7 @@ export function ThoughtCard({
                   type="button"
                   onClick={() => onDispatch(thought)}
                   title="直接派发为任务（不讨论）"
-                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
+                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
                 >
                   <Zap className="h-3.5 w-3.5" strokeWidth={1.5} />
                   派发
@@ -194,15 +208,16 @@ export function ThoughtCard({
             </div>
             {/* "更多" — always visible so the user has a permanent
                  handle on secondary actions (编辑 / 删除) without having
-                 to hover-discover. Sits outside the hover-only cluster
-                 so its opacity stays 100%. */}
+                 to hover-discover. `h-5 w-5` matches the meta row's
+                 text-driven height so the button never raises the row
+                 above its 20px baseline. */}
             <button
               ref={menuAnchorRef}
               type="button"
               onClick={() => setShowMenu((v) => !v)}
               disabled={busy}
               title="更多操作"
-              className="flex h-6 w-6 items-center justify-center rounded-[var(--radius-md)] text-[var(--ink-muted)]/70 transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+              className="flex h-5 w-5 items-center justify-center rounded-[var(--radius-md)] text-[var(--ink-muted)]/70 transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
               <MoreHorizontal className="h-3.5 w-3.5" strokeWidth={1.5} />
             </button>
