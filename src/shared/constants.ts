@@ -78,7 +78,11 @@ export const CUSTOM_EVENTS = {
     SKILL_COPIED_TO_PROJECT: 'skill-copied-to-project',
     /** Fired to open Settings page with optional section (e.g., 'mcp', 'providers') */
     OPEN_SETTINGS: 'open-settings',
-    /** Fired to open the Task Center singleton tab. No payload. */
+    /** Fired to open the Task Center singleton tab. Optional payload:
+     *  `{ autofocusSearch?: boolean }` — when true, the Task list panel
+     *  opens its search input and focuses it (used by Launcher 「我的
+     *  任务」 tab's search icon to continue the search intent across
+     *  tabs instead of forcing the user to re-click). */
     OPEN_TASK_CENTER: 'open-task-center',
     /**
      * Fired to open a new chat tab primed with `/task-alignment` for a thought.

@@ -20,12 +20,19 @@ interface Props {
    * without requiring manual reload.
    */
   refreshKey?: unknown;
+  /**
+   * When `true`, the ThoughtInput auto-focuses its textarea. Parent (TaskCenter)
+   * threads `isActive` through this so returning to the tab drops the caret
+   * into the input box without a second click (v0.1.69 UX round).
+   */
+  autoFocusInput?: boolean;
 }
 
 export function ThoughtPanel({
   onDispatchThought,
   onDiscussThought,
   refreshKey,
+  autoFocusInput = false,
 }: Props) {
   const [thoughts, setThoughts] = useState<Thought[]>([]);
   const [query, setQuery] = useState('');
@@ -237,6 +244,7 @@ export function ThoughtPanel({
         <ThoughtInput
           onCreated={(t) => setThoughts((prev) => [t, ...prev])}
           existingTags={allTags}
+          autoFocus={autoFocusInput}
         />
       </div>
 

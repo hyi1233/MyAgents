@@ -15,7 +15,6 @@ import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import PathInputDialog from '@/components/PathInputDialog';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import TaskCenterOverlay from '@/components/TaskCenterOverlay';
-import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, WorkspaceCard, WorkspaceEditDialog } from '@/components/launcher';
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import { useConfig } from '@/hooks/useConfig';
@@ -31,11 +30,9 @@ import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigSer
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../../shared/types/runtime';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES } from '../../shared/types/runtime';
 import { apiGetJson } from '@/api/apiFetch';
-import { deleteCronTask, stopCronTask, startCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import type { SessionMetadata } from '@/api/sessionClient';
-import type { CronTask } from '@/types/cronTask';
 import type { InitialMessage } from '@/types/tab';
 
 interface LauncherProps {
@@ -90,7 +87,6 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [showLogs, setShowLogs] = useState(false);
     const [projectToRemove, setProjectToRemove] = useState<Project | null>(null);
     const [showOverlay, setShowOverlay] = useState(false);
-    const [selectedCronTask, setSelectedCronTask] = useState<CronTask | null>(null);
     const [showTemplateDialog, setShowTemplateDialog] = useState(false);
     const [editingProject, setEditingProject] = useState<Project | null>(null);
     // Agent overlay — opens WorkspaceConfigPanel for agent settings or upgrade
@@ -411,73 +407,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [overlayMode, setOverlayMode] = useState<'default' | 'search'>('default');
     const handleOpenOverlay = useCallback((mode: 'default' | 'search' = 'default') => { track('task_center_open', {}); setOverlayMode(mode); setShowOverlay(true); }, []);
     const handleCloseOverlay = useCallback(() => { setShowOverlay(false); setOverlayMode('default'); }, []);
-    const handleOpenCronDetail = useCallback((task: CronTask) => setSelectedCronTask(task), []);
-    const handleCloseCronDetail = useCallback(() => setSelectedCronTask(null), []);
-
-    const handleCronOpenSession = useCallback((sessionId: string) => {
-        const task = selectedCronTask;
-        if (!task) return;
-        const project = projects.find(p => p.path === task.workspacePath);
-        if (project) {
-            handleLaunch(project, sessionId);
-        } else {
-            toastRef.current.error('工作区已移除，无法打开会话');
-        }
-    }, [selectedCronTask, projects, handleLaunch]);
-
-    // Derive bot info for selected cron task from agents[].channels[]
-    const selectedTaskBotInfo = useMemo(() => {
-        if (!selectedCronTask?.sourceBotId || !config.agents) return undefined;
-        for (const agent of config.agents) {
-            const channel = agent.channels?.find(ch => ch.id === selectedCronTask.sourceBotId);
-            if (channel) {
-                return { name: channel.name || agent.name, platform: channel.type };
-            }
-        }
-        return undefined;
-    }, [selectedCronTask?.sourceBotId, config.agents]);
 
     // Stable callback for overlay session open (avoids inline function in render)
     const handleOverlayOpenTask = useCallback((session: SessionMetadata, project: Project) => {
         handleOpenTask(session, project);
         handleCloseOverlay();
     }, [handleOpenTask, handleCloseOverlay]);
-
-    const handleCronDelete = useCallback(async (taskId: string) => {
-        await deleteCronTask(taskId);
-        setSelectedCronTask(null);
-        toastRef.current.success('定时任务已删除');
-    }, []);
-
-    const handleCronResume = useCallback(async (taskId: string) => {
-        try {
-            await startCronTask(taskId);
-            await startCronScheduler(taskId);
-            setSelectedCronTask(null);
-            toastRef.current.success('任务已恢复运行');
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            // Task was deleted elsewhere — close stale detail panel
-            if (msg.includes('not found')) {
-                setSelectedCronTask(null);
-            }
-            toastRef.current.error(`恢复失败: ${msg}`);
-        }
-    }, []);
-
-    const handleCronStop = useCallback(async (taskId: string) => {
-        try {
-            await stopCronTask(taskId, '手动停止');
-            setSelectedCronTask(null);
-            toastRef.current.success('任务已停止');
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            if (msg.includes('not found')) {
-                setSelectedCronTask(null);
-            }
-            toastRef.current.error(`停止失败: ${msg}`);
-        }
-    }, []);
 
     const handleAddProject = async () => {
         setAddError(null);
@@ -655,7 +590,6 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                             projects={visibleProjects}
                             onOpenTask={handleOpenTask}
                             onOpenOverlay={handleOpenOverlay}
-                            onOpenCronDetail={handleOpenCronDetail}
                             taskCenterData={taskCenterData}
                         />
                     </div>
@@ -745,23 +679,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 <TaskCenterOverlay
                     projects={visibleProjects}
                     onOpenTask={handleOverlayOpenTask}
-                    onOpenCronDetail={handleOpenCronDetail}
                     onClose={handleCloseOverlay}
                     taskCenterData={taskCenterData}
                     initialMode={overlayMode}
-                />
-            )}
-
-            {/* Cron Task Detail Panel */}
-            {selectedCronTask && (
-                <CronTaskDetailPanel
-                    task={selectedCronTask}
-                    botInfo={selectedTaskBotInfo}
-                    onClose={handleCloseCronDetail}
-                    onDelete={handleCronDelete}
-                    onResume={handleCronResume}
-                    onStop={handleCronStop}
-                    onOpenSession={handleCronOpenSession}
                 />
             )}
 

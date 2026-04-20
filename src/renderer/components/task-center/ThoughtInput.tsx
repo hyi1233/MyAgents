@@ -91,6 +91,22 @@ export function ThoughtInput({
     setTagIndex(0);
   }, [tagMenu?.query, tagMenu?.anchor]);
 
+  // Programmatic focus when `autoFocus` flips true. The textarea's
+  // `autoFocus` HTML attribute only fires on initial mount, but the
+  // TaskCenter tab is a singleton — the user can leave and come back
+  // without a remount. `autoFocus` effectively becomes a "focus intent"
+  // signal now: each time the parent passes `true` (TaskCenter
+  // re-activates) we reassert focus. Guarded by the prop value so
+  // `false` transitions don't steal focus from other fields.
+  useEffect(() => {
+    if (!autoFocus) return;
+    // Defer one frame so the focus lands after the tab's layout pass
+    // and the textarea is actually part of the visible tree (the
+    // hidden-tab branch uses `content-visibility: hidden`).
+    const raf = requestAnimationFrame(() => textareaRef.current?.focus());
+    return () => cancelAnimationFrame(raf);
+  }, [autoFocus]);
+
   // The overlay wrapper is `overflow: hidden` (to clip past the textarea
   // bounds), so setting `scrollTop` on it would no-op. Instead we translate
   // the inner content upward by the textarea's scrollTop — produces the
@@ -307,7 +323,12 @@ export function ThoughtInput({
             // set `rows={N}` here because it would re-inject a min-height
             // attribute that fights the JS sizer on first paint.
             disabled={busy}
-            autoFocus={autoFocus}
+            // NB: no HTML `autoFocus` attribute. The `autoFocus` prop
+            // drives a `useEffect` above that calls `.focus()` via
+            // `requestAnimationFrame` — that effect fires on every
+            // `false → true` transition (tab re-activation), which the
+            // mount-only HTML attribute cannot do. Keeping both would
+            // just double-fire `.focus()` on first mount.
             // The textarea's own text is transparent (mirror layer above
             // renders the glyphs) — but `-webkit-text-fill-color`
             // overrides `::placeholder { color }` in WebKit, so without

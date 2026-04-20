@@ -11,9 +11,15 @@ import type { Thought } from '@/../shared/types/thought';
 
 interface Props {
   isActive?: boolean;
+  /** Most recent OPEN_TASK_CENTER event payload. Forwarded to `TaskListPanel`
+   *  so navigation with `{ autofocusSearch: true }` can open the task-list
+   *  search input without the user touching the UI a second time. `nonce`
+   *  forces the consumer's effect to re-fire when the same intent is sent
+   *  back-to-back (e.g. user clicking the Launcher search icon twice). */
+  pendingIntent?: { autofocusSearch?: boolean; nonce: number } | null;
 }
 
-export default function TaskCenter({ isActive }: Props) {
+export default function TaskCenter({ isActive, pendingIntent }: Props) {
   const [dispatching, setDispatching] = useState<Thought | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -100,6 +106,14 @@ export default function TaskCenter({ isActive }: Props) {
             onDispatchThought={handleDispatch}
             onDiscussThought={handleDiscuss}
             refreshKey={`${refreshKey}:${isActive ? '1' : '0'}`}
+            // Suppress thought-input autofocus when the user arrived via
+            // the Launcher 「我的任务」 search icon — in that flow the
+            // caret belongs in the TaskListPanel search field, not the
+            // ThoughtInput. Both would otherwise `requestAnimationFrame`
+            // a focus call on the same tick, the right panel's effect
+            // wins by render order but the user sees a momentary caret
+            // flicker on the thought input. (v0.1.69 cross-review W4)
+            autoFocusInput={!!isActive && !pendingIntent?.autofocusSearch}
           />
         </div>
 
@@ -113,6 +127,7 @@ export default function TaskCenter({ isActive }: Props) {
         <div className="flex flex-1 flex-col overflow-hidden">
           <TaskListPanel
             refreshKey={`${refreshKey}:${isActive ? '1' : '0'}`}
+            pendingIntent={pendingIntent ?? null}
           />
         </div>
       </div>

@@ -87,6 +87,9 @@ interface TabContentProps {
   updateDownloading: boolean;
   onCheckForUpdate: () => Promise<'up-to-date' | 'downloading' | 'error'>;
   onRestartAndUpdate: () => void;
+  // Task Center intent carried by the most recent OPEN_TASK_CENTER event.
+  // Only read by the `taskcenter` tab; other tab views ignore it.
+  taskCenterPendingIntent: { autofocusSearch?: boolean; nonce: number } | null;
 }
 
 const MemoizedTabContent = memo(function TabContent({
@@ -97,6 +100,7 @@ const MemoizedTabContent = memo(function TabContent({
   settingsInitialSection, settingsInitialMcpId, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading,
   onCheckForUpdate, onRestartAndUpdate,
+  taskCenterPendingIntent,
 }: TabContentProps) {
   return (
     <div
@@ -124,7 +128,7 @@ const MemoizedTabContent = memo(function TabContent({
           onRestartAndUpdate={onRestartAndUpdate}
         />
       ) : tab.view === 'taskcenter' ? (
-        <TaskCenter isActive={isActive} />
+        <TaskCenter isActive={isActive} pendingIntent={taskCenterPendingIntent} />
       ) : (
         <TabProvider
           tabId={tab.id}
@@ -165,7 +169,15 @@ const MemoizedTabContent = memo(function TabContent({
     prev.updateReady === next.updateReady &&
     prev.updateVersion === next.updateVersion &&
     prev.updateChecking === next.updateChecking &&
-    prev.updateDownloading === next.updateDownloading
+    prev.updateDownloading === next.updateDownloading &&
+    // Reference equality — each OPEN_TASK_CENTER dispatch allocates a
+    // fresh intent object (or `null`), so identity comparison is enough.
+    // Without this line, a user re-clicking the Launcher's search icon
+    // while Task Center is already active would see their new intent
+    // dropped: isActive stays true, tab ref stays the same, so memo
+    // returns true and the new `pendingIntent` prop never reaches the
+    // TaskCenter tab. (v0.1.69 cross-review C1)
+    prev.taskCenterPendingIntent === next.taskCenterPendingIntent
   );
 });
 
@@ -1507,12 +1519,88 @@ export default function App() {
     setActiveTabId(newTab.id);
   }, []);
 
+  // Intent carried across `OPEN_TASK_CENTER` — the event dispatcher
+  // (Launcher "我的任务" tab's search icon) wants more than just "open
+  // the tab": it wants the Task Center's search box focused on arrival.
+  // Propagating via a direct `window` listener in TaskListPanel misses
+  // the first-mount case (the event fires before the tab exists), so
+  // we stash the intent in state here and pass it down as a prop.
+  //
+  // Intent lifecycle (cross-review C2):
+  //   1. Every event overwrites state — including with `null` when the
+  //      event carries no focus request. Otherwise a stale intent from
+  //      an earlier search path would persist and trigger unexpected
+  //      focus when the user later opens Task Center via the titlebar
+  //      icon or any other entry.
+  //   2. Each intent gets a monotonically-increasing `nonce` (not
+  //      `Date.now()`) so back-to-back same-millisecond firings still
+  //      produce distinct dep-array values for the consuming effect.
+  //      `useRef + ++` is cheap and collision-free.
+  const taskCenterIntentCounterRef = useRef(0);
+  const [taskCenterPendingIntent, setTaskCenterPendingIntent] = useState<
+    { autofocusSearch?: boolean; nonce: number } | null
+  >(null);
+
   // Listen for OPEN_TASK_CENTER custom event from child components
   useEffect(() => {
-    const handler = () => handleOpenTaskCenter();
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { autofocusSearch?: boolean }
+        | undefined;
+      if (detail?.autofocusSearch) {
+        taskCenterIntentCounterRef.current += 1;
+        setTaskCenterPendingIntent({
+          autofocusSearch: true,
+          nonce: taskCenterIntentCounterRef.current,
+        });
+      } else {
+        // Non-focus open (titlebar icon, Chat 新建 dispatch, etc.) —
+        // clear any lingering search intent so returning to Task Center
+        // doesn't auto-focus the search field unexpectedly.
+        setTaskCenterPendingIntent(null);
+      }
+      handleOpenTaskCenter();
+    };
     window.addEventListener(CUSTOM_EVENTS.OPEN_TASK_CENTER, handler);
     return () => window.removeEventListener(CUSTOM_EVENTS.OPEN_TASK_CENTER, handler);
   }, [handleOpenTaskCenter]);
+
+  // One-shot legacy CronTask → Task sweep at app startup (PRD §11.4,
+  // v0.1.69 UX round). The Launcher's 「我的任务」 tab reads new-model
+  // Task[] — users who never open the Task Center page would see an
+  // empty list even though they have legacy crons on disk. Running the
+  // upgrade sweep here (not inside TaskListPanel's mount) guarantees
+  // the data is ready before the Launcher is user-visible.
+  //
+  // Guards:
+  //   - taskCenterAvailable() — Tauri-only, silent no-op in browser dev
+  //   - configProjects.length > 0 — eligibility check needs workspace
+  //     resolution; Config loads async, so we wait for projects to
+  //     populate before sweeping
+  //   - useRef one-shot — only run once per session; refocusing the
+  //     window or a user navigating won't re-trigger the work
+  const startupSweepDoneRef = useRef(false);
+  useEffect(() => {
+    if (startupSweepDoneRef.current) return;
+    if (configProjects.length === 0) return;
+    startupSweepDoneRef.current = true;
+    void (async () => {
+      try {
+        const { sweepAppStartupLegacyCrons } = await import(
+          '@/components/task-center/legacyUpgrade'
+        );
+        const stats = await sweepAppStartupLegacyCrons(configProjects);
+        if (stats.upgraded > 0) {
+          console.info(
+            `[legacy-sweep] upgraded ${stats.upgraded} legacy cron(s) at startup ` +
+              `(skipped ${stats.skippedIneligible} ineligible, ${stats.failed} failed)`,
+          );
+        }
+      } catch (err) {
+        console.warn('[legacy-sweep] startup sweep crashed:', err);
+      }
+    })();
+  }, [configProjects]);
 
   // PRD §8.3 — "AI 讨论" flow. Open a new Chat tab, auto-dispatch the
   // `/task-alignment` skill with the thought content + instructions to call
@@ -1836,6 +1924,7 @@ export default function App() {
             updateDownloading={updateDownloading}
             onCheckForUpdate={checkForUpdate}
             onRestartAndUpdate={handleRestartAndUpdate}
+            taskCenterPendingIntent={taskCenterPendingIntent}
           />
         ))}
       </div>

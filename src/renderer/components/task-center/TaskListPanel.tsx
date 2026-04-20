@@ -11,7 +11,7 @@
 // their "remain in source chat tab" management pattern.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Layers } from 'lucide-react';
+import { Layers, Plus } from 'lucide-react';
 
 import {
   taskCenterAvailable,
@@ -26,7 +26,8 @@ import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import type { Task, TaskStatus } from '@/../shared/types/task';
-import { canAutoUpgrade, upgradeLegacyCron, type LegacyCronRaw } from './legacyUpgrade';
+import { canAutoUpgrade, isBenignAlreadyLinked, upgradeLegacyCron, type LegacyCronRaw } from './legacyUpgrade';
+import { DispatchTaskDialog } from './DispatchTaskDialog';
 import { LegacyCronOverlay } from './LegacyCronOverlay';
 import { TaskDetailOverlay } from './TaskDetailOverlay';
 import { TaskCardItem } from './views/TaskCardItem';
@@ -44,6 +45,13 @@ interface Props {
   highlightTaskId?: string | null;
   /** Bumped by parent to trigger re-fetch (tab activation, post-dispatch). */
   refreshKey?: unknown;
+  /** Intent forwarded from `App.tsx`'s `OPEN_TASK_CENTER` event handler.
+   *  `autofocusSearch: true` + a changing `nonce` tells this panel to
+   *  programmatically focus the search input so the user can start typing
+   *  immediately. Firing the same intent twice in a row (user clicks the
+   *  Launcher search icon twice) requires the `nonce` to change — it's
+   *  the dependency `useEffect` watches. */
+  pendingIntent?: { autofocusSearch?: boolean; nonce: number } | null;
 }
 
 type Bucket = 'pending' | 'active' | 'finished';
@@ -67,7 +75,7 @@ function loadStoredView(): TaskView {
   return raw === 'list' ? 'list' : 'card';
 }
 
-export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
+export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Props) {
   const toast = useToast();
   const toastRef = useRef(toast);
   useEffect(() => {
@@ -102,6 +110,10 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
   const [selectedTaskStartEditing, setSelectedTaskStartEditing] = useState(false);
   const [selectedLegacy, setSelectedLegacy] = useState<LegacyCronRow | null>(null);
   const [view, setView] = useState<TaskView>(loadStoredView);
+  // Inline "新建任务" modal — opened by the header "+ 新建" button.
+  // Renders `DispatchTaskDialog` without a `thought` prop so it enters
+  // the dialog's blank-state branch (default once-mode).
+  const [showCreateModal, setShowCreateModal] = useState(false);
   // Per-id busy flag so only the affected card/row greys out during an action,
   // instead of locking the whole panel.
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
@@ -194,6 +206,24 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
       void reload();
     }
   }, [projects.length, reload]);
+
+  // Focus the search input when the parent forwards a `{ autofocusSearch:
+  // true }` intent. Triggered by the Launcher "我的任务" tab's search
+  // icon — it opens this tab and wants the user to start typing without
+  // an extra click. `nonce` is the change signal so firing the same
+  // intent twice (user clicks search icon again while the tab is open)
+  // still re-runs the effect. `requestAnimationFrame` waits for the
+  // layout pass that mounts the SearchPill input; focusing on the same
+  // tick silently drops when the element isn't yet attached.
+  const intentNonce = pendingIntent?.nonce ?? 0;
+  const intentAutofocus = pendingIntent?.autofocusSearch ?? false;
+  useEffect(() => {
+    if (!intentAutofocus || intentNonce === 0) return;
+    const raf = requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [intentAutofocus, intentNonce]);
 
 
   // SSE: listen for task:status-changed events fired by Rust `update_status`
@@ -486,6 +516,21 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
           <span className="text-[16px] font-semibold text-[var(--ink)]">
             任务
           </span>
+          {/* v0.1.69 — inline "+ 新建" entry point so users aren't forced
+              to enter the Task Center flow via a thought first. Opens
+              `DispatchTaskDialog` with no `thought` prop (dialog's
+              "新建任务" branch, defaulting to once-mode). Visual matches
+              the SearchPill's rounded-full pill + ghost treatment so
+              both affordances read as one header row of toolbelt actions. */}
+          <button
+            type="button"
+            onClick={() => setShowCreateModal(true)}
+            title="新建任务"
+            className="ml-1 inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+          >
+            <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
+            新建
+          </button>
         </div>
         <div className="ml-auto flex items-center gap-2">
           {/* Workspace filter — hidden when there's only one (or zero)
@@ -597,6 +642,17 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
           }}
         />
       )}
+
+      {showCreateModal && (
+        <DispatchTaskDialog
+          onClose={() => setShowCreateModal(false)}
+          onDispatched={(created) => {
+            setShowCreateModal(false);
+            toastRef.current.success(`「${created.name}」已创建`);
+            void reload();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -704,6 +760,14 @@ async function autoUpgradeEligible(
       const { task } = await upgradeLegacyCron(raw, projects);
       upgradedTasks.push(task);
     } catch (err) {
+      if (isBenignAlreadyLinked(err)) {
+        // App-startup sweep won the race — this row is now migrated,
+        // just not by us. Drop it from `remainingLegacy` so it no
+        // longer renders the "遗留" badge; next `reload()` fetches the
+        // freshly-upgraded Task via the non-legacy path. No failure
+        // toast. (v0.1.69 cross-review W1)
+        continue;
+      }
       console.warn('[TaskListPanel] auto-upgrade failed for', row.id, err);
       remainingLegacy.push(row);
       failedCount += 1;

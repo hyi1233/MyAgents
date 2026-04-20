@@ -1,10 +1,15 @@
 /**
- * RecentTasks - Dual-tab mini view: Sessions | CronTasks
- * Shows 5 items per tab, with tags and "查看全部" entry to overlay
+ * RecentTasks — Dual-tab mini view: 历史会话 (Chat sessions) | 我的任务 (Tasks).
+ *
+ * v0.1.69 UX consolidation: the old panel split Chat sessions + legacy CronTasks;
+ * v0.1.69 introduced the Task entity as the unified schedule-bearing concept.
+ * This panel now reads new-model `Task[]` for the right tab so "启动页" agrees
+ * with "任务中心" on the same source of truth. Legacy CronTasks ineligible for
+ * auto-migration stay in the Task Center's "遗留" view only.
  */
 
 import { memo, useCallback, useMemo, useState } from 'react';
-import { AlertCircle, ArrowRight, BarChart2, Clock, MessageSquare, Plus, RefreshCw, Timer, Trash2, Search } from 'lucide-react';
+import { AlertCircle, ArrowRight, BarChart2, Clock, Folder, MessageSquare, Plus, RefreshCw, Sparkles, Trash2, Search } from 'lucide-react';
 
 import type { TaskCenterData } from '@/hooks/useTaskCenterData';
 import WorkspaceIcon from './WorkspaceIcon';
@@ -12,41 +17,50 @@ import SessionTagBadge from '@/components/SessionTagBadge';
 import SessionStatsModal from '@/components/SessionStatsModal';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import { useToast } from '@/components/Toast';
-import { getFolderName, formatTime, getSessionDisplayText, formatMessageCount } from '@/utils/taskCenterUtils';
+import { getFolderName, formatTime, getSessionDisplayText, formatMessageCount, relativeTime } from '@/utils/taskCenterUtils';
 import type { SessionMetadata } from '@/api/sessionClient';
-import type { CronTask } from '@/types/cronTask';
-import {
-    getCronStatusText,
-    getCronStatusColor,
-    formatNextExecution,
-} from '@/types/cronTask';
+import type { TaskStatus } from '@/../shared/types/task';
 import type { Project } from '@/config/types';
 import { DispatchTaskDialog } from '@/components/task-center/DispatchTaskDialog';
+import { CUSTOM_EVENTS } from '@/../shared/constants';
 
 const DISPLAY_COUNT = 5;
-/** Cron tab shows fewer items because the "新建" button takes one row's worth of height */
-const CRON_DISPLAY_COUNT = 4;
+/** Tasks tab shows one fewer item because the "新建任务" button takes one row's worth of height */
+const TASKS_DISPLAY_COUNT = 4;
 /** Fixed min-height for 5 rows (each ~36px + 2px gap) to prevent layout shift */
 const LIST_MIN_HEIGHT = 'min-h-[188px]';
 
 interface RecentTasksProps {
     projects: Project[];
     onOpenTask: (session: SessionMetadata, project: Project) => void;
+    /** "全部 →" / "搜索" buttons on the sessions tab — opens the session-history overlay. */
     onOpenOverlay: (mode?: 'default' | 'search') => void;
-    onOpenCronDetail: (task: CronTask) => void;
     taskCenterData: TaskCenterData;
 }
 
-type ActiveTab = 'sessions' | 'cron';
+type ActiveTab = 'sessions' | 'tasks';
+
+// Map new-model Task statuses to a compact label + tint that parallels the old
+// `getCronStatusText` / `getCronStatusColor` helpers so this row's visual
+// vocabulary doesn't change dramatically across the tab switch.
+const TASK_STATUS_STYLE: Record<TaskStatus, { label: string; className: string }> = {
+    todo: { label: '待启动', className: 'text-[var(--ink-muted)]' },
+    running: { label: '进行中', className: 'text-[var(--success)]' },
+    verifying: { label: '验证中', className: 'text-[var(--accent-warm)]' },
+    blocked: { label: '受阻', className: 'text-[var(--warning)]' },
+    stopped: { label: '已暂停', className: 'text-[var(--ink-muted)]/70' },
+    done: { label: '已完成', className: 'text-[var(--ink-muted)]/60' },
+    archived: { label: '已归档', className: 'text-[var(--ink-muted)]/50' },
+    deleted: { label: '已删除', className: 'text-[var(--ink-muted)]/40' },
+};
 
 export default memo(function RecentTasks({
     projects,
     onOpenTask,
     onOpenOverlay,
-    onOpenCronDetail,
     taskCenterData,
 }: RecentTasksProps) {
-    const { sessions, cronTasks, sessionTagsMap, cronBotInfoMap, isLoading, error, refresh, actions } = taskCenterData;
+    const { sessions, cronTasks, tasks, sessionTagsMap, isLoading, error, refresh, actions } = taskCenterData;
     const toast = useToast();
 
     const [activeTab, setActiveTab] = useState<ActiveTab>('sessions');
@@ -60,24 +74,17 @@ export default memo(function RecentTasks({
         return sessions.filter(s => projectPaths.has(s.agentDir)).slice(0, DISPLAY_COUNT);
     }, [sessions, projects]);
 
-    // Sorted cron tasks: running first (by nextExecutionAt ASC), then stopped (by updatedAt DESC), take 5
-    const displayCronTasks = useMemo(() => {
-        return [...cronTasks]
-            .sort((a, b) => {
-                if (a.status === 'running' && b.status !== 'running') return -1;
-                if (a.status !== 'running' && b.status === 'running') return 1;
-                if (a.status === 'running') {
-                    if (a.nextExecutionAt && b.nextExecutionAt) {
-                        return new Date(a.nextExecutionAt).getTime() - new Date(b.nextExecutionAt).getTime();
-                    }
-                    return 0;
-                }
-                const aTime = new Date(a.updatedAt || a.createdAt).getTime();
-                const bTime = new Date(b.updatedAt || b.createdAt).getTime();
-                return bTime - aTime;
-            })
-            .slice(0, CRON_DISPLAY_COUNT);
-    }, [cronTasks]);
+    // "我的任务" tab: all Task statuses, sorted by updatedAt desc, take the
+    // top 4 (5th slot reserved for the "+ 新建任务" affordance). We
+    // deliberately include `done` / `archived` rows so users see the
+    // full shape of their recent work; `deleted` is dropped because a
+    // deleted task is never something the user wants to navigate to.
+    const displayTasks = useMemo(() => {
+        return tasks
+            .filter((t) => t.status !== 'deleted')
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .slice(0, TASKS_DISPLAY_COUNT);
+    }, [tasks]);
 
     const getProjectForSession = useCallback(
         (session: SessionMetadata): Project | undefined =>
@@ -85,6 +92,10 @@ export default memo(function RecentTasks({
         [projects]
     );
 
+    // A session that backs a running cron is "protected" from delete —
+    // still computed from `cronTasks` (the cron scheduler owns the
+    // session lifecycle) even though the right-hand tab no longer
+    // shows cron rows.
     const cronProtectedSessionIds = useMemo(
         () => new Set(cronTasks.filter(t => t.status === 'running').map(t => t.sessionId)),
         [cronTasks]
@@ -119,7 +130,7 @@ export default memo(function RecentTasks({
 
     const handleTabChange = useCallback((tab: ActiveTab) => {
         setActiveTab(tab);
-        refresh(tab === 'sessions' ? 'sessions' : 'cronTasks', {
+        refresh(tab === 'sessions' ? 'sessions' : 'tasks', {
             force: true,
             reason: 'recent-tasks-tab-change',
             silent: true,
@@ -127,8 +138,21 @@ export default memo(function RecentTasks({
     }, [refresh]);
 
     const handleCreated = useCallback(() => {
-        refresh('all', { force: true, reason: 'recent-tasks-cron-created', silent: true });
+        refresh('all', { force: true, reason: 'recent-tasks-task-created', silent: true });
     }, [refresh]);
+
+    // "全部 →" / 搜索 buttons on the 「我的任务」 tab navigate to the Task
+    // Center singleton tab instead of opening the session-history
+    // overlay. `autofocusSearch` is only set by the search-icon path
+    // (v0.1.69 UX decision: clicking 🔍 should drop the user straight
+    // into typing mode, not force a second click inside the tab).
+    const handleOpenTaskCenter = useCallback((mode: 'default' | 'search' = 'default') => {
+        window.dispatchEvent(
+            new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER, {
+                detail: mode === 'search' ? { autofocusSearch: true } : undefined,
+            }),
+        );
+    }, []);
 
     const handleRetry = useCallback(() => {
         refresh('all', { force: true, reason: 'recent-tasks-retry' });
@@ -137,7 +161,7 @@ export default memo(function RecentTasks({
     if (isLoading) {
         return (
             <div className="mb-8">
-                <TabHeader activeTab={activeTab} onTabChange={handleTabChange} onOpenOverlay={onOpenOverlay} />
+                <TabHeader activeTab={activeTab} onTabChange={handleTabChange} onOpenOverlay={onOpenOverlay} onOpenTaskCenter={handleOpenTaskCenter} />
                 <div className={`${LIST_MIN_HEIGHT} flex items-center`}>
                     <div className="py-4 text-[13px] text-[var(--ink-muted)]/70">加载中...</div>
                 </div>
@@ -148,7 +172,7 @@ export default memo(function RecentTasks({
     if (error) {
         return (
             <div className="mb-8">
-                <TabHeader activeTab={activeTab} onTabChange={handleTabChange} onOpenOverlay={onOpenOverlay} />
+                <TabHeader activeTab={activeTab} onTabChange={handleTabChange} onOpenOverlay={onOpenOverlay} onOpenTaskCenter={handleOpenTaskCenter} />
                 <div className={`${LIST_MIN_HEIGHT} flex items-center justify-center`}>
                     <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
                         <AlertCircle className="mx-auto mb-2 h-4 w-4 text-amber-500/70" />
@@ -168,7 +192,7 @@ export default memo(function RecentTasks({
 
     return (
         <div className="mb-8">
-            <TabHeader activeTab={activeTab} onTabChange={handleTabChange} onOpenOverlay={onOpenOverlay} />
+            <TabHeader activeTab={activeTab} onTabChange={handleTabChange} onOpenOverlay={onOpenOverlay} onOpenTaskCenter={handleOpenTaskCenter} />
 
             {/* Sessions tab */}
             {activeTab === 'sessions' && (
@@ -257,57 +281,65 @@ export default memo(function RecentTasks({
                 </div>
             )}
 
-            {/* CronTasks tab */}
-            {activeTab === 'cron' && (
+            {/* 「我的任务」 tab — snapshot of the Task Center's task list,
+                 sorted by updatedAt desc. Clicking a row (or "全部 →")
+                 jumps to the full Task Center tab; this surface is
+                 read-only, per-row edit affordances live in the Task
+                 Center. */}
+            {activeTab === 'tasks' && (
                 <div className={LIST_MIN_HEIGHT}>
-                    {/* Create button */}
+                    {/* "+ 新建任务" — opens the blank-state DispatchTaskDialog
+                         (default executionMode = once). The Task Center's
+                         TaskListPanel header carries the same entry so
+                         both surfaces agree on the "+" semantics. */}
                     <button
                         onClick={() => setShowCreateModal(true)}
                         className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--line)] py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] transition-colors"
                     >
                         <Plus className="h-3.5 w-3.5" />
-                        新建定时任务
+                        新建任务
                     </button>
-                    {displayCronTasks.length === 0 ? (
-                        <div className={`flex items-center justify-center py-6`}>
+                    {displayTasks.length === 0 ? (
+                        <div className="flex items-center justify-center py-6">
                             <div className="text-center">
-                                <Timer className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
-                                <p className="text-[13px] text-[var(--ink-muted)]/70">暂无定时任务</p>
+                                <Sparkles className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
+                                <p className="text-[13px] text-[var(--ink-muted)]/70">暂无任务</p>
                             </div>
                         </div>
                     ) : (
                         <div className="space-y-0.5">
-                            {displayCronTasks.map(task => {
-                                const botInfo = task.sourceBotId
-                                    ? cronBotInfoMap.get(task.sourceBotId)
-                                    : undefined;
-                                const displayName =
-                                    task.name ||
-                                    task.prompt.slice(0, 30) + (task.prompt.length > 30 ? '...' : '');
-
+                            {displayTasks.map(task => {
+                                // TypeScript's exhaustiveness check covers the compile-time
+                                // `TaskStatus` union, but on-disk Task records can be ahead
+                                // of the types (e.g. a new backend status rolled out before
+                                // a renderer update). Fall back to the raw string instead of
+                                // misrepresenting it as "待启动", which would hide the fact
+                                // that the app doesn't know what the task is doing.
+                                // (v0.1.69 cross-review N1)
+                                const style =
+                                    TASK_STATUS_STYLE[task.status] ??
+                                    ({ label: String(task.status), className: 'text-[var(--ink-muted)]/50' } as const);
+                                const workspaceName = getFolderName(task.workspacePath ?? '');
                                 return (
                                     <button
                                         key={task.id}
-                                        onClick={() => onOpenCronDetail(task)}
+                                        onClick={() => handleOpenTaskCenter('default')}
                                         className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
                                     >
                                         <span
-                                            className={`w-14 shrink-0 text-[11px] font-medium ${getCronStatusColor(task.status)}`}
+                                            className={`w-14 shrink-0 text-[11px] font-medium ${style.className}`}
                                         >
-                                            {getCronStatusText(task.status)}
+                                            {style.label}
                                         </span>
                                         <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
-                                            {displayName}
+                                            {task.name || '未命名任务'}
                                         </span>
-                                        <div className="flex shrink-0 items-center gap-2 text-[11px] text-[var(--ink-muted)]/45">
-                                            <span className="max-w-[100px] truncate">
-                                                {botInfo ? `${botInfo.name}` : getFolderName(task.workspacePath)}
+                                        <div className="flex shrink-0 items-center gap-2 text-[11px] text-[var(--ink-muted)]/50">
+                                            <span className="inline-flex items-center gap-1">
+                                                <Folder className="h-2.5 w-2.5" strokeWidth={1.5} />
+                                                <span className="max-w-[80px] truncate">{workspaceName}</span>
                                             </span>
-                                            {task.status === 'running' && (
-                                                <span className="text-[10px]">
-                                                    {formatNextExecution(task.nextExecutionAt, task.status)}
-                                                </span>
-                                            )}
+                                            <span>{relativeTime(task.updatedAt)}</span>
                                         </div>
                                     </button>
                                 );
@@ -347,16 +379,33 @@ export default memo(function RecentTasks({
     );
 });
 
-// Tab header sub-component
+// Tab header sub-component.
+//
+// The 全部/搜索 buttons route differently by active tab (v0.1.69 UX round):
+//   - 「历史会话」 tab → `onOpenOverlay` (session-history overlay, unchanged)
+//   - 「我的任务」 tab → `onOpenTaskCenter` (dispatches OPEN_TASK_CENTER so
+//     the Task Center singleton tab handles navigation + optional search
+//     auto-focus)
 function TabHeader({
     activeTab,
     onTabChange,
-    onOpenOverlay
+    onOpenOverlay,
+    onOpenTaskCenter,
 }: {
     activeTab: ActiveTab;
     onTabChange: (t: ActiveTab) => void;
     onOpenOverlay: (mode?: 'default' | 'search') => void;
+    onOpenTaskCenter: (mode?: 'default' | 'search') => void;
 }) {
+    const handleSearch = () => {
+        if (activeTab === 'tasks') onOpenTaskCenter('search');
+        else onOpenOverlay('search');
+    };
+    const handleSeeAll = () => {
+        if (activeTab === 'tasks') onOpenTaskCenter('default');
+        else onOpenOverlay('default');
+    };
+    const searchTitle = activeTab === 'tasks' ? '搜索任务' : '搜索历史会话';
     return (
         <div className="mb-3 flex items-center justify-between">
             <div className="flex gap-4">
@@ -368,36 +417,36 @@ function TabHeader({
                             : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
                     }`}
                 >
-                    最近任务
+                    历史会话
                     {activeTab === 'sessions' && (
                         <div className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full bg-[var(--accent)]" />
                     )}
                 </button>
                 <button
-                    onClick={() => onTabChange('cron')}
+                    onClick={() => onTabChange('tasks')}
                     className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
-                        activeTab === 'cron'
+                        activeTab === 'tasks'
                             ? 'text-[var(--ink-muted)]'
                             : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
                     }`}
                 >
-                    定时任务
-                    {activeTab === 'cron' && (
+                    我的任务
+                    {activeTab === 'tasks' && (
                         <div className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full bg-[var(--accent)]" />
                     )}
                 </button>
             </div>
-            
+
             <div className="flex items-center gap-1">
                 <button
-                    onClick={() => onOpenOverlay('search')}
+                    onClick={handleSearch}
                     className="flex h-6 w-6 items-center justify-center rounded p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                    title="搜索任务"
+                    title={searchTitle}
                 >
                     <Search className="h-3.5 w-3.5" />
                 </button>
                 <button
-                    onClick={() => onOpenOverlay('default')}
+                    onClick={handleSeeAll}
                     className="group flex h-6 items-center gap-1 rounded px-1.5 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                 >
                     全部

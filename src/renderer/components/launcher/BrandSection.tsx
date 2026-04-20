@@ -11,7 +11,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import SimpleChatInput, { type ImageAttachment } from '@/components/SimpleChatInput';
+import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import WorkspaceSelector from './WorkspaceSelector';
 import ModeSegment, { type InputMode } from '@/components/task-center/ModeSegment';
 import RecentThoughtsRow from '@/components/task-center/RecentThoughtsRow';
@@ -99,6 +99,29 @@ export default memo(function BrandSection({
     // Gracefully degrade in browser dev mode — ModeSegment is Tauri-only.
     const modeSegmentEnabled = taskCenterAvailable();
 
+    // Ref into SimpleChatInput so the ModeSegment's click handler can
+    // auto-focus the textarea. Without this the user has to click the
+    // tab then click the input; the v0.1.69 UX round asks that a tab
+    // click leave the caret blinking in the box, ready for typing.
+    const inputRef = useRef<SimpleChatInputHandle>(null);
+    // Single helper used by BOTH the segment click path (explicit next
+    // mode) and the Tab / Cmd+Shift+T keyboard paths (toggle). Without
+    // this the two call sites diverged on `setMode(next)` vs
+    // `setMode((m) => ...)` and future work added to one (analytics,
+    // side effects) would silently skip the other (v0.1.69 cross-review
+    // N4). Defer focus to the next paint so React's state commit and
+    // any downstream auto-resize (placeholder swap, row count change)
+    // land before the caret is planted — Safari occasionally eats the
+    // focus while the textarea is mid-reflow.
+    const setModeAndFocus = useCallback((next: InputMode | 'toggle') => {
+        if (next === 'toggle') {
+            setMode((m) => (m === 'task' ? 'thought' : 'task'));
+        } else {
+            setMode(next);
+        }
+        requestAnimationFrame(() => inputRef.current?.focus());
+    }, []);
+
     const handleSend = useCallback(
         async (text: string, images?: ImageAttachment[]) => {
             if (mode === 'thought' && modeSegmentEnabled) {
@@ -148,7 +171,7 @@ export default memo(function BrandSection({
         const handler = (e: KeyboardEvent) => {
             if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
                 e.preventDefault();
-                setMode((m) => (m === 'task' ? 'thought' : 'task'));
+                setModeAndFocus('toggle');
                 return;
             }
             if (
@@ -168,11 +191,11 @@ export default memo(function BrandSection({
                 !target || target === document.body || (section?.contains(target) ?? false);
             if (!inScope) return;
             e.preventDefault();
-            setMode((m) => (m === 'task' ? 'thought' : 'task'));
+            setModeAndFocus('toggle');
         };
         window.addEventListener('keydown', handler);
         return () => window.removeEventListener('keydown', handler);
-    }, [modeSegmentEnabled]);
+    }, [modeSegmentEnabled, setModeAndFocus]);
 
     // Check if any provider is available (has valid subscription or API key configured)
     // Validation status is informational — having a key is enough to be "available"
@@ -214,7 +237,7 @@ export default memo(function BrandSection({
                 <div className="mt-6 mb-6">
                     <ModeSegment
                         value={mode}
-                        onChange={setMode}
+                        onChange={setModeAndFocus}
                         tabSwitchHint
                     />
                 </div>
@@ -228,6 +251,7 @@ export default memo(function BrandSection({
             <div className="w-full max-w-[640px] pb-[12vh]">
                 <div className="relative w-full">
                     <SimpleChatInput
+                        ref={inputRef}
                         mode="launcher"
                         thoughtMode={mode === 'thought'}
                         onSend={handleSend}
