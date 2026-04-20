@@ -749,18 +749,45 @@ impl TaskStore {
             if keep_running {
                 // Status unchanged (already Running); only the
                 // self-loop history entry records the event.
-                task.updated_at = now;
-                task.status_history.push(StatusTransition {
-                    from: Some(from),
-                    to: TaskStatus::Running,
-                    at: now,
-                    actor: TransitionActor::System,
-                    message: Some(
-                        "上次运行被应用重启中断,调度器将在下次计划时间继续触发"
-                            .to_string(),
-                    ),
-                    source: Some(TransitionSource::Crash),
+                //
+                // Deduplication (v0.1.69+): if the most recent transition
+                // is already a crash self-loop (from == to, source=crash),
+                // don't write another one. The rationale:
+                //
+                //   - User closes laptop for lunch → app exits. We already
+                //     wrote "上次运行被应用重启中断" once on the last boot.
+                //   - User reopens laptop → app boots → recovery runs again.
+                //     Without dedup we'd write the identical message again,
+                //     and again, and again — one per suspend/resume cycle.
+                //   - Real-world users saw 20+ identical crash rows for the
+                //     same task across a week of daily laptop use, drowning
+                //     out meaningful state transitions.
+                //
+                // Dedup breaks the moment the scheduler actually fires a
+                // tick: that pushes a non-crash transition (e.g.
+                // running→verifying, or the post-execution running→running
+                // "heartbeat"), and on the next crash we'll write a fresh
+                // crash row — this one carrying real signal ("we were
+                // interrupted AFTER a successful tick since last boot").
+                let last_is_crash_selfloop = task.status_history.last().is_some_and(|t| {
+                    t.source == Some(TransitionSource::Crash) && t.from == Some(t.to)
                 });
+                if !last_is_crash_selfloop {
+                    task.updated_at = now;
+                    task.status_history.push(StatusTransition {
+                        from: Some(from),
+                        to: TaskStatus::Running,
+                        at: now,
+                        actor: TransitionActor::System,
+                        message: Some(
+                            "上次运行被应用重启中断,调度器将在下次计划时间继续触发"
+                                .to_string(),
+                        ),
+                        source: Some(TransitionSource::Crash),
+                    });
+                    changed = true;
+                }
+                continue;
             } else {
                 task.status = TaskStatus::Blocked;
                 task.updated_at = now;
