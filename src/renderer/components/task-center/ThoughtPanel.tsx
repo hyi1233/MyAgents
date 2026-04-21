@@ -13,7 +13,7 @@ import type { Thought } from '@/../shared/types/thought';
 
 interface Props {
   onDispatchThought?: (t: Thought) => void;
-  onDiscussThought?: (t: Thought) => void;
+  onDiscussThought?: (t: Thought, workspaceId: string) => void;
   /**
    * When `true`, the panel re-fetches from disk. Parent should bump this on tab
    * activation so a thought created elsewhere (e.g. Launcher 想法 mode) appears

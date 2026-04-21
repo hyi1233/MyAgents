@@ -36,16 +36,17 @@ export default function TaskCenter({ isActive, pendingIntent }: Props) {
     setDispatching(t);
   }, []);
 
-  const handleDiscuss = useCallback((t: Thought) => {
-    // Hand off to App.tsx which owns tab creation. It'll pick a workspace via
-    // smart default (match thought.tags → project name), open a new Chat tab,
-    // and auto-send the task-alignment prompt.
+  const handleDiscuss = useCallback((t: Thought, workspaceId: string) => {
+    // Hand off to App.tsx which owns tab creation. The workspace was picked
+    // explicitly via the card's workspace popover, so we carry its id through
+    // the event; App.tsx uses it instead of running a smart-default guess.
     window.dispatchEvent(
       new CustomEvent(CUSTOM_EVENTS.OPEN_AI_DISCUSSION, {
         detail: {
           thoughtId: t.id,
           content: t.content,
           tags: t.tags,
+          workspaceId,
         },
       }),
     );

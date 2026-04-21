@@ -1611,8 +1611,13 @@ export default function App() {
         thoughtId: string;
         content: string;
         tags: string[];
+        /** Explicit workspace pick from the ThoughtCard popover (v0.1.69
+         *  polish). When present we use it directly; when absent (old
+         *  callers or programmatic triggers) we fall back to the smart
+         *  tag→project match so behavior degrades gracefully. */
+        workspaceId?: string;
       }>;
-      const { thoughtId, content, tags } = event.detail ?? {
+      const { thoughtId, content, tags, workspaceId } = event.detail ?? {
         thoughtId: '',
         content: '',
         tags: [],
@@ -1626,14 +1631,16 @@ export default function App() {
           return;
         }
 
-        // Smart workspace default — same logic as DispatchTaskDialog (PRD §8.4).
         const projects = configProjectsRef.current.filter((p) => !p.internal);
         if (projects.length === 0) {
           toastRef.current?.error('还没有工作区，无法开始 AI 讨论');
           return;
         }
+        // Prefer the explicit pick; fall back to smart default for legacy
+        // callers / programmatic use.
         const lowerTags = tags.map((t) => t.toLowerCase());
         const workspace =
+          (workspaceId ? projects.find((p) => p.id === workspaceId) : undefined) ??
           projects.find((p) => lowerTags.includes(p.name.toLowerCase())) ??
           projects[0];
 
@@ -1686,8 +1693,23 @@ export default function App() {
           providerId: provider.id,
         };
 
+        // Pre-seed the tab as a Chat tab before awaiting sidecar startup.
+        // Without this, the user sees the Launcher briefly while
+        // handleLaunchProject waits on ensureSessionSidecar, then the tab
+        // "jumps" to Chat. createPendingSessionId is deterministic
+        // (`pending-<tabId>`), so handleLaunchProject's internal call
+        // resolves to the same id and its later setTabs is a no-op for
+        // view/agentDir/sessionId.
         const newTab = createNewTab();
-        setTabs((prev) => [...prev, newTab]);
+        const seeded = {
+          ...newTab,
+          view: 'chat' as const,
+          agentDir: workspace.path,
+          sessionId: createPendingSessionId(newTab.id),
+          title: '任务讨论',
+          initialMessage,
+        };
+        setTabs((prev) => [...prev, seeded]);
         setActiveTabId(newTab.id);
         activeTabIdRef.current = newTab.id;
 
@@ -1698,6 +1720,10 @@ export default function App() {
           initialMessage,
         );
 
+        // handleLaunchProject's internal setTabs overwrites `title` with the
+        // workspace display name. Restore the "任务讨论" title afterwards so
+        // the tab consistently reads as a discussion session, not the
+        // workspace's generic name.
         setTabs((prev) =>
           prev.map((t) =>
             t.id === newTab.id ? { ...t, title: '任务讨论' } : t,

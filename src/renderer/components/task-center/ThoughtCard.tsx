@@ -13,6 +13,7 @@
 import {
   useCallback,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -25,6 +26,10 @@ import {
 } from 'lucide-react';
 import { thoughtDelete, thoughtUpdate } from '@/api/taskCenter';
 import { Popover } from '@/components/ui/Popover';
+import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
+import { useConfig } from '@/hooks/useConfig';
+import { getFolderName } from '@/types/tab';
+import type { Project } from '@/config/types';
 import type { Thought } from '@/../shared/types/thought';
 import { splitWithTagHighlights } from '@/utils/parseThoughtTags';
 
@@ -32,8 +37,9 @@ interface Props {
   thought: Thought;
   onChanged: (t: Thought | null) => void;
   onDispatch?: (t: Thought) => void;
-  /** Open a new chat tab with `/task-alignment` (PRD §8.3). */
-  onDiscuss?: (t: Thought) => void;
+  /** Open a new chat tab with `/task-alignment` (PRD §8.3). The selected
+   *  workspace is the one the user picked from the popover. */
+  onDiscuss?: (t: Thought, workspaceId: string) => void;
   /** Click handler for inline tag chips — wires into the panel's tag filter. */
   onTagClick?: (tag: string) => void;
 }
@@ -55,10 +61,39 @@ export function ThoughtCard({
   const [expanded, setExpanded] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [showWorkspacePicker, setShowWorkspacePicker] = useState(false);
 
   const viewRef = useRef<HTMLDivElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const menuAnchorRef = useRef<HTMLButtonElement>(null);
+  const discussAnchorRef = useRef<HTMLButtonElement>(null);
+
+  // Workspace list for the AI-discussion picker. Internal projects
+  // (the ~/.myagents helper workspace) are hidden — a thought belongs
+  // to user work, not the diagnostic sandbox. Sorted by most-recently
+  // opened so the user's current work bubbles up.
+  const { projects } = useConfig();
+  const pickableWorkspaces = useMemo<Project[]>(() => {
+    return projects
+      .filter((p) => !p.internal)
+      .slice()
+      .sort((a, b) => {
+        const ta = a.lastOpened ? new Date(a.lastOpened).getTime() : 0;
+        const tb = b.lastOpened ? new Date(b.lastOpened).getTime() : 0;
+        return tb - ta;
+      });
+  }, [projects]);
+
+  // Smart default — match a thought tag against a workspace name so the
+  // popover lands with the most likely pick highlighted. Falls back to
+  // the first (most recent) workspace.
+  const suggestedWorkspaceId = useMemo(() => {
+    const lowerTags = thought.tags?.map((t) => t.toLowerCase()) ?? [];
+    const matched = pickableWorkspaces.find((p) =>
+      lowerTags.includes(p.name.toLowerCase()),
+    );
+    return (matched ?? pickableWorkspaces[0])?.id;
+  }, [pickableWorkspaces, thought.tags]);
 
   // Overflow detection — measure only in collapsed state so flipping to
   // expanded doesn't reset the flag (clientHeight would grow to match).
@@ -180,32 +215,94 @@ export function ThoughtCard({
         </span>
         {!editing && (
           <div className="flex shrink-0 items-center gap-1">
-            {/* Primary actions (派发 / AI 讨论) — hover-only to keep the
-                 resting card uncluttered. */}
+            {/* Primary actions (AI 讨论 / 派发) — hover-only to keep the
+                 resting card uncluttered. Each button owns a local
+                 `group/btn-*` so its dark-pill tooltip doesn't inherit
+                 the card-level `group-hover`. Native `title=` would
+                 render the OS-default grey tooltip and break with the
+                 WorkspaceCard tooltip language we use elsewhere. */}
             <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
               {onDiscuss && (
-                <button
-                  type="button"
-                  onClick={() => onDiscuss(thought)}
-                  title="AI 讨论 — 开新对话用 /task-alignment 聊出方案"
-                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
-                >
-                  <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
-                  AI 讨论
-                </button>
+                <div className="group/discuss relative">
+                  <button
+                    ref={discussAnchorRef}
+                    type="button"
+                    onClick={() => setShowWorkspacePicker((v) => !v)}
+                    className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
+                  >
+                    <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
+                    AI 讨论
+                  </button>
+                  {!showWorkspacePicker && (
+                    <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-[11px] text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/discuss:opacity-100">
+                      与 AI 讨论形成任务方案
+                    </span>
+                  )}
+                </div>
               )}
               {onDispatch && (
-                <button
-                  type="button"
-                  onClick={() => onDispatch(thought)}
-                  title="直接派发为任务（不讨论）"
-                  className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
-                >
-                  <Zap className="h-3.5 w-3.5" strokeWidth={1.5} />
-                  派发
-                </button>
+                <div className="group/dispatch relative">
+                  <button
+                    type="button"
+                    onClick={() => onDispatch(thought)}
+                    className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
+                  >
+                    <Zap className="h-3.5 w-3.5" strokeWidth={1.5} />
+                    派发
+                  </button>
+                  <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-[11px] text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/dispatch:opacity-100">
+                    直接派发任务
+                  </span>
+                </div>
               )}
             </div>
+            {/* Workspace picker — rendered once per card; shows when the
+                 AI 讨论 button is clicked. Portal'd via Popover so the
+                 anchor's `overflow-hidden` card chrome can't clip it. */}
+            {onDiscuss && (
+              <Popover
+                open={showWorkspacePicker}
+                onClose={() => setShowWorkspacePicker(false)}
+                anchorRef={discussAnchorRef}
+                placement="bottom-end"
+                className="min-w-[240px] max-w-[320px] py-1"
+              >
+                <div className="px-3 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/70">
+                  选择工作区
+                </div>
+                <div className="max-h-[280px] overflow-y-auto py-1">
+                  {pickableWorkspaces.length === 0 ? (
+                    <div className="px-3 py-4 text-[12px] text-[var(--ink-muted)]">
+                      暂无工作区
+                    </div>
+                  ) : (
+                    pickableWorkspaces.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => {
+                          setShowWorkspacePicker(false);
+                          onDiscuss(thought, p.id);
+                        }}
+                        className={`flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-[var(--hover-bg)] ${
+                          p.id === suggestedWorkspaceId ? 'bg-[var(--accent-warm-subtle)]' : ''
+                        }`}
+                      >
+                        <WorkspaceIcon icon={p.icon} size={20} />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[13px] font-medium text-[var(--ink)]">
+                            {p.displayName || getFolderName(p.path)}
+                          </div>
+                          <div className="truncate text-[11px] text-[var(--ink-muted)]/70">
+                            {p.path}
+                          </div>
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </Popover>
+            )}
             {/* "更多" — always visible so the user has a permanent
                  handle on secondary actions (编辑 / 删除) without having
                  to hover-discover. `h-5 w-5` matches the meta row's

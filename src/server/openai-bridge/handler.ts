@@ -23,6 +23,27 @@ const THOUGHT_SIG_CACHE_MAX = 500; // Max cached thought_signatures to prevent u
 // See: https://ai.google.dev/gemini-api/docs/thought-signatures
 const THOUGHT_SIG_SKIP_VALIDATOR = 'skip_thought_signature_validator';
 
+/**
+ * Last upstream-connectivity failure observed by the bridge.
+ *
+ * Purpose is purely diagnostic: when `verifyViaSdk`'s outer 30s timeout fires,
+ * it inspects this ref to surface the real connect-layer error (TLS rejection,
+ * socket closed, DNS failure, proxy-intercepted TLS, …) instead of the generic
+ * "验证超时，请检查网络连接" message. These errors live only in the bridge's
+ * fetch-catch path — the SDK sees our 502 and retries until the outer timeout
+ * fires, so the real reason never reaches verify through the normal code path.
+ *
+ * Scoped by wall-clock: readers filter by `timestamp >= theirStartTime` so
+ * stale errors from unrelated sessions don't leak into new verify attempts.
+ * Last-writer-wins across concurrent sessions is an acceptable trade-off —
+ * this is a failure-mode diagnostic, not a correctness surface.
+ */
+let lastBridgeError: { message: string; timestamp: number; upstreamUrl: string } | undefined;
+
+export function getLastBridgeError(): { message: string; timestamp: number; upstreamUrl: string } | undefined {
+  return lastBridgeError;
+}
+
 /** Detect proxy URL from environment (respects no_proxy for the target URL) */
 export function getProxyForUrl(url: string): string | undefined {
   const proxy = process.env.https_proxy || process.env.HTTPS_PROXY
@@ -189,6 +210,10 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
       const isTimeout = err instanceof Error && err.name === 'AbortError';
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`[bridge] Upstream ${isTimeout ? 'timeout' : 'error'}: ${errMsg}`);
+      // Record for verify-timeout diagnostics (see getLastBridgeError docstring).
+      // Only the connect-layer catch path — HTTP error responses (!upstreamResp.ok)
+      // are already surfaced through the SDK's assistant.error path to verify.
+      lastBridgeError = { message: errMsg, timestamp: Date.now(), upstreamUrl };
       return jsonError(
         isTimeout ? 408 : 502,
         'api_error',

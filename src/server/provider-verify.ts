@@ -11,6 +11,7 @@ import { execSync } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveClaudeCodeCli, buildClaudeSessionEnv } from './agent-session';
 import { ensureDirSync } from './utils/fs-utils';
+import { getLastBridgeError } from './openai-bridge';
 // Subscription types (keep in sync with src/renderer/types/subscription.ts)
 export interface SubscriptionInfo {
   accountUuid?: string;
@@ -79,6 +80,13 @@ async function verifyViaSdk(
     logPrefix: string;
     parseError: (text: string, originalText?: string) => VerifyError;
     settingSources: ('user' | 'project')[];
+    /**
+     * Real upstream baseUrl this verify targets (user-config baseUrl, NOT the
+     * loopback ANTHROPIC_BASE_URL we set for OpenAI-bridge mode). Used to
+     * scope bridge-error diagnostics so a concurrent verify of a DIFFERENT
+     * provider can't leak its error into this one's timeout message.
+     */
+    upstreamBaseUrlForDiagnostics?: string;
   },
 ): Promise<{ success: boolean; error?: string; detail?: string }> {
   const TIMEOUT_MS = 30000;
@@ -147,10 +155,25 @@ async function verifyViaSdk(
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<{ success: false; error: string; detail?: string }>((resolve) => {
       timeoutId = setTimeout(() => {
-        // Priority: real API error collected during retries > stderr > generic timeout
+        // Priority: real API error collected > bridge connect failure > stderr > generic timeout
         if (firstAuthError) {
           console.log(`[${logPrefix}] timeout but have auth error collected, using it`);
           resolve({ success: false, error: firstAuthError.error, detail: firstAuthError.detail });
+          return;
+        }
+        // OpenAI-bridge connect failures (TLS rejection, socket closed, proxy interception, …)
+        // never reach the SDK as `assistant.error` — the SDK sees our 502 and retries until the
+        // outer timeout fires. Inspect the bridge's last-error ref and, if it happened inside
+        // OUR verify window AND targets OUR upstream (prevents concurrent-verify cross-talk
+        // since the ref is process-global, last-writer-wins), surface the real reason.
+        // Purely informational transparency — nothing about retry or success logic changes.
+        const bridgeErr = getLastBridgeError();
+        const urlMatches = !!bridgeErr
+          && (!opts.upstreamBaseUrlForDiagnostics
+            || bridgeErr.upstreamUrl.startsWith(opts.upstreamBaseUrlForDiagnostics));
+        if (bridgeErr && bridgeErr.timestamp >= startTime && urlMatches) {
+          console.log(`[${logPrefix}] timeout with bridge error in window: ${bridgeErr.message}`);
+          resolve({ success: false, error: `无法连接到供应商：${bridgeErr.message}` });
           return;
         }
         const stderrHint = stderrMessages.length > 0
@@ -283,6 +306,10 @@ export async function verifyProviderViaSdk(
     // MUST NOT use 'user' — it reads ~/.claude/settings.json which may contain
     // enabledPlugins causing 30s+ initialization and triggering our timeout.
     settingSources: ['project'],
+    // Scope bridge-error diagnostics to this provider's real upstream, so a
+    // concurrent verify of a different provider can't leak its error into
+    // our timeout message. See verifyViaSdk.opts docstring.
+    upstreamBaseUrlForDiagnostics: baseUrl,
   });
 }
 
