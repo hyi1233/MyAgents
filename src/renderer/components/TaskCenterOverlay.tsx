@@ -215,11 +215,11 @@ export default memo(function TaskCenterOverlay({
                 className="glass-panel flex h-[85vh] w-full max-w-5xl flex-col"
                 style={{ padding: '2vh 2vw', animation: 'overlayPanelIn 250ms ease-out' }}
             >
-                {/* Header — v0.1.69 renamed from "任务中心" to "历史会话" to
+                {/* Header — v0.1.69 renamed from "任务中心" to "历史对话" to
                     match the new domain of this overlay (Chat sessions only;
                     Tasks live in the Task Center singleton tab). */}
                 <div className="mb-4 flex items-center justify-between">
-                    <h2 className="text-[16px] font-semibold text-[var(--ink)]">历史会话</h2>
+                    <h2 className="text-[16px] font-semibold text-[var(--ink)]">历史对话</h2>
                     <button
                         onClick={onClose}
                         className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
@@ -319,7 +319,7 @@ export default memo(function TaskCenterOverlay({
                         <div className="flex-1 overflow-y-auto overscroll-contain" style={{ scrollbarGutter: 'stable' }}>
                             {filteredSessions.length === 0 ? (
                                 <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]/60">
-                                    暂无匹配的历史会话
+                                    暂无匹配的历史对话
                                 </div>
                             ) : (
                                 <div className="space-y-0.5">

@@ -373,7 +373,7 @@ export function DispatchTaskDialog({
 
               <div>
                 <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
-                  执行 Agent（工作区）
+                  Agent 工作区
                 </label>
                 <CustomSelect
                   value={workspacePath}

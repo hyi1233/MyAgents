@@ -244,7 +244,11 @@ export default memo(function BrandSection({
                 it naturally, casual users shouldn't have a persistent
                 tooltip popping every time their cursor brushes past. */}
             {modeSegmentEnabled && (
-                <div className="mt-6 mb-6">
+                // v0.1.69 polish: bottom gap tightened from mb-6 to mb-3 so
+                // the toggle reads as an affordance OF the input below, not
+                // a free-floating headline. Top gap kept at mt-6 to preserve
+                // breathing room from the brand slogan above.
+                <div className="mt-6 mb-3">
                     <ModeSegment
                         value={mode}
                         onChange={setModeAndFocus}

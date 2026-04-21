@@ -684,6 +684,18 @@ export default function App() {
           setTabs((prev) => [...prev, newTab]);
           setActiveTabId(newTab.id);
         }
+      } else if (!e.shiftKey && !e.altKey && (e.key === 'y' || e.key === 'Y')) {
+        // Cmd/Ctrl+Y — open Task Center as a singleton tab. Mirrors the
+        // header button's CUSTOM_EVENTS.OPEN_TASK_CENTER dispatch so both
+        // entry points converge on the same handler (see line ~1544).
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER));
+      } else if (!e.shiftKey && !e.altKey && (e.key === 'u' || e.key === 'U')) {
+        // Cmd/Ctrl+U — open Settings. `OPEN_SETTINGS` is already the
+        // designated cross-component entry (line ~1489); reusing it keeps
+        // the shortcut and the titlebar button path identical.
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS));
       } else if (e.key === 'w' || e.key === 'W') {
         // macOS: handled by native menu → window:cmd-w → useTrayEvents.ts.
         // Windows/Linux: no native menu with Ctrl+W, so handle here directly.

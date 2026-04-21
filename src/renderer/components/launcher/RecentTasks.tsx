@@ -405,7 +405,7 @@ function TabHeader({
         if (activeTab === 'tasks') onOpenTaskCenter('default');
         else onOpenOverlay('default');
     };
-    const searchTitle = activeTab === 'tasks' ? '搜索任务' : '搜索历史会话';
+    const searchTitle = activeTab === 'tasks' ? '搜索任务' : '搜索历史对话';
     return (
         <div className="mb-3 flex items-center justify-between">
             <div className="flex gap-4">
@@ -417,7 +417,7 @@ function TabHeader({
                             : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
                     }`}
                 >
-                    历史会话
+                    历史对话
                     {activeTab === 'sessions' && (
                         <div className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full bg-[var(--accent)]" />
                     )}

@@ -186,10 +186,19 @@ export default function CustomTitleBar({
                     </button>
                 )}
                 {/* Feedback button + popover */}
+                {/* v0.1.69 polish: `transition-all` widened the transition
+                    to *every* prop, including `transform`. The global
+                    `:active { scale(0.98) }` rule in index.css then animated
+                    *back* to scale(1) on mouseup over 150ms — visually it
+                    reads as the button popping UP rather than sinking in
+                    under the finger. `transition-colors` keeps the hover
+                    bg fade smooth while letting the scale change snap
+                    instantly in both directions, so the press feedback
+                    lands as "down & back" without the return bounce. */}
                 <div ref={feedbackBtnRef} className="relative">
                     <button
                         onClick={() => setShowFeedback(prev => !prev)}
-                        className={`flex h-7 items-center gap-1.5 rounded-md px-2.5 transition-all ${
+                        className={`flex h-7 items-center gap-1.5 rounded-md px-2.5 transition-colors ${
                             showFeedback
                                 ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
                                 : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]'
@@ -210,8 +219,8 @@ export default function CustomTitleBar({
                 {isTauri() && (
                     <button
                         onClick={() => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER))}
-                        className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                        title="任务中心"
+                        className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                        title={`任务中心 (${navigator.platform.toLowerCase().includes('mac') ? '⌘Y' : 'Ctrl+Y'})`}
                     >
                         <CheckSquare className="h-4 w-4" />
                         <span className="text-[13px] font-medium">任务</span>
@@ -220,8 +229,8 @@ export default function CustomTitleBar({
 
                 <button
                     onClick={onSettingsClick || (() => console.log('Settings clicked - TODO'))}
-                    className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                    title="设置"
+                    className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                    title={`设置 (${navigator.platform.toLowerCase().includes('mac') ? '⌘U' : 'Ctrl+U'})`}
                 >
                     <Settings className="h-4 w-4" />
                     <span className="text-[13px] font-medium">设置</span>

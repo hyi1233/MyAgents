@@ -268,7 +268,7 @@ export function ThoughtCard({
                 className="min-w-[240px] max-w-[320px] py-1"
               >
                 <div className="px-3 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/70">
-                  选择工作区
+                  选择 Agent 工作区
                 </div>
                 <div className="max-h-[280px] overflow-y-auto py-1">
                   {pickableWorkspaces.length === 0 ? (

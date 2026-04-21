@@ -512,7 +512,9 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
           reads as a single continuous surface from header → buckets. */}
       <div className="flex h-12 items-center gap-3 px-4">
         <div className="flex items-center gap-2">
-          <CheckSquare className="h-4 w-4 text-[var(--ink-muted)]" strokeWidth={1.5} />
+          {/* `relative top-[1px]` keeps optical centering consistent with
+              ThoughtPanel's Lightbulb — see the comment there. */}
+          <CheckSquare className="relative top-[1px] h-4 w-4 text-[var(--ink-muted)]" strokeWidth={1.5} />
           <span className="text-[16px] font-semibold text-[var(--ink)]">
             任务
           </span>
@@ -521,16 +523,25 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
               `DispatchTaskDialog` with no `thought` prop (dialog's
               "新建任务" branch, defaulting to once-mode). Visual matches
               the SearchPill's rounded-full pill + ghost treatment so
-              both affordances read as one header row of toolbelt actions. */}
-          <button
-            type="button"
-            onClick={() => setShowCreateModal(true)}
-            title="新建任务"
-            className="ml-1 inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-          >
-            <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
-            新建
-          </button>
+              both affordances read as one header row of toolbelt actions.
+              Uses the same dark-pill tooltip pattern as ThoughtPanel's
+              FolderOpen / ThoughtCard's AI讨论 / 派发 buttons — browser
+              native `title=` was visually inconsistent with the rest of
+              the task-center surface. */}
+          <div className="group/newTask relative ml-1">
+            <button
+              type="button"
+              onClick={() => setShowCreateModal(true)}
+              aria-label="新建任务"
+              className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            >
+              <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
+              新建
+            </button>
+            <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)] px-2 py-1 text-[11px] font-medium text-[var(--paper)] opacity-0 shadow-md transition-opacity duration-150 group-hover/newTask:opacity-100">
+              新建任务
+            </span>
+          </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
           {/* Workspace filter — hidden when there's only one (or zero)

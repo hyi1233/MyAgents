@@ -313,6 +313,13 @@ impl ThoughtStore {
         Ok(())
     }
 
+    /// Absolute path to the `~/.myagents/thoughts/` root. Used by
+    /// `cmd_thought_open_dir` to reveal the directory in Finder/Explorer
+    /// without exposing the raw path to the renderer layer.
+    pub fn root_dir(&self) -> &PathBuf {
+        &self.root
+    }
+
     pub async fn delete(&self, id: &str) -> Result<(), String> {
         let mut inner = self.inner.write().await;
         // Peek without removing — we want disk-first so a failed unlink doesn't
@@ -577,6 +584,45 @@ pub async fn cmd_thought_delete(
     id: String,
 ) -> Result<(), String> {
     state.delete(&id).await
+}
+
+/// Reveal `~/.myagents/thoughts/` in the OS file manager so users can
+/// inspect / back-up the raw `.md` files. The path is sourced from the
+/// managed `ThoughtStore`, so the renderer can't coerce us into opening
+/// an arbitrary directory. Creates the dir on demand — a fresh install
+/// has no thoughts root until the first create.
+#[tauri::command]
+pub async fn cmd_thought_open_dir(
+    state: tauri::State<'_, ManagedThoughtStore>,
+) -> Result<(), String> {
+    let dir = state.root_dir().clone();
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir thought dir: {}", e))?;
+    let path = dir.to_string_lossy().to_string();
+
+    // OS openers are user-visible system commands (CLAUDE.md exception);
+    // skip `process_cmd` here and match task.rs:cmd_task_open_docs_dir.
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("open finder: {}", e))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("open explorer: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("xdg-open: {}", e))?;
+    }
+    Ok(())
 }
 
 // ================ Tests ================

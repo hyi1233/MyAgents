@@ -565,6 +565,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Ref for tracking previous isActive state (for config sync on tab switch)
   const prevIsActiveRef = useRef(isActive);
 
+  // Track previous `isConnected` so we can retry the initial workspace load
+  // when the Sidecar finishes starting. In the AI-讨论 path the tab mounts
+  // with view='chat' + agentDir *before* the Sidecar is up, so the first
+  // DirectoryPanel refresh fails; we want the next successful `isConnected`
+  // transition to trigger a retry rather than leaving the file tree stuck
+  // in "Loading…".
+  const prevIsConnectedRef = useRef(isConnected);
+
   // Track whether we're joining an existing sidecar (e.g. IM Bot session)
   // When true, mount effects skip config push and adopt sidecar's config instead.
   const joinedExistingSidecarRef = useRef(joinedExistingSidecar ?? false);
@@ -1606,6 +1614,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     window.addEventListener(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, handleSkillCopied);
     return () => window.removeEventListener(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, handleSkillCopied);
   }, []);
+
+  // Retry initial loads when the Sidecar finishes starting. Firing on a
+  // false → true transition of `isConnected` catches the AI-讨论 pre-seed
+  // path where the tab mounts before the Sidecar is ready; without this,
+  // the DirectoryPanel's first refresh swallows the "No running sidecar"
+  // transient and stays in Loading… until the user manually refreshes.
+  useEffect(() => {
+    const wasConnected = prevIsConnectedRef.current;
+    prevIsConnectedRef.current = isConnected;
+    if (!wasConnected && isConnected) {
+      setWorkspaceRefreshTrigger(k => k + 1);
+    }
+  }, [isConnected]);
 
   // Handle provider change with analytics tracking.
   // targetModel: when provided, use this model instead of the provider's primaryModel

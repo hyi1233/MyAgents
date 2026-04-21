@@ -4,8 +4,8 @@
 // interaction pattern.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Lightbulb, X } from 'lucide-react';
-import { thoughtList, taskCenterAvailable } from '@/api/taskCenter';
+import { FolderOpen, Lightbulb, X } from 'lucide-react';
+import { thoughtList, thoughtOpenDir, taskCenterAvailable } from '@/api/taskCenter';
 import { SearchPill } from './SearchPill';
 import { ThoughtInput } from './ThoughtInput';
 import { ThoughtCard } from './ThoughtCard';
@@ -167,12 +167,51 @@ export function ThoughtPanel({
                   pointerEvents: searchActive ? 'none' : 'auto',
                 }}
               >
+                {/* `relative top-[1px]` nudges the icon down ~1px so its
+                    optical center aligns with the Chinese label's ink
+                    center — lucide icons are geometrically centered in
+                    their viewBox but Chinese glyphs sit slightly below
+                    the em box center, making items-center alone read as
+                    icon-too-high. Same tweak on TaskListPanel's CheckSquare. */}
                 <Lightbulb
-                  className="h-4 w-4 shrink-0 text-[var(--ink-muted)]"
+                  className="relative top-[1px] h-4 w-4 shrink-0 text-[var(--ink-muted)]"
                   strokeWidth={1.5}
                 />
                 <span className="whitespace-nowrap text-[16px] font-semibold text-[var(--ink)]">
                   想法
+                </span>
+              </div>
+              {/* "打开想法存储的文件夹" — ghost icon button, no label.
+                  Sits OUTSIDE the fold container because that container is
+                  `overflow: hidden` to drive the label slide-out animation;
+                  a tooltip rendered inside would be clipped at the bottom
+                  edge and never appear. Here it's a sibling whose own
+                  visibility is gated by `searchActive` via opacity /
+                  pointer-events, and the dark-pill tooltip is free to
+                  render below the button without clipping. */}
+              <div
+                className="group/openDir relative"
+                style={{
+                  opacity: searchActive ? 0 : 1,
+                  pointerEvents: searchActive ? 'none' : 'auto',
+                  transition: 'opacity 150ms ease-out',
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!taskCenterAvailable()) return;
+                    void thoughtOpenDir().catch((err) => {
+                      console.error('[ThoughtPanel] open dir failed', err);
+                    });
+                  }}
+                  aria-label="打开想法存储的文件夹"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                >
+                  <FolderOpen className="h-3.5 w-3.5" strokeWidth={1.75} />
+                </button>
+                <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)] px-2 py-1 text-[11px] font-medium text-[var(--paper)] opacity-0 shadow-md transition-opacity duration-150 group-hover/openDir:opacity-100">
+                  打开想法存储的文件夹
                 </span>
               </div>
               <div className="ml-auto flex min-w-0 flex-1 justify-end">

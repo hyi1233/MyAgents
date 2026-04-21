@@ -56,6 +56,11 @@ export function thoughtDelete(id: string): Promise<void> {
   return inv('cmd_thought_delete', { id });
 }
 
+/** Reveal `~/.myagents/thoughts/` in the OS file manager (Finder/Explorer). */
+export function thoughtOpenDir(): Promise<void> {
+  return inv('cmd_thought_open_dir');
+}
+
 // ==================== Tasks ====================
 
 export function taskCreateDirect(

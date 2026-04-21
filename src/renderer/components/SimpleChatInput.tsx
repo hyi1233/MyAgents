@@ -303,6 +303,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const toolBtnRef = useRef<HTMLButtonElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
   const [isExpanded, setIsExpanded] = useState(false);
+  // Tracks the last committed `isExpanded` so the auto-resize effect can
+  // distinguish a typing-driven resize from an expand/collapse toggle —
+  // they need different transition baselines (see the effect below).
+  const prevExpandedRef = useRef(isExpanded);
 
   // Image attachments - moved up for processDroppedFiles to use
   const [images, setImages] = useState<ImageAttachment[]>([]);
@@ -387,15 +391,44 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     const textarea = textareaRef.current;
     if (!textarea) return;
 
+    const wasExpanded = prevExpandedRef.current;
+    prevExpandedRef.current = isExpanded;
+
     if (isExpanded) {
       textarea.style.height = `${LINE_HEIGHT * MAX_LINES_EXPANDED}px`;
-    } else {
-      textarea.style.height = 'auto';
-      const minHeight = LINE_HEIGHT * effectiveMinLines;
-      const maxHeight = LINE_HEIGHT * Math.max(MAX_LINES_COLLAPSED, effectiveMinLines);
-      const scrollHeight = textarea.scrollHeight;
-      textarea.style.height = `${Math.max(minHeight, Math.min(scrollHeight, maxHeight))}px`;
+      return;
     }
+
+    const minHeight = LINE_HEIGHT * effectiveMinLines;
+    const maxHeight = LINE_HEIGHT * Math.max(MAX_LINES_COLLAPSED, effectiveMinLines);
+
+    if (wasExpanded) {
+      // Expand → Collapse: measure the natural content height without
+      // letting `height: auto` leak into the CSS transition baseline.
+      // If we wrote 'auto' then the final px value in the same tick, the
+      // browser would resolve `auto` to scrollHeight during the forced
+      // layout read, commit that as the baseline, and the transition would
+      // snap instead of animate (which is what made collapse feel abrupt).
+      // Save/restore the current explicit height, then commit the target
+      // in the next frame so the transition animates from the pre-collapse
+      // height to the content-fit height.
+      const saved = textarea.style.height;
+      textarea.style.height = 'auto';
+      const scrollHeight = textarea.scrollHeight;
+      textarea.style.height = saved;
+      const target = Math.max(minHeight, Math.min(scrollHeight, maxHeight));
+      const rafId = requestAnimationFrame(() => {
+        textarea.style.height = `${target}px`;
+      });
+      return () => cancelAnimationFrame(rafId);
+    }
+
+    // Typing path — measured and target heights are usually identical
+    // (±1 line), so the in-place write doesn't produce visible animation
+    // and keystrokes stay snappy.
+    textarea.style.height = 'auto';
+    const scrollHeight = textarea.scrollHeight;
+    textarea.style.height = `${Math.max(minHeight, Math.min(scrollHeight, maxHeight))}px`;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [inputValue, isExpanded]);
 

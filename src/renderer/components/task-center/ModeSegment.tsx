@@ -55,8 +55,12 @@ export function ModeSegment({
   // thumb), `shadow-xs` for the subtle macOS-style lift, and full ink
   // for the label. Inactive state stays ink-muted and relies on a soft
   // hover → ink-secondary step for feedback.
+  // v0.1.69 polish: sized one tier down (14px → 13px, px-3.5 → px-3,
+  // icons 3.5 → 3) so the toggle reads as an affordance above the
+  // input rather than a second-tier headline competing with the brand
+  // group above it.
   const baseBtn =
-    'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3.5 py-1.5 text-[14px] font-medium transition-all duration-150';
+    'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1 text-[13px] font-medium transition-all duration-150';
   const activeBtn =
     'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs';
   const inactiveBtn =
@@ -82,7 +86,7 @@ export function ModeSegment({
           title={taskTitle}
           className={`${baseBtn} ${value === 'task' ? activeBtn : inactiveBtn}`}
         >
-          <Sparkles className="h-3.5 w-3.5" strokeWidth={1.75} />
+          <Sparkles className="h-3 w-3" strokeWidth={1.75} />
           对话
         </button>
         <button
@@ -93,7 +97,7 @@ export function ModeSegment({
           title={thoughtTitle}
           className={`${baseBtn} ${value === 'thought' ? activeBtn : inactiveBtn}`}
         >
-          <Lightbulb className="h-3.5 w-3.5" strokeWidth={1.75} />
+          <Lightbulb className="h-3 w-3" strokeWidth={1.75} />
           想法
         </button>
       </div>
