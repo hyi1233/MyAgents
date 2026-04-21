@@ -30,7 +30,7 @@ import type { TerminalReason } from '../../shared/terminalReason';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
-import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar } from '@/api/tauriClient';
+import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache } from '@/api/tauriClient';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { refreshWorkspaceFileIndex } from '@/api/searchClient';
 import type { PermissionMode } from '@/config/types';
@@ -1895,6 +1895,14 @@ export default function TabProvider({
             // ensureSessionSidecar includes health check — sidecar is ready when it returns
             await ensureSessionSidecar(sid, agentDir, 'tab', tabId);
             if (!isMountedRef.current) return;
+            // Invalidate the per-tab URL cache before reconnecting. The restart
+            // may have bound a new port, and direct `getTabServerUrl(tabId)`
+            // consumers (Markdown, FileAction, DirectoryPanel) would otherwise
+            // hit the stale cached URL forever. SSE / session-keyed HTTP auto
+            // pick the new port via `getSessionPort`, but tab-keyed callers
+            // need an explicit bust. This keeps the pit-of-success guarantee
+            // symmetric across startup AND mid-session recovery.
+            resetTabServerUrlCache(tabId);
             // Disconnect old SSE and reconnect with fresh port
             if (sseRef.current) {
                 await sseRef.current.disconnect();
@@ -1912,8 +1920,16 @@ export default function TabProvider({
         }
     }, [tabId, agentDir]);
 
-    // Connect SSE
-    // Uses Session-centric port lookup via currentSessionIdRef
+    // Connect SSE.
+    // Uses Session-centric port lookup via currentSessionIdRef.
+    //
+    // No explicit boot-window retry here — `sse.connect()` internally calls
+    // `getTabServerUrl()`, which as of v0.1.69 waits for the Sidecar to
+    // become ready (polls `cmd_get_tab_server_url` with backoff up to ~9s)
+    // instead of throwing on the first miss. The AI-讨论 pre-seed race
+    // (Chat mounts before `ensureSessionSidecar` finishes) is absorbed at
+    // the `tauriClient` layer so every consumer — SSE, HTTP, DirectoryPanel,
+    // model push — is automatically correct. See `tauriClient.getTabServerUrl`.
     const connectSse = useCallback(async () => {
         if (sseRef.current?.isConnected()) return;
 

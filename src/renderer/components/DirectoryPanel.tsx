@@ -387,20 +387,14 @@ const DirectoryPanel = memo(
           setDirectoryInfo(data);
         })
         .catch((err) => {
-          // "No running sidecar for tab …" is transient — fires during tab
-          // startup before the Sidecar finishes booting (e.g. the AI-讨论
-          // path pre-seeds a chat tab while `ensure_session_sidecar` is
-          // still spawning Bun). Swallowing it keeps the workspace panel in
-          // its neutral Loading… state instead of flashing a red error that
-          // visually clashes with the center "正在启动工作区…" spinner.
-          // The later refresh (triggered by isConnected / SSE readiness)
-          // will succeed once the Sidecar is up.
-          const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes("No running sidecar")) {
-            console.warn("[DirectoryPanel] Refresh deferred — sidecar still starting");
-            return;
-          }
-          setError(msg || "Failed to load directory info");
+          // Sidecar boot races are absorbed at the `tauriClient.getTabServerUrl`
+          // layer (it waits for readiness before returning), so a failure
+          // here means something genuinely went wrong — surface it.
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Failed to load directory info",
+          );
           console.error("[DirectoryPanel] Failed to refresh:", err);
         });
     }, [apiGet]);

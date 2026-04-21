@@ -413,6 +413,39 @@ export async function proxyPostJsonWithRetry<T>(
 const tabServerUrls = new Map<string, string>();
 
 /**
+ * De-duplication map for in-flight `getTabServerUrl` polls.
+ *
+ * `getTabServerUrl` is the single point where Tab-scoped HTTP / SSE clients
+ * discover which port their Sidecar lives on. During the Sidecar boot
+ * window (≈650ms cold start, up to a few seconds with MCP pre-warm), the
+ * Rust `cmd_get_tab_server_url` command returns an error because the
+ * `ManagedSidecar` map doesn't have an entry for this tab yet.
+ *
+ * Consumers of that boot window — `apiGet`, `apiPost`, `SseConnection`,
+ * `DirectoryPanel.refresh`, `loadAgents`, `/api/model/set`, etc. —
+ * can fire *concurrently* the moment a tab mounts. Without dedup, each
+ * consumer would start its own poll (same IPC question, multiplied N-fold).
+ *
+ * This map keys the pending promise by tabId so concurrent callers share
+ * a single poll; on resolve/reject the entry is removed and the port is
+ * cached in `tabServerUrls` for all subsequent lookups to hit instantly.
+ */
+const tabServerUrlPending = new Map<string, Promise<string>>();
+
+/**
+ * Wait-for-Sidecar-ready backoff schedule (milliseconds between attempts).
+ *
+ * Chosen so the total budget (~9s) comfortably covers the longest observed
+ * cold start + MCP pre-warm kickoff (~2s), but stays short enough that
+ * genuinely missing Sidecars still surface within 10s — not hang the UI.
+ *
+ * Shape front-loads short delays so the common case (boot finishes in
+ * 200–800ms) resolves within 1–2 attempts; later attempts stretch out so
+ * we don't hammer the IPC layer if the Sidecar is taking longer to come up.
+ */
+const TAB_SERVER_URL_RETRY_DELAYS_MS: readonly number[] = [50, 100, 200, 400, 800, 1500, 2000, 2000, 2000];
+
+/**
  * Start a Sidecar for a specific Tab
  * @param tabId - Unique Tab identifier
  * @param agentDir - Optional agent directory (null for global sidecar)
@@ -464,6 +497,11 @@ export async function startTabSidecar(
  */
 export async function stopTabSidecar(tabId: string): Promise<void> {
     tabServerUrls.delete(tabId);
+    // Don't leak in-flight readiness polls past a tab teardown. The poll
+    // itself can't be aborted (IPC is already in flight) but clearing the
+    // dedup entry lets the next call for this tabId start fresh rather
+    // than latch onto the old tab's promise.
+    tabServerUrlPending.delete(tabId);
 
     if (!isTauri()) {
         return;
@@ -498,7 +536,45 @@ export async function stopSseProxy(tabId: string): Promise<void> {
 }
 
 /**
- * Get server URL for a specific Tab
+ * Get server URL for a specific Tab, waiting for the Sidecar to become ready.
+ *
+ * This is the central "where does my Sidecar live?" primitive — every
+ * Tab-scoped HTTP call (`apiGet`, `apiPost`) and SSE connection routes
+ * through here. Making readiness waiting the DEFAULT behaviour means
+ * every consumer is automatically correct during the boot window without
+ * needing to remember retry logic, cascade hooks, or gate effects on
+ * `isConnected`. This is the "pit of success" for Tab-scoped calls:
+ * the only way to get a server URL is to wait until the Sidecar is
+ * actually serving it.
+ *
+ * Behaviour:
+ *   • Cache hit → returns immediately (hot path, no IPC).
+ *   • Cache miss, Sidecar up → one IPC round-trip, then cached.
+ *   • Cache miss, Sidecar still booting → polls with backoff until the
+ *     Rust `cmd_get_tab_server_url` resolves or the ~9s budget is
+ *     exhausted. Concurrent callers for the same tab share one poll
+ *     via `tabServerUrlPending` (no IPC amplification).
+ *   • Budget exhausted → throws `"No running sidecar for tab <id>: <cause>"`
+ *     (including the underlying Rust IPC error) so genuine failures (Sidecar
+ *     crashed, never spawned, IPC bridge broken) surface with debuggable
+ *     context. The budget is deliberately longer than any normal boot so
+ *     this error really does mean "something is wrong", not "you were early".
+ *
+ * Why polling here, not in Rust?
+ *   The four pit-of-success modules in the codebase (`local_http`, `process_cmd`,
+ *   `proxy_config`, `system_binary`) all live in Rust. This one sits in
+ *   TypeScript because making Rust block would require rewriting the
+ *   `ManagedSidecarManager` lock model (sync `Mutex` → async with `tokio::Notify`
+ *   to avoid blocking the runtime). The JS poll gives us the same caller-facing
+ *   guarantee (invoke+await, no consumer-level retry) with zero Rust churn.
+ *   A future Rust-side wait primitive (event-driven, zero polling) is the
+ *   ideal end state — tracked as follow-up.
+ *
+ * Asymmetry note: `getGlobalServerUrl` / `getGlobalServerUrlWithWait` use a
+ * separate event-driven mechanism (`globalSidecarReadyPromise`). The Global
+ * Sidecar boots at App mount and races are rare there, but unifying the
+ * three readiness styles (cache, polling, event) is tracked as follow-up.
+ *
  * @param tabId - Tab identifier
  */
 export async function getTabServerUrl(tabId: string): Promise<string> {
@@ -506,19 +582,68 @@ export async function getTabServerUrl(tabId: string): Promise<string> {
         return '';
     }
 
-    // Check cache first
     const cached = tabServerUrls.get(tabId);
     if (cached !== undefined) {
         return cached;
     }
 
+    // Dedup concurrent callers — share one poll per tabId. Without this,
+    // a tab-mount burst (apiGet + apiPost + SSE connect + DirectoryPanel
+    // refresh + loadAgents + ...) would fan out into N parallel IPC
+    // poll loops all asking the same question.
+    const inflight = tabServerUrlPending.get(tabId);
+    if (inflight !== undefined) {
+        return inflight;
+    }
+
+    // Holder pattern so the closure can self-reference for the
+    // "still-authoritative" guard. If `stopTabSidecar` / `resetTabServerUrlCache`
+    // fires mid-poll, it clears `tabServerUrlPending[tabId]`; when our poll
+    // eventually resolves, we must NOT (a) write a stale URL into the cache,
+    // nor (b) delete a fresh successor poll's pending entry.
+    const ref: { poll?: Promise<string> } = {};
+    ref.poll = (async (): Promise<string> => {
+        let lastError: unknown;
+        // One initial attempt + retries per the backoff schedule.
+        for (let attempt = 0; attempt <= TAB_SERVER_URL_RETRY_DELAYS_MS.length; attempt++) {
+            try {
+                const url = await invoke<string>('cmd_get_tab_server_url', { tabId });
+                // Commit only if we are still the authoritative poll. A stop /
+                // reset during the IPC means the tab either died (url now dead
+                // port) or restarted on a new port (url possibly OK but a new
+                // poll should decide, not us).
+                if (tabServerUrlPending.get(tabId) === ref.poll) {
+                    tabServerUrls.set(tabId, url);
+                }
+                if (attempt > 0) {
+                    console.debug(`[tauriClient] Sidecar for tab ${tabId} ready after ${attempt} retry(ies)`);
+                }
+                return url;
+            } catch (error) {
+                lastError = error;
+                const delay = TAB_SERVER_URL_RETRY_DELAYS_MS[attempt];
+                if (delay === undefined) break;
+                await new Promise((resolve) => setTimeout(resolve, delay));
+            }
+        }
+        const cause = lastError instanceof Error ? lastError.message : String(lastError);
+        console.warn(
+            `[tauriClient] No sidecar for tab ${tabId} after ${TAB_SERVER_URL_RETRY_DELAYS_MS.length + 1} attempts:`,
+            lastError,
+        );
+        throw new Error(`No running sidecar for tab ${tabId}: ${cause}`);
+    })();
+
+    tabServerUrlPending.set(tabId, ref.poll);
     try {
-        const url = await invoke<string>('cmd_get_tab_server_url', { tabId });
-        tabServerUrls.set(tabId, url);
-        return url;
-    } catch (error) {
-        console.warn(`[tauriClient] No sidecar for tab ${tabId}:`, error);
-        throw new Error(`No running sidecar for tab ${tabId}`);
+        return await ref.poll;
+    } finally {
+        // Conditional cleanup — mirror of the authoritative-write guard above.
+        // A stop/reset between pending-set and finally would have installed a
+        // replacement poll; blindly deleting here would wipe it.
+        if (tabServerUrlPending.get(tabId) === ref.poll) {
+            tabServerUrlPending.delete(tabId);
+        }
     }
 }
 
@@ -668,6 +793,12 @@ export async function getGlobalServerUrlWithWait(): Promise<string> {
  */
 export async function stopAllSidecars(): Promise<void> {
     tabServerUrls.clear();
+    // F4: mirror the clear on pending polls so app-exit doesn't leave an
+    // orphan poll that could repopulate `tabServerUrls` after the supposed
+    // global stop. In-flight IPC can't be cancelled, but pending-map
+    // clearance guarantees any poll that completes post-clear is non-auth
+    // (via the guard in getTabServerUrl) and won't commit to cache.
+    tabServerUrlPending.clear();
 
     if (!isTauri()) {
         return;
@@ -686,6 +817,7 @@ export async function stopAllSidecars(): Promise<void> {
  */
 export function resetTabServerUrlCache(tabId: string): void {
     tabServerUrls.delete(tabId);
+    tabServerUrlPending.delete(tabId);
 }
 
 /**

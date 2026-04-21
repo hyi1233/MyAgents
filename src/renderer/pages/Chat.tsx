@@ -565,12 +565,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Ref for tracking previous isActive state (for config sync on tab switch)
   const prevIsActiveRef = useRef(isActive);
 
-  // Track previous `isConnected` so we can retry the initial workspace load
-  // when the Sidecar finishes starting. In the AI-讨论 path the tab mounts
-  // with view='chat' + agentDir *before* the Sidecar is up, so the first
-  // DirectoryPanel refresh fails; we want the next successful `isConnected`
-  // transition to trigger a retry rather than leaving the file tree stuck
-  // in "Loading…".
+  // Track previous `isConnected` so we can re-sync Tab-scoped state after a
+  // mid-session Sidecar restart (crash + Rust health-monitor recovery, or
+  // `recoverSessionSidecar` path). The startup race in the AI-讨论 flow is
+  // handled structurally in `tauriClient.getTabServerUrl` (it waits for
+  // Sidecar readiness), so this effect is NOT the startup band-aid —
+  // it's the recovery hook.
   const prevIsConnectedRef = useRef(isConnected);
 
   // Track whether we're joining an existing sidecar (e.g. IM Bot session)
@@ -1615,18 +1615,48 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     return () => window.removeEventListener(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, handleSkillCopied);
   }, []);
 
-  // Retry initial loads when the Sidecar finishes starting. Firing on a
-  // false → true transition of `isConnected` catches the AI-讨论 pre-seed
-  // path where the tab mounts before the Sidecar is ready; without this,
-  // the DirectoryPanel's first refresh swallows the "No running sidecar"
-  // transient and stays in Loading… until the user manually refreshes.
+  // Re-sync Tab-scoped state on `isConnected` false → true transition.
+  //
+  // This is the RECOVERY hook — fires when a Sidecar that died mid-session
+  // comes back up (Rust health monitor restart or `recoverSessionSidecar`).
+  // Cold-start boot races are absorbed upstream in `tauriClient`, so on
+  // initial mount this effect fires once but is (idempotently) redundant
+  // with the mount-time sync effects — intentional; cost is one extra
+  // network call per boot, which beats forking "recovery vs startup" paths.
+  //
+  //   • `workspaceRefreshTrigger` bump re-runs `loadAndSyncAgents`,
+  //     `loadSkillsAndCommands`, and `DirectoryPanel.rawRefresh` — all
+  //     three gate on this trigger, so re-syncing them is a single bump.
+  //   • `/api/model/set` re-push (both built-in AND external runtimes):
+  //     the mount-time sync-model effects only re-fire when their model
+  //     source *changes*. A restarted Sidecar self-resolves built-in
+  //     config from disk but has NO disk memory for the external-runtime
+  //     model — that lived only in the old sidecar process. So after a
+  //     mid-session restart both paths need an explicit push to stay
+  //     consistent with what the user actually selected.
   useEffect(() => {
     const wasConnected = prevIsConnectedRef.current;
     prevIsConnectedRef.current = isConnected;
     if (!wasConnected && isConnected) {
       setWorkspaceRefreshTrigger(k => k + 1);
+      if (!joinedExistingSidecarRef.current) {
+        // Pick whichever model source matches the active runtime. Previously
+        // this branch only re-synced the built-in `selectedModel` and left
+        // external-runtime Tabs (Codex / Gemini / Claude Code) with a stale
+        // in-process default after a Sidecar restart — the user's chosen
+        // runtime model lives only in sidecar memory, so skipping the push
+        // here means the next turn would silently run on the wrong model.
+        // Both paths hit the same `/api/model/set` endpoint; the backend
+        // routes to the built-in vs external setter based on runtime.
+        const modelToPush = isExternalRuntime ? runtimeModel : selectedModel;
+        if (modelToPush) {
+          apiPost('/api/model/set', { model: modelToPush }).catch(err => {
+            console.error('[Chat] Failed to re-sync model after sidecar ready:', err);
+          });
+        }
+      }
     }
-  }, [isConnected]);
+  }, [isConnected, isExternalRuntime, runtimeModel, selectedModel, apiPost]);
 
   // Handle provider change with analytics tracking.
   // targetModel: when provided, use this model instead of the provider's primaryModel
