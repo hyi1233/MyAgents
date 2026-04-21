@@ -354,8 +354,8 @@ Hover: 添加 var(--shadow-sm)
 边框: 无（v2.3+）
 圆角: var(--radius-lg) 或 --radius-xl
 内边距: var(--space-4) (p-4, 16px)
-静态: shadow-xs（0 1px 2px rgb(28 22 18 / 0.05)）
-Hover: shadow-md（0 8px 24px rgb(28 22 18 / 0.12)）
+静态: 无阴影（纯填色，融在底纸上）
+Hover: shadow-sm（0 2px 8px rgb(28 22 18 / 0.08)）
 动效: transition-shadow（仅阴影过渡，无边框/位移）
 ```
 
