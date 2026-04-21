@@ -163,18 +163,28 @@ async function verifyViaSdk(
         }
         // OpenAI-bridge connect failures (TLS rejection, socket closed, proxy interception, …)
         // never reach the SDK as `assistant.error` — the SDK sees our 502 and retries until the
-        // outer timeout fires. Inspect the bridge's last-error ref and, if it happened inside
-        // OUR verify window AND targets OUR upstream (prevents concurrent-verify cross-talk
-        // since the ref is process-global, last-writer-wins), surface the real reason.
+        // outer timeout fires. Inspect the bridge's last-error ref and surface the real reason
+        // ONLY when we can prove the error belongs to this verify:
+        //   (1) caller supplied its real upstream baseUrl (opt-in — subscription / direct
+        //       Anthropic paths don't pass it because they aren't bridge-routed; staying silent
+        //       there avoids leaking unrelated concurrent bridge traffic into their timeout);
+        //   (2) bridge-error timestamp is inside our verify window;
+        //   (3) bridge-error upstreamUrl matches ours at a path boundary (exact match OR
+        //       startsWith baseUrl+'/...'), so neighboring prefixes like `.../v1` vs `.../v11/...`
+        //       don't cross-match across providers on the same host.
         // Purely informational transparency — nothing about retry or success logic changes.
-        const bridgeErr = getLastBridgeError();
-        const urlMatches = !!bridgeErr
-          && (!opts.upstreamBaseUrlForDiagnostics
-            || bridgeErr.upstreamUrl.startsWith(opts.upstreamBaseUrlForDiagnostics));
-        if (bridgeErr && bridgeErr.timestamp >= startTime && urlMatches) {
-          console.log(`[${logPrefix}] timeout with bridge error in window: ${bridgeErr.message}`);
-          resolve({ success: false, error: `无法连接到供应商：${bridgeErr.message}` });
-          return;
+        const expectedBase = opts.upstreamBaseUrlForDiagnostics;
+        if (expectedBase) {
+          const bridgeErr = getLastBridgeError();
+          const normalizedBase = expectedBase.replace(/\/+$/, '');
+          const urlMatches = !!bridgeErr
+            && (bridgeErr.upstreamUrl === normalizedBase
+              || bridgeErr.upstreamUrl.startsWith(normalizedBase + '/'));
+          if (bridgeErr && bridgeErr.timestamp >= startTime && urlMatches) {
+            console.log(`[${logPrefix}] timeout with bridge error in window: ${bridgeErr.message}`);
+            resolve({ success: false, error: `无法连接到供应商：${bridgeErr.message}` });
+            return;
+          }
         }
         const stderrHint = stderrMessages.length > 0
           ? ` (stderr: ${stderrMessages.join('; ').slice(0, 200)})`
@@ -306,10 +316,12 @@ export async function verifyProviderViaSdk(
     // MUST NOT use 'user' — it reads ~/.claude/settings.json which may contain
     // enabledPlugins causing 30s+ initialization and triggering our timeout.
     settingSources: ['project'],
-    // Scope bridge-error diagnostics to this provider's real upstream, so a
-    // concurrent verify of a different provider can't leak its error into
-    // our timeout message. See verifyViaSdk.opts docstring.
-    upstreamBaseUrlForDiagnostics: baseUrl,
+    // Scope bridge-error diagnostics to this provider's real upstream — but
+    // ONLY when the OpenAI bridge is actually in play. Anthropic-protocol
+    // providers call their baseUrl directly (no bridge), so any bridge error
+    // in the window belongs to some OTHER concurrent session, not us. See
+    // verifyViaSdk.opts.upstreamBaseUrlForDiagnostics docstring.
+    upstreamBaseUrlForDiagnostics: apiProtocol === 'openai' ? baseUrl : undefined,
   });
 }
 
