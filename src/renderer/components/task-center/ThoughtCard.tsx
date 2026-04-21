@@ -150,7 +150,7 @@ export function ThoughtCard({
     //   mt-3 between body and footer (expand toggle / inline-edit
     //                  action bar) — 12px, the larger step that visually
     //                  separates "read" from "act".
-    <div className="group rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px]">
+    <div className="group rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm">
       {/* Top meta row — time + derived-task count on the left, action
           cluster on the right. Moved from the bottom of the card (prior
           iteration) so status reads first, before the user commits to

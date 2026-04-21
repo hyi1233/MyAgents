@@ -102,7 +102,7 @@ export function TaskCardItem(props: TaskCardItemProps) {
     <button
       type="button"
       onClick={onOpen}
-      className={`group relative flex w-full flex-col gap-2.5 rounded-[var(--radius-lg)] border bg-[var(--paper-elevated)] p-4 text-left transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px] ${
+      className={`group relative flex w-full flex-col gap-2.5 rounded-[var(--radius-lg)] border bg-[var(--paper-elevated)] p-4 text-left transition-all hover:border-[var(--line-strong)] hover:shadow-sm ${
         highlighted ? 'border-[var(--accent-warm)] shadow-sm' : 'border-[var(--line)]'
       }`}
     >
