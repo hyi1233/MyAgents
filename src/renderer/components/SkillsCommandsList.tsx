@@ -486,7 +486,7 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
     const isDisabled = skill.enabled === false;
     return (
         <div
-            className={`group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:translate-y-[-1px] ${isDisabled ? 'opacity-50' : ''}`}
+            className={`group flex cursor-pointer flex-col rounded-xl bg-[var(--paper-elevated)] p-4 shadow-xs transition-shadow hover:shadow-md ${isDisabled ? 'opacity-50' : ''}`}
             onClick={onClick}
         >
             {/* Title with badge */}
@@ -533,7 +533,7 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
 export function CommandCard({ command, onClick }: { command: CommandItem; onClick: () => void }) {
     return (
         <div
-            className="group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:translate-y-[-1px]"
+            className="group flex cursor-pointer flex-col rounded-xl bg-[var(--paper-elevated)] p-4 shadow-xs transition-shadow hover:shadow-md"
             onClick={onClick}
         >
             {/* Title with badge */}

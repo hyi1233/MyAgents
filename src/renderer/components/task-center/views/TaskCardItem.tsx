@@ -102,8 +102,8 @@ export function TaskCardItem(props: TaskCardItemProps) {
     <button
       type="button"
       onClick={onOpen}
-      className={`group relative flex w-full flex-col gap-2.5 rounded-[var(--radius-lg)] border bg-[var(--paper-elevated)] p-4 text-left transition-all hover:border-[var(--line-strong)] hover:shadow-sm ${
-        highlighted ? 'border-[var(--accent-warm)] shadow-sm' : 'border-[var(--line)]'
+      className={`group relative flex w-full flex-col gap-2.5 rounded-[var(--radius-lg)] bg-[var(--paper-elevated)] p-4 text-left shadow-xs transition-shadow hover:shadow-md ${
+        highlighted ? 'ring-1 ring-[var(--accent-warm)] shadow-sm' : ''
       }`}
     >
       {/* Row 1 — chips on the left, "…" pinned to the far right via
