@@ -279,7 +279,7 @@ export function ThoughtPanel({
       </div>
 
       {/* Input — new thought */}
-      <div className="border-b border-[var(--line-subtle)] p-3">
+      <div className="p-3">
         <ThoughtInput
           onCreated={(t) => setThoughts((prev) => [t, ...prev])}
           existingTags={allTags}

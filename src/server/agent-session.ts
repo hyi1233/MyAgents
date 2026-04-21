@@ -3783,10 +3783,19 @@ function clearMessageState(): void {
   sessionStorageStateSaved = false;
 }
 
-/** 排空消息队列，逐条广播 queue:cancelled。用于 session 意外死亡时通知前端清除队列 UI。 */
+/**
+ * 排空消息队列，逐条广播 queue:cancelled。
+ *
+ * 由显式 cancel 路径调用：
+ *   - interruptCurrentResponse（用户按停止但已无活跃 turn，清理孤儿队列）
+ *
+ * 不由 startStreamingSession 的 finally 块调用 — 队列默认跨 session 存活，
+ * 由该 finally 下方的 safety net（messageQueue + !preWarmTimer + !isProcessing
+ * + querySession===null → schedulePreWarm）确保新 session 接管处理。
+ */
 function drainQueueWithCancellation(): void {
   if (messageQueue.length === 0) return;
-  console.log(`[agent] Draining ${messageQueue.length} queued messages (session dead)`);
+  console.log(`[agent] Draining ${messageQueue.length} queued messages (explicit cancel)`);
   for (const item of messageQueue) {
     item.resolve();
     broadcast('queue:cancelled', { queueId: item.id });
@@ -6669,10 +6678,26 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Failure counting is handled uniformly in the finally block via preWarmStartedOk flag,
     // so we don't increment preWarmFailCount here — avoids double-counting when both
     // catch and finally execute for the same failed pre-warm.
-    if (!isPreWarming) {
+    //
+    // Also skip when `shouldAbortSession` is set: that flag means WE asked
+    // the SDK subprocess to die (resetSession, rewind, config-change restart,
+    // user deleting the current session, etc.). If the abort lands mid-turn
+    // while a tool call is in flight, the CLI's stdout gets truncated and
+    // the SDK's `readMessages` parser throws
+    //   "Claude Code returned an error result: [ede_diagnostic]
+    //    result_type=user last_content_type=n/a stop_reason=tool_use"
+    // That's an expected side-effect of the abort, not a real failure — the
+    // user already saw the reset/delete go through and shouldn't then get a
+    // red "message-error" banner about it. Pit-of-success: any SDK error
+    // during an active abort is by definition our doing, not a provider/infra
+    // issue to surface. Error is still logged above (line 6611–6612) for
+    // debugging, just not broadcast.
+    if (!isPreWarming && !shouldAbortSession) {
       broadcast('chat:message-error', userFacingError);
       handleMessageError(errorMessage);
       setSessionState('error');
+    } else if (shouldAbortSession) {
+      console.log(`[agent] Suppressing SDK error surfaced during abort (expected): ${errorMessage}`);
     }
   } finally {
     clearTimeout(startupTimeoutId);
@@ -6703,11 +6728,24 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       isStreamingMessage = false;
     }
 
-    // Session 意外死亡时排空队列，通知前端清除 "排队中" UI。
-    // 不在主动 abort 时排空 — 调用方（resetSession/switchToSession 等）有自己的清理流程。
-    if (!wasPreWarming && !shouldAbortSession && messageQueue.length > 0) {
-      drainQueueWithCancellation();
-    }
+    // Queue lifecycle invariant: messageQueue survives session restarts by default.
+    // Any drain decision belongs to the caller that triggered the exit, not here:
+    //   - interruptCurrentResponse (stop button): drains only when called with no
+    //     active turn (orphaned queue). When a turn is in flight, stop cancels
+    //     THAT turn; queued messages naturally flow into the recovery session.
+    //   - forceExecuteQueueItem: the force-executed item MUST survive a hard-kill
+    //     escalation into the recovery session — that's the whole point.
+    //   - abortPersistentSession callers (config changes, provider switch): preserve
+    //     queue so the restarted session picks up pending work.
+    //   - resetSession / switchToSession / recoverFromStaleSession: clear queue
+    //     directly before termination (explicit via `messageQueue.length = 0`).
+    //   - Subprocess crash without explicit abort: preserve queue — the safety net
+    //     below reschedules pre-warm so the new session drains it.
+    //
+    // This replaces earlier logic that used !shouldAbortSession as a proxy for
+    // "unexpected death, drain queue" — a proxy that conflated session-abort-reason
+    // with queue-lifecycle and silently dropped force-executed messages on the
+    // hard-kill escalation path.
 
     // 安全关闭 SDK session
     const session = querySession;
@@ -6763,10 +6801,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // block — it cancels the pre-warm timer and steals isPreWarming flag, causing BOTH branches
     // above to miss. Without this, messages sit in queue indefinitely until a window refocus
     // or other external event triggers a re-sync.
+    //
+    // preWarmDisabled fallback: in --no-pre-warm mode (CLI flag for dev/test), schedulePreWarm
+    // is a no-op, so no recovery is coming. Drain the queue explicitly so the frontend clears
+    // its pills and the user knows to resend. Without this, queue preservation + disabled
+    // pre-warm = orphaned-forever.
     if (messageQueue.length > 0 && !preWarmTimer && !isProcessing && querySession === null) {
-      console.warn(`[agent] Safety net: ${messageQueue.length} orphaned message(s) in queue, scheduling recovery`);
-      preWarmFailCount = 0;
-      schedulePreWarm();
+      if (preWarmDisabled) {
+        console.warn(`[agent] Safety net: ${messageQueue.length} orphaned message(s), pre-warm disabled → draining`);
+        drainQueueWithCancellation();
+      } else {
+        console.warn(`[agent] Safety net: ${messageQueue.length} orphaned message(s) in queue, scheduling recovery`);
+        preWarmFailCount = 0;
+        schedulePreWarm();
+      }
     }
   }
 }
