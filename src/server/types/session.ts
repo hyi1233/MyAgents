@@ -47,6 +47,25 @@ export interface SessionMetadata {
     runtimeSessionId?: string;
     /** Runtime-level cumulative usage totals for restore-safe delta calculation. */
     runtimeUsageTotals?: MessageUsage;
+
+    // ─── Session config snapshot (v0.1.69 layered-snapshot model) ───
+    // Desktop/Cron owned sessions capture these at creation; IM sessions leave all
+    // of them undefined on purpose (live-follow AgentConfig + ChannelOverrides).
+    // Read path: `sessionMeta.<field> ?? agent.<field>` — see resolveSessionConfig().
+
+    /** Snapshot model name. Undefined → fallback to agent.model (lazy migration). */
+    model?: string;
+    /** Snapshot permission mode. Undefined → fallback to agent.permissionMode. */
+    permissionMode?: string;
+    /** Snapshot MCP enabled list. Undefined → fallback to agent.mcpEnabledServers. */
+    mcpEnabledServers?: string[];
+    /** Snapshot providerId. Undefined → fallback to agent.providerId. */
+    providerId?: string;
+    /** Snapshot provider env JSON (credentials). Undefined → fallback to agent.providerEnvJson. */
+    providerEnvJson?: string;
+    /** ISO8601 snapshot creation timestamp. Presence marks "this session is locked" — used
+     *  by scheduleDeferredRestart guards to skip sessions that own their own config. */
+    configSnapshotAt?: string;
 }
 
 /**
@@ -145,9 +164,20 @@ export function generateSessionTitle(message: string): string {
 }
 
 /**
- * Create a new session metadata object
+ * Create a new session metadata object.
+ *
+ * Callers MUST build the `snapshot` argument from the paved helpers in
+ * `src/server/utils/session-snapshot.ts` (`snapshotForImSession` /
+ * `snapshotForOwnedSession`) — never hand-assemble snapshot fields here.
+ * The helpers encode the owner-specific layered-snapshot policy (v0.1.69).
+ *
+ * Left unspecified, `runtime` defaults to 'builtin' (pit of success: no
+ * null/undefined ambiguity on the always-present runtime field).
  */
-export function createSessionMetadata(agentDir: string, runtime: RuntimeType = 'builtin'): SessionMetadata {
+export function createSessionMetadata(
+    agentDir: string,
+    snapshot: Partial<SessionMetadata> = {},
+): SessionMetadata {
     const now = new Date().toISOString();
     return {
         id: randomUUID(),
@@ -156,6 +186,7 @@ export function createSessionMetadata(agentDir: string, runtime: RuntimeType = '
         createdAt: now,
         lastActiveAt: now,
         unifiedSession: true,
-        runtime,  // Always present — pit of success: no null/undefined ambiguity
+        runtime: 'builtin',
+        ...snapshot,
     };
 }

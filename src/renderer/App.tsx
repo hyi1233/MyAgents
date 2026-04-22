@@ -18,6 +18,7 @@ import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import Chat from '@/pages/Chat';
 import Launcher from '@/pages/Launcher';
 import Settings from '@/pages/Settings';
+import TaskCenter from '@/pages/TaskCenter';
 import {
   type Project,
   type Provider,
@@ -27,14 +28,14 @@ import type { ImageAttachment } from '@/components/SimpleChatInput';
 import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
-import { apiGetJson, apiPostJson } from '@/api/apiFetch';
+import { apiGetJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
-import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
-import { Loader2 } from 'lucide-react';
+import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
+import type { SessionMetadata } from '@/api/sessionClient';
 
 // ============================================================
 // User Support Prompt Builder
@@ -86,6 +87,9 @@ interface TabContentProps {
   updateDownloading: boolean;
   onCheckForUpdate: () => Promise<'up-to-date' | 'downloading' | 'error'>;
   onRestartAndUpdate: () => void;
+  // Task Center intent carried by the most recent OPEN_TASK_CENTER event.
+  // Only read by the `taskcenter` tab; other tab views ignore it.
+  taskCenterPendingIntent: { autofocusSearch?: boolean; nonce: number } | null;
 }
 
 const MemoizedTabContent = memo(function TabContent({
@@ -96,6 +100,7 @@ const MemoizedTabContent = memo(function TabContent({
   settingsInitialSection, settingsInitialMcpId, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading,
   onCheckForUpdate, onRestartAndUpdate,
+  taskCenterPendingIntent,
 }: TabContentProps) {
   return (
     <div
@@ -122,6 +127,8 @@ const MemoizedTabContent = memo(function TabContent({
           onCheckForUpdate={onCheckForUpdate}
           onRestartAndUpdate={onRestartAndUpdate}
         />
+      ) : tab.view === 'taskcenter' ? (
+        <TaskCenter isActive={isActive} pendingIntent={taskCenterPendingIntent} />
       ) : (
         <TabProvider
           tabId={tab.id}
@@ -162,7 +169,15 @@ const MemoizedTabContent = memo(function TabContent({
     prev.updateReady === next.updateReady &&
     prev.updateVersion === next.updateVersion &&
     prev.updateChecking === next.updateChecking &&
-    prev.updateDownloading === next.updateDownloading
+    prev.updateDownloading === next.updateDownloading &&
+    // Reference equality — each OPEN_TASK_CENTER dispatch allocates a
+    // fresh intent object (or `null`), so identity comparison is enough.
+    // Without this line, a user re-clicking the Launcher's search icon
+    // while Task Center is already active would see their new intent
+    // dropped: isActive stays true, tab ref stays the same, so memo
+    // returns true and the new `pendingIntent` prop never reaches the
+    // TaskCenter tab. (v0.1.69 cross-review C1)
+    prev.taskCenterPendingIntent === next.taskCenterPendingIntent
   );
 });
 
@@ -180,7 +195,7 @@ export default function App() {
 
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
-  const { config, isLoading: configLoading, updateConfig, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+  const { config, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
 
   // Apply theme (light/dark/system) to <html> element
   useThemeEffect();
@@ -217,6 +232,12 @@ export default function App() {
   const configProjectsRef = useRef(configProjects);
   configProjectsRef.current = configProjects;
 
+  // Ref for full AppConfig — needed by session-switch flow (T12) to resolve per-workspace
+  // agent.runtime for cross-runtime detection without putting `config` into the
+  // handleSwitchSession useCallback deps (it's intentionally a stable empty-deps callback).
+  const configRef = useRef(config);
+  configRef.current = config;
+
   // Toast (ref-stabilized per CLAUDE.md rules)
   const toast = useToast();
   const toastRef = useRef(toast);
@@ -231,13 +252,6 @@ export default function App() {
     runningTaskCount: number;
     resolve: (value: boolean) => void;
   } | null>(null);
-
-  // Claude settings env override warning (cc-switch etc.)
-  const [claudeEnvOverride, setClaudeEnvOverride] = useState<{
-    baseUrl?: string;
-    hasApiKey: boolean;
-  } | null>(null);
-  const [claudeEnvClearing, setClaudeEnvClearing] = useState(false);
 
   // Content container ref for tab swipe gesture
   const contentRef = useRef<HTMLDivElement>(null);
@@ -447,28 +461,6 @@ export default function App() {
       // Rust handles sidecar cleanup on actual exit (WindowEvent::Destroyed, ExitRequested).
     };
   }, [startGlobalSidecarSilent]);
-
-  // Check ~/.claude/settings.json for env overrides on startup
-  // External tools (cc-switch etc.) may write ANTHROPIC_BASE_URL which overrides all providers
-  useEffect(() => {
-    if (configLoading) return; // Wait for config to load from disk before checking
-    if (config.dismissClaudeEnvWarning) return;
-    const checkClaudeEnvOverrides = async () => {
-      try {
-        const result = await apiGetJson<{
-          hasOverrides: boolean;
-          baseUrl?: string;
-          hasApiKey: boolean;
-        }>('/api/claude-settings/check-env');
-        if (result.hasOverrides) {
-          setClaudeEnvOverride({ baseUrl: result.baseUrl, hasApiKey: result.hasApiKey });
-        }
-      } catch {
-        // Silently ignore — non-critical check
-      }
-    };
-    void checkClaudeEnvOverrides();
-  }, [configLoading, config.dismissClaudeEnvWarning]);
 
   // Update tab isGenerating state (called from TabProvider via callback)
   const updateTabGenerating = useCallback((tabId: string, isGenerating: boolean) => {
@@ -692,6 +684,18 @@ export default function App() {
           setTabs((prev) => [...prev, newTab]);
           setActiveTabId(newTab.id);
         }
+      } else if (!e.shiftKey && !e.altKey && (e.key === 'y' || e.key === 'Y')) {
+        // Cmd/Ctrl+Y — open Task Center as a singleton tab. Mirrors the
+        // header button's CUSTOM_EVENTS.OPEN_TASK_CENTER dispatch so both
+        // entry points converge on the same handler (see line ~1544).
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER));
+      } else if (!e.shiftKey && !e.altKey && (e.key === 'u' || e.key === 'U')) {
+        // Cmd/Ctrl+U — open Settings. `OPEN_SETTINGS` is already the
+        // designated cross-component entry (line ~1489); reusing it keeps
+        // the shortcut and the titlebar button path identical.
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS));
       } else if (e.key === 'w' || e.key === 'W') {
         // macOS: handled by native menu → window:cmd-w → useTrayEvents.ts.
         // Windows/Linux: no native menu with Ctrl+W, so handle here directly.
@@ -1020,6 +1024,68 @@ export default function App() {
       console.log(`[App] handleSwitchSession Scenario 1: Session ${sessionId} already in tab ${existingTab.id}, jumping to it`);
       setActiveTabId(existingTab.id);
       return;
+    }
+
+    // Scenario 1.5 (T12): Cross-runtime session → Open in NEW Tab
+    //
+    // With v0.1.69 config-snapshot, a session's runtime is part of its immutable
+    // identity. If we took over the current tab's sidecar (spawned with the agent's
+    // runtime), the sidecar's MYAGENTS_RUNTIME would mismatch the session — the
+    // Rust layer would then kill + respawn on sidecar drift detection, and the
+    // current tab's chat UI would fight the adoption by re-snapshotting its own
+    // defaults into the session. Safer: open in a new Tab so the sidecar spawn
+    // path picks up session.runtime naturally via resolve_session_runtime().
+    //
+    // Gated on multiAgentRuntime — when disabled, everything runs as builtin and
+    // this mismatch cannot arise.
+    const cfg = configRef.current;
+    if (cfg?.multiAgentRuntime) {
+      const currentTabForRuntimeCheck = tabsRef.current.find(t => t.id === tabId);
+      if (currentTabForRuntimeCheck?.agentDir) {
+        try {
+          const meta = await apiGetJson<{ success: boolean; session: SessionMetadata }>(`/sessions/${sessionId}?limit=1`);
+          const sessionRuntime = meta.session.runtime || 'builtin';
+          const currentAgent = getAgentByWorkspacePath(cfg, currentTabForRuntimeCheck.agentDir);
+          const currentAgentRuntime = currentAgent?.runtime || 'builtin';
+          if (sessionRuntime !== currentAgentRuntime) {
+            console.log(`[App] handleSwitchSession Scenario 1.5: Cross-runtime session (session=${sessionRuntime}, agent=${currentAgentRuntime}), opening in new tab`);
+            if (tabsRef.current.length >= MAX_TABS) {
+              toastRef.current.error('标签页已达上限，请关闭一个后重试');
+              return;
+            }
+            const newTab: Tab = {
+              ...createNewTab(),
+              agentDir: currentTabForRuntimeCheck.agentDir,
+              sessionId,
+              view: 'chat',
+              title: currentTabForRuntimeCheck.title || getFolderName(currentTabForRuntimeCheck.agentDir),
+            };
+            setTabs(prev => [...prev, newTab]);
+            setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
+            try {
+              const result = await ensureSessionSidecar(sessionId, currentTabForRuntimeCheck.agentDir, 'tab', newTab.id);
+              await activateSession(sessionId, newTab.id, null, result.port, currentTabForRuntimeCheck.agentDir, false);
+              setTabs(prev => prev.map(t =>
+                t.id === newTab.id
+                  ? { ...t, joinedExistingSidecar: !result.isNew }
+                  : t,
+              ));
+              setActiveTabId(newTab.id);
+            } catch (error) {
+              console.error('[App] Failed to open cross-runtime session in new tab:', error);
+              setTabs(prev => prev.filter(t => t.id !== newTab.id));
+            } finally {
+              setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
+            }
+            return;
+          }
+        } catch (error) {
+          // Non-fatal: if metadata fetch fails (e.g., session just created, transient 404),
+          // fall through to scenarios 2-4. The Rust resolve_session_runtime() on the sidecar
+          // spawn path is still authoritative for correctness.
+          console.warn('[App] Cross-runtime check failed, falling through to normal switch:', error);
+        }
+      }
     }
 
     // Scenario 2: Session has running cron task (no Tab) → Add Tab as owner to existing Sidecar
@@ -1442,6 +1508,351 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callback stabilized via tabsRef
   }, []);
 
+  // Open TaskCenter as a singleton tab (mirrors handleOpenSettings)
+  const handleOpenTaskCenter = useCallback(() => {
+    const currentTabs = tabsRef.current;
+    const existing = currentTabs.find((t) => t.view === 'taskcenter');
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    if (currentTabs.length >= MAX_TABS) {
+      console.warn(`[App] Max tabs (${MAX_TABS}) reached`);
+      return;
+    }
+    const newTab: Tab = {
+      id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      agentDir: null,
+      sessionId: null,
+      view: 'taskcenter',
+      title: '任务中心',
+    };
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+  }, []);
+
+  // Intent carried across `OPEN_TASK_CENTER` — the event dispatcher
+  // (Launcher "我的任务" tab's search icon) wants more than just "open
+  // the tab": it wants the Task Center's search box focused on arrival.
+  // Propagating via a direct `window` listener in TaskListPanel misses
+  // the first-mount case (the event fires before the tab exists), so
+  // we stash the intent in state here and pass it down as a prop.
+  //
+  // Intent lifecycle (cross-review C2):
+  //   1. Every event overwrites state — including with `null` when the
+  //      event carries no focus request. Otherwise a stale intent from
+  //      an earlier search path would persist and trigger unexpected
+  //      focus when the user later opens Task Center via the titlebar
+  //      icon or any other entry.
+  //   2. Each intent gets a monotonically-increasing `nonce` (not
+  //      `Date.now()`) so back-to-back same-millisecond firings still
+  //      produce distinct dep-array values for the consuming effect.
+  //      `useRef + ++` is cheap and collision-free.
+  const taskCenterIntentCounterRef = useRef(0);
+  const [taskCenterPendingIntent, setTaskCenterPendingIntent] = useState<
+    { autofocusSearch?: boolean; nonce: number } | null
+  >(null);
+
+  // Listen for OPEN_TASK_CENTER custom event from child components
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { autofocusSearch?: boolean }
+        | undefined;
+      if (detail?.autofocusSearch) {
+        taskCenterIntentCounterRef.current += 1;
+        setTaskCenterPendingIntent({
+          autofocusSearch: true,
+          nonce: taskCenterIntentCounterRef.current,
+        });
+      } else {
+        // Non-focus open (titlebar icon, Chat 新建 dispatch, etc.) —
+        // clear any lingering search intent so returning to Task Center
+        // doesn't auto-focus the search field unexpectedly.
+        setTaskCenterPendingIntent(null);
+      }
+      handleOpenTaskCenter();
+    };
+    window.addEventListener(CUSTOM_EVENTS.OPEN_TASK_CENTER, handler);
+    return () => window.removeEventListener(CUSTOM_EVENTS.OPEN_TASK_CENTER, handler);
+  }, [handleOpenTaskCenter]);
+
+  // One-shot legacy CronTask → Task sweep at app startup (PRD §11.4,
+  // v0.1.69 UX round). The Launcher's 「我的任务」 tab reads new-model
+  // Task[] — users who never open the Task Center page would see an
+  // empty list even though they have legacy crons on disk. Running the
+  // upgrade sweep here (not inside TaskListPanel's mount) guarantees
+  // the data is ready before the Launcher is user-visible.
+  //
+  // Guards:
+  //   - taskCenterAvailable() — Tauri-only, silent no-op in browser dev
+  //   - configProjects.length > 0 — eligibility check needs workspace
+  //     resolution; Config loads async, so we wait for projects to
+  //     populate before sweeping
+  //   - useRef one-shot — only run once per session; refocusing the
+  //     window or a user navigating won't re-trigger the work
+  const startupSweepDoneRef = useRef(false);
+  useEffect(() => {
+    if (startupSweepDoneRef.current) return;
+    if (configProjects.length === 0) return;
+    startupSweepDoneRef.current = true;
+    void (async () => {
+      try {
+        const { sweepAppStartupLegacyCrons } = await import(
+          '@/components/task-center/legacyUpgrade'
+        );
+        const stats = await sweepAppStartupLegacyCrons(configProjects);
+        if (stats.upgraded > 0) {
+          console.info(
+            `[legacy-sweep] upgraded ${stats.upgraded} legacy cron(s) at startup ` +
+              `(skipped ${stats.skippedIneligible} ineligible, ${stats.failed} failed)`,
+          );
+        }
+      } catch (err) {
+        console.warn('[legacy-sweep] startup sweep crashed:', err);
+      }
+    })();
+  }, [configProjects]);
+
+  // PRD §8.3 — "AI 讨论" flow. Open a new Chat tab, auto-dispatch the
+  // `/task-alignment` skill with the thought content + instructions to call
+  // `myagents task create-from-alignment` at the end.
+  useEffect(() => {
+    const handler = async (raw: Event) => {
+      const event = raw as CustomEvent<{
+        thoughtId: string;
+        content: string;
+        tags: string[];
+        /** Explicit workspace pick from the ThoughtCard popover (v0.1.69
+         *  polish). When present we use it directly; when absent (old
+         *  callers or programmatic triggers) we fall back to the smart
+         *  tag→project match so behavior degrades gracefully. */
+        workspaceId?: string;
+      }>;
+      const { thoughtId, content, tags, workspaceId } = event.detail ?? {
+        thoughtId: '',
+        content: '',
+        tags: [],
+      };
+      if (!thoughtId || !content) return;
+
+      try {
+        const currentTabs = tabsRef.current;
+        if (currentTabs.length >= MAX_TABS) {
+          toastRef.current?.error(`已达标签页上限（${MAX_TABS} 个），请先关闭一个再开始 AI 讨论`);
+          return;
+        }
+
+        const projects = configProjectsRef.current.filter((p) => !p.internal);
+        if (projects.length === 0) {
+          toastRef.current?.error('还没有工作区，无法开始 AI 讨论');
+          return;
+        }
+        // Prefer the explicit pick; fall back to smart default for legacy
+        // callers / programmatic use.
+        const lowerTags = tags.map((t) => t.toLowerCase());
+        const workspace =
+          (workspaceId ? projects.find((p) => p.id === workspaceId) : undefined) ??
+          projects.find((p) => lowerTags.includes(p.name.toLowerCase())) ??
+          projects[0];
+
+        // Pick the user's default provider (CC review W6). Fall back to the
+        // first available provider if the default isn't set or isn't present.
+        const defaultProviderId = configRef.current?.defaultProviderId;
+        const provider =
+          (defaultProviderId
+            ? appProvidersRef.current.find((p) => p.id === defaultProviderId)
+            : undefined) ?? appProvidersRef.current[0];
+        if (!provider) {
+          toastRef.current?.error('未配置模型供应商，无法开始 AI 讨论');
+          return;
+        }
+
+        // Pre-mint the alignment session id (CC review W8) so the AI doesn't
+        // have to infer a placeholder. This becomes the subdir under
+        // `~/.myagents/tasks/<id>/` where alignment.md/task.md/verify.md/
+        // progress.md land, and the exact value the
+        // `task create-from-alignment` CLI takes (it renames that directory
+        // to `~/.myagents/tasks/<newTaskId>/` on promotion).
+        //
+        // v0.1.69 relocation: the task-alignment skill writes via the `Write`
+        // tool using the absolute home-dir path (task docs moved out of the
+        // workspace so moving/renaming the workspace doesn't orphan them).
+        const alignmentSessionId = `align-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+        // Persist the workspace/thought context to
+        // `~/.myagents/tasks/<alignmentSessionId>/metadata.json` so that
+        // when the AI later calls `myagents task create-from-alignment`
+        // it only needs to pass `--name`; the backend inherits the rest
+        // from this file. Without this, the AI had to re-type 3 long
+        // UUIDs that it already had in its prompt context — fragile
+        // (one typo → task hung on wrong workspace, silently).
+        // Fire-and-forget is safe: the prompt still carries the same
+        // context as a fallback, so even if the write fails the AI can
+        // pass the params explicitly and the flow still works.
+        if (isTauriEnvironment()) {
+          try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('cmd_task_write_alignment_metadata', {
+              alignmentSessionId,
+              workspaceId: workspace.id,
+              workspacePath: workspace.path,
+              sourceThoughtId: thoughtId,
+            });
+          } catch (err) {
+            console.warn(
+              '[App] OPEN_AI_DISCUSSION: write alignment metadata failed, AI will need to pass params explicitly:',
+              err,
+            );
+          }
+        }
+
+        // Prompt stays minimal by design — operational details (how to
+        // write the four docs, when to call `create-from-alignment`, what
+        // each of the 4 discussion outcomes looks like, CLI syntax) ALL
+        // live in `bundled-skills/task-alignment/SKILL.md`. The prompt
+        // only carries per-conversation data the skill can't know: the
+        // original thought text + four context-parameter values. Fewer
+        // instructions here means the AI doesn't get steered into "write
+        // files first" before the alignment dialog actually happens.
+        const alignmentPrompt = [
+          '我有一个想法希望进行讨论，请使用 Skill `/task-alignment` 与我讨论对齐。',
+          '本次上下文参数：',
+          `- alignmentSessionId: ${alignmentSessionId}`,
+          `- workspaceId: ${workspace.id}`,
+          `- workspacePath: ${workspace.path}`,
+          `- sourceThoughtId: ${thoughtId}`,
+          '',
+          '[我的想法]',
+          content,
+        ].join('\n');
+
+        const initialMessage: InitialMessage = {
+          text: alignmentPrompt,
+          providerId: provider.id,
+        };
+
+        // Pre-seed the tab as a Chat tab before awaiting sidecar startup.
+        // Without this, the user sees the Launcher briefly while
+        // handleLaunchProject waits on ensureSessionSidecar, then the tab
+        // "jumps" to Chat. createPendingSessionId is deterministic
+        // (`pending-<tabId>`), so handleLaunchProject's internal call
+        // resolves to the same id and its later setTabs is a no-op for
+        // view/agentDir/sessionId.
+        const newTab = createNewTab();
+        const seeded = {
+          ...newTab,
+          view: 'chat' as const,
+          agentDir: workspace.path,
+          sessionId: createPendingSessionId(newTab.id),
+          title: '任务讨论',
+          initialMessage,
+        };
+        setTabs((prev) => [...prev, seeded]);
+        setActiveTabId(newTab.id);
+        activeTabIdRef.current = newTab.id;
+
+        await handleLaunchProject(
+          workspace,
+          provider,
+          undefined,
+          initialMessage,
+        );
+
+        // handleLaunchProject's internal setTabs overwrites `title` with the
+        // workspace display name. Restore the "任务讨论" title afterwards so
+        // the tab consistently reads as a discussion session, not the
+        // workspace's generic name.
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === newTab.id ? { ...t, title: '任务讨论' } : t,
+          ),
+        );
+      } catch (err) {
+        console.error('[App] OPEN_AI_DISCUSSION failed:', err);
+      }
+    };
+    window.addEventListener(CUSTOM_EVENTS.OPEN_AI_DISCUSSION, handler);
+    return () =>
+      window.removeEventListener(CUSTOM_EVENTS.OPEN_AI_DISCUSSION, handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
+  }, []);
+
+  // Listen for OPEN_SESSION_IN_NEW_TAB — task center's 任务执行 session list
+  // dispatches this to open a historical execution in a fresh chat tab.
+  //
+  // Forces a NEW tab unconditionally. An earlier version delegated to
+  // `handleLaunchProject` which falls back to the active tab in its common
+  // Scenario 4 branch — that could silently replace the user's current
+  // chat session if they clicked a row while inside another Chat tab.
+  // We pre-seed a new tab here (mirroring OPEN_AI_DISCUSSION's approach)
+  // so the user always lands in a fresh tab and their active session stays
+  // put. Failures surface as toasts, not silent console.warn — otherwise
+  // the click looks dead and the user has no signal.
+  useEffect(() => {
+    const handler = async (raw: Event) => {
+      const event = raw as CustomEvent<{
+        sessionId: string;
+        workspacePath: string;
+      }>;
+      const { sessionId, workspacePath } = event.detail ?? {};
+      if (!sessionId || !workspacePath) return;
+
+      const workspace = configProjectsRef.current.find(
+        (p) => p.path === workspacePath,
+      );
+      if (!workspace) {
+        toastRef.current?.error('找不到对应的工作区，可能已被删除');
+        return;
+      }
+
+      const providerId =
+        workspace.providerId ?? configRef.current?.defaultProviderId ?? null;
+      const provider =
+        (providerId
+          ? appProvidersRef.current.find((p) => p.id === providerId)
+          : undefined) ?? appProvidersRef.current[0];
+      if (!provider) {
+        toastRef.current?.error('未配置模型供应商，无法打开 session');
+        return;
+      }
+
+      if (tabsRef.current.length >= MAX_TABS) {
+        toastRef.current?.error(`已达 Tab 上限 (${MAX_TABS})，请先关闭一个 Tab`);
+        return;
+      }
+
+      // Pre-seed a chat tab with the target session id so the user lands
+      // directly in Chat view, not Launcher. `handleLaunchProject` below
+      // uses `activeTabIdRef.current` as its target; we've just updated
+      // that to the new tab so no existing tab gets hijacked.
+      const newTab = createNewTab();
+      const seeded = {
+        ...newTab,
+        view: 'chat' as const,
+        agentDir: workspace.path,
+        sessionId,
+      };
+      setTabs((prev) => [...prev, seeded]);
+      setActiveTabId(newTab.id);
+      activeTabIdRef.current = newTab.id;
+
+      try {
+        await handleLaunchProject(workspace, provider, sessionId);
+      } catch (err) {
+        console.error('[App] OPEN_SESSION_IN_NEW_TAB failed:', err);
+        toastRef.current?.error('打开 session 失败，请稍后重试');
+      }
+    };
+    window.addEventListener(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, handler);
+    return () =>
+      window.removeEventListener(
+        CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB,
+        handler,
+      );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
+  }, []);
+
   // Listen for JUMP_TO_TAB custom event (Session singleton constraint)
   useEffect(() => {
     const handleJumpToTab = (event: CustomEvent<{ targetTabId: string; sessionId: string }>) => {
@@ -1656,6 +2067,7 @@ export default function App() {
             updateDownloading={updateDownloading}
             onCheckForUpdate={checkForUpdate}
             onRestartAndUpdate={handleRestartAndUpdate}
+            taskCenterPendingIntent={taskCenterPendingIntent}
           />
         ))}
       </div>
@@ -1693,64 +2105,6 @@ export default function App() {
           }}
           onCancel={dismissPendingUpdate}
         />
-      )}
-
-      {/* Warning: ~/.claude/settings.json env overrides detected */}
-      {claudeEnvOverride && (
-        <OverlayBackdrop onClose={claudeEnvClearing ? undefined : () => setClaudeEnvOverride(null)} className="z-[300] px-4">
-          <div className="glass-panel w-full max-w-sm">
-            <div className="border-b border-[var(--line)] px-5 py-4">
-              <div className="text-[14px] font-semibold text-[var(--ink)]">检测到全局配置覆盖</div>
-            </div>
-            <div className="px-5 py-4">
-              <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
-                {`~/.claude/settings.json 中检测到${claudeEnvOverride.baseUrl ? ` ANTHROPIC_BASE_URL = ${claudeEnvOverride.baseUrl.length > 60 ? claudeEnvOverride.baseUrl.slice(0, 60) + '...' : claudeEnvOverride.baseUrl}` : ''}${claudeEnvOverride.baseUrl && claudeEnvOverride.hasApiKey ? '，' : ''}${claudeEnvOverride.hasApiKey ? 'ANTHROPIC_API_KEY' : ''}，该配置会覆盖 MyAgents 的供应商设置，导致所有请求发送到非预期地址。是否清除？`}
-              </p>
-            </div>
-            <div className="flex items-center justify-between border-t border-[var(--line)] px-5 py-3">
-              <button
-                type="button"
-                disabled={claudeEnvClearing}
-                className="text-[12px] text-[var(--ink-faint)] transition-colors hover:text-[var(--ink-muted)] disabled:opacity-50"
-                onClick={() => {
-                  void updateConfig({ dismissClaudeEnvWarning: true });
-                  setClaudeEnvOverride(null);
-                }}
-              >
-                不再提示
-              </button>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setClaudeEnvOverride(null)}
-                  disabled={claudeEnvClearing}
-                  className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-[12px] font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  disabled={claudeEnvClearing}
-                  className="flex items-center gap-1.5 rounded-full bg-[var(--error)] px-4 py-1.5 text-[12px] font-semibold text-white transition-colors hover:brightness-110 disabled:opacity-50"
-                  onClick={() => {
-                    setClaudeEnvClearing(true);
-                    void apiPostJson('/api/claude-settings/clear-env', {}).then(() => {
-                      setClaudeEnvOverride(null);
-                    }).catch((err) => {
-                      console.error('[App] Failed to clear claude settings env:', err);
-                      setClaudeEnvOverride(null);
-                    }).finally(() => {
-                      setClaudeEnvClearing(false);
-                    });
-                  }}
-                >
-                  {claudeEnvClearing && <Loader2 className="h-3 w-3 animate-spin" />}
-                  清除
-                </button>
-              </div>
-            </div>
-          </div>
-        </OverlayBackdrop>
       )}
 
       {/* Bug report overlay triggered from titlebar feedback button */}

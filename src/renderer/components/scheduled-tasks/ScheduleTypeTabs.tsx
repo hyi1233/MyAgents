@@ -1,12 +1,24 @@
 /**
- * ScheduleTypeTabs — Three schedule type tabs (固定间隔 / 定时执行 / 仅一次)
+ * ScheduleTypeTabs — Three schedule type tabs (周期触发 / 仅一次 / 无限循环)
  * Each tab renders its own configuration area.
+ *
+ * v0.1.69 refactor: the previous four tabs (固定间隔 / 定时执行 /
+ * 仅一次 / 无限循环) collapsed the first two into one "周期触发" tab
+ * powered by `CronExpressionInput` with its 5-chip picker (固定周期 +
+ * 每天 / 工作日 / 每周 / 每月). Both "every N minutes" and calendar-
+ * aligned cron schedules now live under the same UI — the old tab
+ * bifurcation forced users to pre-decide between the two before they
+ * even saw their options.
+ *
+ * Schema: `CronSchedule` still uses `{ kind: 'every', minutes }` vs
+ * `{ kind: 'cron', expr, tz }` — the merged UI just chooses between
+ * them based on which of `cronExpr` vs `intervalMinutes` carries the
+ * active value.
  */
 
-import { useState, useCallback, useMemo } from 'react';
-import { Clock, Calendar, Timer, Repeat } from 'lucide-react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
+import { Clock, Calendar, Repeat } from 'lucide-react';
 import type { CronSchedule } from '@/types/cronTask';
-import { CRON_INTERVAL_PRESETS, MIN_CRON_INTERVAL } from '@/types/cronTask';
 import CronExpressionInput from './CronExpressionInput';
 
 /** Format a Date as local YYYY-MM-DDTHH:mm for datetime-local input */
@@ -15,7 +27,12 @@ function toLocalDateTimeString(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-type ScheduleKind = 'every' | 'cron' | 'at' | 'loop';
+/**
+ * Surface-level kind exposed via the tab row. Maps to `CronSchedule.kind`
+ * at persist time — `recurring` covers both `every` and `cron` variants
+ * (picker decides which is emitted based on `cronExpr` vs interval).
+ */
+type ScheduleKind = 'recurring' | 'at' | 'loop';
 
 interface ScheduleTypeTabsProps {
   value: CronSchedule | null;
@@ -25,34 +42,39 @@ interface ScheduleTypeTabsProps {
 }
 
 const TABS: { kind: ScheduleKind; label: string; icon: typeof Clock }[] = [
-  { kind: 'every', label: '固定间隔', icon: Timer },
-  { kind: 'cron', label: '定时执行', icon: Clock },
+  { kind: 'recurring', label: '周期触发', icon: Clock },
   { kind: 'at', label: '仅一次', icon: Calendar },
   { kind: 'loop', label: '无限循环', icon: Repeat },
 ];
 
+/** Map the incoming `CronSchedule` to the surface-level tab. `every` and
+ *  `cron` both map to the merged "周期触发" tab. */
+function deriveActiveKind(value: CronSchedule | null): ScheduleKind {
+  if (!value) return 'recurring';
+  if (value.kind === 'at') return 'at';
+  if (value.kind === 'loop') return 'loop';
+  return 'recurring';
+}
+
 export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, error }: ScheduleTypeTabsProps) {
-  const activeKind: ScheduleKind = value?.kind ?? 'every';
-  const [customMinutes, setCustomMinutes] = useState<string>(
-    CRON_INTERVAL_PRESETS.some(p => p.value === intervalMinutes) ? '' : String(intervalMinutes)
+  const activeKind: ScheduleKind = deriveActiveKind(value);
+
+  // --- Recurring tab state (covers both "every" and "cron" variants) ---
+  // `cronExpr` non-empty → CronExpressionInput renders in visual/raw
+  // mode and we emit { kind: 'cron', ... }. Empty (= 固定周期 chip) →
+  // we emit { kind: 'every', minutes }.
+  const defaultTz = useMemo(
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone,
+    [],
   );
-  const [isCustom, setIsCustom] = useState(
-    !CRON_INTERVAL_PRESETS.some(p => p.value === intervalMinutes) && activeKind === 'every'
+  const [cronExpr, setCronExpr] = useState(
+    value?.kind === 'cron' ? value.expr : '',
+  );
+  const [cronTz, setCronTz] = useState(
+    value?.kind === 'cron' ? (value.tz ?? defaultTz) : defaultTz,
   );
 
-  // Start time for "every" mode
-  const [startMode, setStartMode] = useState<'now' | 'scheduled'>(
-    value?.kind === 'every' && value.startAt ? 'scheduled' : 'now'
-  );
-  const [startAt, setStartAt] = useState(
-    value?.kind === 'every' && value.startAt ? toLocalDateTimeString(new Date(value.startAt)) : ''
-  );
-
-  // Cron state
-  const [cronExpr, setCronExpr] = useState(value?.kind === 'cron' ? value.expr : '0 8 * * *');
-  const [cronTz, setCronTz] = useState(value?.kind === 'cron' ? (value.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone) : Intl.DateTimeFormat().resolvedOptions().timeZone);
-
-  // At state
+  // --- At state ---
   const getDefaultAtTime = useCallback(() => {
     const d = new Date(Date.now() + 3600000);
     d.setMinutes(0, 0, 0);
@@ -62,44 +84,76 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
     value?.kind === 'at' ? toLocalDateTimeString(new Date(value.at)) : getDefaultAtTime()
   );
 
-  /** Build the schedule value for "every" mode, including startAt if scheduled */
-  const buildEverySchedule = useCallback((mins: number): CronSchedule | null => {
-    if (startMode === 'scheduled' && startAt) {
-      return { kind: 'every', minutes: mins, startAt: new Date(startAt).toISOString() };
+  // Keep local state in sync if the parent swaps `value` underneath us
+  // (e.g. a form reset). The effect only pulls — user-driven updates
+  // still flow out via the handlers below.
+  useEffect(() => {
+    if (value?.kind === 'cron') {
+      setCronExpr(value.expr);
+      setCronTz(value.tz ?? defaultTz);
+    } else if (value?.kind === 'every') {
+      setCronExpr('');
     }
-    return null; // null = use legacy intervalMinutes path (immediate start)
-  }, [startMode, startAt]);
+    if (value?.kind === 'at') {
+      setAtDateTime(toLocalDateTimeString(new Date(value.at)));
+    }
+  }, [value, defaultTz]);
 
   const handleTabChange = useCallback((kind: ScheduleKind) => {
-    if (kind === 'every') {
-      onChange(buildEverySchedule(intervalMinutes), intervalMinutes);
-    } else if (kind === 'cron') {
-      onChange({ kind: 'cron', expr: cronExpr, tz: cronTz }, intervalMinutes);
+    if (kind === 'recurring') {
+      // Emit whichever recurring shape the local state currently holds.
+      // Preserves `startAt` on the Every variant (see
+      // handleIntervalChange for the rationale).
+      if (cronExpr.trim()) {
+        onChange({ kind: 'cron', expr: cronExpr, tz: cronTz }, intervalMinutes);
+      } else {
+        const carryStartAt = value?.kind === 'every' ? value.startAt : undefined;
+        const schedule: CronSchedule = carryStartAt
+          ? { kind: 'every', minutes: intervalMinutes, startAt: carryStartAt }
+          : { kind: 'every', minutes: intervalMinutes };
+        onChange(schedule, intervalMinutes);
+      }
     } else if (kind === 'loop') {
       onChange({ kind: 'loop' }, intervalMinutes);
     } else {
       onChange({ kind: 'at', at: new Date(atDateTime).toISOString() }, intervalMinutes);
     }
-  }, [onChange, intervalMinutes, buildEverySchedule, cronExpr, cronTz, atDateTime]);
+  }, [onChange, intervalMinutes, cronExpr, cronTz, atDateTime, value]);
 
-  const handlePresetClick = useCallback((minutes: number) => {
-    setIsCustom(false);
-    onChange(buildEverySchedule(minutes), minutes);
-  }, [onChange, buildEverySchedule]);
-
-  const handleCustomMinutesChange = useCallback((val: string) => {
-    setCustomMinutes(val);
-    const num = parseInt(val, 10);
-    if (!isNaN(num) && num >= MIN_CRON_INTERVAL) {
-      onChange(buildEverySchedule(num), num);
-    }
-  }, [onChange, buildEverySchedule]);
-
+  // CronExpressionInput emits two separate callbacks when freq is
+  // 'interval': first `onChange('', tz)` then `onIntervalChange(n)`.
+  // If we reacted to the empty-expr path with a schedule emission,
+  // we'd use the *stale* `intervalMinutes` from closure (the
+  // onIntervalChange → parent setState hasn't committed yet within the
+  // same event tick), clobbering the new value once React renders.
+  // So this callback only handles the *non-empty* expr case; the
+  // interval path is owned entirely by `handleIntervalChange` which
+  // receives the fresh value as an arg and doesn't read stale closure.
   const handleCronChange = useCallback((expr: string, tz: string) => {
     setCronExpr(expr);
     setCronTz(tz);
-    onChange({ kind: 'cron', expr, tz }, intervalMinutes);
+    if (expr.trim()) {
+      onChange({ kind: 'cron', expr, tz }, intervalMinutes);
+    }
+    // else: no-op — handleIntervalChange is the authoritative emitter
+    // for interval mode. See comment above for the race rationale.
   }, [onChange, intervalMinutes]);
+
+  // The 固定周期 chip's N-minute input bubbles up here. It doesn't
+  // touch `cronExpr` (already empty in that mode), just updates the
+  // shared intervalMinutes and re-emits the Every schedule.
+  // Preserves an existing `startAt` (delayed first-fire) if the task
+  // was previously created with one — the UI no longer exposes the
+  // picker (v0.1.69 tab consolidation dropped it), but round-tripping
+  // the value through edit keeps pre-existing scheduled starts intact
+  // instead of silently stripping them on save.
+  const handleIntervalChange = useCallback((mins: number) => {
+    const carryStartAt = value?.kind === 'every' ? value.startAt : undefined;
+    const schedule: CronSchedule = carryStartAt
+      ? { kind: 'every', minutes: mins, startAt: carryStartAt }
+      : { kind: 'every', minutes: mins };
+    onChange(schedule, mins);
+  }, [onChange, value]);
 
   const handleAtChange = useCallback((dateTime: string) => {
     setAtDateTime(dateTime);
@@ -141,111 +195,18 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
 
       {/* Tab content */}
       <div className="mt-3">
-        {activeKind === 'every' && (
-          <div>
-            <div className="flex flex-wrap gap-2">
-              {CRON_INTERVAL_PRESETS.map(preset => (
-                <button
-                  key={preset.value}
-                  type="button"
-                  onClick={() => handlePresetClick(preset.value)}
-                  className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
-                    !isCustom && intervalMinutes === preset.value
-                      ? 'bg-[var(--accent)] text-white'
-                      : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
-                  }`}
-                >
-                  {preset.label}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={() => {
-                  setIsCustom(true);
-                  setCustomMinutes(String(intervalMinutes));
-                }}
-                className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
-                  isCustom
-                    ? 'bg-[var(--accent)] text-white'
-                    : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
-                }`}
-              >
-                自定义
-              </button>
-            </div>
-            {isCustom && (
-              <div className="mt-2.5 flex items-center gap-2">
-                <input
-                  type="number"
-                  min={MIN_CRON_INTERVAL}
-                  value={customMinutes}
-                  onChange={e => handleCustomMinutesChange(e.target.value)}
-                  className="w-24 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-1.5 text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none"
-                  placeholder={String(MIN_CRON_INTERVAL)}
-                />
-                <span className="text-[13px] text-[var(--ink-muted)]">分钟（最少 {MIN_CRON_INTERVAL} 分钟）</span>
-              </div>
-            )}
-
-            {/* Start time */}
-            <div className="mt-3 flex items-center gap-2">
-              <span className="text-xs text-[var(--ink-muted)]">开始时间</span>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setStartMode('now');
-                    setStartAt('');
-                    onChange(null, intervalMinutes);
-                  }}
-                  className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
-                    startMode === 'now'
-                      ? 'bg-[var(--accent)] text-white'
-                      : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
-                  }`}
-                >
-                  立刻
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setStartMode('scheduled');
-                    const defaultStart = toLocalDateTimeString(new Date(Date.now() + 3600000));
-                    setStartAt(defaultStart);
-                    onChange({ kind: 'every', minutes: intervalMinutes, startAt: new Date(defaultStart).toISOString() }, intervalMinutes);
-                  }}
-                  className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
-                    startMode === 'scheduled'
-                      ? 'bg-[var(--accent)] text-white'
-                      : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
-                  }`}
-                >
-                  指定时间
-                </button>
-              </div>
-              {startMode === 'scheduled' && (
-                <input
-                  type="datetime-local"
-                  value={startAt}
-                  min={toLocalDateTimeString(new Date(Date.now() + 60000))}
-                  onChange={e => {
-                    setStartAt(e.target.value);
-                    if (e.target.value) {
-                      onChange({ kind: 'every', minutes: intervalMinutes, startAt: new Date(e.target.value).toISOString() }, intervalMinutes);
-                    }
-                  }}
-                  className="rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-2 py-1 text-xs text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none"
-                />
-              )}
-            </div>
-          </div>
-        )}
-
-        {activeKind === 'cron' && (
+        {/* 周期触发 — merged every + cron. The 5-chip picker inside
+            CronExpressionInput covers 固定周期 (→ CronSchedule.every)
+            plus 每天 / 工作日 / 每周 / 每月 (→ CronSchedule.cron).
+            `handleCronChange` is what emits the right `kind` based on
+            whether the expr is empty or not. */}
+        {activeKind === 'recurring' && (
           <CronExpressionInput
             expr={cronExpr}
             tz={cronTz}
             onChange={handleCronChange}
+            intervalMinutes={intervalMinutes}
+            onIntervalChange={handleIntervalChange}
           />
         )}
 

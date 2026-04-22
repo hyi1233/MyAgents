@@ -1,5 +1,5 @@
-import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
-import { mkdir, rename, rm, stat } from 'fs/promises';
+import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
+import { rename, rm, stat } from 'fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
 import AdmZip from 'adm-zip';
@@ -25,6 +25,7 @@ import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } f
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
 import type { McpServerDefinition } from '../renderer/config/types';
+import { ensureDirSync, ensureDir } from './utils/fs-utils';
 import {
   setCronTaskContext,
   clearCronTaskContext,
@@ -38,14 +39,20 @@ import {
   handleMcpList, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
   handleMcpOAuthDiscover, handleMcpOAuthStart, handleMcpOAuthStatus, handleMcpOAuthRevoke,
   handleModelList, handleModelAdd, handleModelRemove, handleModelSetKey, handleModelSetDefault, handleModelVerify,
-  handleAgentList, handleAgentEnable, handleAgentDisable, handleAgentSet,
+  handleAgentList, handleAgentShow, handleAgentEnable, handleAgentDisable, handleAgentSet,
   handleAgentChannelList, handleAgentChannelAdd, handleAgentChannelRemove,
+  handleRuntimeList, handleRuntimeDescribe,
   handleConfigGet, handleConfigSet, handleStatus, handleReload, handleHelp,
   handleVersion,
   handleCronList, handleCronCreate, handleCronStop, handleCronStart, handleCronDelete, handleCronUpdate, handleCronRuns, handleCronStatus,
   handleCronExit, handleImSendMedia, handleReadme,
   handlePluginList, handlePluginInstall, handlePluginUninstall,
   handleAgentRuntimeStatus,
+  handleTaskList, handleTaskGet, handleTaskCreateDirect, handleTaskCreateFromAlignment,
+  handleTaskUpdateStatus, handleTaskAppendSession,
+  handleTaskArchive, handleTaskDelete, handleTaskRun, handleTaskRerun,
+  handleTaskReadDoc, handleTaskWriteDoc,
+  handleThoughtList, handleThoughtCreate,
 } from './admin-api';
 import { setImMediaContext } from './tools/im-media-tool';
 import { setImBridgeToolsContext } from './tools/im-bridge-tools';
@@ -156,6 +163,11 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
+import { findAgentByWorkspacePath } from './utils/admin-config';
+import { snapshotForOwnedSession } from './utils/session-snapshot';
+import { resolveSessionConfig } from './utils/resolve-session-config';
+import type { AgentConfig } from '../shared/types/agent';
+import type { SessionMetadata } from './types/session';
 import { initLogger, getLoggerDiagnostics } from './logger';
 import { cleanupOldLogs } from './AgentLogger';
 import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
@@ -168,6 +180,8 @@ import {
   shouldUseExternalRuntime,
   sendExternalMessage,
   respondExternalPermission,
+  respondExternalAskUserQuestion,
+  hasPendingExternalAskUserQuestion,
   stopExternalSession,
   isExternalSessionActive,
   queryRuntimeModels,
@@ -188,6 +202,7 @@ import {
   prewarmExternalSession,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
+import { VALID_RUNTIMES } from '../shared/types/runtime';
 import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
 
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
@@ -314,7 +329,7 @@ async function ensureAgentDir(dir: string): Promise<string> {
   const expanded = expandTilde(dir);
   const resolved = resolve(expanded);
   if (!existsSync(resolved)) {
-    await mkdir(resolved, { recursive: true });
+    await ensureDir(resolved);
   }
   const info = await stat(resolved);
   if (!info.isDirectory()) {
@@ -358,7 +373,7 @@ function writeSkillsConfig(config: SkillsConfig): void {
   const configPath = getSkillsConfigPath();
   try {
     const dir = dirname(configPath);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    ensureDirSync(dir);
     // Auto-increment generation on every write — signals Tab Sidecars to re-sync symlinks
     config.generation = (config.generation || 0) + 1;
     writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
@@ -434,8 +449,32 @@ function resolveBundledSkillsDir(): string | null {
 }
 
 /**
+ * System skills — owned by the app, version-gated by the Rust side
+ * (`SYSTEM_SKILLS` + `SYSTEM_SKILLS_VERSION` in `src-tauri/src/commands.rs`).
+ * These are skipped by `seedBundledSkills` below because their lifecycle
+ * is "force-overwrite on every version bump", not "seed once then leave
+ * alone". Keep this list in sync with the Rust constant — a mismatch
+ * would either double-seed (harmless but confusing logs) or skip a
+ * genuine user skill named identically.
+ */
+const SYSTEM_SKILLS: readonly string[] = [
+  'task-alignment',
+  'task-implement',
+  'ultra-research',
+  'download-anything',
+];
+
+/**
  * Seed bundled skills to ~/.myagents/skills/ on first launch.
  * Only copies skills that haven't been seeded before (tracked in skills-config.json).
+ *
+ * System skills (SYSTEM_SKILLS above) are owned by Rust's
+ * `cmd_sync_system_skills` and are skipped here — they need the
+ * version-gated force-overwrite path, not the seed-once-then-hands-off
+ * path. If we seeded them here AND Rust overwrote them, the interaction
+ * would be harmless (Rust always wins, ordering-wise) but we'd log a
+ * "skipped existing folder" every boot, and the `config.seeded` array
+ * would grow stale entries users don't recognise.
  */
 function seedBundledSkills(): void {
   try {
@@ -449,7 +488,7 @@ function seedBundledSkills(): void {
     const homeDir = getHomeDirOrNull() || '';
     const userSkillsDir = join(homeDir, '.myagents', 'skills');
 
-    if (!existsSync(userSkillsDir)) mkdirSync(userSkillsDir, { recursive: true });
+    ensureDirSync(userSkillsDir);
 
     const bundledFolders = readdirSync(bundledDir, { withFileTypes: true })
       .filter(d => d.isDirectory())
@@ -457,6 +496,10 @@ function seedBundledSkills(): void {
 
     let changed = false;
     for (const folder of bundledFolders) {
+      if (SYSTEM_SKILLS.includes(folder)) {
+        // Owned by Rust version gate — skip silently.
+        continue;
+      }
       if (isSkillBlockedOnPlatform(folder)) {
         console.log(`[seed] Skipping ${folder} on ${process.platform} (platform blocked)`);
         continue;
@@ -639,7 +682,7 @@ function migrateProfileToStorageState(): void {
 
     const storageState = { cookies, origins: [] as Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }> };
 
-    mkdirSync(myagentsDir, { recursive: true });
+    ensureDirSync(myagentsDir);
     writeFileSync(storageStatePath, JSON.stringify(storageState, null, 2));
     console.log(`[migration] Migrated ${cookies.length} cookies from Chrome profile to ${storageStatePath}`);
     console.log('[migration] Old profile at ~/.playwright-mcp-profile/ can be safely deleted');
@@ -670,8 +713,8 @@ function writeAgentBrowserWrapper(cliPath: string): boolean {
   }
   const binDir = join(homeDir, '.myagents', 'bin');
   const shimsDir = join(homeDir, '.myagents', 'shims');
-  if (!existsSync(binDir)) mkdirSync(binDir, { recursive: true });
-  if (!existsSync(shimsDir)) mkdirSync(shimsDir, { recursive: true });
+  ensureDirSync(binDir);
+  ensureDirSync(shimsDir);
 
   // POSIX sh: escape backslash, double-quote, dollar, backtick inside double-quoted strings
   const shellEscape = (s: string) => s.replace(/([\\"`$])/g, '\\$1');
@@ -803,7 +846,7 @@ function autoInstallAgentBrowser(): void {
   const installDir = join(homeDir, '.myagents', 'agent-browser-cli');
   const lockFile = join(installDir, '.installing');
 
-  if (!existsSync(installDir)) mkdirSync(installDir, { recursive: true });
+  ensureDirSync(installDir);
 
   // Atomic lock: stale check + exclusive create (same pattern as ensureChromiumInstalled)
   if (existsSync(lockFile)) {
@@ -1042,6 +1085,17 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /**
+ * Strip credential-bearing fields from a SessionMetadata before returning to clients.
+ * Replaces providerEnvJson with '[redacted]' when present (so the client can still tell
+ * a provider override exists without seeing the raw API key). Used by GET /sessions,
+ * GET /sessions/:id, and PATCH /sessions/:id response shapes — zero-trust parity.
+ */
+function redactSessionMetadata<T extends { providerEnvJson?: string }>(meta: T): T {
+  if (meta.providerEnvJson === undefined) return meta;
+  return { ...meta, providerEnvJson: '[redacted]' };
+}
+
+/**
  * Route /api/admin/* requests to the appropriate handler.
  * Keeps the route matching logic clean and separated from business logic (in admin-api.ts).
  */
@@ -1072,12 +1126,15 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
 
   // Agent commands
   if (route === 'agent/list') return handleAgentList();
+  if (route === 'agent/show') return handleAgentShow(payload as Parameters<typeof handleAgentShow>[0]);
   if (route === 'agent/enable') return handleAgentEnable(payload as Parameters<typeof handleAgentEnable>[0]);
   if (route === 'agent/disable') return handleAgentDisable(payload as Parameters<typeof handleAgentDisable>[0]);
   if (route === 'agent/set') return handleAgentSet(payload as Parameters<typeof handleAgentSet>[0]);
   if (route === 'agent/channel/list') return handleAgentChannelList(payload as Parameters<typeof handleAgentChannelList>[0]);
   if (route === 'agent/channel/add') return handleAgentChannelAdd(payload as Parameters<typeof handleAgentChannelAdd>[0]);
   if (route === 'agent/channel/remove') return handleAgentChannelRemove(payload as Parameters<typeof handleAgentChannelRemove>[0]);
+  if (route === 'runtime/list') return await handleRuntimeList();
+  if (route === 'runtime/describe') return await handleRuntimeDescribe(payload as Parameters<typeof handleRuntimeDescribe>[0]);
 
   // Agent runtime status
   if (route === 'agent/runtime-status') return await handleAgentRuntimeStatus();
@@ -1122,6 +1179,22 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   // Config commands
   if (route === 'config/get') return handleConfigGet(payload as Parameters<typeof handleConfigGet>[0]);
   if (route === 'config/set') return handleConfigSet(payload as Parameters<typeof handleConfigSet>[0]);
+
+  // Task Center — thoughts + tasks (v0.1.69)
+  if (route === 'task/list') return await handleTaskList(payload as Parameters<typeof handleTaskList>[0]);
+  if (route === 'task/get') return await handleTaskGet(payload as Parameters<typeof handleTaskGet>[0]);
+  if (route === 'task/create-direct') return await handleTaskCreateDirect(payload);
+  if (route === 'task/create-from-alignment') return await handleTaskCreateFromAlignment(payload);
+  if (route === 'task/run') return await handleTaskRun(payload as Parameters<typeof handleTaskRun>[0]);
+  if (route === 'task/rerun') return await handleTaskRerun(payload as Parameters<typeof handleTaskRerun>[0]);
+  if (route === 'task/update-status') return await handleTaskUpdateStatus(payload);
+  if (route === 'task/append-session') return await handleTaskAppendSession(payload as Parameters<typeof handleTaskAppendSession>[0]);
+  if (route === 'task/archive') return await handleTaskArchive(payload as Parameters<typeof handleTaskArchive>[0]);
+  if (route === 'task/delete') return await handleTaskDelete(payload as Parameters<typeof handleTaskDelete>[0]);
+  if (route === 'task/read-doc') return await handleTaskReadDoc(payload as Parameters<typeof handleTaskReadDoc>[0]);
+  if (route === 'task/write-doc') return await handleTaskWriteDoc(payload as Parameters<typeof handleTaskWriteDoc>[0]);
+  if (route === 'thought/list') return await handleThoughtList(payload as Parameters<typeof handleThoughtList>[0]);
+  if (route === 'thought/create') return await handleThoughtCreate(payload as Parameters<typeof handleThoughtCreate>[0]);
 
   // System commands
   if (route === 'status') return handleStatus();
@@ -1183,7 +1256,7 @@ function stripYamlFrontmatter(content: string): string {
  * @param logPrefix Optional prefix for log messages
  */
 function copyDirRecursiveSync(src: string, dest: string, logPrefix = '[copyDir]'): void {
-  mkdirSync(dest, { recursive: true });
+  ensureDirSync(dest);
   const entries = readdirSync(src, { withFileTypes: true });
   for (const entry of entries) {
     const srcPath = join(src, entry.name);
@@ -1312,7 +1385,7 @@ function startupBeacon(step: string): void {
     const m = String(now.getMonth() + 1).padStart(2, '0');
     const d = String(now.getDate()).padStart(2, '0');
     const logsDir = join(homedir(), '.myagents', 'logs');
-    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true });
+    ensureDirSync(logsDir);
     const filePath = join(logsDir, `unified-${y}-${m}-${d}.log`);
     const h = String(now.getHours()).padStart(2, '0');
     const mi = String(now.getMinutes()).padStart(2, '0');
@@ -1515,57 +1588,6 @@ async function main() {
             { success: false, error: error instanceof Error ? error.message : 'Failed to read session messages' },
             500
           );
-        }
-      }
-
-      // Check ~/.claude/settings.json for env overrides (ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY)
-      // External tools like cc-switch write these, which override MyAgents' provider settings via SDK bug
-      if (pathname === '/api/claude-settings/check-env' && request.method === 'GET') {
-        try {
-          const homeDir = getHomeDirOrNull() || '';
-          if (!homeDir) return jsonResponse({ hasOverrides: false });
-          const settingsPath = join(homeDir, '.claude', 'settings.json');
-          const file = Bun.file(settingsPath);
-          if (!(await file.exists())) return jsonResponse({ hasOverrides: false });
-          const settings = await file.json() as { env?: Record<string, string> };
-          const env = settings?.env;
-          if (!env) return jsonResponse({ hasOverrides: false });
-          const baseUrl = env.ANTHROPIC_BASE_URL || undefined;
-          const apiKey = env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || undefined;
-          if (!baseUrl && !apiKey) return jsonResponse({ hasOverrides: false });
-          return jsonResponse({ hasOverrides: true, baseUrl, hasApiKey: !!apiKey });
-        } catch {
-          return jsonResponse({ hasOverrides: false });
-        }
-      }
-
-      // Clear env overrides from ~/.claude/settings.json
-      if (pathname === '/api/claude-settings/clear-env' && request.method === 'POST') {
-        try {
-          const homeDir = getHomeDirOrNull() || '';
-          if (!homeDir) return jsonResponse({ success: false, error: 'Home directory not found' }, 400);
-          const settingsPath = join(homeDir, '.claude', 'settings.json');
-          const file = Bun.file(settingsPath);
-          if (!(await file.exists())) return jsonResponse({ success: true });
-          const settings = await file.json() as Record<string, unknown>;
-          if (!settings.env) return jsonResponse({ success: true });
-          const env = settings.env as Record<string, string>;
-          delete env.ANTHROPIC_BASE_URL;
-          delete env.ANTHROPIC_API_KEY;
-          delete env.ANTHROPIC_AUTH_TOKEN;
-          // Remove env key entirely if empty
-          if (Object.keys(env).length === 0) {
-            delete settings.env;
-          }
-          // Atomic write: temp file + rename to prevent corruption
-          const tmpPath = settingsPath + '.tmp';
-          await Bun.write(tmpPath, JSON.stringify(settings, null, 2) + '\n');
-          await rename(tmpPath, settingsPath);
-          console.log('[claude-settings] Cleared ANTHROPIC_BASE_URL/API_KEY from ~/.claude/settings.json');
-          return jsonResponse({ success: true });
-        } catch (err) {
-          console.error('[claude-settings] Failed to clear env:', err);
-          return jsonResponse({ success: false, error: err instanceof Error ? err.message : String(err) }, 500);
         }
       }
 
@@ -2104,8 +2126,39 @@ async function main() {
           console.log(`[cron] execute taskId=${taskId} sessionId=${currentSessionId} interval=${intervalMinutes}min exec#=${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
           // Wrap cron prompt so AI recognizes it as system-triggered (not a real-time human message)
           const wrappedPrompt = `<system-reminder>\n<CRON_TASK>\n${prompt}\n</CRON_TASK>\n</system-reminder>`;
+
+          // v0.1.69 T15: Resolve per-tick from the session snapshot (owned kind).
+          // This endpoint runs against whatever session is already loaded in this
+          // Sidecar, so there's no switch step — but the snapshot is still
+          // authoritative over task-frozen payload fields.
+          let effectiveModel = model;
+          let effectiveProviderEnv: typeof providerEnv = providerEnv;
+          let effectiveRuntimeConfig = payload.runtimeConfig;
+          if (currentSessionId) {
+            const sessionMeta = getSessionMetadata(currentSessionId);
+            const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+            if (sessionMeta && agent) {
+              const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
+              if (resolved.model !== undefined) effectiveModel = resolved.model;
+              if (resolved.providerEnvJson) {
+                try {
+                  effectiveProviderEnv = JSON.parse(resolved.providerEnvJson);
+                } catch (e) {
+                  console.warn(`[cron] execute T15: failed to parse providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`, e);
+                }
+              }
+              if (resolved.runtime !== 'builtin') {
+                effectiveRuntimeConfig = {
+                  ...(payload.runtimeConfig ?? {}),
+                  model: resolved.model ?? payload.runtimeConfig?.model,
+                  permissionMode: resolved.permissionMode ?? payload.runtimeConfig?.permissionMode,
+                };
+              }
+            }
+          }
+
           if (shouldUseExternalRuntime()) {
-            const runtimeConfig = payload.runtimeConfig ?? null;
+            const runtimeConfig = effectiveRuntimeConfig ?? null;
             const runtimeResult = await sendExternalMessage(
               wrappedPrompt, undefined, undefined, undefined,
               {
@@ -2122,7 +2175,7 @@ async function main() {
           } else {
             // Cron tasks are unattended — bypass all permissions so tool requests
             // don't block indefinitely waiting for a user who isn't present.
-            await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', model, providerEnv);
+            await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', effectiveModel, effectiveProviderEnv);
           }
           // Reset scenario after enqueue — already consumed by startStreamingSession()
           resetInteractionScenario();
@@ -2170,15 +2223,37 @@ async function main() {
         let effectiveSessionId = sessionId;
 
         if (effectiveRunMode === 'new_session') {
-          // Create a fresh session for each execution (no memory of previous runs)
-          const newSession = createSession(agentDir, payload.runtime ?? getActiveRuntimeType());
+          // Create a fresh session for each execution (no memory of previous runs).
+          // v0.1.69: Cron new_task ticks are structurally 'owned' — every tick reads the
+          // current Agent and freezes a snapshot into the new SessionMetadata. Per-tick
+          // freshness keeps "live-follow" semantics for cron without inventing a third
+          // owner kind in resolveSessionConfig (PRD D4 footnote).
+          const cronAgent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+          const cronSnapshot: Partial<SessionMetadata> = cronAgent ? snapshotForOwnedSession(cronAgent) : {};
+          const overrideRuntime = payload.runtime ?? getActiveRuntimeType();
+          if (overrideRuntime) cronSnapshot.runtime = overrideRuntime;
+          // Rust rotates a fresh UUID per tick for new_session mode (see
+          // cron_task.rs::rotate_new_session_id) and passes it as
+          // payload.sessionId. Honour that id here — if we generated our
+          // own instead, Rust's ManagedSidecar registry would be keyed by
+          // the Rust-chosen id while the actual running session used a
+          // different Bun-chosen id, and opening the session via history
+          // would spawn a duplicate read-only sidecar (Bug A, v0.1.69).
+          //
+          // Fallback to a fresh random id only when payload.sessionId is
+          // missing — keeps backward-compat with older Rust builds that
+          // didn't pre-generate the id.
+          if (sessionId) {
+            cronSnapshot.id = sessionId;
+          }
+          const newSession = createSession(agentDir, cronSnapshot);
           const switched = await switchToSession(newSession.id);
           if (!switched) {
             console.error(`[cron] execute-sync taskId=${taskId} failed to switch to new session ${newSession.id}`);
             return jsonResponse({ success: false, error: 'Failed to create new session for execution.' }, 500);
           }
           effectiveSessionId = newSession.id;
-          console.log(`[cron] execute-sync taskId=${taskId} new_session mode: created fresh session ${newSession.id}`);
+          console.log(`[cron] execute-sync taskId=${taskId} new_session mode: created fresh session ${newSession.id} (from=${sessionId ? 'rust-payload' : 'bun-fallback'})`);
         } else if (sessionId) {
           // single_session mode: switch to the task's stored session (keeps context)
           // If already in the target session, skip switchToSession to avoid aborting
@@ -2200,6 +2275,77 @@ async function main() {
           }
         } else {
           console.log(`[cron] execute-sync taskId=${taskId} no sessionId provided, using current session`);
+        }
+
+        // v0.1.69 T15: Cron per-tick resolve — unified for both run modes.
+        //
+        // Both single_session and new_session derive their effective config from the
+        // session snapshot that was captured at creation time (single_session: at
+        // CronTask creation; new_session: at each tick by `snapshotForOwnedSession`
+        // above). CronTask.model / provider_env / runtime_config are task-frozen
+        // fallbacks used only if no snapshot exists.
+        //
+        // Resolving for both paths keeps "payload.model" from winning over the fresh
+        // per-tick snapshot in new_session mode — if the user edits the Agent between
+        // ticks, new_session picks up the change next tick via the fresh snapshot.
+        let effectiveModel = model;
+        let effectiveProviderEnv: typeof providerEnv = providerEnv;
+        let effectiveRuntimeConfig = payload.runtimeConfig;
+        const snapshotSessionId = effectiveSessionId ?? getSessionId();
+        if (snapshotSessionId) {
+          const sessionMeta = getSessionMetadata(snapshotSessionId);
+          const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+          if (sessionMeta && agent) {
+            const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
+            if (resolved.model !== undefined) effectiveModel = resolved.model;
+            if (resolved.providerEnvJson) {
+              try {
+                effectiveProviderEnv = JSON.parse(resolved.providerEnvJson);
+              } catch (e) {
+                console.warn(`[cron] execute-sync T15: failed to parse providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`, e);
+              }
+            }
+            if (resolved.runtime !== 'builtin') {
+              effectiveRuntimeConfig = {
+                ...(payload.runtimeConfig ?? {}),
+                model: resolved.model ?? payload.runtimeConfig?.model,
+                permissionMode: resolved.permissionMode ?? payload.runtimeConfig?.permissionMode,
+              };
+            }
+            console.log(`[cron] execute-sync T15: resolved from snapshot session=${snapshotSessionId} runMode=${effectiveRunMode} snapshotLocked=${Boolean(sessionMeta.configSnapshotAt)} model=${effectiveModel ?? 'default'} runtime=${resolved.runtime}`);
+          }
+        }
+
+        // Per-task override precedence (v0.1.69 cross-review fix):
+        //
+        // Task-level `model` / `permissionMode` set at task creation time (via
+        // CLI `--model` / `--permissionMode` flags on `task create-direct` /
+        // `task create-from-alignment`) are explicit per-task intent — the user
+        // said "this task should run with this model regardless of what the
+        // session/agent defaults are". They must therefore win over both
+        // (a) the agent default copied into a fresh new_session snapshot, and
+        // (b) the historical session snapshot reused by single_session mode.
+        //
+        // We apply on top of `effectiveModel` / `effectiveRuntimeConfig` rather
+        // than injecting into the snapshot, so the behavior is identical for
+        // both run modes and the snapshot itself stays a pure derivation of
+        // session history.
+        //
+        // Without this block, the CLI surface accepts and validates overrides,
+        // `enrichTaskCreateResponse` echoes them back as "overridden" — but
+        // dispatch silently falls back to the snapshot value. That's the
+        // silent-data-loss bug cross-review flagged on 2026-04-22.
+        if (payload.model) {
+          effectiveModel = payload.model;
+          if (effectiveRuntimeConfig) {
+            effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model };
+          }
+        }
+        if (payload.permissionMode) {
+          effectiveRuntimeConfig = {
+            ...(effectiveRuntimeConfig ?? {}),
+            permissionMode: payload.permissionMode,
+          };
         }
 
         // Set cron task context so the exit_cron_task tool knows which task is running
@@ -2235,7 +2381,8 @@ async function main() {
 
           if (shouldUseExternalRuntime()) {
             // ─── External Runtime (CC/Codex): cron task ───
-            const runtimeConfig = payload.runtimeConfig ?? null;
+            // T15: effectiveRuntimeConfig carries snapshot-resolved model/permissionMode
+            const runtimeConfig = effectiveRuntimeConfig ?? null;
             const ccResult = await sendExternalMessage(
               wrappedPrompt, undefined, undefined, undefined,
               {
@@ -2272,7 +2419,9 @@ async function main() {
             // ─── Builtin Runtime: existing path ───
             // Cron tasks are unattended — bypass all permissions so tool requests
             // (e.g. Bash) don't block forever waiting for human approval.
-            const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', model, providerEnv);
+            // T15: effectiveModel / effectiveProviderEnv come from the session snapshot
+            //      (single_session) or payload defaults (new_session / fallback).
+            const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', effectiveModel, effectiveProviderEnv);
             console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
             // Wait for session to become idle (execution complete)
@@ -2498,7 +2647,10 @@ async function main() {
           const sessions = agentDirParam
             ? getSessionsByAgentDir(agentDirParam)
             : getAllSessionMetadata();
-          return jsonResponse({ success: true, sessions });
+          // Zero-trust: strip providerEnvJson before handing to clients.
+          // Matches PATCH response behavior (see PATCH /sessions/:id).
+          const safeSessions = sessions.map(redactSessionMetadata);
+          return jsonResponse({ success: true, sessions: safeSessions });
         } catch (error) {
           console.error('[sessions] Error in GET /sessions:', error);
           return jsonResponse({
@@ -2522,11 +2674,20 @@ async function main() {
           return jsonResponse({ success: false, error: 'agentDir is required.' }, 400);
         }
 
-        const VALID_RUNTIMES = ['builtin', 'claude-code', 'codex', 'gemini'] as const;
-        const runtimeValue = VALID_RUNTIMES.includes(payload?.runtime as typeof VALID_RUNTIMES[number])
+        // Use the shared VALID_RUNTIMES constant — same list that drives
+        // admin-api validation and HELP_TEXTS. A local literal here used to
+        // silently drift when new runtimes landed.
+        const runtimeValue = (VALID_RUNTIMES as readonly string[]).includes(payload?.runtime as string)
           ? (payload.runtime as import('../shared/types/runtime').RuntimeType)
           : undefined;
-        const session = createSession(agentDirValue, runtimeValue);
+        // v0.1.69 Desktop session = owned snapshot. Capture model/permission/mcp/provider
+        // from AgentConfig so the session is self-contained from creation onward.
+        // The frontend's runtime override (payload.runtime) wins over agent.runtime — Tab UI
+        // can pin a session to a specific runtime independent of the Agent's default.
+        const agent = findAgentByWorkspacePath(agentDirValue) as AgentConfig | undefined;
+        const baseSnapshot = agent ? snapshotForOwnedSession(agent) : {};
+        if (runtimeValue) baseSnapshot.runtime = runtimeValue;
+        const session = createSession(agentDirValue, baseSnapshot);
         return jsonResponse({ success: true, session });
       }
 
@@ -2775,7 +2936,7 @@ async function main() {
         // of screenshots. Browser dev mode uses the /api/attachment/* fallback
         // route below.
         const sessionWithPreview = {
-          ...session,
+          ...redactSessionMetadata(session),
           liveStreamingMessage,
           liveSessionState: shouldUseExternalRuntime() && sessionId === getExternalSessionId()
             ? getExternalSessionState()
@@ -2803,16 +2964,28 @@ async function main() {
         return jsonResponse({ success: true });
       }
 
-      // PATCH /sessions/:id - Update session metadata
+      // PATCH /sessions/:id - Update session metadata (incl. v0.1.69 config snapshot)
       if (pathname.startsWith('/sessions/') && request.method === 'PATCH') {
         const sessionId = pathname.replace('/sessions/', '');
         if (!sessionId) {
           return jsonResponse({ success: false, error: 'Session ID required.' }, 400);
         }
 
-        let payload: { title?: string; titleSource?: 'default' | 'auto' | 'user' };
+        // Snapshot fields (v0.1.69): send `null` to clear (revert to agent fallback);
+        // omit a field to leave it unchanged.
+        interface PatchPayload {
+          title?: string;
+          titleSource?: 'default' | 'auto' | 'user';
+          model?: string | null;
+          permissionMode?: string | null;
+          mcpEnabledServers?: string[] | null;
+          providerId?: string | null;
+          providerEnvJson?: string | null;
+        }
+
+        let payload: PatchPayload;
         try {
-          payload = (await request.json()) as { title?: string; titleSource?: 'default' | 'auto' | 'user' };
+          payload = (await request.json()) as PatchPayload;
         } catch {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
@@ -2821,13 +2994,38 @@ async function main() {
         if (payload.title !== undefined) updates.title = String(payload.title).slice(0, 100);
         if (payload.titleSource !== undefined) updates.titleSource = payload.titleSource;
 
+        // Snapshot fields: null → clear (undefined in stored JSON); value → set.
+        // `undefined` in stored metadata is how the resolver recognizes "fall back to agent".
+        const snapshotKeys = [
+          'model',
+          'permissionMode',
+          'mcpEnabledServers',
+          'providerId',
+          'providerEnvJson',
+        ] as const;
+        let wroteSnapshotField = false;
+        for (const key of snapshotKeys) {
+          const v = payload[key];
+          if (v === undefined) continue;
+          updates[key] = v === null ? undefined : v;
+          wroteSnapshotField = true;
+        }
+
+        // Stamp configSnapshotAt on the first snapshot write (lazy migration).
+        // Also bumps on subsequent writes — harmless, useful for debugging.
+        if (wroteSnapshotField) {
+          updates.configSnapshotAt = new Date().toISOString();
+        }
+
         const updated = updateSessionMetadata(sessionId, updates as Parameters<typeof updateSessionMetadata>[1]);
 
         if (!updated) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
 
-        return jsonResponse({ success: true, session: updated });
+        // Zero-trust: redact credential-bearing fields from the echo payload.
+        // The client already owns what it sent; no need to round-trip secrets.
+        return jsonResponse({ success: true, session: redactSessionMetadata(updated) });
       }
 
       // POST /sessions/switch - Switch to existing session for resume
@@ -3242,7 +3440,7 @@ async function main() {
           if (files.length === 0) {
             return jsonResponse({ error: 'No files provided.' }, 400);
           }
-          await mkdir(resolvedTarget, { recursive: true });
+          await ensureDir(resolvedTarget);
           const saved: string[] = [];
           for (const file of files) {
             const safeName = file.name.replace(/[<>:"/\\|?*]/g, '_');
@@ -3325,7 +3523,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'Folder already exists.' }, 409);
           }
 
-          await mkdir(folderPath, { recursive: true });
+          await ensureDir(folderPath);
           return jsonResponse({ success: true, path: relative(currentAgentDir, folderPath) });
         } catch (error) {
           return jsonResponse(
@@ -3625,7 +3823,7 @@ async function main() {
             return jsonResponse({ error: 'No files provided.' }, 400);
           }
 
-          await mkdir(resolvedTarget, { recursive: true });
+          await ensureDir(resolvedTarget);
           const saved: string[] = [];
 
           for (const file of files) {
@@ -3669,7 +3867,7 @@ async function main() {
           }
 
           // Ensure target directory exists
-          await mkdir(resolvedTarget, { recursive: true });
+          await ensureDir(resolvedTarget);
 
           const saved: string[] = [];
 
@@ -3730,7 +3928,7 @@ async function main() {
           }
 
           // Ensure target directory exists
-          await mkdir(resolvedTarget, { recursive: true });
+          await ensureDir(resolvedTarget);
 
           const copiedFiles: Array<{ sourcePath: string; targetPath: string; renamed: boolean }> = [];
 
@@ -3756,7 +3954,7 @@ async function main() {
 
           // Helper function to copy directory recursively
           const copyDirectory = async (src: string, dest: string) => {
-            await mkdir(dest, { recursive: true });
+            await ensureDir(dest);
             const entries = readdirSync(src, { withFileTypes: true });
 
             for (const entry of entries) {
@@ -4369,7 +4567,7 @@ async function main() {
 
             // Acquire lock
             if (!existsSync(CACHE_DIR)) {
-              mkdirSync(CACHE_DIR, { recursive: true });
+              ensureDirSync(CACHE_DIR);
             }
             writeFileSync(LOCK_FILE, String(Date.now()));
 
@@ -4992,12 +5190,25 @@ async function main() {
       }
 
       // POST /api/ask-user-question/respond - Handle user's answers to AskUserQuestion
+      // Auto-routes to external runtime (CC) when the request was originated there, otherwise
+      // uses builtin SDK handler. External-runtime tracking lives in external-session.ts.
       if (pathname === '/api/ask-user-question/respond' && request.method === 'POST') {
         try {
           const payload = await request.json() as {
             requestId: string;
             answers: Record<string, string> | null;  // null means user cancelled
           };
+
+          // Route by pending-request ownership, NOT live session state
+          // (cross-review C4): if we track this requestId as external, the
+          // answer belongs to CC even if the process just died. Deferring to
+          // the builtin handler would return "unknown request" and silently
+          // lose the user's input. External handler returns false + logs on
+          // process-gone, surfacing the failure to the UI.
+          if (shouldUseExternalRuntime() && hasPendingExternalAskUserQuestion(payload.requestId)) {
+            const success = await respondExternalAskUserQuestion(payload.requestId, payload.answers);
+            return jsonResponse({ success });
+          }
 
           const { handleAskUserQuestionResponse } = await import('./agent-session');
           const success = handleAskUserQuestionResponse(payload.requestId, payload.answers);
@@ -5442,7 +5653,7 @@ async function main() {
           }
           const targetDir = queryAgentDir || currentAgentDir;
           const rulesDir = join(targetDir, '.claude', 'rules');
-          mkdirSync(rulesDir, { recursive: true });
+          ensureDirSync(rulesDir);
           const filePath = join(rulesDir, filename);
           if (existsSync(filePath)) {
             return jsonResponse({ success: false, error: 'File already exists' }, 409);
@@ -5559,7 +5770,7 @@ async function main() {
           }
           const targetDir = queryAgentDir || currentAgentDir;
           const rulesDir = join(targetDir, '.claude', 'rules');
-          mkdirSync(rulesDir, { recursive: true });
+          ensureDirSync(rulesDir);
           const filePath = join(rulesDir, filename);
           writeFileSync(filePath, payload.content, 'utf-8');
           return jsonResponse({ success: true });
@@ -5798,7 +6009,7 @@ async function main() {
 
           // Ensure MyAgents skills directory exists
           if (!existsSync(userSkillsBaseDir)) {
-            mkdirSync(userSkillsBaseDir, { recursive: true });
+            ensureDirSync(userSkillsBaseDir);
           }
 
           // Get existing folders in MyAgents skills directory
@@ -6085,7 +6296,7 @@ async function main() {
           }
 
           // Ensure global skills directory exists
-          mkdirSync(userSkillsBaseDir, { recursive: true });
+          ensureDirSync(userSkillsBaseDir);
 
           // Copy the skill folder
           copyDirRecursiveSync(srcDir, destDir, '[api/skill/copy-to-global]');
@@ -6130,7 +6341,7 @@ async function main() {
           }
 
           // Create directory structure
-          mkdirSync(skillDir, { recursive: true });
+          ensureDirSync(skillDir);
 
           // Create SKILL.md with default content
           const frontmatter: Partial<SkillFrontmatter> = {
@@ -6240,7 +6451,7 @@ async function main() {
               }
 
               // Create skill directory
-              mkdirSync(skillDir, { recursive: true });
+              ensureDirSync(skillDir);
 
               // Extract files, handling nested structure
               for (const entry of entries) {
@@ -6267,7 +6478,7 @@ async function main() {
 
                 // Create subdirectories if needed
                 if (!existsSync(dir)) {
-                  mkdirSync(dir, { recursive: true });
+                  ensureDirSync(dir);
                 }
 
                 // Write file
@@ -6308,7 +6519,7 @@ async function main() {
             }
 
             // Create skill directory
-            mkdirSync(skillDir, { recursive: true });
+            ensureDirSync(skillDir);
 
             // Write the md file as SKILL.md
             const skillPath = join(skillDir, 'SKILL.md');
@@ -6407,7 +6618,7 @@ async function main() {
 
           // Copy folder recursively
           const copyDir = (src: string, dest: string) => {
-            mkdirSync(dest, { recursive: true });
+            ensureDirSync(dest);
             const entries = readdirSync(src);
 
             for (const entry of entries) {
@@ -6984,7 +7195,7 @@ async function main() {
 
           // Ensure directory exists
           if (!existsSync(baseDir)) {
-            mkdirSync(baseDir, { recursive: true });
+            ensureDirSync(baseDir);
           }
 
           const cmdPath = join(baseDir, `${fileName}.md`);
@@ -7124,7 +7335,7 @@ async function main() {
           }
 
           if (!existsSync(userAgentsBaseDir)) {
-            mkdirSync(userAgentsBaseDir, { recursive: true });
+            ensureDirSync(userAgentsBaseDir);
           }
 
           let synced = 0;
@@ -7220,7 +7431,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'Agent already exists' }, 409);
           }
 
-          mkdirSync(agentFolderDir, { recursive: true });
+          ensureDirSync(agentFolderDir);
 
           const frontmatter: Partial<AgentFrontmatter> = {
             name: payload.name,

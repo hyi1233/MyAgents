@@ -18,6 +18,7 @@ import CustomSelect from '@/components/CustomSelect';
 import type { SelectOption } from '@/components/CustomSelect';
 import Markdown from '@/components/Markdown';
 import MonacoEditor from '@/components/MonacoEditor';
+import { Popover } from '@/components/ui/Popover';
 import type { AgentFrontmatter, AgentDetail } from '../../shared/agentTypes';
 import { sanitizeFolderName } from '../../shared/utils';
 import { PERMISSION_MODES } from '@/config/types';
@@ -159,13 +160,19 @@ function TagInput({
                     <Plus className="h-3.5 w-3.5" />
                 </button>
 
-                {/* Dropdown suggestions */}
-                {showSuggestions && filteredSuggestions.length > 0 && (
-                    <div
-                        ref={listRef}
-                        role="listbox"
-                        className="absolute left-0 top-full z-10 mt-1 max-h-40 w-full overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-lg"
-                    >
+                {/* Dropdown suggestions — anchored to the input; kept open
+                    while the input has focus (onBlur closes after a small
+                    delay to allow click-through to suggestion items). */}
+                <Popover
+                    open={showSuggestions && filteredSuggestions.length > 0}
+                    onClose={() => setShowSuggestions(false)}
+                    anchorRef={inputRef}
+                    placement="bottom-start"
+                    matchAnchorWidth
+                    closeOnEscape={false}
+                    className="max-h-40 overflow-y-auto bg-[var(--paper)] shadow-lg"
+                >
+                    <div ref={listRef} role="listbox">
                         {filteredSuggestions.map((s, i) => (
                             <button
                                 key={s}
@@ -184,7 +191,7 @@ function TagInput({
                             </button>
                         ))}
                     </div>
-                )}
+                </Popover>
             </div>
         </div>
     );

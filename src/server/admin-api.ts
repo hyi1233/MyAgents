@@ -27,7 +27,8 @@ import {
   type AgentConfigSlim,
   type ChannelConfigSlim,
 } from './utils/admin-config';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync , writeFileSync, unlinkSync } from 'fs';
+import { ensureDirSync } from './utils/fs-utils';
 import { resolve } from 'path';
 import { setMcpServers, getMcpServers, getAgentState, getSidecarPort } from './agent-session';
 import { broadcast } from './sse';
@@ -35,6 +36,19 @@ import { getCronTaskContext, CRON_TASK_EXIT_TEXT } from './tools/cron-tools';
 import { getImMediaContext } from './tools/im-media-tool';
 import { buildReadMeContent } from './tools/generative-ui-tool';
 import { assertSafeFilePath } from './utils/safe-file-path';
+import {
+  VALID_RUNTIMES,
+  RUNTIME_DISPLAY_NAMES,
+  getRuntimePermissionModes,
+  getDefaultRuntimePermissionMode,
+  type RuntimeType,
+  type RecoveryHint,
+  type RuntimePermissionMode,
+  type RuntimeModelInfo,
+  type RuntimeDetection,
+} from '../shared/types/runtime';
+import { getExternalRuntime, isRuntimeSupported } from './runtimes/factory';
+import { queryRuntimeModels } from './runtimes/external-session';
 
 // ---------------------------------------------------------------------------
 // Management API forwarding (Bun Sidecar → Rust)
@@ -48,7 +62,19 @@ async function managementApi(
   body?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   if (!MGMT_PORT) {
-    return { ok: false, error: 'Management API not available (app may still be starting)' };
+    // Happens when the Bun Sidecar is up but the Rust-side Management API
+    // isn't — during app cold boot, after a crashed restart, or in the
+    // standalone dev sidecar used for CLI smoke tests. Returning the hint
+    // alongside the error lets `wrapMgmtResponse` propagate it to the CLI
+    // so the reader sees `→ Run: myagents status` instead of a dead-end.
+    return {
+      ok: false,
+      error: 'Management API not available (app may still be starting)',
+      recoveryHint: {
+        recoveryCommand: 'myagents status',
+        message: 'Check whether the app backend is fully up; if not, retry in a few seconds.',
+      },
+    };
   }
   const url = `http://127.0.0.1:${MGMT_PORT}${path}`;
   const options: RequestInit = {
@@ -63,7 +89,14 @@ async function managementApi(
     return resp.json() as Promise<Record<string, unknown>>;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `Management API unreachable: ${msg}` };
+    return {
+      ok: false,
+      error: `Management API unreachable: ${msg}`,
+      recoveryHint: {
+        recoveryCommand: 'myagents status',
+        message: 'Check backend health; restart the app if the problem persists.',
+      },
+    };
   }
 }
 
@@ -98,13 +131,45 @@ async function sidecarSelf(
   }
 }
 
+/**
+ * Build an AdminResponse error from a Management API failure, preserving any
+ * `recoveryHint` the helper attached (currently: unreachable-backend cases).
+ *
+ * Use this instead of `{ success: false, error: String(resp.error ?? 'X') }`
+ * in handlers that transform the shape (e.g. list handlers that unwrap
+ * `resp.tasks` / `resp.runs`) — those bypass `wrapMgmtResponse` but still
+ * deserve the hint propagation. Sites that already go through
+ * `wrapMgmtResponse` don't need to change.
+ */
+function mgmtError(resp: Record<string, unknown>, fallbackMsg: string): AdminResponse {
+  const response: AdminResponse = {
+    success: false,
+    error: String(resp.error ?? fallbackMsg),
+  };
+  const hint = resp.recoveryHint;
+  if (hint && typeof hint === 'object' && !Array.isArray(hint)) {
+    response.recoveryHint = hint as RecoveryHint;
+  }
+  return response;
+}
+
 /** Convert Management API response ({ ok, ... }) to Admin API response ({ success, data, error }) */
 function wrapMgmtResponse(mgmt: Record<string, unknown>): AdminResponse {
   if (mgmt.ok) {
-    const { ok: _ok, ...rest } = mgmt;
+    const { ok: _ok, recoveryHint: _rh, ...rest } = mgmt;
     return { success: true, data: rest };
   }
-  return { success: false, error: String(mgmt.error ?? 'Unknown error') };
+  const response: AdminResponse = {
+    success: false,
+    error: String(mgmt.error ?? 'Unknown error'),
+  };
+  // Propagate the `recoveryHint` if the Management API helper attached one
+  // (currently only for unreachable-backend scenarios — see `managementApi`).
+  const maybeHint = mgmt.recoveryHint;
+  if (maybeHint && typeof maybeHint === 'object' && !Array.isArray(maybeHint)) {
+    response.recoveryHint = maybeHint as RecoveryHint;
+  }
+  return response;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +180,21 @@ interface AdminResponse<T = unknown> {
   success: boolean;
   data?: T;
   error?: string;
+  /**
+   * Free-form success tip ("Server added.", "Restart required."). Purely
+   * informational — distinct from `recoveryHint` which is a structured,
+   * actionable recovery path for a failed request.
+   */
   hint?: string;
+  /**
+   * Structured recovery path for recoverable errors. The CLI renders this
+   * under the error line as `→ Run: <command>` so the caller (AI or human)
+   * can copy-paste to correct course without digging through --help.
+   *
+   * Pair a `recoveryHint` with `success: false` + `error` — never emit one
+   * on a success path; use `hint` there.
+   */
+  recoveryHint?: RecoveryHint;
   dryRun?: boolean;
   preview?: unknown;
   [key: string]: unknown;
@@ -957,6 +1036,11 @@ export function handleReload(workspacePath?: string): AdminResponse {
 // Help text
 // ---------------------------------------------------------------------------
 
+// Build the runtime enum line from the single source of truth (VALID_RUNTIMES).
+// This prevents silent drift between docs and validator — if a runtime is
+// added to the RuntimeType union, `--help` picks it up automatically.
+const RUNTIMES_ENUM_LINE = VALID_RUNTIMES.join(' | ');
+
 const HELP_TEXTS: Record<string, string> = {
   mcp: `myagents mcp — Manage MCP tool servers
 
@@ -1025,23 +1109,6 @@ Options for 'add':
   --vendor        Vendor name
   --website-url   Provider website`,
 
-  agent: `myagents agent — Manage agents & channels
-
-Commands:
-  list                     List all agents
-  enable <id>              Enable an agent
-  disable <id>             Disable an agent
-  set <id> <key> <value>   Set agent config field
-  channel list <agent-id>  List channels for an agent
-  channel add <agent-id>   Add a channel
-  channel remove <a-id> <ch-id>  Remove a channel
-
-Options for 'channel add':
-  --type        telegram | feishu | dingtalk (required)
-  --token       Bot token (for telegram)
-  --app-id      App ID (for feishu/dingtalk)
-  --app-secret  App Secret (for feishu/dingtalk)`,
-
   config: `myagents config — Read/write application config
 
 Commands:
@@ -1073,6 +1140,119 @@ Commands:
   list                     List installed plugins
   install <npm-spec>       Install a plugin from npm
   remove <plugin-id>       Uninstall a plugin`,
+
+  runtime: `myagents runtime — Inspect Agent Runtimes (v0.1.69+)
+
+Commands:
+  list                            List all known runtimes + install status
+  describe <runtime>              Show models + permission modes for a runtime
+
+Valid runtimes: ${RUNTIMES_ENUM_LINE}
+
+Examples:
+  myagents runtime list                       # which runtimes are installed?
+  myagents runtime list --json
+  myagents runtime describe codex             # models + permission modes for codex
+  myagents runtime describe gemini --json
+
+Why this exists:
+  'runtime describe' is the command to consult BEFORE choosing values for
+  'task create-direct --runtime / --model / --permissionMode'. The help text
+  for those flags intentionally does NOT list models or modes — values depend
+  on which CLI you have installed and are dynamic. Use this command instead.`,
+
+  task: `myagents task — Manage Task Center tasks (v0.1.69+)
+
+Commands:
+  list                            List tasks (filter via --workspaceId / --status / --tag)
+  get <taskId>                    Task metadata + .task/ doc paths
+  create-direct <name>            Create a task with inline task.md content
+  create-from-alignment <sid>     Materialize a task from an alignment session
+  update-status <taskId> <status> Transition state (running/verifying/done/blocked/stopped)
+  append-session <taskId> <sid>   Link an SDK session id to a task
+  run <taskId>                    Dispatch a todo task for execution
+  rerun <taskId>                  Reset to 'todo' and dispatch
+  archive <taskId>                Soft-archive (with 30d retention)
+  delete <taskId>                 Hard delete
+
+Options for 'create-direct':
+  --name               Task name (required; may also be the 1st positional)
+  --executor           'agent' | 'user' (default: agent)
+  --description        Short description
+  --workspaceId        Workspace id (required)
+  --workspacePath      Absolute workspace path (required)
+  --taskMdFile <path>  Read task.md body from a file (preferred for multi-line
+                       markdown — avoids shell-escape hell). Max 1 MB.
+  --taskMdContent      Inline task.md body (use --taskMdFile instead when
+                       content spans multiple lines / has backticks / quotes).
+                       Exactly one of --taskMdFile / --taskMdContent must be set.
+  --executionMode      'once' | 'scheduled' | 'recurring' | 'loop' (default: once)
+  --runMode            'single-session' | 'new-session'
+  --tags               Comma-separated tag list
+  --sourceThoughtId    Link back to the originating thought
+
+Per-task RUNTIME overrides (all optional; omit to inherit workspace defaults):
+  --runtime            Override runtime (${RUNTIMES_ENUM_LINE})
+                       See: myagents runtime list
+  --model              Override model — values depend on runtime
+                       See: myagents runtime describe <runtime>
+  --permissionMode     Override permission mode — values depend on runtime
+                       See: myagents runtime describe <runtime>
+  --runtimeConfig      JSON string for runtime-specific extra config
+
+Options for 'create-from-alignment' (identical override flags):
+  Positional: <alignmentSessionId>
+  --name               Task name (required)
+  --executor --description --workspaceId --workspacePath
+  --executionMode --runMode --tags --sourceThoughtId
+  --runtime --model --permissionMode --runtimeConfig   (per-task overrides)
+
+Options for 'update-status':
+  Positional: <taskId> <status>
+  --message            Optional message attached to the transition
+
+Output:
+  - Default (human-readable) mode prints a compact summary + any override echo.
+  - --json returns the full structured payload (task id, overrides, overridden[],
+    inheritedFromWorkspace[], nextSteps.{dispatch,inspect}).
+
+Examples:
+  myagents task list --workspaceId my-proj
+  myagents task create-direct --name "review PR" \\
+      --workspaceId my-proj --workspacePath /path/to/my-proj \\
+      --taskMdContent "Review the latest PR and file findings in progress.md" \\
+      --runtime codex --model gpt-5.2 --permissionMode full-auto
+  myagents task create-from-alignment sess_abc --name "Ship feature X" --runtime claude-code
+  myagents task run t_abc123
+  myagents task update-status t_abc123 done --message "shipped in v0.1.70"
+
+Related:
+  myagents agent show <id>          Inspect an agent's effective defaults first,
+                                    so you know what you are overriding.`,
+
+  agent: `myagents agent — Manage agents & channels
+
+Commands:
+  list                            List all agents
+  show <id>                       Show an agent's effective runtime/model/permissionMode defaults
+  enable <id>                     Enable an agent
+  disable <id>                    Disable an agent
+  set <id> <key> <value>          Set agent config field
+  runtime-status                  Runtime drift status across agents
+  channel list <agent-id>         List channels
+  channel add <agent-id>          Add a channel
+  channel remove <a-id> <ch-id>   Remove a channel
+
+Options for 'channel add':
+  --type        telegram | feishu | dingtalk (required)
+  --token       Bot token (for telegram)
+  --app-id      App ID (for feishu/dingtalk)
+  --app-secret  App Secret (for feishu/dingtalk)
+
+Typical flow (AI preparing a task override):
+  1. myagents agent show <id>          — learn current defaults
+  2. myagents runtime describe <rt>    — see valid model + permission values
+  3. myagents task create-direct ... --runtime <rt> --model <m>`,
 };
 
 export function handleHelp(payload: { path?: string[] }): AdminResponse {
@@ -1115,7 +1295,7 @@ export async function handleCronList(payload: { workspacePath?: string }): Promi
   if (resp.ok) {
     return { success: true, data: (resp as Record<string, unknown>).tasks ?? [] };
   }
-  return { success: false, error: String(resp.error ?? 'Failed to list cron tasks') };
+  return mgmtError(resp, 'Failed to list cron tasks');
 }
 
 export async function handleCronCreate(payload: Record<string, unknown>): Promise<AdminResponse> {
@@ -1149,12 +1329,251 @@ export async function handleCronRuns(payload: { taskId: string; limit?: number }
   if (resp.ok) {
     return { success: true, data: (resp as Record<string, unknown>).runs ?? [] };
   }
-  return { success: false, error: String(resp.error ?? 'Failed to get cron runs') };
+  return mgmtError(resp, 'Failed to get cron runs');
 }
 
 export async function handleCronStatus(payload: { workspacePath?: string }): Promise<AdminResponse> {
   const qs = payload.workspacePath ? `?workspacePath=${encodeURIComponent(payload.workspacePath)}` : '';
   const resp = await managementApi(`/api/cron/status${qs}`);
+  return wrapMgmtResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// Task Center forwarding (v0.1.69)
+//
+// Trust-boundary note: the CLI stamps `actor` + `source` from its own env
+// (AI subprocess = agent/cli, user terminal = user/cli) BEFORE posting here.
+// We forward these fields verbatim to the Rust Management API. The renderer-
+// originated path (Tauri IPC) never reaches this module — it goes through
+// `cmd_task_update_status` in Rust which stamps `user/ui` authoritatively.
+// ---------------------------------------------------------------------------
+
+function qsFrom(params: Record<string, string | number | boolean | undefined>): string {
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined) continue;
+    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+  }
+  return parts.length ? `?${parts.join('&')}` : '';
+}
+
+export async function handleTaskList(payload: {
+  workspaceId?: string;
+  status?: string;
+  tag?: string;
+  includeDeleted?: boolean;
+}): Promise<AdminResponse> {
+  const resp = await managementApi(`/api/task/list${qsFrom(payload)}`);
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).tasks ?? [] };
+  }
+  return mgmtError(resp, 'Failed to list tasks');
+}
+
+export async function handleTaskGet(payload: { id: string }): Promise<AdminResponse> {
+  const resp = await managementApi(`/api/task/get${qsFrom({ id: payload.id })}`);
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).task };
+  }
+  return mgmtError(resp, 'Failed to get task');
+}
+
+export async function handleTaskCreateDirect(
+  payload: Record<string, unknown>,
+): Promise<AdminResponse> {
+  const validationError = await validateTaskOverrides(payload);
+  if (validationError) return validationError;
+
+  const overridden = computeOverriddenFields(payload);
+  const resp = await managementApi('/api/task/create-direct', 'POST', payload);
+  const wrapped = wrapMgmtResponse(resp);
+  return enrichTaskCreateResponse(wrapped, payload, overridden);
+}
+
+export async function handleTaskCreateFromAlignment(
+  payload: Record<string, unknown>,
+): Promise<AdminResponse> {
+  const validationError = await validateTaskOverrides(payload);
+  if (validationError) return validationError;
+
+  const overridden = computeOverriddenFields(payload);
+  const resp = await managementApi('/api/task/create-from-alignment', 'POST', payload);
+  const wrapped = wrapMgmtResponse(resp);
+  return enrichTaskCreateResponse(wrapped, payload, overridden);
+}
+
+export async function handleTaskRun(payload: { id: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/run', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskRerun(payload: { id: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/rerun', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+/**
+ * Enrich a successful task-create response with:
+ *   - the override values **as actually persisted** (read from the returned
+ *     Task record, not echoed from the request — this proves the round-trip
+ *     survived serde rather than just restating what the client sent);
+ *   - `overridden` — the list of override fields the caller supplied that
+ *     also show up on the persisted task (so "requested but dropped" is
+ *     visible as a mismatch);
+ *   - `nextSteps` — the next CLI commands the caller is most likely to run.
+ *
+ * No-op on failed responses (leaves the existing error / recoveryHint shape
+ * untouched).
+ */
+function enrichTaskCreateResponse(
+  response: AdminResponse,
+  payload: Record<string, unknown>,
+  requestedOverrides: string[],
+): AdminResponse {
+  if (!response.success) return response;
+  const existing = (response.data ?? {}) as Record<string, unknown>;
+  // Rust returns `{ task: {...} }` for task creation — unwrap so we can read
+  // the authoritative persisted values.
+  const persistedTask =
+    (existing.task as Record<string, unknown> | undefined)
+    ?? existing; // fallback for older Rust shapes that returned the task inline
+  const taskId =
+    typeof persistedTask.id === 'string'
+      ? persistedTask.id
+      : typeof existing.task_id === 'string'
+        ? existing.task_id
+        : typeof existing.taskId === 'string'
+          ? existing.taskId
+          : undefined;
+
+  // Read the overrides from the persisted Task, NOT from the request payload.
+  // If serde dropped a field (e.g., prior to v0.1.69 when `TaskCreateFromAlignmentInput`
+  // lacked model/permission_mode), we want the mismatch to be visible here.
+  const persistedOverrides = {
+    runtime: (persistedTask.runtime as string | undefined) ?? null,
+    model: (persistedTask.model as string | undefined) ?? null,
+    permissionMode: (persistedTask.permissionMode as string | undefined) ?? null,
+    runtimeConfig: persistedTask.runtimeConfig ?? null,
+  };
+
+  // The authoritative "overridden" list: fields the caller requested AND that
+  // actually landed on the persisted task. If the two diverge, the extra
+  // `overridesRequested` field (below) lets the caller detect the drop.
+  const fieldsWithValue = Object.entries(persistedOverrides)
+    .filter(([, v]) => v !== null && v !== undefined && v !== '')
+    .map(([k]) => k);
+
+  const enriched: Record<string, unknown> = {
+    ...existing,
+    overrides: persistedOverrides,
+    overridden: fieldsWithValue,
+    // If the client requested an override that didn't land, this exposes the
+    // drift (a diff between these two arrays means "server silently dropped
+    // a field you sent").
+    overridesRequested: requestedOverrides,
+    inheritedFromWorkspace:
+      ['runtime', 'model', 'permissionMode'].filter(f => !fieldsWithValue.includes(f)),
+  };
+  if (taskId) {
+    enriched.nextSteps = {
+      dispatch: `myagents task run ${taskId}`,
+      inspect: `myagents task get ${taskId}`,
+    };
+  }
+  return { ...response, data: enriched };
+}
+
+export async function handleTaskUpdateStatus(
+  payload: Record<string, unknown>,
+): Promise<AdminResponse> {
+  // Infer actor/source if caller omitted them:
+  //   Inside an AI subprocess → MYAGENTS_PORT is set → actor=agent, source=cli.
+  //   Otherwise (user ran `myagents` in their terminal) → actor=user, source=cli.
+  // `MYAGENTS_PORT` is injected by `buildClaudeSessionEnv()` into SDK subproc
+  // env (see cli_architecture.md); the user's own shell does NOT have it set
+  // (the user's CLI binary reads `~/.myagents/sidecar.port` instead).
+  if (payload.actor === undefined) {
+    payload.actor = process.env.MYAGENTS_PORT ? 'agent' : 'user';
+  }
+  if (payload.source === undefined) {
+    payload.source = 'cli';
+  }
+  const resp = await managementApi('/api/task/update-status', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskAppendSession(payload: {
+  id: string;
+  sessionId: string;
+}): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/append-session', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskArchive(payload: {
+  id: string;
+  message?: string;
+}): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/archive', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleTaskDelete(payload: { id: string }): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/delete', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+/**
+ * Read a task's markdown doc (`task.md` / `verify.md` / `progress.md` /
+ * `alignment.md`). Missing files return `{ ok: true, content: "" }` so
+ * CLI scripting is idempotent. Task docs live under `~/.myagents/tasks/<id>/`
+ * since v0.1.69 — this endpoint is the agent-facing read path because the
+ * AI runs in the workspace cwd and can't know the user-profile dir.
+ */
+export async function handleTaskReadDoc(payload: {
+  id: string;
+  doc: string;
+}): Promise<AdminResponse> {
+  const resp = await managementApi(
+    `/api/task/read-doc${qsFrom(payload)}`,
+  );
+  if (resp.ok) {
+    return { success: true, data: { content: (resp as Record<string, unknown>).content ?? '' } };
+  }
+  return mgmtError(resp, 'Failed to read task doc');
+}
+
+/**
+ * Write `task.md` or `verify.md`. `progress.md` is agent-appended during
+ * runs and rejected here; `alignment.md` is written by the alignment
+ * skill via direct file-system access (not through this API).
+ */
+export async function handleTaskWriteDoc(payload: {
+  id: string;
+  doc: string;
+  content: string;
+}): Promise<AdminResponse> {
+  const resp = await managementApi('/api/task/write-doc', 'POST', payload);
+  return wrapMgmtResponse(resp);
+}
+
+export async function handleThoughtList(payload: {
+  tag?: string;
+  query?: string;
+  limit?: number;
+}): Promise<AdminResponse> {
+  const resp = await managementApi(`/api/thought/list${qsFrom(payload)}`);
+  if (resp.ok) {
+    return { success: true, data: (resp as Record<string, unknown>).thoughts ?? [] };
+  }
+  return mgmtError(resp, 'Failed to list thoughts');
+}
+
+export async function handleThoughtCreate(payload: {
+  content: string;
+  images?: string[];
+}): Promise<AdminResponse> {
+  const resp = await managementApi('/api/thought/create', 'POST', payload);
   return wrapMgmtResponse(resp);
 }
 
@@ -1229,7 +1648,7 @@ export async function handleImSendMedia(payload: { filePath?: string; caption?: 
       hint: 'File sent to IM chat.',
     };
   }
-  return { success: false, error: String(resp.error ?? 'Failed to send media') };
+  return mgmtError(resp, 'Failed to send media');
 }
 
 // ---------------------------------------------------------------------------
@@ -1391,7 +1810,7 @@ export async function handlePluginList(): Promise<AdminResponse> {
   if (resp.ok) {
     return { success: true, data: (resp as Record<string, unknown>).plugins ?? [] };
   }
-  return { success: false, error: String(resp.error ?? 'Failed to list plugins') };
+  return mgmtError(resp, 'Failed to list plugins');
 }
 
 export async function handlePluginInstall(payload: { npmSpec: string }): Promise<AdminResponse> {
@@ -1399,7 +1818,7 @@ export async function handlePluginInstall(payload: { npmSpec: string }): Promise
   if (resp.ok) {
     return { success: true, data: (resp as Record<string, unknown>).plugin, hint: 'Plugin installed successfully.' };
   }
-  return { success: false, error: String(resp.error ?? 'Failed to install plugin') };
+  return mgmtError(resp, 'Failed to install plugin');
 }
 
 export async function handlePluginUninstall(payload: { pluginId: string }): Promise<AdminResponse> {
@@ -1634,7 +2053,517 @@ export async function handleAgentRuntimeStatus(): Promise<AdminResponse> {
   if (resp.ok) {
     return { success: true, data: (resp as Record<string, unknown>).agents ?? {} };
   }
-  return { success: false, error: String(resp.error ?? 'Failed to get agent runtime status') };
+  return mgmtError(resp, 'Failed to get agent runtime status');
+}
+
+// ---------------------------------------------------------------------------
+// Runtime discovery handlers (v0.1.69+)
+//
+// Give AI agents (and humans) a way to answer "what am I allowed to pass to
+// --runtime / --model / --permissionMode?" *before* they commit to creating
+// a task. Without this, the only feedback loop is "task gets created, task
+// fails at dispatch time" — the AI then has to unwind multiple async steps
+// to figure out it filled the wrong value.
+// ---------------------------------------------------------------------------
+
+/** One row in `runtime list` output. */
+interface RuntimeListRow {
+  runtime: RuntimeType;
+  displayName: string;
+  installed: boolean;
+  version?: string;
+  path?: string;
+  /** Present when `installed=false` — suggests the install/inspect command. */
+  notInstalledHint?: string;
+}
+
+/** Payload for `runtime describe <runtime>`. */
+interface RuntimeDescribeResult {
+  runtime: RuntimeType;
+  displayName: string;
+  installed: boolean;
+  version?: string;
+  models: RuntimeModelInfo[];
+  permissionModes: RuntimePermissionMode[];
+  defaultPermissionMode: string;
+}
+
+/** Per-runtime detection timeout — a wedged `<cli> --version` binary shouldn't
+ *  block the whole command. Race each detect() against this timeout. */
+const RUNTIME_DETECT_TIMEOUT_MS = 2_000;
+
+/**
+ * Race a promise against a timeout; on timeout resolves to `fallback`.
+ * Used by `handleRuntimeList` / `handleRuntimeDescribe` so one misbehaving
+ * runtime CLI doesn't hang the whole Admin API request.
+ */
+async function raceWithTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  fallback: T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>(resolve => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * List every runtime MyAgents knows about with its install status.
+ *
+ * Detection is best-effort and actually gated at `RUNTIME_DETECT_TIMEOUT_MS`
+ * per runtime — each runtime's `detect()` spawns `<cli> --version`, and a
+ * wedged binary would otherwise block the whole list. We *always* return the
+ * full row list — even for not-installed runtimes — so the CLI reader sees
+ * every valid `--runtime` value and can learn which ones need installing.
+ */
+export async function handleRuntimeList(): Promise<AdminResponse> {
+  const rows: RuntimeListRow[] = [];
+  for (const runtime of VALID_RUNTIMES) {
+    if (runtime === 'builtin') {
+      // builtin is always "installed" — it's the embedded Claude Agent SDK.
+      rows.push({
+        runtime,
+        displayName: RUNTIME_DISPLAY_NAMES[runtime],
+        installed: true,
+      });
+      continue;
+    }
+    let detection: RuntimeDetection = { installed: false };
+    try {
+      const rt = getExternalRuntime(runtime);
+      detection = await raceWithTimeout(rt.detect(), RUNTIME_DETECT_TIMEOUT_MS, { installed: false });
+    } catch {
+      // Runtime not supported in this build (should not happen given
+      // VALID_RUNTIMES ⊆ supported types, but keep defensive).
+    }
+    const row: RuntimeListRow = {
+      runtime,
+      displayName: RUNTIME_DISPLAY_NAMES[runtime],
+      installed: detection.installed,
+      version: detection.version,
+      path: detection.path,
+    };
+    if (!detection.installed) {
+      row.notInstalledHint = hintForMissingRuntime(runtime);
+    }
+    rows.push(row);
+  }
+  return { success: true, data: rows };
+}
+
+/**
+ * Describe a single runtime — its installed state, available models, and
+ * permission modes. This is the command the AI is supposed to consult
+ * *before* choosing values for `--model` / `--permissionMode`.
+ */
+export async function handleRuntimeDescribe(payload: {
+  runtime?: string;
+}): Promise<AdminResponse> {
+  const runtimeArg = payload.runtime;
+  if (!runtimeArg) {
+    return {
+      success: false,
+      error: 'Missing required argument: runtime',
+      recoveryHint: {
+        recoveryCommand: 'myagents runtime list',
+        message: 'See valid runtime names.',
+      },
+    };
+  }
+  if (!isValidRuntimeType(runtimeArg)) {
+    return {
+      success: false,
+      error: `Unknown runtime: '${runtimeArg}'. Valid: ${VALID_RUNTIMES.join(', ')}.`,
+      recoveryHint: {
+        recoveryCommand: 'myagents runtime list',
+        message: 'See valid runtime names + install status.',
+      },
+    };
+  }
+
+  // builtin has no external CLI — models come from the configured provider,
+  // not a spawnable CLI, so we intentionally return `models: []`. Permission
+  // modes DO come from a static allowlist (PermissionMode enum) and are
+  // surfaced so `runtime describe builtin` is as useful as `describe codex`.
+  if (runtimeArg === 'builtin') {
+    return {
+      success: true,
+      data: {
+        runtime: runtimeArg,
+        displayName: RUNTIME_DISPLAY_NAMES.builtin,
+        installed: true,
+        models: [],
+        permissionModes: getRuntimePermissionModes('builtin'),
+        defaultPermissionMode: getDefaultRuntimePermissionMode('builtin'),
+        note:
+          'Built-in runtime uses the configured provider + model from `myagents model list`. '
+          + 'It does not have a runtime-specific model catalogue — override `--model` with any '
+          + 'model id supported by the active provider.',
+      } satisfies RuntimeDescribeResult & { note: string },
+    };
+  }
+
+  let detection: RuntimeDetection = { installed: false };
+  try {
+    detection = await raceWithTimeout(
+      getExternalRuntime(runtimeArg).detect(),
+      RUNTIME_DETECT_TIMEOUT_MS,
+      { installed: false },
+    );
+  } catch {
+    /* detection returns installed:false below */
+  }
+
+  // Only query models when the CLI is actually installed — otherwise we'd
+  // waste 10+ seconds trying to spawn a binary that doesn't exist.
+  const models: RuntimeModelInfo[] = detection.installed
+    ? ((await queryRuntimeModels(runtimeArg)) as RuntimeModelInfo[])
+    : [];
+  const permissionModes = getRuntimePermissionModes(runtimeArg);
+  const defaultPermissionMode = getDefaultRuntimePermissionMode(runtimeArg);
+
+  return {
+    success: true,
+    data: {
+      runtime: runtimeArg,
+      displayName: RUNTIME_DISPLAY_NAMES[runtimeArg],
+      installed: detection.installed,
+      version: detection.version,
+      models,
+      permissionModes,
+      defaultPermissionMode,
+    } satisfies RuntimeDescribeResult,
+  };
+}
+
+/**
+ * Show one agent's effective defaults so the AI can decide whether a given
+ * task override is a no-op (same as workspace default) or meaningful.
+ */
+export function handleAgentShow(payload: { id?: string }): AdminResponse {
+  const id = payload.id;
+  if (!id) {
+    return {
+      success: false,
+      error: 'Missing required argument: <agent-id>',
+      recoveryHint: {
+        recoveryCommand: 'myagents agent list',
+        message: 'See valid agent ids.',
+      },
+    };
+  }
+  const config = loadConfig();
+  const agent = (config.agents ?? []).find(a => a.id === id);
+  if (!agent) {
+    return {
+      success: false,
+      error: `Agent '${id}' not found.`,
+      recoveryHint: {
+        recoveryCommand: 'myagents agent list',
+        message: 'See valid agent ids.',
+      },
+    };
+  }
+
+  // AgentConfigSlim is intentionally permissive (`[key: string]: unknown`) —
+  // runtime / permissionMode / runtimeConfig exist on the full AgentConfig
+  // but not on the slim shape. Extract defensively.
+  const runtime = (agent.runtime as RuntimeType | undefined) ?? 'builtin';
+  const agentPermissionMode = (agent.permissionMode as string | undefined) ?? '';
+  const runtimeConfig = (agent.runtimeConfig as Record<string, unknown> | undefined) ?? undefined;
+
+  // Per-runtime resolution of "effective" model / permissionMode
+  // (cross-review fix, v0.1.69):
+  //   - builtin       → read from agent.{model, permissionMode}
+  //   - CC/Codex/Gemini → prefer agent.runtimeConfig.{model, permissionMode};
+  //     fall back to the top-level agent fields only when absent.
+  //
+  // External runtimes use distinct permission-mode vocabularies (`suggest`,
+  // `auto-edit`, `full-auto`, etc.) that do NOT intersect with the builtin
+  // enum. Reporting `agent.permissionMode = 'fullAgency'` as the effective
+  // value for a Codex agent would be actively misleading — the dispatch
+  // path never consults that field.
+  const isExternal = runtime !== 'builtin';
+  const rcModel = isExternal ? (runtimeConfig?.model as string | undefined) : undefined;
+  const rcPermissionMode = isExternal
+    ? (runtimeConfig?.permissionMode as string | undefined)
+    : undefined;
+  const effectiveModel = rcModel ?? (agent.model as string | undefined);
+  const effectivePermissionMode = rcPermissionMode ?? agentPermissionMode;
+
+  return {
+    success: true,
+    data: {
+      id: agent.id,
+      name: agent.name,
+      enabled: agent.enabled,
+      workspacePath: agent.workspacePath,
+      effectiveDefaults: {
+        runtime,
+        model: effectiveModel || null,
+        permissionMode: effectivePermissionMode || null,
+        providerId: agent.providerId ?? null,
+        runtimeConfig: runtimeConfig ?? null,
+      },
+      channelCount: (agent.channels ?? []).length,
+    },
+  };
+}
+
+/** Type guard for `runtime` string coming from CLI payloads. */
+function isValidRuntimeType(runtime: unknown): runtime is RuntimeType {
+  return typeof runtime === 'string' && (VALID_RUNTIMES as readonly string[]).includes(runtime);
+}
+
+/** Install guidance keyed by runtime. Shown when a runtime is NOT installed. */
+function hintForMissingRuntime(runtime: RuntimeType): string {
+  switch (runtime) {
+    case 'claude-code':
+      return 'Install the Claude Code CLI — see https://docs.anthropic.com/claude/docs/claude-code';
+    case 'codex':
+      return 'Install the OpenAI Codex CLI — `npm i -g @openai/codex` or see https://github.com/openai/codex';
+    case 'gemini':
+      return 'Install the Gemini CLI — `npm i -g @google/gemini-cli` or see https://github.com/google/gemini-cli';
+    default:
+      return '';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task-creation pre-flight validation (v0.1.69+)
+//
+// Reject bad runtime/model/permissionMode overrides *here* in Bun admin-api,
+// before the payload hits Rust. Three reasons:
+//   1. We have first-class access to `RuntimeFactory.detect()` / queryModels,
+//      Rust does not.
+//   2. Error strings here can cite the exact CLI recovery command — across
+//      the Rust boundary those would turn into opaque serde errors.
+//   3. The CLI is the primary caller; keeping validation adjacent to the CLI
+//      glue means changes to flag semantics and error copy land in one file.
+// ---------------------------------------------------------------------------
+
+/** Fields on a task-create payload that we validate as overrides. */
+interface TaskOverrideFields {
+  runtime?: unknown;
+  model?: unknown;
+  permissionMode?: unknown;
+  /** Workspace path — used to resolve the agent's default runtime when the
+   *  caller passes --model / --permissionMode *without* --runtime. */
+  workspacePath?: unknown;
+  /** Workspace id — alternative identifier for the same lookup as workspacePath. */
+  workspaceId?: unknown;
+}
+
+/**
+ * Validate the runtime/model/permissionMode fields on a task-create payload.
+ * Returns an error `AdminResponse` on first failure, or `null` if all fields
+ * are present-and-valid or absent.
+ *
+ * Effective-runtime resolution (cross-review fix, v0.1.69):
+ *   - If `payload.runtime` is set → use it.
+ *   - Else if `payload.model` / `payload.permissionMode` is set → resolve the
+ *     agent's default runtime from `workspacePath` so we can still validate
+ *     the model/mode against the correct allowlist. Without this step a
+ *     caller like `--model o3` with no `--runtime` would silently bypass
+ *     validation and ship a garbage payload to Rust.
+ *   - Else → no overrides at all; nothing to validate.
+ */
+async function validateTaskOverrides(
+  payload: TaskOverrideFields,
+): Promise<AdminResponse | null> {
+  // Step 1: resolve the effective runtime that downstream checks should use.
+  let effectiveRuntime: RuntimeType | undefined;
+  if (payload.runtime !== undefined && payload.runtime !== null && payload.runtime !== '') {
+    if (typeof payload.runtime !== 'string' || !isValidRuntimeType(payload.runtime)) {
+      return {
+        success: false,
+        error: `Invalid --runtime value: '${String(payload.runtime)}'. Valid: ${VALID_RUNTIMES.join(', ')}.`,
+        recoveryHint: {
+          recoveryCommand: 'myagents runtime list',
+          message: 'See valid runtimes + install status.',
+        },
+      };
+    }
+    effectiveRuntime = payload.runtime;
+    if (effectiveRuntime !== 'builtin' && isRuntimeSupported(effectiveRuntime)) {
+      try {
+        const detection = await getExternalRuntime(effectiveRuntime).detect();
+        if (!detection.installed) {
+          return {
+            success: false,
+            error: `Runtime '${effectiveRuntime}' is not installed on this machine.`,
+            recoveryHint: {
+              recoveryCommand: 'myagents runtime list',
+              message: 'See which runtimes are available + install hints.',
+            },
+          };
+        }
+      } catch {
+        return {
+          success: false,
+          error: `Runtime '${effectiveRuntime}' detection failed.`,
+          recoveryHint: {
+            recoveryCommand: 'myagents runtime list',
+            message: 'See which runtimes are available.',
+          },
+        };
+      }
+    }
+  } else if (
+    (payload.model !== undefined && payload.model !== null && payload.model !== '')
+    || (payload.permissionMode !== undefined && payload.permissionMode !== null && payload.permissionMode !== '')
+  ) {
+    // --model / --permissionMode passed without --runtime: try to resolve the
+    // workspace's agent default so we can still validate against the correct
+    // allowlist. If resolution fails, reject rather than silently trust.
+    const resolved = resolveAgentRuntimeFromWorkspace(payload);
+    if (resolved === undefined) {
+      return {
+        success: false,
+        error:
+          '--model / --permissionMode requires either an explicit --runtime, '
+          + 'or a resolvable workspace (via --workspacePath / --workspaceId matching an agent).',
+        recoveryHint: {
+          recoveryCommand: 'myagents agent list',
+          message: 'Find your agent, then `myagents agent show <id>` to see its default runtime.',
+        },
+      };
+    }
+    effectiveRuntime = resolved;
+  } else {
+    // No overrides at all — nothing to validate.
+    return null;
+  }
+
+  // Step 2: permissionMode is validated against the runtime's allowlist.
+  // Works for both builtin (BUILTIN_PERMISSION_MODES: auto/plan/fullAgency/custom)
+  // and external runtimes (CC/Codex/Gemini) — since `getRuntimePermissionModes`
+  // returns an exhaustive list for every runtime including builtin, we don't
+  // need a separate builtin escape hatch. Previously builtin was skipped on
+  // the assumption that Rust validates it, but Rust stores the field as
+  // `Option<String>` with no enum constraint, so a typo like `--permissionMode
+  // fulAgency` would land silently.
+  if (
+    payload.permissionMode !== undefined
+    && payload.permissionMode !== null
+    && payload.permissionMode !== ''
+  ) {
+    if (typeof payload.permissionMode !== 'string') {
+      return {
+        success: false,
+        error: `--permissionMode must be a string (got ${typeof payload.permissionMode}).`,
+        recoveryHint: {
+          recoveryCommand: `myagents runtime describe ${effectiveRuntime}`,
+          message: 'See valid permission modes.',
+        },
+      };
+    }
+    const modes = getRuntimePermissionModes(effectiveRuntime);
+    if (modes.length > 0 && !modes.some(m => m.value === payload.permissionMode)) {
+      return {
+        success: false,
+        error: `--permissionMode '${payload.permissionMode}' is not valid for runtime '${effectiveRuntime}'. Valid: ${modes.map(m => m.value).join(', ')}.`,
+        recoveryHint: {
+          recoveryCommand: `myagents runtime describe ${effectiveRuntime}`,
+          message: 'See valid permission modes for this runtime.',
+        },
+      };
+    }
+  }
+
+  // Step 3: model is validated for *external* runtimes that expose a known
+  // model list. External CLI model lists can be dynamic (Gemini calls the
+  // server to discover them) so an empty list is treated as "can't validate,
+  // trust the caller". builtin runtime model ids depend on the active
+  // provider — out of scope for this validator.
+  if (
+    payload.model !== undefined
+    && payload.model !== null
+    && payload.model !== ''
+    && effectiveRuntime !== 'builtin'
+  ) {
+    if (typeof payload.model !== 'string') {
+      return {
+        success: false,
+        error: `--model must be a string (got ${typeof payload.model}).`,
+        recoveryHint: {
+          recoveryCommand: `myagents runtime describe ${effectiveRuntime}`,
+          message: 'See valid model ids for this runtime.',
+        },
+      };
+    }
+    try {
+      const models = (await queryRuntimeModels(effectiveRuntime)) as RuntimeModelInfo[];
+      // Empty list means either "runtime is not installed" (handled above)
+      // or "discovery failed transiently" — in both cases, don't block the
+      // write. The Rust side will surface the real dispatch error if any.
+      if (models.length > 0 && !models.some(m => m.value === payload.model)) {
+        const examples = models.slice(0, 5).map(m => m.value).filter(Boolean).join(', ');
+        return {
+          success: false,
+          error: `--model '${payload.model}' is not available for runtime '${effectiveRuntime}'. Examples: ${examples || '(none found)'}.`,
+          recoveryHint: {
+            recoveryCommand: `myagents runtime describe ${effectiveRuntime}`,
+            message: 'See the full model list.',
+          },
+        };
+      }
+    } catch {
+      /* swallow — same "trust and forward" rationale as above */
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Compute which override fields the caller actually provided.
+ * Surfaced in the success response so the AI can confirm its intent took
+ * effect (vs. silently falling back to the workspace default).
+ */
+function computeOverriddenFields(payload: Record<string, unknown>): string[] {
+  const fields = ['runtime', 'model', 'permissionMode', 'runtimeConfig'];
+  return fields.filter(f => {
+    const v = payload[f];
+    return v !== undefined && v !== null && v !== '';
+  });
+}
+
+/**
+ * Look up the workspace's agent from config and return the agent's default
+ * runtime (falling back to 'builtin' when unset). Used by `validateTaskOverrides`
+ * to decide which runtime's permission-mode / model allowlist to validate
+ * against when the caller passes `--model` / `--permissionMode` without
+ * `--runtime`.
+ *
+ * Returns `undefined` when neither `workspacePath` nor `workspaceId` matches
+ * an agent — forces the validator to reject rather than guess.
+ */
+function resolveAgentRuntimeFromWorkspace(
+  payload: { workspacePath?: unknown; workspaceId?: unknown },
+): RuntimeType | undefined {
+  const wsPath = typeof payload.workspacePath === 'string' ? payload.workspacePath : undefined;
+  const wsId = typeof payload.workspaceId === 'string' ? payload.workspaceId : undefined;
+  if (!wsPath && !wsId) return undefined;
+
+  const config = loadConfig();
+  const agents = config.agents ?? [];
+  // Match by workspacePath first (most specific), then by workspaceId.
+  const agent =
+    (wsPath && agents.find(a => a.workspacePath === wsPath))
+    ?? (wsId && agents.find(a => a.id === wsId))
+    ?? undefined;
+  if (!agent) return undefined;
+
+  const raw = agent.runtime as unknown;
+  if (typeof raw === 'string' && isValidRuntimeType(raw)) return raw;
+  return 'builtin';
 }
 
 // ---------------------------------------------------------------------------
@@ -1660,7 +2589,7 @@ function hasDangerousKeySegment(key: string): boolean {
 /** Save a custom provider JSON file */
 function saveCustomProviderFile(provider: Record<string, unknown>): void {
   const dir = getProvidersDir();
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  ensureDirSync(dir);
   const filePath = resolve(dir, `${provider.id}.json`);
   writeFileSync(filePath, JSON.stringify(provider, null, 2), 'utf-8');
 }

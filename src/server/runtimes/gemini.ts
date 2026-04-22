@@ -11,7 +11,6 @@
 import { spawn, type Subprocess } from 'bun';
 import {
   writeFileSync,
-  mkdirSync,
   existsSync,
   readFileSync,
   readdirSync,
@@ -37,6 +36,7 @@ import type {
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { resolveGeminiWorkspaceInstructions } from './workspace-instructions';
 import { broadcast } from '../sse';
+import { ensureDirSync } from '../utils/fs-utils';
 
 // ─── Tmp directory layout for system prompt files ───
 
@@ -60,11 +60,31 @@ function sessionSystemPromptPath(sessionId: string): string {
 /**
  * Ensure TMP_ROOT exists and delete session prompt files older than 1 hour.
  * Base cache files (base-<version>.md) are preserved between sessions.
+ *
+ * This is the ONLY place session-*.md files are deleted. We deliberately do
+ * NOT unlink the file when the gemini Subprocess exits. Reasoning:
+ *
+ *   1. Windows launcher chain: `resolveCommand('gemini')` resolves to
+ *      `gemini.cmd`, a .cmd wrapper that spawns node. The Bun Subprocess
+ *      handle is the .cmd launcher, and `proc.exited` firing does NOT prove
+ *      the grandchild node process has finished reading GEMINI_SYSTEM_MD
+ *      (or even started reading it, on cold-start failure paths). Unlinking
+ *      on proc.exited produced the "missing system prompt file" error seen
+ *      in issue #95.
+ *
+ *   2. Filename reuse: `session-<sessionId>.md` is deterministic per session,
+ *      so a late proc.exited.then from a failed attempt would delete the
+ *      newly-written file of a retry that uses the same session id.
+ *
+ * Age-based cleanup is safe because Gemini reads GEMINI_SYSTEM_MD only during
+ * chat-session init at `session/new`; once the ACP session is established
+ * the file is no longer referenced, so letting it linger up to an hour has
+ * no functional impact.
  */
 function cleanupStaleSessionPrompts(): void {
   try {
     if (!existsSync(TMP_ROOT)) {
-      mkdirSync(TMP_ROOT, { recursive: true });
+      ensureDirSync(TMP_ROOT);
       return;
     }
     const cutoff = Date.now() - 60 * 60 * 1000;
@@ -103,7 +123,7 @@ async function extractGeminiBasePrompt(version: string): Promise<string | null> 
     }
   }
 
-  mkdirSync(TMP_ROOT, { recursive: true });
+  ensureDirSync(TMP_ROOT);
 
   let proc: Subprocess | null = null;
   try {
@@ -174,7 +194,7 @@ async function writeSessionSystemPrompt(
 ): Promise<string | null> {
   if (!myAgentsPrompt || myAgentsPrompt.trim().length === 0) return null;
 
-  mkdirSync(TMP_ROOT, { recursive: true });
+  ensureDirSync(TMP_ROOT);
   const path = sessionSystemPromptPath(sessionId);
 
   const basePrompt = await extractGeminiBasePrompt(geminiVersion);
@@ -419,7 +439,6 @@ class GeminiProcess implements RuntimeProcess {
   exited = false;
   rpc: JsonRpcClient;
   sessionId = '';
-  systemPromptPath: string | null = null;
 
   /** Callback registered by startSession() — sendMessage() routes async events through this. */
   wrappedOnEvent: UnifiedEventCallback | null = null;
@@ -664,7 +683,6 @@ export class GeminiRuntime implements AgentRuntime {
     });
 
     const geminiProc = new GeminiProcess(proc);
-    geminiProc.systemPromptPath = promptFile;
 
     // 4. Wire up the event callback closure. sendMessage() reads this back through the
     //    process instance so it can emit turn_complete / usage from the RPC response.
@@ -693,16 +711,13 @@ export class GeminiRuntime implements AgentRuntime {
 
     geminiProc.rpc.startReading();
 
-    // 6. Lifecycle: emit session_complete on process exit + clean up prompt file.
+    // 6. Lifecycle: emit session_complete on process exit.
+    //    The prompt file is NOT unlinked here — see cleanupStaleSessionPrompts
+    //    for why deletion must be decoupled from the Bun Subprocess exit on
+    //    Windows (.cmd launcher + node grandchild) and against retries that
+    //    reuse the same session id.
     proc.exited.then((code) => {
       geminiProc.exited = true;
-      if (geminiProc.systemPromptPath && existsSync(geminiProc.systemPromptPath)) {
-        try {
-          unlinkSync(geminiProc.systemPromptPath);
-        } catch {
-          /* ignore */
-        }
-      }
       wrappedOnEvent({
         kind: 'session_complete',
         result: code === 0 ? '' : `Gemini process exited with code ${code}`,
@@ -732,10 +747,15 @@ export class GeminiRuntime implements AgentRuntime {
 
     try {
       // 8. ACP initialize handshake.
+      // Matches queryModels timeout: covers Gemini Node.js cold-start (3-8s)
+      // + OAuth refresh. A tighter timeout here used to interact badly with
+      // the prompt-file cleanup (see issue #95); cleanup is now age-based,
+      // so a shorter budget only risks false-positive "timed out" toasts,
+      // not missing-prompt-file failures.
       await geminiProc.rpc.call(
         'initialize',
         { protocolVersion: 1, clientCapabilities: {} },
-        15_000,
+        30_000,
       );
 
       // 9. Determine mode + create/load session.
@@ -844,7 +864,13 @@ export class GeminiRuntime implements AgentRuntime {
       }
     } catch (err) {
       try {
-        proc.kill();
+        // SIGKILL (9) over SIGTERM (15): the Windows launcher chain
+        // (gemini.cmd → node) is slow to unwind on SIGTERM, and leaving a
+        // zombie gemini subprocess around wastes OAuth token refreshes and
+        // stderr bandwidth. Note: prompt-file cleanup is now age-based, so
+        // an uncooperative grandchild reading GEMINI_SYSTEM_MD after this
+        // point will still find a valid file.
+        proc.kill(9);
       } catch {
         /* ignore */
       }

@@ -1,0 +1,260 @@
+// Task Center API — thin wrappers around Tauri invoke()
+// Handles both Tauri (desktop) and browser dev mode (no-op fallback).
+
+import type {
+  Thought,
+  ThoughtCreateInput,
+  ThoughtUpdateInput,
+} from '@/../shared/types/thought';
+import type {
+  Task,
+  TaskCreateDirectInput,
+  TaskCreateFromAlignmentInput,
+  TaskListFilter,
+  TaskRunStats,
+  TaskUpdateInput,
+  TaskUpdateStatusInput,
+} from '@/../shared/types/task';
+
+function isTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+async function inv<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isTauri()) {
+    throw new Error(
+      `Task Center commands require Tauri runtime; ran in browser mode: ${cmd}`,
+    );
+  }
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<T>(cmd, args);
+}
+
+// ==================== Thoughts ====================
+
+export function thoughtCreate(input: ThoughtCreateInput): Promise<Thought> {
+  return inv('cmd_thought_create', { input });
+}
+
+export function thoughtList(filter?: {
+  tag?: string;
+  query?: string;
+  limit?: number;
+}): Promise<Thought[]> {
+  return inv('cmd_thought_list', { filter });
+}
+
+export function thoughtGet(id: string): Promise<Thought | null> {
+  return inv('cmd_thought_get', { id });
+}
+
+export function thoughtUpdate(input: ThoughtUpdateInput): Promise<Thought> {
+  return inv('cmd_thought_update', { input });
+}
+
+export function thoughtDelete(id: string): Promise<void> {
+  return inv('cmd_thought_delete', { id });
+}
+
+/** Reveal `~/.myagents/thoughts/` in the OS file manager (Finder/Explorer). */
+export function thoughtOpenDir(): Promise<void> {
+  return inv('cmd_thought_open_dir');
+}
+
+// ==================== Tasks ====================
+
+export function taskCreateDirect(
+  input: TaskCreateDirectInput & { taskMdContent: string },
+): Promise<Task> {
+  return inv('cmd_task_create_direct', { input });
+}
+
+export function taskCreateFromAlignment(
+  input: TaskCreateFromAlignmentInput & { alignmentSessionId: string },
+): Promise<Task> {
+  return inv('cmd_task_create_from_alignment', { input });
+}
+
+export function taskList(filter?: TaskListFilter): Promise<Task[]> {
+  return inv('cmd_task_list', { filter });
+}
+
+export function taskGet(id: string): Promise<Task | null> {
+  return inv('cmd_task_get', { id });
+}
+
+export function taskUpdate(input: TaskUpdateInput): Promise<Task> {
+  return inv('cmd_task_update', { input });
+}
+
+export function taskUpdateStatus(input: TaskUpdateStatusInput): Promise<Task> {
+  return inv('cmd_task_update_status', { input });
+}
+
+export function taskUpdateProgress(id: string, message: string): Promise<void> {
+  return inv('cmd_task_update_progress', { id, message });
+}
+
+export function taskAppendSession(id: string, sessionId: string): Promise<Task> {
+  return inv('cmd_task_append_session', { id, sessionId });
+}
+
+export function taskArchive(id: string, message?: string): Promise<Task> {
+  return inv('cmd_task_archive', { id, message });
+}
+
+export function taskDelete(id: string): Promise<void> {
+  return inv('cmd_task_delete', { id });
+}
+
+/** Names of the markdown documents attached to a Task. */
+export type TaskDocName = 'task' | 'verify' | 'progress';
+
+/** Read `.task/<id>/<doc>.md`. Missing files resolve to `""` (not an error). */
+export function taskReadDoc(id: string, doc: TaskDocName): Promise<string> {
+  return inv('cmd_task_read_doc', { id, doc });
+}
+
+/**
+ * Write `.task/<id>/<doc>.md`. Allowed for `task` and `verify` only;
+ * `progress` is agent-only (the CLI / SDK tool appends during runs).
+ * Rejected while the task is running / verifying (PRD §9.4 lock).
+ */
+export function taskWriteDoc(
+  id: string,
+  doc: Exclude<TaskDocName, 'progress'>,
+  content: string,
+): Promise<void> {
+  return inv('cmd_task_write_doc', { id, doc, content });
+}
+
+/**
+ * Reveal `~/.myagents/tasks/<id>/` in the OS file manager. Creates the
+ * directory on demand for tasks that haven't written any doc yet.
+ * Tauri-only (no browser fallback — the editor surface is desktop).
+ */
+export function taskOpenDocsDir(id: string): Promise<void> {
+  return inv('cmd_task_open_docs_dir', { id });
+}
+
+/**
+ * Aggregate runtime telemetry for the detail overlay — execution count,
+ * last-run result, linked CronTask scheduler status. Composed server-side
+ * from `TaskStore` + `CronTaskManager` + `cron_runs/<cronId>.jsonl`.
+ */
+export function taskGetRunStats(id: string): Promise<TaskRunStats> {
+  return inv('cmd_task_get_run_stats', { id });
+}
+
+/**
+ * Upgrade one legacy CronTask (no `task_id` back-pointer) to a new-model
+ * Task in a single atomic Rust call. The primitive handles schedule /
+ * end-condition / run-mode type conversions, lifecycle-preserving status
+ * mapping (running → Running, naturally-ended → Done, user-paused →
+ * Stopped), both back-pointers, and rollback on any step failure — see
+ * `src-tauri/src/legacy_upgrade.rs`.
+ *
+ * Migrated Tasks have `sourceThoughtId = None` — legacy crons have no
+ * backing Thought and auto-minting one would pollute the user's thought
+ * stream with synthetic rows.
+ */
+export interface TaskUpgradeLegacyResult {
+  task: Task;
+}
+export function taskUpgradeLegacyCron(
+  cronTaskId: string,
+  workspaceId: string,
+): Promise<TaskUpgradeLegacyResult> {
+  return inv('cmd_task_upgrade_legacy_cron', {
+    cronTaskId,
+    workspaceId,
+  });
+}
+
+// ============================================================
+// Search (Task Center — v0.1.69, §13.2)
+// ============================================================
+
+export interface ThoughtSearchHit {
+  id: string;
+  snippet: string;
+  tags: string[];
+  updatedAt: number;
+}
+
+export interface ThoughtSearchResult {
+  hits: ThoughtSearchHit[];
+  total: number;
+}
+
+export interface TaskSearchHit {
+  id: string;
+  name: string;
+  snippet: string;
+  status: string;
+  workspaceId: string;
+  updatedAt: number;
+}
+
+export interface TaskSearchResult {
+  hits: TaskSearchHit[];
+  total: number;
+}
+
+export function searchThoughts(
+  query: string,
+  limit = 50,
+): Promise<ThoughtSearchResult> {
+  return inv('cmd_search_thoughts', { query, limit });
+}
+
+export function searchTasks(
+  query: string,
+  workspaceId?: string,
+  limit = 50,
+): Promise<TaskSearchResult> {
+  return inv('cmd_search_tasks', { query, workspaceId, limit });
+}
+
+// ============================================================
+// Execution triggers (renderer → Global Sidecar → Rust Management API)
+// ============================================================
+//
+// `taskRun` / `taskRerun` go through the Admin API path (Bun Sidecar forwards
+// to Rust `/api/task/run|rerun`) because the execution primitive binds a
+// CronTask to the Task Center task and kicks the Rust scheduler. The Tauri
+// IPC shortcut (`cmd_task_update_status`) would skip CronTask registration
+// and the task would never fire.
+
+interface AdminResponse<T = unknown> {
+  success: boolean;
+  data?: T;
+  error?: string;
+}
+
+async function postAdmin<T = unknown>(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<T> {
+  const { apiPostJson } = await import('@/api/apiFetch');
+  const result = await apiPostJson<AdminResponse<T>>(path, body);
+  if (!result.success) {
+    throw new Error(result.error ?? `${path} failed`);
+  }
+  return result.data as T;
+}
+
+/** Dispatch task execution (PRD §11.1 unified primitive). */
+export function taskRun(id: string): Promise<unknown> {
+  return postAdmin('/api/admin/task/run', { id });
+}
+
+/** Reset status → todo, then dispatch (PRD §10.2.2 row "rerun"). */
+export function taskRerun(id: string): Promise<unknown> {
+  return postAdmin('/api/admin/task/rerun', { id });
+}
+
+/** True if the current environment exposes Task Center commands (Tauri-only). */
+export function taskCenterAvailable(): boolean {
+  return isTauri();
+}

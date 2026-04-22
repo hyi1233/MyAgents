@@ -175,7 +175,7 @@ export default memo(function TabBar({
                 <button
                     className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md transition-all duration-150 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]/60 hover:text-[var(--ink)]"
                     onClick={onNewTab}
-                    title="新建标签页"
+                    title={`新建标签页 (${navigator.platform.toLowerCase().includes('mac') ? '⌘T' : 'Ctrl+T'})`}
                 >
                     <Plus className="h-4 w-4" />
                 </button>

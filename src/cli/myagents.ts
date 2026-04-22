@@ -33,7 +33,14 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
   while (i < args.length) {
     const arg = args[i];
     if (arg.startsWith('--')) {
-      const key = arg.slice(2);
+      // Support both `--key value` and `--key=value` forms. The equals form
+      // is ubiquitous in GNU-style CLIs; without it, callers (especially AI
+      // agents) get silently-dropped values + confusing "missing flag" errors
+      // downstream.
+      const raw = arg.slice(2);
+      const eq = raw.indexOf('=');
+      const key = eq >= 0 ? raw.slice(0, eq) : raw;
+      const inlineValue = eq >= 0 ? raw.slice(eq + 1) : undefined;
       // Boolean flags (no value follows)
       if (key === 'help' || key === 'json' || key === 'dry-run' || key === 'disable-nonessential') {
         flags[camelCase(key)] = true;
@@ -45,39 +52,60 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
       // below must NOT run for repeatable flags — it would overwrite the
       // accumulated array with `true`.
       if (repeatable.has(key)) {
+        const cKey = camelCase(key);
+        const arr = (flags[cKey] as string[]) || [];
+        if (inlineValue !== undefined) {
+          arr.push(inlineValue);
+          flags[cKey] = arr;
+          i++;
+          continue;
+        }
         const value = args[i + 1];
         if (value === undefined) {
           // No value — normalize to empty array (not boolean) to keep type consistent
-          const cKey = camelCase(key);
           if (!flags[cKey]) flags[cKey] = [];
           i++;
           continue;
         }
-        // Collect values under camelCase key for consistency with non-repeatable flags
-        const cKey = camelCase(key);
-        const arr = (flags[cKey] as string[]) || [];
         arr.push(value);
         flags[cKey] = arr;
         i += 2;
         continue;
       }
       // Key-value flags (non-repeatable)
+      if (inlineValue !== undefined) {
+        flags[camelCase(key)] = inlineValue;
+        i++;
+        continue;
+      }
       const value = args[i + 1];
       if (value === undefined || value.startsWith('--')) {
         flags[camelCase(key)] = true;
         i++;
         continue;
       }
-      {
-        flags[camelCase(key)] = value;
-        i += 2;
-      }
+      flags[camelCase(key)] = value;
+      i += 2;
     } else {
       positional.push(arg);
       i++;
     }
   }
   return { positional, flags };
+}
+
+/**
+ * Reject flags that arrived without a value (parser fell back to `true`
+ * when the next token was another `--flag`). Surfaces a clear, exit-1
+ * CLI error BEFORE any HTTP call — prevents the downstream handler from
+ * seeing a bool where it expected a string and returning an opaque
+ * "transport/parse failed" error to the AI caller.
+ */
+function assertStringFlag(value: unknown, flagName: string): asserts value is string | undefined {
+  if (value === true) {
+    console.error(`Error: --${flagName} requires a value (e.g. --${flagName} foo or --${flagName}=foo)`);
+    process.exit(2);
+  }
 }
 
 function camelCase(s: string): string {
@@ -95,9 +123,12 @@ Usage: myagents <command> [options]
 Commands:
   mcp       Manage MCP tool servers
   model     Manage model providers
-  agent     Manage agents & channels
+  agent     Manage agents & channels (+ 'agent show <id>' for effective defaults)
+  runtime   Inspect Agent Runtimes (list installed + describe models/modes)
   skill     Manage skills (install from URL, list, enable/disable, sync)
   cron      Manage scheduled tasks (list/add/runs/exit ...)
+  task      Manage Task Center tasks (list/get/update-status/run/rerun ...)
+  thought   Manage Task Center thoughts (list/create)
   im        IM runtime actions for current chat (send-media)
   widget    Generative UI widget design guidelines (readme)
   plugin    Manage OpenClaw channel plugins
@@ -127,6 +158,34 @@ Examples:
   myagents skill remove my-skill
   myagents skill sync
   myagents cron list
+  myagents runtime list                       # see installed runtimes + install hints
+  myagents runtime describe codex             # models + permission modes
+  myagents agent show <agent-id>              # effective defaults for a workspace
+  myagents task list
+  myagents task get <taskId>            # returns metadata + docs paths
+                                        # (task.md / verify.md / progress.md /
+                                        #  alignment.md — read/edit them with
+                                        #  standard Read/Edit/Write tools)
+  myagents task update-status <taskId> running --message "starting work"
+  myagents task update-status <taskId> verifying
+  myagents task update-status <taskId> done --message "bundle size dropped 40%"
+  myagents task append-session <taskId> <sessionId>
+  myagents task run <taskId>
+  myagents task rerun <taskId>
+  myagents task create-direct --name "review PR" \\
+      --workspaceId proj --workspacePath /path/to/proj \\
+      --taskMdContent "Review this PR and file findings in progress.md" \\
+      --runtime codex --model gpt-5.2 --permissionMode full-auto
+    # Per-task runtime/model/permissionMode overrides — consult
+    #   myagents runtime list  +  myagents runtime describe <runtime>
+    # before choosing values. Omit any flag to inherit the agent workspace default.
+  myagents task create-from-alignment <alignmentSessionId> --name "新任务"
+    # Backend auto-inherits workspaceId / workspacePath / sourceThoughtId
+    # from the alignment session's metadata (set when 「AI 讨论」 launched).
+    # Pass --run to dispatch immediately in the same call.
+    # Pass --json for machine-readable output (task_id + docs_path).
+    # Same per-task override flags as create-direct apply here.
+  myagents thought list
   myagents plugin list
   myagents version
   myagents reload
@@ -144,6 +203,18 @@ async function callApi(route: string, body: Record<string, unknown> = {}): Promi
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    // Non-JSON error bodies (e.g. axum 4xx returns plain text like
+    // "Failed to deserialize query string: missing field `doc`") would
+    // crash `resp.json()` with a SyntaxError — translate to an
+    // AdminResponse-shaped error so the caller can surface it cleanly.
+    const contentType = resp.headers.get('content-type') ?? '';
+    if (!contentType.includes('application/json')) {
+      const text = await resp.text();
+      return {
+        success: false,
+        error: text.trim() || `HTTP ${resp.status} ${resp.statusText}`,
+      };
+    }
     return await resp.json() as Record<string, unknown>;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -167,6 +238,19 @@ function printResult(group: string, action: string, result: Record<string, unkno
 
   if (!result.success) {
     console.error(`Error: ${result.error}`);
+    // Structured recovery hint (v0.1.69+): print `→ Run: <command>   <message>`
+    // below the error line in human mode so a downstream AI reader has a
+    // concrete next step, not just a rejection. JSON mode preserves the full
+    // shape via the `JSON.stringify` branch above.
+    const hint = result.recoveryHint as { recoveryCommand?: string; message?: string } | undefined;
+    if (hint && typeof hint === 'object') {
+      if (hint.recoveryCommand) {
+        const suffix = hint.message ? `   ${hint.message}` : '';
+        console.error(`  \u2192 Run: ${hint.recoveryCommand}${suffix}`);
+      } else if (hint.message) {
+        console.error(`  ${hint.message}`);
+      }
+    }
     return;
   }
 
@@ -207,6 +291,18 @@ function printResult(group: string, action: string, result: Record<string, unkno
     printPluginList(result.data as Array<Record<string, unknown>>);
     return;
   }
+  if (group === 'task' && action === 'list') {
+    printTaskList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
+  if (group === 'task' && action === 'get') {
+    printTaskDetail(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'thought' && action === 'list') {
+    printThoughtList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
   if (group === 'skill' && action === 'list') {
     printSkillList(result.data as Array<Record<string, unknown>>);
     return;
@@ -231,6 +327,18 @@ function printResult(group: string, action: string, result: Record<string, unkno
     printAgentRuntimeStatus(result.data as Record<string, unknown>);
     return;
   }
+  if (group === 'agent' && action === 'show') {
+    printAgentShow(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'runtime' && action === 'list') {
+    printRuntimeList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
+  if (group === 'runtime' && action === 'describe') {
+    printRuntimeDescribe(result.data as Record<string, unknown>);
+    return;
+  }
   if (group === 'status') {
     printStatus(result.data as Record<string, unknown>);
     return;
@@ -248,11 +356,246 @@ function printResult(group: string, action: string, result: Record<string, unkno
     return;
   }
 
+  // Task create-* — AI-facing flow: print task_id + docs path + next-step
+  // hint + any override echo so the caller doesn't have to guess the id via
+  // `ls -lt ~/.myagents/tasks/`. JSON mode above returns the full payload.
+  // Both `create-direct` and `create-from-alignment` go through the same
+  // `enrichTaskCreateResponse` server-side, so one printer covers both.
+  if (group === 'task' && (action === 'create-direct' || action === 'create-from-alignment')) {
+    printTaskCreateResult(result.data as Record<string, unknown>);
+    return;
+  }
+
+  // Task run — print the engine/model the task will execute on, plus the
+  // task_id echo so the caller has observability on what was dispatched.
+  if (group === 'task' && (action === 'run' || action === 'rerun')) {
+    printTaskDispatchResult(action, result.data as Record<string, unknown>);
+    return;
+  }
+
   // Generic success output
   const symbol = '\u2713'; // ✓
   const hint = result.hint ? ` ${result.hint}` : '';
   const id = (result.data as Record<string, unknown>)?.id ?? '';
   console.log(`${symbol} ${action} ${id}${hint}`);
+}
+
+/**
+ * Format output for `task create-from-alignment` (and eventually `task create-direct`).
+ *
+ * AI scripts need at minimum the `task_id` of the newly minted task so they
+ * can call `task run <id>` next. Also surfaces `docs_path` because the AI
+ * often wants to tell the human "I wrote the task docs to X" and having
+ * that string in the CLI output saves a re-lookup.
+ *
+ * Plaintext shape deliberately mirrors what `--json` produces so readers
+ * can mentally switch between the two without re-learning fields:
+ *
+ *   ✓ Task created
+ *     task_id:   <uuid>
+ *     name:      <string>
+ *     docs_path: ~/.myagents/tasks/<uuid>/
+ *     next:      myagents task run <uuid>
+ */
+function printTaskCreateResult(data: Record<string, unknown>): void {
+  // Handler returns { task, dispatched?, runResult? } — `task` is the full
+  // Task record; `dispatched/runResult` appear when the caller passed --run.
+  const task = (data?.task as Record<string, unknown>) ?? data;
+  const id = String(task?.id ?? '');
+  const name = String(task?.name ?? '');
+  const home = process.env.HOME ?? '';
+  const absDocs = `${home}/.myagents/tasks/${id}/`;
+  const displayDocs = home && absDocs.startsWith(home)
+    ? `~${absDocs.slice(home.length)}`
+    : absDocs;
+
+  console.log('\u2713 Task created');
+  if (id) console.log(`  task_id:   ${id}`);
+  if (name) console.log(`  name:      ${name}`);
+  console.log(`  docs_path: ${displayDocs}`);
+
+  // Surface which runtime/model/permission overrides actually landed on the
+  // persisted task (read from the server-returned Task record, not echoed
+  // from the request). Visible here — not buried in --json — because the AI
+  // needs to confirm "the override I specified stuck" before dispatching.
+  // A mismatch between `overridesRequested` and `overridden` indicates the
+  // server silently dropped a field, which the AI should flag to the user.
+  const overridden = (data?.overridden as string[] | undefined) ?? [];
+  const overridesRequested = (data?.overridesRequested as string[] | undefined) ?? [];
+  const overrides = (data?.overrides as Record<string, unknown> | undefined) ?? {};
+  if (overridden.length > 0) {
+    console.log(`  overrides: ${overridden.join(', ')}`);
+    for (const field of overridden) {
+      const v = overrides[field];
+      if (v !== null && v !== undefined && v !== '') {
+        const display = typeof v === 'object' ? JSON.stringify(v) : String(v);
+        console.log(`    ${field.padEnd(14)} = ${display}`);
+      }
+    }
+  } else {
+    console.log('  overrides: (none — inherits workspace defaults)');
+  }
+  // Drift warning: requested override didn't reach the persisted task.
+  const droppedFields = overridesRequested.filter(f => !overridden.includes(f));
+  if (droppedFields.length > 0) {
+    console.log('');
+    console.log(`  \u26A0 warning: requested overrides were NOT persisted: ${droppedFields.join(', ')}`);
+    console.log('    This likely indicates a server-side deserialization gap — please report.');
+  }
+
+  const nextSteps = data?.nextSteps as Record<string, string> | undefined;
+  const dispatch = nextSteps?.dispatch ?? (id ? `myagents task run ${id}` : '');
+  if (dispatch) console.log(`  next:      ${dispatch}`);
+
+  // If --run was bundled with create, the backend also dispatched; echo
+  // the dispatch summary inline so the caller sees both in one output.
+  const runResult = data?.runResult as Record<string, unknown> | undefined;
+  if (runResult) {
+    console.log('');
+    printTaskDispatchResult('run', runResult);
+  }
+}
+
+/**
+ * Format `myagents runtime list` output.
+ *
+ * Structure each row as `runtime  installed  version  displayName`, with
+ * non-installed rows following up on the next line with the install hint.
+ * AI callers scan this to learn which `--runtime` values are safe to pass.
+ */
+function printRuntimeList(rows: Array<Record<string, unknown>>): void {
+  if (!rows || rows.length === 0) {
+    console.log('No runtimes found.');
+    return;
+  }
+  const pad = (s: string, n: number) => s.padEnd(n);
+  console.log(pad('RUNTIME', 14) + pad('INSTALLED', 11) + pad('VERSION', 18) + 'NAME');
+  for (const row of rows) {
+    const rt = String(row.runtime ?? '');
+    const installed = row.installed ? 'yes' : 'no';
+    const version = String(row.version ?? '').split('\n')[0].slice(0, 16) || '-';
+    console.log(pad(rt, 14) + pad(installed, 11) + pad(version, 18) + String(row.displayName ?? ''));
+    const hint = row.notInstalledHint;
+    if (hint) console.log(`    \u2192 ${String(hint)}`);
+  }
+  console.log('');
+  console.log('Describe a runtime:  myagents runtime describe <runtime>');
+}
+
+/**
+ * Format `myagents runtime describe <runtime>` output.
+ *
+ * Show the four things an AI needs before choosing override values:
+ *   - install state (version string when installed, install hint otherwise)
+ *   - available models  (`--model` accepts any of these)
+ *   - permission modes  (`--permissionMode` accepts any of these)
+ *   - default permission mode (so the caller knows what "no override" means)
+ */
+function printRuntimeDescribe(data: Record<string, unknown>): void {
+  const runtime = String(data.runtime ?? '');
+  const name = String(data.displayName ?? runtime);
+  const installed = data.installed ? 'yes' : 'no';
+  const version = data.version ? ` (${String(data.version).split('\n')[0]})` : '';
+  console.log(`${name}  [${runtime}]`);
+  console.log(`  installed: ${installed}${version}`);
+  const defaultMode = String(data.defaultPermissionMode ?? '');
+  if (defaultMode) console.log(`  default permissionMode: ${defaultMode}`);
+
+  const models = (data.models as Array<Record<string, unknown>>) ?? [];
+  console.log('');
+  console.log('Models:');
+  if (models.length === 0) {
+    console.log('  (none reported — runtime may not be installed, or has no static model list)');
+  } else {
+    for (const m of models) {
+      const value = String(m.value ?? '');
+      const display = String(m.displayName ?? '');
+      const mark = m.isDefault ? ' *' : '';
+      console.log(`  ${value.padEnd(28) || '(default)'}  ${display}${mark}`);
+    }
+  }
+
+  const modes = (data.permissionModes as Array<Record<string, unknown>>) ?? [];
+  console.log('');
+  console.log('Permission modes:');
+  if (modes.length === 0) {
+    console.log('  (runtime uses the built-in PermissionMode enum; set via --permissionMode)');
+  } else {
+    for (const mode of modes) {
+      const value = String(mode.value ?? '');
+      const label = String(mode.label ?? '');
+      const desc = String(mode.description ?? '');
+      console.log(`  ${value.padEnd(22)} ${label}${desc ? '  —  ' + desc : ''}`);
+    }
+  }
+
+  const note = data.note;
+  if (note) {
+    console.log('');
+    console.log(`Note: ${String(note)}`);
+  }
+}
+
+/**
+ * Format `myagents agent show <id>` output.
+ *
+ * Exposes the resolved defaults an AI would need to decide whether a task
+ * override is meaningful or a no-op. Keys are printed one-per-line with
+ * `(inherits provider / workspace default)` for null/empty values so the
+ * reader doesn't have to guess what an absent field means.
+ */
+function printAgentShow(data: Record<string, unknown>): void {
+  if (!data) {
+    console.log('No agent data.');
+    return;
+  }
+  console.log(`Agent:       ${String(data.name ?? '')}`);
+  console.log(`  id:        ${String(data.id ?? '')}`);
+  console.log(`  enabled:   ${data.enabled ? 'yes' : 'no'}`);
+  if (data.workspacePath) console.log(`  workspace: ${String(data.workspacePath)}`);
+  const channelCount = data.channelCount;
+  if (typeof channelCount === 'number') console.log(`  channels:  ${channelCount}`);
+  console.log('');
+  console.log('Effective defaults:');
+  const defaults = (data.effectiveDefaults as Record<string, unknown>) ?? {};
+  const fmt = (v: unknown): string => {
+    if (v === null || v === undefined || v === '') return '(inherits default)';
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  };
+  console.log(`  runtime:        ${fmt(defaults.runtime)}`);
+  console.log(`  model:          ${fmt(defaults.model)}`);
+  console.log(`  permissionMode: ${fmt(defaults.permissionMode)}`);
+  console.log(`  providerId:     ${fmt(defaults.providerId)}`);
+  if (defaults.runtimeConfig) {
+    console.log(`  runtimeConfig:  ${JSON.stringify(defaults.runtimeConfig)}`);
+  }
+  console.log('');
+  console.log('Describe this runtime:  myagents runtime describe <runtime>');
+}
+
+/**
+ * Format output for `task run` / `task rerun`.
+ *
+ * Answers the "what will this actually run on?" question so the AI caller
+ * can relay engine/model back to the human in chat. `runtime` and `model`
+ * are read from the updated Task record — both can be null/undefined
+ * (meaning "use agent default" / "use provider default"); we explicitly
+ * label that case rather than hiding it.
+ */
+function printTaskDispatchResult(
+  action: string,
+  data: Record<string, unknown>,
+): void {
+  const task = (data?.task as Record<string, unknown>) ?? data;
+  const id = String(task?.id ?? '');
+  const runtime = (task?.runtime as string) || 'builtin';
+  const model = (task?.model as string) || '(agent default)';
+
+  console.log(`\u2713 Task ${action === 'rerun' ? 'redispatched' : 'dispatched'}`);
+  if (id) console.log(`  task_id:  ${id}`);
+  console.log(`  runtime:  ${runtime}`);
+  console.log(`  model:    ${model}`);
 }
 
 function printMcpList(servers: Array<Record<string, unknown>>): void {
@@ -419,6 +762,157 @@ function printSkillAdd(result: Record<string, unknown>): void {
   console.log(`\u2713 ${result.hint ?? 'done'}`);
 }
 
+function printTaskList(tasks: Array<Record<string, unknown>>): void {
+  if (!tasks || tasks.length === 0) {
+    console.log('(no tasks)');
+    return;
+  }
+  console.log(`Tasks (${tasks.length}):`);
+  for (const t of tasks) {
+    const status = String(t.status ?? '?');
+    const mode = String(t.executionMode ?? 'once');
+    const origin = String(t.dispatchOrigin ?? 'direct');
+    console.log(`  ${t.id}  [${status}]  ${t.name}`);
+    console.log(
+      `     mode=${mode}  origin=${origin}  workspace=${t.workspaceId}  sessions=${
+        Array.isArray(t.sessionIds) ? (t.sessionIds as string[]).length : 0
+      }`,
+    );
+  }
+}
+
+function printTaskDetail(task: Record<string, unknown>): void {
+  if (!task) {
+    console.log('(task not found)');
+    return;
+  }
+
+  // Identity + top-line state
+  console.log(`Task: ${task.name ?? '(unnamed)'}`);
+  console.log(`  ID:             ${task.id}`);
+  const statusLine = String(task.status ?? '?');
+  const updatedAt = typeof task.updatedAt === 'number' ? new Date(task.updatedAt).toISOString() : undefined;
+  console.log(`  Status:         ${statusLine}${updatedAt ? ` (updated ${updatedAt})` : ''}`);
+  console.log(`  Executor:       ${task.executor ?? '?'}`);
+  console.log(`  Execution mode: ${task.executionMode ?? '?'}`);
+  console.log(`  Dispatch:       ${task.dispatchOrigin ?? '?'}`);
+  if (task.workspacePath || task.workspaceId) {
+    console.log(`  Workspace:      ${task.workspacePath ?? task.workspaceId}`);
+  }
+  if (task.description) console.log(`  Description:    ${task.description}`);
+  if (task.runMode) console.log(`  Run mode:       ${task.runMode}`);
+  if (task.runtime) console.log(`  Runtime:        ${task.runtime}`);
+  if (task.model) console.log(`  Model override: ${task.model}`);
+  if (task.permissionMode) console.log(`  Permission:     ${task.permissionMode}`);
+  if (Array.isArray(task.tags) && (task.tags as string[]).length > 0) {
+    console.log(`  Tags:           ${(task.tags as string[]).join(', ')}`);
+  }
+
+  // Docs paths — the highlight of `task get`. AI consumers read these
+  // files with standard Read/Edit/Write tools; there are no separate
+  // `show-doc` / `write-doc` CLIs (removed v0.1.69+).
+  const docs = task.docs as Record<string, string | undefined> | undefined;
+  if (docs) {
+    console.log('\nDocs (read/edit/write these directly — they are YOUR workspace):');
+    if (docs.dir) console.log(`  Dir:            ${docs.dir}`);
+    if (docs.taskMd) console.log(`  task.md:        ${docs.taskMd}`);
+    if (docs.verifyMd) console.log(`  verify.md:      ${docs.verifyMd}`);
+    if (docs.progressMd) console.log(`  progress.md:    ${docs.progressMd}`);
+    if (docs.alignmentMd) console.log(`  alignment.md:   ${docs.alignmentMd}`);
+  }
+
+  // Schedule — only for scheduled / recurring / loop tasks
+  const mode = String(task.executionMode ?? 'once');
+  if (mode !== 'once') {
+    console.log('\nSchedule:');
+    if (task.cronExpression) {
+      console.log(
+        `  Cron:           ${task.cronExpression}${task.cronTimezone ? ` (${task.cronTimezone})` : ''}`,
+      );
+    } else if (task.intervalMinutes) {
+      console.log(`  Interval:       every ${task.intervalMinutes} minute(s)`);
+    } else if (task.dispatchAt) {
+      const when = typeof task.dispatchAt === 'number' ? new Date(task.dispatchAt).toISOString() : String(task.dispatchAt);
+      console.log(`  Dispatch at:    ${when}`);
+    }
+    if (task.lastExecutedAt) {
+      const last = typeof task.lastExecutedAt === 'number' ? new Date(task.lastExecutedAt).toISOString() : String(task.lastExecutedAt);
+      console.log(`  Last executed:  ${last}`);
+    }
+  }
+
+  // End conditions — when present, they're decision-relevant
+  const end = task.endConditions as Record<string, unknown> | undefined;
+  if (end && (end.deadline || end.maxExecutions || end.aiCanExit === false)) {
+    console.log('\nEnd conditions:');
+    if (end.deadline) {
+      const dl = typeof end.deadline === 'number' ? new Date(end.deadline).toISOString() : String(end.deadline);
+      console.log(`  Deadline:       ${dl}`);
+    }
+    if (end.maxExecutions) console.log(`  Max executions: ${end.maxExecutions}`);
+    if (end.aiCanExit === false) console.log(`  AI can exit:    no (must run to end conditions)`);
+  }
+
+  // Notification
+  const notif = task.notification as Record<string, unknown> | undefined;
+  if (notif) {
+    console.log('\nNotification:');
+    console.log(`  Desktop:        ${notif.desktop !== false ? 'on' : 'off'}`);
+    if (notif.botChannelId) console.log(`  Bot channel:    ${notif.botChannelId}`);
+  }
+
+  // Sessions + source thought
+  const sessionIds = Array.isArray(task.sessionIds) ? (task.sessionIds as string[]) : [];
+  if (sessionIds.length > 0) {
+    console.log(`\nSessions:         ${sessionIds.join(', ')} (${sessionIds.length} total)`);
+  }
+
+  // Recent status changes — last 5, with counter
+  const hist = task.statusHistory as Array<Record<string, unknown>> | undefined;
+  if (hist && hist.length > 0) {
+    const last5 = hist.slice(-5);
+    console.log(`\nRecent changes (${last5.length} of ${hist.length}):`);
+    for (const h of last5) {
+      const at = typeof h.at === 'number' ? new Date(h.at).toISOString() : String(h.at ?? '');
+      const actor = String(h.actor ?? '?');
+      const source = h.source ? `/${h.source}` : '';
+      const from = h.from ?? '—';
+      const msg = h.message ? `   "${h.message}"` : '';
+      console.log(`  ${at}  ${actor}${source}  ${from} → ${h.to}${msg}`);
+    }
+  }
+
+  // Footer — next-step hints so the AI / user doesn't have to guess
+  console.log('\nNext steps:');
+  console.log('  myagents task update-status <id> <status> [--message ...]  # transition state machine');
+  console.log('  myagents task run <id>                                     # dispatch immediately');
+  console.log('  myagents task rerun <id>                                   # re-arm stopped/blocked task');
+  console.log('  myagents task --help                                       # full Task CLI reference');
+}
+
+function printThoughtList(thoughts: Array<Record<string, unknown>>): void {
+  if (!thoughts || thoughts.length === 0) {
+    console.log('(no thoughts)');
+    return;
+  }
+  console.log(`Thoughts (${thoughts.length}):`);
+  for (const t of thoughts) {
+    const content = String(t.content ?? '');
+    const preview = content.length > 80 ? content.slice(0, 77) + '...' : content;
+    const tags = Array.isArray(t.tags) ? (t.tags as string[]) : [];
+    const convCount = Array.isArray(t.convertedTaskIds)
+      ? (t.convertedTaskIds as string[]).length
+      : 0;
+    console.log(`  ${t.id}  ${preview}`);
+    if (tags.length || convCount) {
+      const bits: string[] = [];
+      if (tags.length) bits.push(`tags=${tags.join(',')}`);
+      if (convCount) bits.push(`tasks=${convCount}`);
+      console.log(`     ${bits.join('  ')}`);
+    }
+  }
+}
+
 function printMcpOAuth(data: Record<string, unknown>): void {
   if (!data) return;
   const id = data.id ?? '';
@@ -536,6 +1030,40 @@ async function main(): Promise<void> {
     const body = buildRequestBody(group, action, restArgs, flags);
     const route = buildRoute(group, action, restArgs);
     result = await callApi(route, body);
+
+    // --run bundled with `task create-from-alignment`: chain immediately
+    // into /task/run using the fresh task_id. Saves the caller one round
+    // trip and removes the "which id did I just get?" parsing step.
+    // Only fires on success and only when the response actually carries
+    // a task.id (older backends without the enriched payload fall
+    // through without the run — graceful degradation).
+    if (
+      group === 'task' &&
+      action === 'create-from-alignment' &&
+      flags.run &&
+      result.success &&
+      result.data
+    ) {
+      const data = result.data as Record<string, unknown>;
+      const task = (data.task as Record<string, unknown>) ?? data;
+      const newTaskId = task?.id as string | undefined;
+      if (newTaskId) {
+        const runResult = await callApi('task/run', { id: newTaskId });
+        if (!runResult.success) {
+          // Flag the failure in the top-level result so exit code reflects
+          // it, but keep the successful create payload visible so the user
+          // can manually `task run <id>` next. Stick the run error in a
+          // distinct field to avoid clobbering the create data.
+          result.success = false;
+          result.error = `created ${newTaskId} but run failed: ${String(runResult.error ?? 'unknown error')}`;
+        } else {
+          // Bundle the run result alongside create so printTaskCreateResult
+          // can show both sections (task_id + docs_path + runtime/model).
+          (result.data as Record<string, unknown>).runResult = runResult.data;
+        }
+      }
+    }
+
     printResult(group, action, result, jsonMode);
   }
 
@@ -672,6 +1200,7 @@ function buildRequestBody(
   // Agent commands
   if (group === 'agent') {
     if (action === 'enable' || action === 'disable') return { id: rest[0] || flags.id };
+    if (action === 'show') return { id: rest[0] || flags.id };
     if (action === 'set') return { id: rest[0], key: rest[1], value: tryParseJson(rest[2]) };
     if (action === 'channel') {
       const channelAction = rest[0] || 'list'; // list | add | remove
@@ -680,6 +1209,15 @@ function buildRequestBody(
       if (channelAction === 'remove') return { agentId: rest[1], channelId: rest[2] };
       return { agentId: rest[1] };
     }
+    return {};
+  }
+
+  // Runtime discovery commands (v0.1.69+): `myagents runtime list|describe`
+  // Pure query endpoints — no body mutation — meant to be consulted BEFORE
+  // choosing values for `task create-direct --runtime/--model/...`.
+  if (group === 'runtime') {
+    if (action === 'list') return {};
+    if (action === 'describe') return { runtime: rest[0] || flags.runtime };
     return {};
   }
 
@@ -823,6 +1361,112 @@ function buildRequestBody(
     return {};
   }
 
+  // Task Center (v0.1.69) — covers all `myagents task <action>` subcommands.
+  //
+  // The `actor` / `source` trust fields are NOT settable via the CLI; the
+  // admin-api handler derives them from the calling process environment
+  // (MYAGENTS_PORT present → agent subprocess; otherwise user terminal).
+  if (group === 'task') {
+    if (action === 'list') {
+      return {
+        workspaceId: flags.workspaceId,
+        status: flags.status,
+        tag: flags.tag,
+        includeDeleted: flags.includeDeleted,
+      };
+    }
+    if (action === 'get') return { id: rest[0] || flags.id };
+    if (action === 'update-status') {
+      return {
+        id: rest[0],
+        status: rest[1],
+        message: flags.message,
+      };
+    }
+    if (action === 'append-session') {
+      return { id: rest[0], sessionId: rest[1] || flags.sessionId };
+    }
+    if (action === 'archive') return { id: rest[0], message: flags.message };
+    if (action === 'delete') return { id: rest[0] };
+    if (action === 'create-direct') {
+      assertStringFlag(flags.name, 'name');
+      // Resolve task.md body: `--taskMdFile` (industry-standard for long
+      // text — avoids shell-escape hell for multi-line / backtick / quoted
+      // markdown) takes precedence over `--taskMdContent` when both are
+      // set. Mirrors the `cron add --prompt-file` pattern above.
+      const taskMdContent = resolveTaskMdContent(flags);
+      return {
+        name: rest[0] || flags.name,
+        executor: flags.executor ?? 'agent',
+        description: flags.description,
+        workspaceId: flags.workspaceId,
+        workspacePath: flags.workspacePath,
+        taskMdContent,
+        executionMode: flags.executionMode ?? 'once',
+        runMode: flags.runMode,
+        sourceThoughtId: flags.sourceThoughtId,
+        tags: typeof flags.tags === 'string'
+          ? (flags.tags as string).split(',').map(s => s.trim()).filter(Boolean)
+          : undefined,
+        // Per-task runtime overrides. Admin-api validates these before
+        // forwarding to Rust — if the caller mistypes a value, they get a
+        // recovery hint pointing to `runtime list` / `runtime describe`.
+        runtime: flags.runtime,
+        model: flags.model,
+        permissionMode: flags.permissionMode,
+        runtimeConfig: parseRuntimeConfigFlag(flags.runtimeConfig),
+      };
+    }
+    if (action === 'create-from-alignment') {
+      // First positional MUST be the alignmentSessionId. Use --name for the
+      // task title (to avoid ambiguity when the user writes a task name that
+      // happens to parse as a sessionId). An empty alignmentSessionId will be
+      // rejected by the Rust layer's `validate_safe_id`.
+      assertStringFlag(flags.name, 'name');
+      return {
+        name: flags.name,
+        executor: flags.executor ?? 'agent',
+        description: flags.description,
+        workspaceId: flags.workspaceId,
+        workspacePath: flags.workspacePath,
+        alignmentSessionId: flags.alignmentSessionId ?? rest[0],
+        executionMode: flags.executionMode ?? 'once',
+        runMode: flags.runMode,
+        sourceThoughtId: flags.sourceThoughtId,
+        tags: typeof flags.tags === 'string'
+          ? (flags.tags as string).split(',').map(s => s.trim()).filter(Boolean)
+          : undefined,
+        // Identical override contract to create-direct above — keep these two
+        // in lockstep.
+        runtime: flags.runtime,
+        model: flags.model,
+        permissionMode: flags.permissionMode,
+        runtimeConfig: parseRuntimeConfigFlag(flags.runtimeConfig),
+      };
+    }
+    if (action === 'run' || action === 'rerun') {
+      return { id: rest[0] || flags.id };
+    }
+    return {};
+  }
+
+  // Thought (v0.1.69) — `myagents thought <list|create>`
+  if (group === 'thought') {
+    if (action === 'list') {
+      return {
+        tag: flags.tag,
+        query: flags.query,
+        limit: flags.limit ? Number(flags.limit) : undefined,
+      };
+    }
+    if (action === 'create') {
+      return {
+        content: rest.join(' ') || flags.content,
+      };
+    }
+    return {};
+  }
+
   return flags;
 }
 
@@ -857,6 +1501,100 @@ function tryParseJson(value: string | undefined): unknown {
   } catch {
     return value;
   }
+}
+
+/** Hard cap for `--taskMdContent` (inline string). Mirrors the `--taskMdFile`
+ *  1 MB cap so neither ingress path can ship a pathologically large body
+ *  through to Rust, where it would bloat `.task/<id>/task.md` without bound. */
+const TASK_MD_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Resolve `task create-direct --taskMdFile` / `--taskMdContent` into a
+ * single `taskMdContent` string.
+ *
+ * Precedence (both flags set → `--taskMdFile` wins):
+ *   1. `--taskMdFile <path>` — read the file (size + NUL guarded).
+ *      Chosen as primary because inline markdown on the shell is hostile to
+ *      backticks, quotes, and newlines.
+ *   2. `--taskMdContent <string>` — raw inline content (size-guarded).
+ *
+ * Earlier revisions silently joined trailing positional args as a "legacy"
+ * fallback — that was undocumented surface area and a fat-fingered positional
+ * could silently become task body. Removed after cross-review (v0.1.69).
+ */
+function resolveTaskMdContent(
+  flags: Record<string, unknown>,
+): string | undefined {
+  const filePath = flags.taskMdFile;
+  if (filePath !== undefined && filePath !== '') {
+    if (typeof filePath !== 'string') {
+      console.error('Error: --taskMdFile must be a file path string');
+      process.exit(2);
+    }
+    try {
+      // Lazy require — same pattern as the cron `--prompt-file` reader
+      // (keeps startup fast for commands that don't need fs).
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('fs') as typeof import('fs');
+      const stat = fs.statSync(filePath);
+      if (stat.size > TASK_MD_MAX_BYTES) {
+        console.error(`Error: --taskMdFile "${filePath}" is ${stat.size} bytes, exceeds ${TASK_MD_MAX_BYTES} (1 MB) limit`);
+        process.exit(1);
+      }
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      if (raw.includes('\0')) {
+        console.error(`Error: --taskMdFile "${filePath}" contains NUL bytes (is this a binary file?)`);
+        process.exit(1);
+      }
+      return raw;
+    } catch (err) {
+      console.error(`Error: failed to read --taskMdFile "${filePath}": ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  }
+  const contentFlag = flags.taskMdContent;
+  if (typeof contentFlag === 'string' && contentFlag !== '') {
+    // Byte-length cap — a 1 MB inline arg on the shell is almost always a
+    // copy-paste gone wrong, and downstream JSON serialisation / logging
+    // would otherwise choke silently.
+    const byteLen = Buffer.byteLength(contentFlag, 'utf-8');
+    if (byteLen > TASK_MD_MAX_BYTES) {
+      console.error(`Error: --taskMdContent is ${byteLen} bytes, exceeds ${TASK_MD_MAX_BYTES} (1 MB) limit. Use --taskMdFile for large content.`);
+      process.exit(1);
+    }
+    return contentFlag;
+  }
+  return undefined;
+}
+
+/**
+ * Parse the value of `--runtimeConfig` (a JSON object string) into an object.
+ *
+ * Fails hard (exit 2) on malformed JSON — unlike `tryParseJson` which falls
+ * back to the raw string. Reason: silently forwarding a broken string to the
+ * server would surface as a cryptic Rust deserialization error 3 hops later.
+ * An early, typed rejection with "must be a JSON object" is a much more
+ * fixable error for the AI caller.
+ */
+function parseRuntimeConfigFlag(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string') {
+    console.error('Error: --runtimeConfig must be a JSON object string (e.g. --runtimeConfig \'{"model":"o3"}\')');
+    process.exit(2);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Error: --runtimeConfig is not valid JSON: ${msg}`);
+    process.exit(2);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error('Error: --runtimeConfig must be a JSON object (not array, null, or primitive)');
+    process.exit(2);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------

@@ -14,9 +14,14 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 /// CLI subcommands that trigger CLI mode
+///
+/// Keep this list in sync with the command groups in `src/cli/myagents.ts` TOP_HELP.
+/// Missing commands silently take the GUI launch path, which looks like "my command
+/// was ignored" to a terminal user — the exact failure mode this whole CLI was
+/// designed to avoid for AI callers.
 const CLI_COMMANDS: &[&str] = &[
-    "mcp", "model", "agent", "config", "status", "reload", "version",
-    "cron", "plugin",
+    "mcp", "model", "agent", "runtime", "config", "status", "reload", "version",
+    "cron", "plugin", "skill", "task", "thought", "im", "widget",
 ];
 
 /// Check if the given args indicate CLI mode.

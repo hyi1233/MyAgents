@@ -7,10 +7,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { deleteSession as deleteSessionApi, getSessions, type SessionMetadata } from '@/api/sessionClient';
 import { getAllCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
+import { taskCenterAvailable, taskList } from '@/api/taskCenter';
 import { deactivateSession } from '@/api/tauriClient';
 import { loadAppConfig } from '@/config/configService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import type { CronTask } from '@/types/cronTask';
+import type { Task } from '../../shared/types/task';
 import type { AgentConfig } from '../../shared/types/agent';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
@@ -26,6 +28,9 @@ export type SessionTag =
 export interface TaskCenterData {
     sessions: SessionMetadata[];
     cronTasks: CronTask[];
+    /** New-model Tasks (v0.1.69). Populated alongside cronTasks — crons
+     *  are the legacy surface, tasks are the primary Launcher tab now. */
+    tasks: Task[];
     sessionTagsMap: Map<string, SessionTag[]>;
     cronBotInfoMap: Map<string, { name: string; platform: string }>;
     isLoading: boolean;
@@ -34,7 +39,7 @@ export interface TaskCenterData {
     actions: TaskCenterActions;
 }
 
-export type TaskCenterRefreshScope = 'all' | 'sessions' | 'cronTasks' | 'backgroundSessions' | 'agentStatuses';
+export type TaskCenterRefreshScope = 'all' | 'sessions' | 'cronTasks' | 'tasks' | 'backgroundSessions' | 'agentStatuses';
 
 export interface TaskCenterRefreshOptions {
     force?: boolean;
@@ -47,6 +52,7 @@ export interface TaskCenterActions {
     deleteSession: (sessionId: string) => Promise<boolean>;
     refreshSessions: () => void;
     refreshCronTasks: () => void;
+    refreshTasks: () => void;
 }
 
 interface UseTaskCenterDataOptions {
@@ -62,9 +68,21 @@ export const TASK_CENTER_FRESHNESS_TTL_MS = 2_000;
 const sortSessionsByLastActive = (data: SessionMetadata[]) =>
     [...data].sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime());
 
+/** `taskList` is Tauri-only; browser dev mode returns [] silently. */
+async function safeTaskList(): Promise<Task[]> {
+    if (!taskCenterAvailable()) return [];
+    try {
+        return await taskList({});
+    } catch (err) {
+        console.warn('[useTaskCenterData] taskList failed', err);
+        return [];
+    }
+}
+
 export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskCenterData {
     const [sessions, setSessions] = useState<SessionMetadata[]>([]);
     const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
+    const [tasks, setTasks] = useState<Task[]>([]);
     const [backgroundSessionIds, setBackgroundSessionIds] = useState<string[]>([]);
     const [agentStatuses, setAgentStatuses] = useState<AgentStatusMap>({});
     const [agents, setAgents] = useState<AgentConfig[]>([]);
@@ -87,6 +105,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         if (scope === 'all') {
             lastFetchedAtRef.current.sessions = now;
             lastFetchedAtRef.current.cronTasks = now;
+            lastFetchedAtRef.current.tasks = now;
             lastFetchedAtRef.current.backgroundSessions = now;
             lastFetchedAtRef.current.agentStatuses = now;
         }
@@ -98,6 +117,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         if (scope === 'all') {
             latestRequestSeqByScopeRef.current.sessions = requestSeq;
             latestRequestSeqByScopeRef.current.cronTasks = requestSeq;
+            latestRequestSeqByScopeRef.current.tasks = requestSeq;
             latestRequestSeqByScopeRef.current.backgroundSessions = requestSeq;
             latestRequestSeqByScopeRef.current.agentStatuses = requestSeq;
         }
@@ -126,9 +146,10 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
                     .catch(() => ({} as AgentStatusMap))
                 : Promise.resolve({} as AgentStatusMap);
 
-            const [sessionsData, tasksData, bgSessions, agentStatusResult, appConfig] = await Promise.all([
+            const [sessionsData, cronData, newTasks, bgSessions, agentStatusResult, appConfig] = await Promise.all([
                 getSessions(),
                 getAllCronTasks().catch(() => [] as CronTask[]),
+                safeTaskList(),
                 getBackgroundSessions().catch(() => [] as string[]),
                 agentStatusPromise,
                 loadAppConfig().catch(() => null),
@@ -139,7 +160,8 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             if (isLatestRequest('sessions', requestSeq)) {
                 setSessions(sortSessionsByLastActive(filterDeletedSessions(sessionsData)));
             }
-            if (isLatestRequest('cronTasks', requestSeq)) setCronTasks(tasksData);
+            if (isLatestRequest('cronTasks', requestSeq)) setCronTasks(cronData);
+            if (isLatestRequest('tasks', requestSeq)) setTasks(newTasks);
             if (isLatestRequest('backgroundSessions', requestSeq)) setBackgroundSessionIds(bgSessions);
             if (isLatestRequest('agentStatuses', requestSeq)) setAgentStatuses(agentStatusResult);
             setAgents(appConfig?.agents ?? []);
@@ -181,6 +203,16 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             markFetched('cronTasks');
         }).catch(err => {
             console.warn('[useTaskCenterData] Failed to refresh cron tasks:', err);
+        });
+    }, [isLatestRequest, markFetched, startRequest]);
+
+    const refreshTasksNow = useCallback(() => {
+        const requestSeq = startRequest('tasks');
+        void safeTaskList().then(newTasks => {
+            if (!isMountedRef.current) return;
+            if (!isLatestRequest('tasks', requestSeq)) return;
+            setTasks(newTasks);
+            markFetched('tasks');
         });
     }, [isLatestRequest, markFetched, startRequest]);
 
@@ -233,6 +265,15 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             refreshCronTasksNow();
         }, delayMs);
     }, [refreshCronTasksNow]);
+
+    const tasksRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const refreshTasksDebounced = useCallback((delayMs = 500) => {
+        if (tasksRefreshTimerRef.current) clearTimeout(tasksRefreshTimerRef.current);
+        tasksRefreshTimerRef.current = setTimeout(() => {
+            tasksRefreshTimerRef.current = null;
+            refreshTasksNow();
+        }, delayMs);
+    }, [refreshTasksNow]);
 
     const refreshBackgroundSessionsDebounced = useCallback((delayMs = 500) => {
         if (backgroundRefreshTimerRef.current) clearTimeout(backgroundRefreshTimerRef.current);
@@ -290,7 +331,22 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         return () => window.removeEventListener(CUSTOM_EVENTS.SESSION_TITLE_CHANGED, handler);
     }, [refreshSessionsDebounced]);
 
-    // Event listeners for real-time updates
+    // Event listeners for real-time updates.
+    //
+    // Cleanup race (v0.1.69 cross-review W3): the prior shape pushed each
+    // `await listen()` result into `unlisteners[]` at the end of a long
+    // async sequence. If the component unmounted midway (cleanup runs,
+    // `mounted = false`, `unlisteners.forEach(fn)` sees a partial array),
+    // any listener that resolved AFTER cleanup would be added to a
+    // now-dead array and never be unlistened. Its callback is still
+    // no-oped by the `mounted` guard, but the Tauri-side registration
+    // leaks for the lifetime of the page.
+    //
+    // Fix: after each `await listen()`, check `mounted` — if false, call
+    // the returned unlisten function immediately. Only reachable when
+    // mounted is still true does the handle join `unlisteners[]`. A
+    // `register()` helper collapses that pattern so new listeners can't
+    // accidentally forget the guard.
     useEffect(() => {
         if (!isTauriEnvironment()) return;
 
@@ -300,64 +356,74 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         (async () => {
             const { listen } = await import('@tauri-apps/api/event');
             if (!mounted) return;
+            type Listener = Parameters<typeof listen>[1];
+            const register = async (event: string, cb: Listener) => {
+                const off = await listen(event, cb);
+                if (!mounted) {
+                    off();
+                    return;
+                }
+                unlisteners.push(off);
+            };
 
             // Background completion events
-            const u1 = await listen('session:background-complete', () => {
+            await register('session:background-complete', () => {
                 if (!mounted) return;
                 refreshBackgroundSessionsDebounced();
                 refreshSessionsDebounced();
             });
-            unlisteners.push(u1);
 
             // Cron task events
-            const u2 = await listen('cron:task-stopped', () => {
+            await register('cron:task-stopped', () => {
                 if (!mounted) return;
                 refreshCronTasksDebounced();
             });
-            unlisteners.push(u2);
 
-            const u2b = await listen('cron:task-started', () => {
+            await register('cron:task-started', () => {
                 if (!mounted) return;
                 refreshCronTasksDebounced();
             });
-            unlisteners.push(u2b);
 
-            const u3 = await listen('cron:execution-complete', () => {
+            await register('cron:execution-complete', () => {
                 if (!mounted) return;
                 refreshCronTasksDebounced();
                 refreshSessionsDebounced();
             });
-            unlisteners.push(u3);
 
             // Scheduler started (resume / recovery)
-            const u4 = await listen('cron:scheduler-started', () => {
+            await register('cron:scheduler-started', () => {
                 if (!mounted) return;
                 refreshCronTasksDebounced();
                 refreshSessionsDebounced();
             });
-            unlisteners.push(u4);
 
             // Task deleted
-            const u5 = await listen('cron:task-deleted', () => {
+            await register('cron:task-deleted', () => {
                 if (!mounted) return;
                 refreshCronTasksDebounced();
             });
-            unlisteners.push(u5);
 
             // Task updated (fields edited via cmd_update_cron_task_fields)
-            const u6 = await listen('cron:task-updated', () => {
+            await register('cron:task-updated', () => {
                 if (!mounted) return;
                 refreshCronTasksDebounced();
             });
-            unlisteners.push(u6);
 
             // Agent status changes (channel started/stopped, session created)
-            const u7 = await listen('agent:status-changed', () => {
+            await register('agent:status-changed', () => {
                 if (!mounted) return;
                 refreshAgentStatusDebounced();
                 refreshSessionsDebounced(1000);
             });
-            unlisteners.push(u7);
+
+            // New-model Task status changes (dispatch / run / done / delete).
+            // Mirrors the cron task listeners so the Launcher 「我的任务」
+            // tab reflects edits made elsewhere (Task Center, CLI, agent
+            // self-update) without the user manually refreshing.
+            await register('task:status-changed', () => {
+                if (!mounted) return;
+                refreshTasksDebounced();
+            });
         })();
 
         return () => {
@@ -366,9 +432,10 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
             if (agentRefreshTimerRef.current) clearTimeout(agentRefreshTimerRef.current);
             if (cronRefreshTimerRef.current) clearTimeout(cronRefreshTimerRef.current);
+            if (tasksRefreshTimerRef.current) clearTimeout(tasksRefreshTimerRef.current);
             if (backgroundRefreshTimerRef.current) clearTimeout(backgroundRefreshTimerRef.current);
         };
-    }, [refreshSessionsDebounced, refreshCronTasksDebounced, refreshBackgroundSessionsDebounced, refreshAgentStatusDebounced]);
+    }, [refreshSessionsDebounced, refreshCronTasksDebounced, refreshTasksDebounced, refreshBackgroundSessionsDebounced, refreshAgentStatusDebounced]);
 
     // Compute session tags (memoized)
     const sessionTagsMap = useMemo(() => {
@@ -387,14 +454,22 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             }
         }
 
-        // Build running cron task session set
-        // Use internalSessionId (actual SDK session) when available, falling back to sessionId
-        const cronSessionIds = new Set(
-            cronTasks.filter(t => t.status === 'running').map(t => t.internalSessionId || t.sessionId)
-        );
-
-        // Build background session set
-        const bgSessionIds = new Set(backgroundSessionIds);
+        // Build running cron task session sets.
+        // Use internalSessionId (actual SDK session) when available, falling back to sessionId.
+        // One-shot ('at' kind) tasks are routed into the background set instead of the cron set —
+        // the unified-primitive architecture uses CronTask for all executions, but a one-off
+        // execution is semantically a background task, not a scheduled task.
+        const cronSessionIds = new Set<string>();
+        const bgSessionIds = new Set<string>(backgroundSessionIds);
+        for (const t of cronTasks) {
+            if (t.status !== 'running') continue;
+            const sid = t.internalSessionId || t.sessionId;
+            if (t.schedule?.kind === 'at') {
+                bgSessionIds.add(sid);
+            } else {
+                cronSessionIds.add(sid);
+            }
+        }
 
         // Assign tags to each session
         for (const session of sessions) {
@@ -436,6 +511,10 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             refreshCronTasksNow();
             return;
         }
+        if (scope === 'tasks') {
+            refreshTasksNow();
+            return;
+        }
         if (scope === 'backgroundSessions') {
             refreshBackgroundSessionsNow();
             return;
@@ -445,7 +524,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             return;
         }
         void fetchData(0, options.silent ?? false);
-    }, [fetchData, refreshAgentStatusNow, refreshBackgroundSessionsNow, refreshCronTasksNow, refreshSessionsNow]);
+    }, [fetchData, refreshAgentStatusNow, refreshBackgroundSessionsNow, refreshCronTasksNow, refreshTasksNow, refreshSessionsNow]);
 
     const actions = useMemo<TaskCenterActions>(() => ({
         deleteSession: async (sessionId: string) => {
@@ -466,11 +545,13 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         },
         refreshSessions: () => refresh('sessions', { force: true, silent: true }),
         refreshCronTasks: () => refresh('cronTasks', { force: true, silent: true }),
+        refreshTasks: () => refresh('tasks', { force: true, silent: true }),
     }), [refresh]);
 
     return {
         sessions,
         cronTasks,
+        tasks,
         sessionTagsMap,
         cronBotInfoMap,
         isLoading,

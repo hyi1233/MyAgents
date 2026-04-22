@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2 } from 'lucide-react';
+import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, PenLine, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import Tip from '@/components/Tip';
@@ -17,6 +17,8 @@ import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 import { isProviderAvailable } from '@/config/configService';
 import RuntimeSelector from '@/components/RuntimeSelector';
+import { Popover } from '@/components/ui/Popover';
+import { taskCenterAvailable } from '@/api/taskCenter';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 
 // ===== Module-level pure helpers (extracted from render body) =====
@@ -46,6 +48,19 @@ interface SimpleChatInputProps {
   /** Called when user sends message. Text is managed internally for performance.
    *  Return false to indicate rejection (input will NOT be cleared). */
   onSend: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode) => boolean | void | Promise<boolean | void>;
+  /**
+   * When `true`, the input is rendered as a minimal **note-taking box** instead
+   * of a chat-send box (PRD §4.2): toolbar hidden, placeholder swapped to the
+   * thought-mode copy. Submission still goes through `onSend`; the parent
+   * (Launcher BrandSection) decides whether to persist as a Thought or
+   * launch a Chat, and signals "saved" by returning `true` from `onSend`.
+   */
+  thoughtMode?: boolean;
+  /**
+   * Whether this input belongs to the currently active tab. Reserved for
+   * features that want to ignore keystrokes on background tabs.
+   */
+  active?: boolean;
   onStop?: () => void; // Called when stop button is clicked
   isLoading: boolean;
   /** Session state for stop button UI ('stopping' shows disabled spinner) */
@@ -59,6 +74,12 @@ interface SimpleChatInputProps {
   onProviderChange?: (providerId: string, targetModel?: string) => void; // Called when provider is changed (with optional model to set atomically)
   selectedModel?: string; // Current selected model ID
   onModelChange?: (modelId: string) => void; // Called when model is changed
+  /**
+   * v0.1.69: true when session exists but has no snapshot (legacy pre-v0.1.69 session).
+   * Renders an "unlocked" indicator next to the model button so the user knows changes
+   * to the agent defaults will affect this session (live-follow vs snapshot-frozen).
+   */
+  sessionUnlocked?: boolean;
   // Permission modes
   permissionMode?: PermissionMode; // Current permission mode from parent
   onPermissionModeChange?: (mode: PermissionMode) => void;
@@ -125,6 +146,11 @@ interface SimpleChatInputProps {
 const LINE_HEIGHT = 26; // px per line (text-base 16px * leading-relaxed 1.625 = 26px)
 const MAX_LINES_COLLAPSED = 3;
 const MAX_LINES_EXPANDED = 12;
+// Launcher shows the input as the page's primary affordance — an extra row
+// (3 vs 2) reduces visual compression and signals "there's room to write a
+// full thought", matching the spacious Launcher layout. Chat tabs keep the
+// 2-row default to preserve screen real estate for the message stream.
+const LAUNCHER_MIN_LINES = 3;
 const MAX_IMAGES = 5;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
 
@@ -142,6 +168,10 @@ export interface SimpleChatInputHandle {
   setValue: (value: string) => void;
   /** Set image attachments directly (used for restoring queued message images on cancel) */
   setImages: (images: ImageAttachment[]) => void;
+  /** Programmatically focus the textarea. Used by the Launcher's mode
+   *  switcher so the caret lands in the input the moment the user
+   *  clicks 任务 / 想法 — no second click required. */
+  focus: () => void;
 }
 
 // File search result type
@@ -165,6 +195,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onProviderChange,
   selectedModel,
   onModelChange,
+  sessionUnlocked = false,
   permissionMode = 'auto',
   onPermissionModeChange,
   apiKeys = {},
@@ -187,6 +218,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onInputChange,
   mode = 'chat',
   toolbarPrefix,
+  thoughtMode = false,
+  // Whether this input belongs to the currently active tab. Used to gate document-level
+  // listeners (Shift+Tab permission-mode cycle below) so background tabs don't also fire.
+  active = true,
   runtime = 'builtin',
   runtimeDetections,
   onRuntimeChange,
@@ -197,7 +232,19 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onForceExecuteQueued,
 }, ref) {
   const isLauncherMode = mode === 'launcher';
+  // Launcher-vs-Chat minimum row count, referenced by both the auto-resize
+  // effect and the textarea `rows` / min/max style props. Keep as a single
+  // derived constant so a later tweak (e.g. bump to 4) propagates everywhere
+  // without the three-site scan the prior duplicated ternary required.
+  const effectiveMinLines = isLauncherMode ? LAUNCHER_MIN_LINES : 2;
   const isExternalRuntime = runtime !== 'builtin';
+
+  // PRD §4.2 — when the caller declares thought-mode, the input behaves as a
+  // note-taking box: no model / permission / MCP / cron toolbar, just the
+  // textarea + send. Thought persistence requires the Tauri runtime (Rust
+  // `cmd_thought_create`); in browser dev mode we silently fall back to the
+  // normal onSend path.
+  const thoughtModeActive = thoughtMode && taskCenterAvailable();
 
   // Compute display modes and model name based on runtime
   const displayPermissionModes = isExternalRuntime && runtimePermissionModes
@@ -247,7 +294,19 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const internalRef = useRef<HTMLTextAreaElement>(null);
   const textareaRef = inputRef ?? internalRef;
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Anchor refs for Popover-based dropdowns. The textarea wrapper anchors
+  // the @file and /slash menus (both sit at the bottom of the textarea
+  // area); the four toolbar menus anchor to their own trigger buttons.
+  const textareaWrapperRef = useRef<HTMLDivElement>(null);
+  const plusBtnRef = useRef<HTMLButtonElement>(null);
+  const modeBtnRef = useRef<HTMLButtonElement>(null);
+  const toolBtnRef = useRef<HTMLButtonElement>(null);
+  const modelBtnRef = useRef<HTMLButtonElement>(null);
   const [isExpanded, setIsExpanded] = useState(false);
+  // Tracks the last committed `isExpanded` so the auto-resize effect can
+  // distinguish a typing-driven resize from an expand/collapse toggle —
+  // they need different transition baselines (see the effect below).
+  const prevExpandedRef = useRef(isExpanded);
 
   // Image attachments - moved up for processDroppedFiles to use
   const [images, setImages] = useState<ImageAttachment[]>([]);
@@ -332,15 +391,44 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     const textarea = textareaRef.current;
     if (!textarea) return;
 
+    const wasExpanded = prevExpandedRef.current;
+    prevExpandedRef.current = isExpanded;
+
     if (isExpanded) {
       textarea.style.height = `${LINE_HEIGHT * MAX_LINES_EXPANDED}px`;
-    } else {
-      textarea.style.height = 'auto';
-      const minHeight = LINE_HEIGHT * 2;
-      const maxHeight = LINE_HEIGHT * MAX_LINES_COLLAPSED;
-      const scrollHeight = textarea.scrollHeight;
-      textarea.style.height = `${Math.max(minHeight, Math.min(scrollHeight, maxHeight))}px`;
+      return;
     }
+
+    const minHeight = LINE_HEIGHT * effectiveMinLines;
+    const maxHeight = LINE_HEIGHT * Math.max(MAX_LINES_COLLAPSED, effectiveMinLines);
+
+    if (wasExpanded) {
+      // Expand → Collapse: measure the natural content height without
+      // letting `height: auto` leak into the CSS transition baseline.
+      // If we wrote 'auto' then the final px value in the same tick, the
+      // browser would resolve `auto` to scrollHeight during the forced
+      // layout read, commit that as the baseline, and the transition would
+      // snap instead of animate (which is what made collapse feel abrupt).
+      // Save/restore the current explicit height, then commit the target
+      // in the next frame so the transition animates from the pre-collapse
+      // height to the content-fit height.
+      const saved = textarea.style.height;
+      textarea.style.height = 'auto';
+      const scrollHeight = textarea.scrollHeight;
+      textarea.style.height = saved;
+      const target = Math.max(minHeight, Math.min(scrollHeight, maxHeight));
+      const rafId = requestAnimationFrame(() => {
+        textarea.style.height = `${target}px`;
+      });
+      return () => cancelAnimationFrame(rafId);
+    }
+
+    // Typing path — measured and target heights are usually identical
+    // (±1 line), so the in-place write doesn't produce visible animation
+    // and keystrokes stay snappy.
+    textarea.style.height = 'auto';
+    const scrollHeight = textarea.scrollHeight;
+    textarea.style.height = `${Math.max(minHeight, Math.min(scrollHeight, maxHeight))}px`;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [inputValue, isExpanded]);
 
@@ -747,6 +835,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     insertSlashCommand,
     setValue,
     setImages,
+    focus: () => textareaRef.current?.focus(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }), [processDroppedFiles, processDroppedFilePaths, insertReferences, insertSlashCommand, setValue]);
 
   // Handle file input change
@@ -925,8 +1015,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     onPermissionModeChange?.(nextMode);
   }, [permissionMode, onPermissionModeChange, runtimePermissionModes]);
 
-  // Global Shift+Tab handler with capture phase to prevent default Tab behavior
+  // Global Shift+Tab handler with capture phase to prevent default Tab behavior.
+  // Gated by `active` so pressing Shift+Tab doesn't cycle permission-mode on every
+  // mounted tab simultaneously (document-level listener otherwise fans out to all
+  // N tabs, each calling its own cyclePermissionMode).
   useEffect(() => {
+    if (!active) return;
     const handleShiftTab = (e: KeyboardEvent) => {
       if (e.key === 'Tab' && e.shiftKey) {
         e.preventDefault();
@@ -937,7 +1031,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // Use capture phase to intercept before default Tab behavior
     document.addEventListener('keydown', handleShiftTab, { capture: true });
     return () => document.removeEventListener('keydown', handleShiftTab, { capture: true });
-  }, [cyclePermissionMode]);
+  }, [active, cyclePermissionMode]);
 
   // Send message - defined before handleKeyDown to avoid circular dependency
   // Note: isLoading guard removed to allow queuing messages while AI is responding
@@ -950,6 +1044,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     sendingRef.current = true;
 
     try {
+      // Delegate thought-mode persistence to the caller (Launcher
+      // BrandSection owns `thoughtCreate` + refresh-key bump). The
+      // boolean-return protocol (`return true` = saved, clear textarea)
+      // lets the parent signal when to reset input state here.
       const result = onSend(text, images.length > 0 ? images : undefined);
       // If onSend returns a promise, await it; if sync, use directly
       const accepted = result instanceof Promise ? await result : result;
@@ -1034,6 +1132,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       // Tab or Enter to select
       if (event.key === 'Enter' || event.key === 'Tab') {
         event.preventDefault();
+        // `stopPropagation` — when the slash menu consumes Tab for
+        // autocomplete, prevent the event from reaching window-level
+        // handlers (e.g. the Launcher `BrandSection`'s mode toggle).
+        // Without this, Tab would both autocomplete AND toggle the
+        // segment, a double-effect. React's `stopPropagation` also
+        // stops the underlying native bubble, so the window listener
+        // truly won't fire.
+        event.stopPropagation();
         const selected = filteredSlashCommands[selectedSlashIndex];
         if (selected && slashPosition !== null) {
           // Trigger skill copy if user-level skill
@@ -1070,6 +1176,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       // Tab or Enter to select file
       if (event.key === 'Enter' || event.key === 'Tab') {
         event.preventDefault();
+        // Same rationale as the slash-menu path above — stop native
+        // bubble so window-level Tab handlers (BrandSection's mode
+        // toggle) don't fire when the file-search menu is the owner
+        // of this Tab keystroke.
+        event.stopPropagation();
         const selected = fileSearchResults[selectedFileIndex];
         if (selected && atPosition !== null) {
           // Replace @query with @path
@@ -1091,10 +1202,22 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
     // Normal send - but NOT during IME composition (e.g., Chinese input)
     // Check both event.nativeEvent.isComposing (standard) and event.keyCode === 229 (legacy)
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
-      event.preventDefault();
-      if ((inputValue.trim() || images.length > 0) && canSendMessageRef.current) {
-        handleSend();
+    //
+    // Thought mode splits the keyboard contract: plain Enter is a newline
+    // (note-taking convention — matches the TaskCenter ThoughtInput and
+    // apps like flomo / Apple Notes), and Cmd/Ctrl+Enter commits. Chat
+    // mode keeps the familiar "Enter sends" (Shift+Enter = newline).
+    if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+      const isCmdEnter = event.metaKey || event.ctrlKey;
+      const isPlainEnter = !event.shiftKey && !isCmdEnter;
+      const shouldSend = thoughtModeActive
+        ? isCmdEnter
+        : isPlainEnter;
+      if (shouldSend) {
+        event.preventDefault();
+        if ((inputValue.trim() || images.length > 0) && canSendMessageRef.current) {
+          handleSend();
+        }
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
@@ -1210,73 +1333,103 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
           )}
 
           {/* Textarea area */}
-          <div className="relative px-4 pt-3">
+          <div ref={textareaWrapperRef} className="relative px-4 pt-3">
             <textarea
               ref={textareaRef}
               value={inputValue}
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder={isLauncherMode ? '今天，想干点啥？' : '输入消息，使用 @ 引用文件，/ 使用技能...'}
-              rows={2}
+              placeholder={
+                thoughtModeActive
+                  ? '此刻有什么想法？写下来，稍后可派发为任务'
+                  : isLauncherMode
+                    ? '今天，想干点啥？'
+                    : '输入消息，使用 @ 引用文件，/ 使用技能...'
+              }
+              rows={effectiveMinLines}
               className="block w-full resize-none bg-transparent pr-8 text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
               style={{
-                minHeight: `${LINE_HEIGHT * 2}px`,
-                maxHeight: `${LINE_HEIGHT * (isExpanded ? MAX_LINES_EXPANDED : MAX_LINES_COLLAPSED)}px`,
-                overflowY: 'auto'
+                minHeight: `${LINE_HEIGHT * effectiveMinLines}px`,
+                maxHeight: `${LINE_HEIGHT * (isExpanded ? MAX_LINES_EXPANDED : Math.max(MAX_LINES_COLLAPSED, effectiveMinLines))}px`,
+                overflowY: 'auto',
+                // Explicit property list + `height` so collapse animates
+                // symmetrically to expand (WebKit textareas sometimes drop the
+                // transition on shrink when only `max-height` is listed).
+                transitionProperty: 'max-height, height, min-height',
+                transitionDuration: '220ms',
+                transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
+                willChange: 'max-height',
               }}
             />
 
-            {/* @file search popup */}
-            {showFileSearch && (
-              <div className="absolute left-4 bottom-full mb-2 w-80 max-h-64 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl">
-                {fileSearchQuery.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                    输入文件名搜索...
+            {/* @file search popup. Keyboard is owned by the textarea
+                (↑↓/Enter/Esc), so we disable the Popover's own Escape
+                handler to avoid double-fire. */}
+            <Popover
+              open={showFileSearch}
+              onClose={() => setShowFileSearch(false)}
+              anchorRef={textareaWrapperRef}
+              placement="top-start"
+              offset={8}
+              closeOnEscape={false}
+              className="w-80 max-h-64 overflow-auto"
+            >
+              {fileSearchQuery.length === 0 ? (
+                <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
+                  输入文件名搜索...
+                </div>
+              ) : isFileSearching ? (
+                <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
+                  搜索中...
+                </div>
+              ) : fileSearchResults.length === 0 ? (
+                <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
+                  未找到文件
+                </div>
+              ) : (
+                fileSearchResults.map((file, idx) => (
+                  <div
+                    key={file.path}
+                    className={`flex items-center gap-2 px-3 py-2 cursor-pointer text-sm ${idx === selectedFileIndex
+                      ? 'bg-[var(--accent)]/10 text-[var(--ink)]'
+                      : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
+                      }`}
+                    onClick={() => {
+                      if (atPosition !== null) {
+                        const before = inputValue.slice(0, atPosition);
+                        const after = inputValue.slice(textareaRef.current?.selectionStart || atPosition + fileSearchQuery.length + 1);
+                        setInputValue(`${before}@${file.path} ${after}`);
+                        setShowFileSearch(false);
+                        setAtPosition(null);
+                      }
+                    }}
+                  >
+                    <FileText className="h-4 w-4 flex-shrink-0" />
+                    <span className="truncate">{file.path}</span>
                   </div>
-                ) : isFileSearching ? (
-                  <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                    搜索中...
-                  </div>
-                ) : fileSearchResults.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                    未找到文件
-                  </div>
-                ) : (
-                  fileSearchResults.map((file, idx) => (
-                    <div
-                      key={file.path}
-                      className={`flex items-center gap-2 px-3 py-2 cursor-pointer text-sm ${idx === selectedFileIndex
-                        ? 'bg-[var(--accent)]/10 text-[var(--ink)]'
-                        : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
-                        }`}
-                      onClick={() => {
-                        if (atPosition !== null) {
-                          const before = inputValue.slice(0, atPosition);
-                          const after = inputValue.slice(textareaRef.current?.selectionStart || atPosition + fileSearchQuery.length + 1);
-                          setInputValue(`${before}@${file.path} ${after}`);
-                          setShowFileSearch(false);
-                          setAtPosition(null);
-                        }
-                      }}
-                    >
-                      <FileText className="h-4 w-4 flex-shrink-0" />
-                      <span className="truncate">{file.path}</span>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
+                ))
+              )}
+            </Popover>
 
-            {/* /slash command popup */}
-            {!isLauncherMode && showSlashMenu && (
+            {/* /slash command popup. Same ownership pattern — textarea owns
+                the keyboard (↑↓/Enter/Tab/Esc); the primitive just positions
+                the content above the input. */}
+            <Popover
+              open={!isLauncherMode && showSlashMenu}
+              onClose={() => setShowSlashMenu(false)}
+              anchorRef={textareaWrapperRef}
+              placement="top-start"
+              offset={8}
+              closeOnEscape={false}
+            >
               <SlashCommandMenu
                 commands={filteredSlashCommands}
                 selectedIndex={selectedSlashIndex}
                 isEmpty={slashSearchQuery.length > 0 && filteredSlashCommands.length === 0}
                 onSelect={handleSlashSelect}
               />
-            )}
+            </Popover>
 
             {/* Expand/Collapse button - larger click area */}
             <button
@@ -1294,97 +1447,109 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
           </div>
           </div>
 
-          {/* Toolbar row — container query: hides text labels when narrow */}
-          <div className="toolbar-menus flex items-center justify-between px-3 pb-2 pt-1 flex-nowrap min-w-0" style={{ containerType: 'inline-size' }}>
-            {/* Left side - action buttons */}
-            <div className="flex items-center gap-1 min-w-0 flex-nowrap">
+          {/* Toolbar row — container query: hides text labels when narrow.
+              In thought mode (PRD §4.2) the left-side action strip collapses so
+              the input reads as a pure note-taking box; the right-side send
+              button remains so users can commit the thought with a click. */}
+          <div className="toolbar-menus flex items-center px-3 pb-2 pt-1 flex-nowrap min-w-0" style={{ containerType: 'inline-size' }}>
+            {/* Left side - action buttons (hidden in thought mode). Uses
+                `ml-auto` on the right group instead of `justify-between` so
+                the send button stays right-aligned even when the left strip
+                is removed from the flex flow. */}
+            <div
+              className="flex items-center gap-1 min-w-0 flex-nowrap"
+              style={thoughtModeActive ? { display: 'none' } : undefined}
+            >
               {/* Optional prefix (e.g., workspace selector in launcher mode) */}
               {toolbarPrefix}
 
               {/* Plus menu */}
-              <div className="relative">
+              <button
+                ref={plusBtnRef}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // Close other menus first
+                  setShowModeMenu(false);
+                  setShowModelMenu(false);
+                  setShowToolMenu(false);
+                  setShowPlusMenu(!showPlusMenu);
+                }}
+                className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                title="添加上下文"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+              <Popover
+                open={showPlusMenu}
+                onClose={() => setShowPlusMenu(false)}
+                anchorRef={plusBtnRef}
+                placement="top-start"
+                className="w-48 py-1"
+              >
+                {!isLauncherMode && (
                 <button
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    // Close other menus first
-                    setShowModeMenu(false);
-                    setShowModelMenu(false);
-                    setShowToolMenu(false);
-                    setShowPlusMenu(!showPlusMenu);
+                    // Insert @ at cursor position and trigger file search
+                    const textarea = textareaRef.current;
+                    if (textarea) {
+                      const cursorPos = textarea.selectionStart;
+                      const before = inputValue.slice(0, cursorPos);
+                      const after = inputValue.slice(cursorPos);
+                      setInputValue(`${before}@${after}`);
+                      setShowFileSearch(true);
+                      setAtPosition(cursorPos);
+                      setFileSearchQuery('');
+                      textarea.focus();
+                    }
+                    setShowPlusMenu(false);
                   }}
-                  className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                  title="添加上下文"
+                  className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
-                  <Plus className="h-4 w-4" />
+                  <AtSign className="h-4 w-4" />
+                  引用文件
                 </button>
-                {showPlusMenu && (
-                  <div className="absolute left-0 bottom-full mb-1 w-48 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
-                    {!isLauncherMode && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Insert @ at cursor position and trigger file search
-                        const textarea = textareaRef.current;
-                        if (textarea) {
-                          const cursorPos = textarea.selectionStart;
-                          const before = inputValue.slice(0, cursorPos);
-                          const after = inputValue.slice(cursorPos);
-                          setInputValue(`${before}@${after}`);
-                          setShowFileSearch(true);
-                          setAtPosition(cursorPos);
-                          setFileSearchQuery('');
-                          textarea.focus();
-                        }
-                        setShowPlusMenu(false);
-                      }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                    >
-                      <AtSign className="h-4 w-4" />
-                      引用文件
-                    </button>
-                    )}
-                    {!isLauncherMode && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Insert / at cursor position and trigger slash menu
-                        const textarea = textareaRef.current;
-                        if (textarea) {
-                          const cursorPos = textarea.selectionStart;
-                          const before = inputValue.slice(0, cursorPos);
-                          const after = inputValue.slice(cursorPos);
-                          setInputValue(`${before}/${after}`);
-                          setShowSlashMenu(true);
-                          setSlashPosition(cursorPos);
-                          setSlashSearchQuery('');
-                          setSelectedSlashIndex(0);
-                          textarea.focus();
-                        }
-                        setShowPlusMenu(false);
-                      }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                    >
-                      <span className="inline-flex h-4 w-4 items-center justify-center font-medium text-[var(--ink-muted)]">/</span>
-                      使用技能
-                    </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        fileInputRef.current?.click();
-                      }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                    >
-                      <Paperclip className="h-4 w-4" />
-                      上传文件
-                    </button>
-                  </div>
                 )}
-              </div>
+                {!isLauncherMode && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    // Insert / at cursor position and trigger slash menu
+                    const textarea = textareaRef.current;
+                    if (textarea) {
+                      const cursorPos = textarea.selectionStart;
+                      const before = inputValue.slice(0, cursorPos);
+                      const after = inputValue.slice(cursorPos);
+                      setInputValue(`${before}/${after}`);
+                      setShowSlashMenu(true);
+                      setSlashPosition(cursorPos);
+                      setSlashSearchQuery('');
+                      setSelectedSlashIndex(0);
+                      textarea.focus();
+                    }
+                    setShowPlusMenu(false);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                >
+                  <span className="inline-flex h-4 w-4 items-center justify-center font-medium text-[var(--ink-muted)]">/</span>
+                  使用技能
+                </button>
+                )}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    fileInputRef.current?.click();
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                >
+                  <Paperclip className="h-4 w-4" />
+                  上传文件
+                </button>
+              </Popover>
 
               {/* Hidden file input */}
               <input
@@ -1407,95 +1572,115 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               )}
 
               {/* Mode Dropdown */}
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowModeMenu(!showModeMenu);
-                    setShowModelMenu(false);
-                    setShowPlusMenu(false);
-                    setShowToolMenu(false);
-                  }}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                  title="切换执行模式"
-                >
-                  <span>{currentModeDisplay?.icon}</span>
-                  <span className="toolbar-label">{currentModeDisplay?.label}</span>
-                  <ChevronUp className="h-3 w-3" />
-                </button>
-                {showModeMenu && (
-                  <div className="absolute left-0 bottom-full mb-1 w-72 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
-                    <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--line)]">
-                      <span className="text-xs font-medium text-[var(--ink-muted)]">会话模式</span>
-                      {onOpenAgentSettings && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setShowModeMenu(false);
-                            onOpenAgentSettings();
-                          }}
-                          className="text-xs font-medium text-[var(--accent)] hover:text-[var(--accent-warm-hover)] transition-colors"
-                        >
-                          Agent 设置
-                        </button>
-                      )}
-                    </div>
-                    {displayPermissionModes.map((mode) => (
-                      <button
-                        key={mode.value}
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (mode.value === 'fullAgency' || (mode.value as string) === 'bypassPermissions') {
-                            toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
-                          }
-                          onPermissionModeChange?.(mode.value);
-                          setShowModeMenu(false);
-                        }}
-                        className={`flex w-full flex-col items-start px-3 py-2 text-left ${permissionMode === mode.value
-                          ? 'bg-[var(--accent)]/10'
-                          : 'hover:bg-[var(--hover-bg)]'
-                          }`}
-                      >
-                        <span className={`text-sm font-medium flex items-center gap-1.5 ${permissionMode === mode.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
-                          }`}>
-                          <span>{mode.icon}</span>
-                          {mode.label}
-                        </span>
-                        <span className="text-xs text-[var(--ink-muted)] mt-0.5">{mode.description}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <button
+                ref={modeBtnRef}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowModeMenu(!showModeMenu);
+                  setShowModelMenu(false);
+                  setShowPlusMenu(false);
+                  setShowToolMenu(false);
+                }}
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                title="切换执行模式"
+              >
+                <span>{currentModeDisplay?.icon}</span>
+                <span className="toolbar-label">{currentModeDisplay?.label}</span>
+                <ChevronUp className="h-3 w-3" />
+              </button>
+              <Popover
+                open={showModeMenu}
+                onClose={() => setShowModeMenu(false)}
+                anchorRef={modeBtnRef}
+                placement="top-start"
+                className="w-72 py-1"
+              >
+                <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--line)]">
+                  <span className="text-xs font-medium text-[var(--ink-muted)]">会话模式</span>
+                  {onOpenAgentSettings && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowModeMenu(false);
+                        onOpenAgentSettings();
+                      }}
+                      className="text-xs font-medium text-[var(--accent)] hover:text-[var(--accent-warm-hover)] transition-colors"
+                    >
+                      Agent 设置
+                    </button>
+                  )}
+                </div>
+                {displayPermissionModes.map((mode) => (
+                  <button
+                    key={mode.value}
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (mode.value === 'fullAgency' || (mode.value as string) === 'bypassPermissions') {
+                        toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
+                      }
+                      onPermissionModeChange?.(mode.value);
+                      setShowModeMenu(false);
+                    }}
+                    className={`flex w-full flex-col items-start px-3 py-2 text-left ${permissionMode === mode.value
+                      ? 'bg-[var(--accent)]/10'
+                      : 'hover:bg-[var(--hover-bg)]'
+                      }`}
+                  >
+                    <span className={`text-sm font-medium flex items-center gap-1.5 ${permissionMode === mode.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
+                      }`}>
+                      <span>{mode.icon}</span>
+                      {mode.label}
+                    </span>
+                    <span className="text-xs text-[var(--ink-muted)] mt-0.5">{mode.description}</span>
+                  </button>
+                ))}
+              </Popover>
 
               {/* Tool/MCP Dropdown - hidden for external runtimes (they use their own tools) */}
               {!isExternalRuntime && (
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowToolMenu(!showToolMenu);
-                    setShowModeMenu(false);
-                    setShowModelMenu(false);
-                    setShowPlusMenu(false);
-                  }}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                  title="使用工具"
-                >
-                  <Wrench className="h-3.5 w-3.5" />
-                  <span className="toolbar-label">工具</span>
-                  {workspaceMcpEnabled.length > 0 && (
-                    <span className="text-[11px] text-[var(--ink-muted)]">
-                      {workspaceMcpEnabled.length}
-                    </span>
-                  )}
-                </button>
-                {showToolMenu && (
-                  <div className="absolute left-0 bottom-full mb-1 w-64 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
+              <>
+              {(() => {
+                // Count only MCPs the user will actually see *and* that are live: present in the
+                // catalogue (mcpServers), globally enabled, and workspace-enabled. Using the raw
+                // `workspaceMcpEnabled.length` drifts from the popover contents when a workspace
+                // still references IDs that were disabled globally or removed from the catalogue.
+                const effectiveMcpCount = workspaceMcpEnabled.filter(
+                  id => globalMcpEnabled.includes(id) && mcpServers.some(s => s.id === id)
+                ).length;
+                return (
+              <button
+                ref={toolBtnRef}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowToolMenu(!showToolMenu);
+                  setShowModeMenu(false);
+                  setShowModelMenu(false);
+                  setShowPlusMenu(false);
+                }}
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                title="使用工具"
+              >
+                <Wrench className="h-3.5 w-3.5" />
+                <span className="toolbar-label">工具</span>
+                {effectiveMcpCount > 0 && (
+                  <span className="text-[11px] text-[var(--ink-muted)]">
+                    {effectiveMcpCount}
+                  </span>
+                )}
+              </button>
+                );
+              })()}
+              <Popover
+                open={showToolMenu}
+                onClose={() => setShowToolMenu(false)}
+                anchorRef={toolBtnRef}
+                placement="top-start"
+                className="w-64 py-1"
+              >
                     <div className="px-3 py-2 text-xs font-medium text-[var(--ink-muted)] border-b border-[var(--line)]">
                       工具 (在此对话中启用)
                     </div>
@@ -1566,9 +1751,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         安装开启 MCP 工具，即可使用浏览器等更多功能
                       </div>
                     )}
-                  </div>
-                )}
-              </div>
+              </Popover>
+              </>
               )}
 
               {/* Heartbeat Loop Button */}
@@ -1593,32 +1777,50 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             </div>
 
             {/* Right side - model selector + send/stop button */}
-            <div className="flex items-center gap-2 shrink-0">
-              {/* Model Dropdown with Provider Selector */}
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const willOpen = !showModelMenu;
-                    setShowModelMenu(willOpen);
-                    setShowModeMenu(false);
-                    setShowPlusMenu(false);
-                    setShowToolMenu(false);
-                    // Refresh providers data when opening menu
-                    if (willOpen && onRefreshProviders) {
-                      onRefreshProviders();
-                    }
-                  }}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                  title="切换模型"
+            <div className="ml-auto flex items-center gap-2 shrink-0">
+              {/* v0.1.69: Unlocked indicator for legacy pre-snapshot sessions */}
+              {sessionUnlocked && !thoughtModeActive && (
+                <span
+                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)]/60"
+                  title="该 session 未锁定，跟随 agent 默认（修改 agent 会影响此会话）"
                 >
-                  <span className="max-w-[140px] truncate">{currentModelName}</span>
-                  <ChevronUp className="h-3 w-3 shrink-0" />
-                </button>
-                {showModelMenu && (isExternalRuntime && runtimeModels ? (
-                  /* External Runtime model selector — shows CC/Codex/Gemini models */
-                  <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
+                  <Unlock className="h-3 w-3" />
+                </span>
+              )}
+              {/* Model Dropdown with Provider Selector — hidden in thought mode
+                  (PRD §4.2: thought input is a note box, not an AI chat input). */}
+              {!thoughtModeActive && (
+              <>
+              <button
+                ref={modelBtnRef}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const willOpen = !showModelMenu;
+                  setShowModelMenu(willOpen);
+                  setShowModeMenu(false);
+                  setShowPlusMenu(false);
+                  setShowToolMenu(false);
+                  // Refresh providers data when opening menu
+                  if (willOpen && onRefreshProviders) {
+                    onRefreshProviders();
+                  }
+                }}
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                title="切换模型"
+              >
+                <span className="max-w-[140px] truncate">{currentModelName}</span>
+                <ChevronUp className="h-3 w-3 shrink-0" />
+              </button>
+              <Popover
+                open={showModelMenu}
+                onClose={() => setShowModelMenu(false)}
+                anchorRef={modelBtnRef}
+                placement="top-end"
+                className="w-64 max-h-[300px] overflow-y-auto py-1"
+              >
+                {isExternalRuntime && runtimeModels ? (
+                  <>
                     <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                       {runtime === 'claude-code' ? 'CLAUDE CODE' : runtime === 'gemini' ? 'GEMINI CLI' : runtime?.toUpperCase()} 模型
                     </div>
@@ -1643,70 +1845,68 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         </button>
                       );
                     })}
-                  </div>
-                ) : showModelMenu && (() => {
-                  /* Builtin Runtime model selector — original provider-based */
+                  </>
+                ) : (() => {
                   const availableProviders = (providers ?? []).filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
-                  return (
-                    <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
-                      {availableProviders.length === 0 ? (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setShowModelMenu(false);
-                            window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
-                              detail: { section: 'providers' }
-                            }));
-                          }}
-                          className="w-full px-3 py-2.5 text-left text-[13px] text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
-                        >
-                          请先设置模型服务 →
-                        </button>
-                      ) : (
-                        availableProviders.map((p, idx) => (
-                          <div key={p.id}>
-                            {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
-                            <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                              {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
-                              {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
-                                <Tip label="验证未通过，部分模型可能不可用" position="bottom">
-                                  <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
-                                </Tip>
-                              )}
-                            </div>
-                            {p.models.map(model => {
-                              const isSelected = provider?.id === p.id && currentModelId === model.model;
-                              return (
-                                <button
-                                  key={model.model}
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (provider?.id !== p.id) {
-                                      onProviderChange?.(p.id, model.model);
-                                    } else {
-                                      onModelChange?.(model.model);
-                                    }
-                                    setShowModelMenu(false);
-                                  }}
-                                  className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
-                                    isSelected
-                                      ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
-                                      : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
-                                  }`}
-                                >
-                                  {model.modelName}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ))
-                      )}
+                  if (availableProviders.length === 0) {
+                    return (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowModelMenu(false);
+                          window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+                            detail: { section: 'providers' }
+                          }));
+                        }}
+                        className="w-full px-3 py-2.5 text-left text-[13px] text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
+                      >
+                        请先设置模型服务 →
+                      </button>
+                    );
+                  }
+                  return availableProviders.map((p, idx) => (
+                    <div key={p.id}>
+                      {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
+                      <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                        {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
+                        {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
+                          <Tip label="验证未通过，部分模型可能不可用" position="bottom">
+                            <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
+                          </Tip>
+                        )}
+                      </div>
+                      {p.models.map(model => {
+                        const isSelected = provider?.id === p.id && currentModelId === model.model;
+                        return (
+                          <button
+                            key={model.model}
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (provider?.id !== p.id) {
+                                onProviderChange?.(p.id, model.model);
+                              } else {
+                                onModelChange?.(model.model);
+                              }
+                              setShowModelMenu(false);
+                            }}
+                            className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                              isSelected
+                                ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
+                                : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                            }`}
+                          >
+                            {model.modelName}
+                          </button>
+                        );
+                      })}
                     </div>
-                  );
-                })())}
-              </div>
+                  ));
+                })()}
+              </Popover>
+              </>
+              )}
 
               {/* Button states: system task (disabled send) → stopping (disabled spinner) → AI responding (stop) → normal (send) */}
               {systemStatus ? (
@@ -1740,16 +1940,41 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <Square className="h-4 w-4" />
                 </button>
               ) : (
-                // Normal state - can send
-                <button
-                  type="button"
-                  onClick={handleSend}
-                  disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
-                  className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-                  title={!canSendMessage ? '请前往设置页面设置模型供应商' : '发送'}
-                >
-                  <Send className="h-4 w-4" />
-                </button>
+                // Normal state - can send. In thought mode the send
+                // button gets a two-line tooltip teaching `⌘ + Enter`,
+                // which matches the TaskCenter ThoughtInput affordance
+                // and is crucial because thought mode swaps the usual
+                // "Enter sends" contract (Enter is a newline there).
+                thoughtModeActive ? (
+                  // Thought mode: swap the paper-plane for a single-pen
+                  // icon — "send" implies dispatching to a recipient,
+                  // but saving a thought is a local memo. `PenLine`
+                  // (one clean pen + trailing stroke) reads as "记录
+                  // 想法" at a glance without the visual clutter of a
+                  // full notebook glyph. Distinct from `Pencil` (used
+                  // by the edit menu) so the two affordances don't
+                  // collapse into the same mental category.
+                  <Tip label="记录想法" shortcut="⌘ + Enter" align="end">
+                    <button
+                      type="button"
+                      onClick={handleSend}
+                      disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
+                      className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
+                    >
+                      <PenLine className="h-4 w-4" />
+                    </button>
+                  </Tip>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleSend}
+                    disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
+                    className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
+                    title={!canSendMessage ? '请前往设置页面设置模型供应商' : '发送'}
+                  >
+                    <Send className="h-4 w-4" />
+                  </button>
+                )
               )}
             </div>
           </div>

@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.69] - 2026-04-23
+
+### Added
+- **任务中心（Task Center）**：全新的任务管理 Tab，左栏是「想法」速记流（`#tag` 自动识别 + 按月归档），右栏是任务列表（进行中 / 规划中 / 已完成三段式 + 卡片 / 列表双视图）。点击任务卡唤起详情 Overlay，包含：
+  - 完整的任务编辑面板 —— 名称、描述、Prompt、执行模式（一次性 / 定时）、per-task 覆盖 Runtime / 模型 / 权限模式、结束条件（执行次数 / deadline）、通知订阅
+  - 定时任务的 interval（每 N 分钟）和 cron 表达式统一在一个切换器里配置
+  - 运行统计、状态变更历史、关联 Session 列表，支持立即执行、重新派发、状态变更、归档、删除
+  - 任务 / 想法搜索栏（独立过滤）+ 全局 ⌘K 搜索都能检索任务内容
+  - 顶部导航栏新增「任务」入口
+- **任务 / 想法 模式切换器**：启动页 + Chat Tab 输入框上方都有 `任务 | 想法` 切换（`Cmd/Ctrl+Shift+T` 快捷键）。选中「想法」后回车保存为想法而非启动对话，写完自动切回「任务」。
+- **AI 讨论路径（想法 → 正式任务）**：想法卡「AI 讨论」按钮打开新 Chat Tab，自动注入 `task-alignment` Skill；对齐完成后 AI 直接把四份文档（alignment / task / verify / progress）迁入正式任务目录，登记为「AI 对齐」任务，一键就能开始执行。
+- **执行闭环：编辑即生效**：任务立即执行 / 重新派发时，每次触发都会动态从最新的 task.md 读取内容构造首条消息。你中途编辑任务描述后，下一次执行立即生效，不需要手动同步。定时任务走同一套机制。
+- **`myagents task` / `thought` CLI**：AI 和用户通过终端完整自管任务生命周期 —— `task list / get / run / rerun / update-status / update-progress / append-session / archive / delete / create-direct / create-from-alignment` + `thought list / create`。支持 per-task 运行时 / 模型 / 权限模式覆盖参数。AI 子进程、用户终端、UI 三条入口的身份自动识别，互不伪造，审计链可追溯。
+- **通知系统**：每次任务状态变更自动分发 —— 桌面通知 + IM Bot 消息（`done / blocked / endCondition` 默认订阅 + per-task 自定义）。派发对话框和任务详情 Overlay 两处都能编辑通知配置。通知 Bot 选择器按「工作区 · 平台」分组展示，稳定排序。
+- **状态机 + 审计链 + 实时同步**：Task 持久化状态变更历史（谁、何时、从什么状态到什么状态、原因），每次变更原子写入 + 追加到 progress.md + 广播 SSE 事件，所有打开的任务中心 Tab 实时同步；崩溃恢复自动把遗留 running / verifying 状态迁到 blocked 并记入历史；删除也写入审计可溯。
+- **想法 ↔ 任务双向绑定**：派发想法生成的任务 ID 自动追加回想法记录；任务被删除时反向清理想法中的绑定。
+- **Moonshot Kimi-K2.6 + CodingPlan 预设**：供应商下拉新增 Moonshot 官方 Coding 预设，Kimi-K2.6 模型开箱即用。
+- **Claude Code 的 AskUserQuestion 走结构化 UI**：CC Runtime 下 AI 问用户问题（多选）时，前端直接渲染成可点击按钮组，而不是纯文本让你手打答案。
+
+### Improved
+- **启动页 / 任务中心 / 聊天输入框视觉升级**：
+  - 卡片系统 V2 —— 悬浮式无边框卡片、阴影降一档，整体更轻盈
+  - 启动页模式切换器改为 macOS 风格图标分段控件（任务 / 对话）
+  - 13 处下拉菜单统一用新的 Popover 原语，弹出位置、翻转方向、关闭行为一致
+  - 点击反馈动画统一 scale(0.98) 并正确 scope 到最内层元素（点卡片里的按钮不再带动整张卡片动）
+  - 任务（CheckSquare）、小助理（Bot）、记录想法（PenLine）等图标调整
+- **聊天页稳定性**：
+  - 工具调用卡片不再把一段连续文本切成两半
+  - 工具数量 badge 和弹窗里的工具列表对齐
+  - Virtuoso 滚动在"强制到底"模式下不再卡顿
+  - 切 Tab 时全局监听器不再越权响应其他 Tab 的事件
+  - AI 中止期间 SDK 的诊断噪音被抑制，不再刷屏
+
+### Fixed
+- **Windows 硬杀会话时消息不丢失**：之前在 Windows 上中断会话可能让最近几条消息丢失，现在队列生命周期架构化处理，即使硬杀也能完整保留。
+- **Gemini 临时提示词文件不再残留**：之前 Gemini 进程意外退出时会留下临时的 system prompt 文件，现在改由 session 生命周期管理，进程 crash / 空闲超时都会正确清理。
+- **Sidecar 未就绪时的竞态**：打开 Tab 瞬间发消息偶尔会因为 Sidecar 还没起好而失败，现在会先等待就绪再发送，用户无感。
+- **macOS 触摸板轻按首次点击失效**：之前在 macOS 上用触摸板 tap 某些按钮，物理按下正常但轻按首次无反应（隐蔽的焦点抢夺陷阱）。修复后所有按钮触摸板轻按稳定响应。
+- **启动页 Tab 切换按钮真的会切换**：之前 tooltip 说"点击切换模式"但点了没反应，现在 Tab 键 + 点击都能正常切换任务 / 对话模式。
+- **Bun-on-Windows 目录创建崩溃**：系统性修复 Windows 平台下 Bun 在多处零散出现的 `mkdirSync` 遇到已存在目录报 EEXIST 的问题。
+- **Claude Code 订阅登录隔离**：CC Runtime 现在完全由 CLI 自己管推理路由，MyAgents 不再尝试注入 provider，避免跨入口（Tab / 微信 / 定时任务）互相干扰订阅登录态。
+- **验证供应商时的错误提示**：之前桥接连接失败统一显示"超时"，现在区分真正的超时和连接错误，给出具体原因。
+- **Runtime 切换防串线加固**：外部 Runtime 的会话标识以 session 为权威来源，切换 Runtime / 续接历史时不再发生 runtime 不匹配导致的状态污染。
+- **系统级 Skills 强制更新**：`task-alignment` / `task-implement` 作为系统 Skill 随版本强制更新，确保你本地的任务对齐和执行逻辑永远与产品同步。
+- **内置 MA 小助理升级**：`self-config` Skill 新增任务中心 CLI 操作说明（建任务 / 管想法 / 改配置都可以直接对小助理说），`task-alignment` Skill 补充 AI 讨论路径自动化指令。
+
+---
+
 ## [0.1.68] - 2026-04-17
 
 ### Added

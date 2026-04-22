@@ -1,11 +1,19 @@
 /**
- * TaskCenterOverlay - Full-screen overlay for browsing all tasks.
- * Left column: sessions list with filters.
- * Right column: cron tasks list.
+ * TaskCenterOverlay — full-screen overlay focused on chat session history.
+ *
+ * v0.1.69 rework: was a two-column view (sessions + cron tasks). The right
+ * column has been removed because the Launcher's 「我的任务」 tab now routes
+ * "全部 → / 搜索" to the Task Center singleton tab instead of this overlay,
+ * making the cron column redundant here. The overlay now serves a single
+ * purpose — browse/filter/search historical Chat sessions — and is renamed
+ * accordingly ("历史会话").
+ *
+ * The legacy `onOpenCronDetail` prop is dropped; downstream callers have
+ * been updated in the same commit.
  */
 
 import { memo, useCallback, useEffect, useMemo, useState, useRef } from 'react';
-import { Search, Loader2, BarChart2, Clock, Plus, Trash2, X } from 'lucide-react';
+import { Search, Loader2, BarChart2, Clock, Trash2, X } from 'lucide-react';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { searchSessions, type SessionSearchHit } from '@/api/searchClient';
@@ -19,22 +27,13 @@ import CustomSelect from '@/components/CustomSelect';
 import { useToast } from '@/components/Toast';
 import { getFolderName, formatTime, isImSource, getSessionDisplayText, formatMessageCount } from '@/utils/taskCenterUtils';
 import type { SessionMetadata } from '@/api/sessionClient';
-import type { CronTask } from '@/types/cronTask';
 import type { Project } from '@/config/types';
-import {
-    getCronStatusText,
-    getCronStatusColor,
-    formatScheduleDescription,
-    formatNextExecution,
-} from '@/types/cronTask';
-import TaskCreateModal from '@/components/scheduled-tasks/TaskCreateModal';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import SessionSearchItem from '@/components/search/SessionSearchItem';
 
 interface TaskCenterOverlayProps {
     projects: Project[];
     onOpenTask: (session: SessionMetadata, project: Project) => void;
-    onOpenCronDetail: (task: CronTask) => void;
     onClose: () => void;
     taskCenterData: TaskCenterData;
     initialMode?: 'default' | 'search';
@@ -52,13 +51,12 @@ const FILTER_OPTIONS: { key: StatusFilter; label: string }[] = [
 export default memo(function TaskCenterOverlay({
     projects,
     onOpenTask,
-    onOpenCronDetail,
     onClose,
     taskCenterData,
     initialMode = 'default',
 }: TaskCenterOverlayProps) {
     useCloseLayer(() => { onClose(); return true; }, 40);
-    const { sessions, cronTasks, sessionTagsMap, cronBotInfoMap, refresh, actions } = taskCenterData;
+    const { sessions, cronTasks, sessionTagsMap, refresh, actions } = taskCenterData;
     const toast = useToast();
 
     // Search state
@@ -72,7 +70,6 @@ export default memo(function TaskCenterOverlay({
     const [workspaceFilter, setWorkspaceFilter] = useState<string>('all');
     const [pendingDeleteSession, setPendingDeleteSession] = useState<{ id: string; title: string } | null>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
-    const [showCreateModal, setShowCreateModal] = useState(false);
 
     useEffect(() => {
         refresh('all', {
@@ -141,28 +138,6 @@ export default memo(function TaskCenterOverlay({
             return true;
         });
     }, [sessions, sessionTagsMap, statusFilter, workspaceFilter, projects]);
-
-    // Sort cron tasks: running first (by nextExecutionAt ASC), then stopped (by updatedAt DESC)
-    const sortedCronTasks = useMemo(() => {
-        return [...cronTasks].sort((a, b) => {
-            // Primary: running tasks first
-            if (a.status === 'running' && b.status !== 'running') return -1;
-            if (a.status !== 'running' && b.status === 'running') return 1;
-
-            if (a.status === 'running') {
-                // Within running: soonest execution first
-                if (a.nextExecutionAt && b.nextExecutionAt) {
-                    return new Date(a.nextExecutionAt).getTime() - new Date(b.nextExecutionAt).getTime();
-                }
-                return 0;
-            }
-
-            // Within stopped: most recently active first
-            const aTime = new Date(a.updatedAt || a.createdAt).getTime();
-            const bTime = new Date(b.updatedAt || b.createdAt).getTime();
-            return bTime - aTime;
-        });
-    }, [cronTasks]);
 
     // Search effect
     useEffect(() => {
@@ -234,19 +209,17 @@ export default memo(function TaskCenterOverlay({
         setStatsSession({ id: session.id, title: getSessionDisplayText(session) });
     }, []);
 
-    const handleCreated = useCallback(() => {
-        refresh('all', { force: true, reason: 'task-center-cron-created', silent: true });
-    }, [refresh]);
-
     return (
         <OverlayBackdrop onClose={onClose} className="z-40" style={{ animation: 'overlayFadeIn 200ms ease-out' }}>
             <div
                 className="glass-panel flex h-[85vh] w-full max-w-5xl flex-col"
                 style={{ padding: '2vh 2vw', animation: 'overlayPanelIn 250ms ease-out' }}
             >
-                {/* Header */}
+                {/* Header — v0.1.69 renamed from "任务中心" to "历史对话" to
+                    match the new domain of this overlay (Chat sessions only;
+                    Tasks live in the Task Center singleton tab). */}
                 <div className="mb-4 flex items-center justify-between">
-                    <h2 className="text-[16px] font-semibold text-[var(--ink)]">任务中心</h2>
+                    <h2 className="text-[16px] font-semibold text-[var(--ink)]">历史对话</h2>
                     <button
                         onClick={onClose}
                         className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
@@ -255,14 +228,12 @@ export default memo(function TaskCenterOverlay({
                     </button>
                 </div>
 
-                {/* Body: two columns */}
-                <div className="flex min-h-0 flex-1 gap-5">
-                    {/* Left: Sessions */}
+                {/* Body — single column now that the cron-tasks right pane
+                    has been removed. Kept inside the flex wrapper so a future
+                    sibling (e.g. per-workspace stats) slides in without
+                    further restructuring. */}
+                <div className="flex min-h-0 flex-1">
                     <div className="flex min-w-0 flex-1 flex-col">
-                        <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/60">
-                            最近任务
-                        </h3>
-
                         {/* Filter bar / Search Input */}
                         <div className="mb-3 flex flex-wrap items-center gap-2 h-8">
                             {isSearchMode ? (
@@ -348,7 +319,7 @@ export default memo(function TaskCenterOverlay({
                         <div className="flex-1 overflow-y-auto overscroll-contain" style={{ scrollbarGutter: 'stable' }}>
                             {filteredSessions.length === 0 ? (
                                 <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]/60">
-                                    暂无匹配的任务
+                                    暂无匹配的历史对话
                                 </div>
                             ) : (
                                 <div className="space-y-0.5">
@@ -453,74 +424,6 @@ export default memo(function TaskCenterOverlay({
                             )}
                         </div>
                     </div>
-
-                    {/* Right: Cron tasks */}
-                    <div className="flex w-[340px] shrink-0 flex-col border-l border-[var(--line)] pl-5">
-                        <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/60">
-                            定时任务
-                        </h3>
-
-                        <div className="flex-1 overflow-y-auto overscroll-contain" style={{ scrollbarGutter: 'stable' }}>
-                            <div className="space-y-1">
-                                {/* Create button — first item, matching RecentTasks style */}
-                                <button
-                                    onClick={() => setShowCreateModal(true)}
-                                    className="mb-1 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--line)] py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] transition-colors"
-                                >
-                                    <Plus className="h-3.5 w-3.5" />
-                                    新建定时任务
-                                </button>
-
-                                {sortedCronTasks.length === 0 ? (
-                                    <div className="py-6 text-center text-[13px] text-[var(--ink-muted)]/60">
-                                        暂无定时任务
-                                    </div>
-                                ) : (
-                                    sortedCronTasks.map(task => {
-                                        const botInfo = task.sourceBotId
-                                            ? cronBotInfoMap.get(task.sourceBotId)
-                                            : undefined;
-                                        const displayName =
-                                            task.name ||
-                                            task.prompt.slice(0, 30) + (task.prompt.length > 30 ? '...' : '');
-
-                                        return (
-                                            <button
-                                                key={task.id}
-                                                onClick={() => onOpenCronDetail(task)}
-                                                className="group flex w-full flex-col gap-1 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
-                                            >
-                                                <div className="flex items-center gap-2">
-                                                    <span
-                                                        className={`text-[12px] font-medium ${getCronStatusColor(task.status)}`}
-                                                    >
-                                                        {getCronStatusText(task.status)}
-                                                    </span>
-                                                    <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
-                                                        {displayName}
-                                                    </span>
-                                                </div>
-                                                <div className="flex items-center gap-3 text-[11px] text-[var(--ink-muted)]/50">
-                                                    {botInfo && (
-                                                        <span>{botInfo.name} ({botInfo.platform})</span>
-                                                    )}
-                                                    {!botInfo && (
-                                                        <span>{getFolderName(task.workspacePath)}</span>
-                                                    )}
-                                                    <span>{formatScheduleDescription(task)}</span>
-                                                    {task.status === 'running' && (
-                                                        <span className="ml-auto">
-                                                            {formatNextExecution(task.nextExecutionAt, task.status)}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </button>
-                                        );
-                                    })
-                                )}
-                            </div>
-                        </div>
-                    </div>
                 </div>
             </div>
 
@@ -539,12 +442,6 @@ export default memo(function TaskCenterOverlay({
                     sessionId={statsSession.id}
                     sessionTitle={statsSession.title}
                     onClose={() => setStatsSession(null)}
-                />
-            )}
-            {showCreateModal && (
-                <TaskCreateModal
-                    onClose={() => setShowCreateModal(false)}
-                    onCreated={handleCreated}
                 />
             )}
         </OverlayBackdrop>

@@ -17,6 +17,7 @@ import SessionStatsModal from './SessionStatsModal';
 import SessionTagBadge from './SessionTagBadge';
 import Tip from './Tip';
 import { useToast } from './Toast';
+import { Popover } from './ui/Popover';
 
 interface SessionHistoryDropdownProps {
     agentDir: string;
@@ -26,6 +27,8 @@ interface SessionHistoryDropdownProps {
     onDeleteCurrentSession: () => void;
     isOpen: boolean;
     onClose: () => void;
+    /** Trigger button ref — anchors the dropdown via the Popover primitive. */
+    triggerRef: React.RefObject<HTMLElement | null>;
 }
 
 // Track fetch state: null = not fetched, empty array = fetched but empty
@@ -39,6 +42,7 @@ export default function SessionHistoryDropdown({
     onDeleteCurrentSession,
     isOpen,
     onClose,
+    triggerRef,
 }: SessionHistoryDropdownProps) {
     const toast = useToast();
     const [sessions, setSessions] = useState<FetchState>(null);
@@ -49,7 +53,6 @@ export default function SessionHistoryDropdown({
     // Track delete error for user feedback
     const [deleteError, setDeleteError] = useState<string | null>(null);
 
-    const dropdownRef = useRef<HTMLDivElement>(null);
     const onCloseRef = useRef(onClose);
     const statsSessionRef = useRef(statsSession);
 
@@ -226,21 +229,14 @@ export default function SessionHistoryDropdown({
         };
     }, [isOpen, agentDir]);
 
-    // Close on outside click (using stable ref to avoid re-attaching listener)
-    useEffect(() => {
-        if (!isOpen) return;
-
-        const handleClickOutside = (e: MouseEvent) => {
-            // Don't close dropdown when stats modal is open - modal handles its own close
-            if (statsSessionRef.current) return;
-            if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-                onCloseRef.current();
-            }
-        };
-
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, [isOpen]);
+    // Outside-click + Escape dismissal are owned by the Popover primitive.
+    // The `handlePopoverClose` wrapper below blocks close propagation while
+    // the stats modal is open — otherwise clicks inside the modal would
+    // close the dropdown behind it.
+    const handlePopoverClose = useCallback(() => {
+        if (statsSessionRef.current) return;
+        onClose();
+    }, [onClose]);
 
     const handleDeleteClick = (e: React.MouseEvent, sessionId: string) => {
         e.stopPropagation();
@@ -396,16 +392,18 @@ export default function SessionHistoryDropdown({
         }
     };
 
-    if (!isOpen) return null;
-
     // Derive loading state: open but sessions not yet fetched
     const isLoading = sessions === null;
 
     return (
         <>
-            <div
-                ref={dropdownRef}
-                className="absolute right-0 top-full z-50 mt-1 w-96 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-lg"
+            <Popover
+                open={isOpen}
+                onClose={handlePopoverClose}
+                anchorRef={triggerRef}
+                placement="bottom-end"
+                zIndex={50}
+                className="w-96 bg-[var(--paper)] shadow-lg"
             >
                 {/* Header */}
                 <div className="border-b border-[var(--line)] px-4 py-2">
@@ -548,7 +546,7 @@ export default function SessionHistoryDropdown({
                         })
                     )}
                 </div>
-            </div>
+            </Popover>
 
             {/* Stats Modal — portal to document root to escape stacking context */}
             {statsSession && createPortal(

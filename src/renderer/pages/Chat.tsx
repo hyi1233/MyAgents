@@ -28,6 +28,7 @@ import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { useCronTask } from '@/hooks/useCronTask';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
+import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
 import type { CronTask } from '@/types/cronTask';
 import { formatScheduleDescription } from '@/types/cronTask';
 import CronTaskCard from '@/components/scheduled-tasks/CronTaskCard';
@@ -35,6 +36,7 @@ import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import type { CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
+import { isImSource } from '@/utils/taskCenterUtils';
 import { type PermissionMode, type McpServerDefinition, getEffectiveModelAliases } from '@/config/types';
 import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
 import {
@@ -165,6 +167,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     isSessionLoading,
     sessionState,
     sessionRuntime,
+    sessionMeta,
+    setSessionMeta,
     unifiedLogs,
     systemInitInfo: _systemInitInfo,
     agentError,
@@ -245,6 +249,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // to avoid re-rendering Chat (and MessageList) on every keystroke
   const [showLogs, setShowLogs] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const historyBtnRef = useRef<HTMLButtonElement>(null);
   // Narrow mode: workspace renders as overlay drawer instead of side panel
   // Initialize from window.innerWidth to avoid layout flash (FOUC) on first render
   const [isNarrowLayout, setIsNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
@@ -560,6 +565,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Ref for tracking previous isActive state (for config sync on tab switch)
   const prevIsActiveRef = useRef(isActive);
 
+  // Track previous `isConnected` so we can re-sync Tab-scoped state after a
+  // mid-session Sidecar restart (crash + Rust health-monitor recovery, or
+  // `recoverSessionSidecar` path). The startup race in the AI-讨论 flow is
+  // handled structurally in `tauriClient.getTabServerUrl` (it waits for
+  // Sidecar readiness), so this effect is NOT the startup band-aid —
+  // it's the recovery hook.
+  const prevIsConnectedRef = useRef(isConnected);
+
   // Track whether we're joining an existing sidecar (e.g. IM Bot session)
   // When true, mount effects skip config push and adopt sidecar's config instead.
   const joinedExistingSidecarRef = useRef(joinedExistingSidecar ?? false);
@@ -594,9 +607,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // This gate is applied at the definition of currentRuntime itself so ALL downstream
   // derivations (runtimePermissionModes, runtimeModels, etc.) are automatically safe.
   const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
-  const currentRuntime = multiAgentRuntimeEnabled
+  // Agent's currently-configured runtime — used as the default for NEW sessions.
+  const agentRuntime: RuntimeType = multiAgentRuntimeEnabled
     ? ((currentAgent?.runtime as RuntimeType) || 'builtin')
     : 'builtin';
+  // v0.1.69: session is self-contained — its frozen runtime is authoritative for
+  // both display and message routing within this tab. Falls back to agentRuntime
+  // only before the session has loaded (sessionRuntime===null) or for newly-created
+  // sessions before TabProvider syncs metadata. Changing agent.runtime in another
+  // tab does NOT change an existing session's display: the session's Sidecar was
+  // spawned with its frozen runtime and the backend routes by sessionId.
+  const currentRuntime: RuntimeType = (sessionRuntime as RuntimeType | null) ?? agentRuntime;
   const isExternalRuntime = currentRuntime !== 'builtin';
 
   // Detect installed runtimes once on mount
@@ -996,6 +1017,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [handleTauriChatDrop, handleTauriDirectoryDrop]);
 
   const { isDragging: isTauriDragging, activeZoneId, registerZone, unregisterZone } = useTauriFileDrop({
+    // Tauri drag events are window-global and fire on every mounted hook instance.
+    // Without this gate, a single Finder drop (or image drag) lands in ALL open tabs'
+    // attachment/workspace state because every hidden tab's zone still matches the
+    // geometric check (absolute inset-0 overlap) AND the `zoneId === null` fallback
+    // below defaults to chat-drop regardless. Gating at the hook ensures only the
+    // visible tab reacts.
+    enabled: isActive,
     onDrop: (paths, zoneId) => {
       if (isDebugMode()) {
         console.log('[Chat] Tauri drop event - zoneId:', zoneId, 'paths:', paths);
@@ -1244,7 +1272,34 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [currentProject?.mcpEnabledServers]);
 
-  // Handle workspace MCP toggle — persist via patchProject (updates disk + React state)
+  // v0.1.69 — owned (Desktop/Cron) sessions lock config via SessionMetadata snapshot
+  // (configSnapshotAt stamped at creation per `snapshotForOwnedSession`). Tab-level UI
+  // changes on a locked session MUST go only to the session snapshot, not the agent
+  // — agent is the template for *future* sessions. IM / unlocked sessions have no
+  // snapshot and live-follow the agent; UI changes there patch the agent as before.
+  const isOwnedSession = !!sessionMeta?.configSnapshotAt;
+
+  // v0.1.69 T17: legacy pre-snapshot session — session exists but has no snapshot,
+  // and not IM-sourced (IM is live-follow by design, not a legacy artifact). These
+  // sessions live-follow the agent, so edits to the agent mutate this session's
+  // effective config. Show an "unlocked" indicator so the user understands why.
+  const isSessionUnlocked = !!sessionMeta
+    && !sessionMeta.configSnapshotAt
+    && !isImSource(sessionMeta.source);
+
+  /**
+   * Patch one or more snapshot fields on the current session and mirror the update
+   * into TabContext so `sessionMeta`-driven derivations (see the sync effect above)
+   * don't rubber-band back to the old value on the next render. Safe no-op if there
+   * is no current sessionId (new-tab pre-create race).
+   */
+  const patchSnapshot = useCallback(async (patch: Parameters<typeof patchSessionMetadata>[1]) => {
+    if (!sessionId) return;
+    const updated = await patchSessionMetadata(sessionId, patch);
+    if (updated) setSessionMeta(updated);
+  }, [sessionId, setSessionMeta]);
+
+  // Handle workspace MCP toggle — owned session: PATCH snapshot only; unlocked/IM: patch agent+project (live-follow)
   const handleWorkspaceMcpToggle = useCallback(async (serverId: string, enabled: boolean) => {
     const newEnabled = enabled
       ? [...workspaceMcpEnabled, serverId]
@@ -1252,9 +1307,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     setWorkspaceMcpEnabled(newEnabled);
 
-    // Persist to project config (patchProject updates disk AND projects React state,
-    // keeping currentProject.mcpEnabledServers in sync for tab-activate sync at L672)
-    if (currentProject) {
+    if (isOwnedSession) {
+      void patchSnapshot({ mcpEnabledServers: newEnabled });
+    } else if (currentProject) {
+      // Persist to project config (patchProject updates disk AND projects React state,
+      // keeping currentProject.mcpEnabledServers in sync for tab-activate sync at L672)
       void patchProject(currentProject.id, { mcpEnabledServers: newEnabled });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { mcpEnabledServers: newEnabled });
@@ -1273,7 +1330,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       console.error('[Chat] Failed to sync MCP servers:', err);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost is stable, only care about state changes
-  }, [workspaceMcpEnabled, currentProject, mcpServers, globalMcpEnabled]);
+  }, [workspaceMcpEnabled, currentProject, mcpServers, globalMcpEnabled, isOwnedSession, patchSnapshot]);
 
   // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
   const providerInitRef = useRef(true);
@@ -1318,6 +1375,27 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time sync when project first loads
   }, [currentProject?.id]);
+
+  // v0.1.69: session snapshot → local state (session-first per D7 Option C).
+  // Also handles T11 reset-on-session-switch: when switching to an unlocked / IM session
+  // (no snapshot), fall back to the agent's current config so stale local state from a
+  // previously-loaded locked session doesn't bleed across. Runs on session load AND after
+  // PATCH /sessions/:id. React bails on setState when target === current, so no render loop.
+  useEffect(() => {
+    if (!sessionMeta) return;  // Not loaded yet — keep mount-time defaults
+    if (joinedExistingSidecarRef.current) return;  // Adoption effect handles it
+    // Field-by-field merge: `session ?? agent` (Option C). Missing snapshot fields
+    // re-derive from the agent — this is the write-read symmetry of IM live-follow.
+    const model = sessionMeta.model ?? currentAgent?.model;
+    const mode = sessionMeta.permissionMode ?? (currentAgent?.permissionMode as string | undefined);
+    const providerId = sessionMeta.providerId ?? currentAgent?.providerId;
+    const mcp = sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers;
+    if (model) setSelectedModel(model);
+    if (mode) setPermissionMode(mode as PermissionMode);
+    if (providerId) setSelectedProviderId(providerId);
+    if (mcp) setWorkspaceMcpEnabled(mcp);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- currentAgent derived from config, listening to its identity would re-fire on unrelated agent changes
+  }, [sessionMeta]);
 
   // 若 selectedModel 不在当前 provider 的 models 中（如模型已被删除），回退到 primaryModel 并更新项目
   useEffect(() => {
@@ -1397,12 +1475,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption on mount
   }, [joinedExistingSidecar]);
 
-  const { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll, handleAtBottomChange } = useVirtuosoScroll();
-
-  // Capture virtuoso's internal scroller element for QueryNavigator
-  const handleScrollerRef = useCallback((el: HTMLElement | Window | null) => {
-    scrollerRef.current = el instanceof HTMLElement ? el : null;
-  }, [scrollerRef]);
+  const { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll, handleAtBottomChange, attachScroller } = useVirtuosoScroll();
 
   // ── In-page text finder (Cmd/Ctrl+F) ──
   // Scope: already-rendered messages only (Virtuoso virtualizes the rest).
@@ -1542,6 +1615,49 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     return () => window.removeEventListener(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, handleSkillCopied);
   }, []);
 
+  // Re-sync Tab-scoped state on `isConnected` false → true transition.
+  //
+  // This is the RECOVERY hook — fires when a Sidecar that died mid-session
+  // comes back up (Rust health monitor restart or `recoverSessionSidecar`).
+  // Cold-start boot races are absorbed upstream in `tauriClient`, so on
+  // initial mount this effect fires once but is (idempotently) redundant
+  // with the mount-time sync effects — intentional; cost is one extra
+  // network call per boot, which beats forking "recovery vs startup" paths.
+  //
+  //   • `workspaceRefreshTrigger` bump re-runs `loadAndSyncAgents`,
+  //     `loadSkillsAndCommands`, and `DirectoryPanel.rawRefresh` — all
+  //     three gate on this trigger, so re-syncing them is a single bump.
+  //   • `/api/model/set` re-push (both built-in AND external runtimes):
+  //     the mount-time sync-model effects only re-fire when their model
+  //     source *changes*. A restarted Sidecar self-resolves built-in
+  //     config from disk but has NO disk memory for the external-runtime
+  //     model — that lived only in the old sidecar process. So after a
+  //     mid-session restart both paths need an explicit push to stay
+  //     consistent with what the user actually selected.
+  useEffect(() => {
+    const wasConnected = prevIsConnectedRef.current;
+    prevIsConnectedRef.current = isConnected;
+    if (!wasConnected && isConnected) {
+      setWorkspaceRefreshTrigger(k => k + 1);
+      if (!joinedExistingSidecarRef.current) {
+        // Pick whichever model source matches the active runtime. Previously
+        // this branch only re-synced the built-in `selectedModel` and left
+        // external-runtime Tabs (Codex / Gemini / Claude Code) with a stale
+        // in-process default after a Sidecar restart — the user's chosen
+        // runtime model lives only in sidecar memory, so skipping the push
+        // here means the next turn would silently run on the wrong model.
+        // Both paths hit the same `/api/model/set` endpoint; the backend
+        // routes to the built-in vs external setter based on runtime.
+        const modelToPush = isExternalRuntime ? runtimeModel : selectedModel;
+        if (modelToPush) {
+          apiPost('/api/model/set', { model: modelToPush }).catch(err => {
+            console.error('[Chat] Failed to re-sync model after sidecar ready:', err);
+          });
+        }
+      }
+    }
+  }, [isConnected, isExternalRuntime, runtimeModel, selectedModel, apiPost]);
+
   // Handle provider change with analytics tracking.
   // targetModel: when provided, use this model instead of the provider's primaryModel
   // (avoids useEffect race when user picks a specific model from a different provider).
@@ -1551,7 +1667,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       // Provider unchanged but caller passed a specific model — treat as model change
       if (targetModel) {
         setSelectedModel(targetModel);
-        if (currentProject) {
+        if (isOwnedSession) {
+          void patchSnapshot({ model: targetModel });
+        } else if (currentProject) {
           void patchProject(currentProject.id, { model: targetModel });
           if (currentProject?.agentId) {
             void patchAgentConfig(currentProject.agentId, { model: targetModel });
@@ -1589,15 +1707,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Suppress the deferred provider-change useEffect — we've already set the correct model
     providerInitRef.current = true;
 
-    // Write back to project (last-writer-wins for new tabs)
-    if (currentProject) {
+    // Write back: owned session locks to snapshot; unlocked/IM follows agent (last-writer-wins for new tabs)
+    if (isOwnedSession) {
+      void patchSnapshot({ providerId, model: model ?? null });
+    } else if (currentProject) {
       void patchProject(currentProject.id, { providerId, model: model ?? null });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { providerId, model: model ?? undefined });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
-  }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider?.id]);
+  }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider?.id, isOwnedSession, patchSnapshot]);
 
   // Handle model change with analytics tracking and project write-back
   const handleModelChange = useCallback((model: string) => {
@@ -1610,34 +1730,46 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     track('model_switch', { model });
 
     setSelectedModel(model);
-    if (currentProject) {
+    if (isOwnedSession) {
+      void patchSnapshot({ model });
+    } else if (currentProject) {
       void patchProject(currentProject.id, { model });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { model });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
-  }, [selectedModel, currentProject?.id, patchProject]);
+  }, [selectedModel, currentProject?.id, patchProject, isOwnedSession, patchSnapshot]);
 
-  // Handle permission mode change with project write-back
+  // Handle permission mode change — owned session: snapshot; unlocked/IM: project+agent
   const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
     setPermissionMode(mode);
-    if (currentProject) {
+    if (isOwnedSession) {
+      void patchSnapshot({ permissionMode: mode });
+    } else if (currentProject) {
       void patchProject(currentProject.id, { permissionMode: mode });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { permissionMode: mode });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
-  }, [currentProject?.id, patchProject]);
+  }, [currentProject?.id, patchProject, isOwnedSession, patchSnapshot]);
 
-  // Cross-runtime session detection: session was created by a DIFFERENT runtime than the current one.
-  // Covers all mismatch scenarios across builtin, Claude Code, Codex, and Gemini.
-  // sessionRuntime is null ONLY when session hasn't loaded yet (initial state).
-  // After loadSession, it's always a valid RuntimeType ('builtin' | 'codex' | 'claude-code' | 'gemini')
-  // because: new sessions write runtime via createSessionMetadata (defaults to 'builtin'),
-  // old sessions get 'builtin' at load time (TabProvider: runtime || 'builtin').
-  const isCrossRuntimeSession = sessionRuntime !== null && sessionRuntime !== currentRuntime;
+  // Cross-runtime SDK protection: only fires when the multiAgentRuntime feature
+  // gate is OFF but the session was created by an external runtime (Codex/CC/
+  // Gemini). In that case the backend would try to run the built-in SDK against
+  // an external-runtime session → "No conversation found" crash, so we MUST block
+  // sending and route the user through fork-to-new-session instead.
+  //
+  // Normal agent-runtime drift does NOT trigger this (per v0.1.69 self-contained
+  // principle): when the feature gate is on, existing sessions keep their frozen
+  // runtime and the backend routes by sessionId to the correct Sidecar — no fork
+  // needed. The previous formula `sessionRuntime !== currentRuntime` was wrong
+  // because it compared session-actual against agent-preference, which forced an
+  // unnecessary fork every time the user changed agent.runtime in another tab.
+  const isCrossRuntimeSession = sessionRuntime !== null
+    && sessionRuntime !== 'builtin'
+    && !multiAgentRuntimeEnabled;
   const [pendingCrossRuntimeMessage, setPendingCrossRuntimeMessage] = useState<{
     text: string;
     images: ImageAttachment[];
@@ -1807,10 +1939,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setPendingRuntimeChange(null);
     if (!runtime || !currentAgent) return;
     try {
-      // 1. Save runtime to agent config + refresh React state so new tab sees updated runtime
-      await patchAgentConfig(currentAgent.id, { runtime });
-      await refreshConfig();  // Must use refreshConfig (not refreshProviderData) to update config.agents
-      // 2. Create a new session and open in new Tab (pass runtime to avoid cross-runtime mismatch)
+      // The bottom-bar runtime selector is a per-tab fork action, NOT a workspace-
+      // level setting. We pin the new tab to the chosen runtime by stamping it on
+      // the new SessionMetadata (server-side override in POST /sessions wins over
+      // agent.runtime). We deliberately do NOT call patchAgentConfig here:
+      //
+      //   - Patching agent.runtime mutates shared workspace state, which leaks
+      //     into every other open tab on this workspace — empty tabs would flip
+      //     their displayed runtime, and even non-empty tabs whose sessionRuntime
+      //     hadn't been hydrated yet could drift. That broke the v0.1.69
+      //     self-contained guarantee in practice.
+      //   - The new tab still opens with the right runtime: createSession passes
+      //     `runtime` into POST /sessions, which overrides the snapshot's runtime
+      //     field; sidecar.rs's resolve_session_runtime() then spawns the new
+      //     Sidecar with MYAGENTS_RUNTIME set from session metadata, not agent
+      //     config. So nothing here depends on agent.runtime being patched.
+      //   - Users who want to change the workspace default runtime should do it
+      //     in Settings → Agent → Runtime (WorkspaceBasicsSection.tsx) — that's
+      //     the right surface for a workspace-level change.
       if (onForkSession && agentDir) {
         const { createSession } = await import('@/api/sessionClient');
         const session = await createSession(agentDir, runtime);
@@ -1821,7 +1967,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       console.error('[chat] Failed to switch runtime:', err);
       toastRef.current.error('切换 Runtime 失败');
     }
-  }, [pendingRuntimeChange, currentAgent, refreshConfig, onForkSession, agentDir]);
+  }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir]);
 
   // Cross-protocol provider switch confirm: save new provider to project, create new session in new tab.
   // Current tab stays unchanged (preserving the third-party session). See: #68
@@ -2246,28 +2392,28 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               {!splitFile && <span>新对话</span>}
             </button>
             {/* History button */}
-            <div className="relative">
-              <button
-                type="button"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => setShowHistory((prev) => !prev)}
-                className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${showHistory
-                  ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
-                  : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
-                  }`}
-              >
-                <History className="h-3.5 w-3.5 flex-shrink-0" />
-                {!splitFile && <span>历史</span>}
-              </button>
-              <SessionHistoryDropdown
-                agentDir={agentDir}
-                currentSessionId={sessionId}
-                onSelectSession={handleSelectSession}
-                onDeleteCurrentSession={handleNewSession}
-                isOpen={showHistory}
-                onClose={() => setShowHistory(false)}
-              />
-            </div>
+            <button
+              ref={historyBtnRef}
+              type="button"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => setShowHistory((prev) => !prev)}
+              className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${showHistory
+                ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
+                : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
+                }`}
+            >
+              <History className="h-3.5 w-3.5 flex-shrink-0" />
+              {!splitFile && <span>历史</span>}
+            </button>
+            <SessionHistoryDropdown
+              agentDir={agentDir}
+              currentSessionId={sessionId}
+              onSelectSession={handleSelectSession}
+              onDeleteCurrentSession={handleNewSession}
+              isOpen={showHistory}
+              onClose={() => setShowHistory(false)}
+              triggerRef={historyBtnRef}
+            />
             {/* Dev-only buttons - controlled by config.showDevTools */}
             {config.showDevTools && (
               <>
@@ -2447,8 +2593,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               isSessionLoading={isSessionLoading}
               sessionId={sessionId}
               virtuosoRef={virtuosoRef}
-              onScrollerRef={handleScrollerRef}
+              onScrollerRef={attachScroller}
               followEnabledRef={followEnabledRef}
+              scrollToBottom={scrollToBottom}
               handleAtBottomChange={handleAtBottomChange}
               pendingPermission={pendingPermission}
               onPermissionDecision={handlePermissionDecision}
@@ -2497,6 +2644,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             ref={chatInputRef}
             onSend={handleSendMessage}
             onStop={handleStop}
+            active={isActive}
             isLoading={isLoading || sessionState === 'running'}
             sessionState={sessionState}
             systemStatus={systemStatus}
@@ -2506,6 +2654,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onProviderChange={handleProviderChange}
             selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
             onModelChange={isExternalRuntime ? setRuntimeModel : handleModelChange}
+            sessionUnlocked={isSessionUnlocked}
             permissionMode={effectivePermissionMode}
             onPermissionModeChange={isExternalRuntime
               ? ((mode: PermissionMode) => setRuntimePermissionMode(mode))

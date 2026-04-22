@@ -166,6 +166,213 @@ impl SearchEngine {
         let mut mgr = self.file_indices.lock().await;
         mgr.refresh_or_create(workspace)
     }
+
+    /// Search Task Center thoughts (v0.1.69, PRD §13.2). Substring match over
+    /// content + tags (case-insensitive). The store keeps everything in memory
+    /// and the expected N < 10k, so Tantivy overhead is unwarranted at v1
+    /// scale; we defer that to a later release when user data grows past the
+    /// linear-scan threshold.
+    pub async fn search_thoughts(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<ThoughtSearchResult, String> {
+        let Some(store) = crate::thought::get_thought_store() else {
+            return Ok(ThoughtSearchResult {
+                hits: vec![],
+                total: 0,
+            });
+        };
+        let start = std::time::Instant::now();
+        let all = store
+            .list(crate::thought::ThoughtListFilter::default())
+            .await;
+        let needle = query.trim().to_lowercase();
+        let hits: Vec<ThoughtSearchHit> = all
+            .into_iter()
+            .filter(|t| {
+                if needle.is_empty() {
+                    return true;
+                }
+                t.content.to_lowercase().contains(&needle)
+                    || t.tags
+                        .iter()
+                        .any(|tag| tag.to_lowercase().contains(&needle))
+            })
+            .take(limit)
+            .map(|t| ThoughtSearchHit {
+                id: t.id,
+                snippet: make_snippet(&t.content, &needle, 180),
+                tags: t.tags,
+                updated_at: t.updated_at,
+            })
+            .collect();
+        let total = hits.len() as u64;
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        ulog_info!(
+            "[search] thought query={:?} → {} hits ({:.1}ms)",
+            query,
+            total,
+            elapsed_ms
+        );
+        Ok(ThoughtSearchResult { hits, total })
+    }
+
+    /// Search Task Center tasks. Matches on name + description + tags +
+    /// task.md contents (read lazily per task, cached per-call). Filters by
+    /// workspace when supplied.
+    pub async fn search_tasks(
+        &self,
+        query: &str,
+        workspace_id: Option<&str>,
+        limit: usize,
+    ) -> Result<TaskSearchResult, String> {
+        let Some(store) = crate::task::get_task_store() else {
+            return Ok(TaskSearchResult {
+                hits: vec![],
+                total: 0,
+            });
+        };
+        let start = std::time::Instant::now();
+        let all = store
+            .list(crate::task::TaskListFilter {
+                workspace_id: workspace_id.map(|s| s.to_string()),
+                ..Default::default()
+            })
+            .await;
+        let needle = query.trim().to_lowercase();
+        let mut hits: Vec<TaskSearchHit> = Vec::new();
+        for t in all.into_iter() {
+            if hits.len() >= limit {
+                break;
+            }
+            let mut matched = false;
+            let mut snippet = String::new();
+            if needle.is_empty() {
+                matched = true;
+            } else {
+                if t.name.to_lowercase().contains(&needle) {
+                    matched = true;
+                    snippet = t.name.clone();
+                }
+                if let Some(desc) = t.description.as_deref() {
+                    if !matched && desc.to_lowercase().contains(&needle) {
+                        matched = true;
+                        snippet = desc.to_string();
+                    }
+                }
+                if !matched && t.tags.iter().any(|x| x.to_lowercase().contains(&needle)) {
+                    matched = true;
+                    snippet = format!("tags: {}", t.tags.join(", "));
+                }
+                if !matched {
+                    // Peek at task.md — bounded read so we don't blow out I/O
+                    // on a huge workspace. `task_docs_dir` errors on bad inputs
+                    // so we silently skip in that case. After v0.1.69 relocation
+                    // task docs live in ~/.myagents/tasks/<id>/, not in the
+                    // workspace.
+                    if let Ok(dir) = crate::task::task_docs_dir(&t.id) {
+                        let md = dir.join("task.md");
+                        if let Ok(body) = std::fs::read_to_string(&md) {
+                            let lc = body.to_lowercase();
+                            if lc.contains(&needle) {
+                                matched = true;
+                                snippet = make_snippet(&body, &needle, 180);
+                            }
+                        }
+                    }
+                }
+            }
+            if matched {
+                hits.push(TaskSearchHit {
+                    id: t.id,
+                    name: t.name,
+                    snippet,
+                    status: t.status.as_str().to_string(),
+                    workspace_id: t.workspace_id,
+                    updated_at: t.updated_at,
+                });
+            }
+        }
+        let total = hits.len() as u64;
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        ulog_info!(
+            "[search] task query={:?} → {} hits ({:.1}ms)",
+            query,
+            total,
+            elapsed_ms
+        );
+        Ok(TaskSearchResult { hits, total })
+    }
+}
+
+fn make_snippet(body: &str, needle: &str, ctx_chars: usize) -> String {
+    if needle.is_empty() || body.is_empty() {
+        return body.chars().take(ctx_chars).collect();
+    }
+    let lc = body.to_lowercase();
+    match lc.find(needle) {
+        Some(byte_idx) => {
+            // Expand around match using char boundary clamping.
+            let start = byte_idx.saturating_sub(ctx_chars / 2);
+            let end = (byte_idx + needle.len() + ctx_chars / 2).min(body.len());
+            let clamped_start = body
+                .char_indices()
+                .take_while(|(i, _)| *i <= start)
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let clamped_end = body
+                .char_indices()
+                .take_while(|(i, _)| *i <= end)
+                .last()
+                .map(|(i, _)| i + body[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(0))
+                .unwrap_or(body.len());
+            let mut out = String::new();
+            if clamped_start > 0 {
+                out.push('…');
+            }
+            out.push_str(&body[clamped_start..clamped_end]);
+            if clamped_end < body.len() {
+                out.push('…');
+            }
+            out
+        }
+        None => body.chars().take(ctx_chars).collect(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThoughtSearchResult {
+    pub hits: Vec<ThoughtSearchHit>,
+    pub total: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThoughtSearchHit {
+    pub id: String,
+    pub snippet: String,
+    pub tags: Vec<String>,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskSearchResult {
+    pub hits: Vec<TaskSearchHit>,
+    pub total: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskSearchHit {
+    pub id: String,
+    pub name: String,
+    pub snippet: String,
+    pub status: String,
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,4 +449,27 @@ pub async fn cmd_refresh_workspace_index(
     workspace: String,
 ) -> Result<(usize, usize), String> {
     state.refresh_workspace_file_index(&workspace).await
+}
+
+/// Search Task Center thoughts (v0.1.69).
+#[tauri::command]
+pub async fn cmd_search_thoughts(
+    state: tauri::State<'_, Arc<SearchEngine>>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<ThoughtSearchResult, String> {
+    state.search_thoughts(&query, limit.unwrap_or(50)).await
+}
+
+/// Search Task Center tasks (v0.1.69). Optional workspace filter.
+#[tauri::command]
+pub async fn cmd_search_tasks(
+    state: tauri::State<'_, Arc<SearchEngine>>,
+    query: String,
+    workspace_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<TaskSearchResult, String> {
+    state
+        .search_tasks(&query, workspace_id.as_deref(), limit.unwrap_or(50))
+        .await
 }

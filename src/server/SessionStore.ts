@@ -20,8 +20,8 @@ import { join } from 'path';
 
 import type { SessionMetadata, SessionData, SessionMessage, SessionStats } from './types/session';
 import { createSessionMetadata, generateSessionTitle } from './types/session';
-import type { RuntimeType } from '../shared/types/runtime';
 import { stripBom } from '../shared/utils';
+import { ensureDirSync } from './utils/fs-utils';
 
 const MYAGENTS_DIR = join(homedir(), '.myagents');
 const SESSIONS_FILE = join(MYAGENTS_DIR, 'sessions.json');
@@ -165,13 +165,13 @@ function atomicWriteSessionsFile(content: string): void {
  */
 function ensureStorageDir(): void {
     if (!existsSync(MYAGENTS_DIR)) {
-        mkdirSync(MYAGENTS_DIR, { recursive: true });
+        ensureDirSync(MYAGENTS_DIR);
     }
     if (!existsSync(SESSIONS_DIR)) {
-        mkdirSync(SESSIONS_DIR, { recursive: true });
+        ensureDirSync(SESSIONS_DIR);
     }
     if (!existsSync(ATTACHMENTS_DIR)) {
-        mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+        ensureDirSync(ATTACHMENTS_DIR);
     }
 }
 
@@ -578,11 +578,33 @@ export function saveSessionMessages(sessionId: string, messages: SessionMessage[
 }
 
 /**
- * Update session metadata (title, lastActiveAt, sdkSessionId, stats)
+ * Update session metadata.
+ *
+ * Writable keys include config-snapshot fields (v0.1.69) so the PATCH
+ * /sessions/:id endpoint can persist model / permissionMode / MCP / provider
+ * onto an existing session without replaying the full SessionMetadata blob.
  */
 export function updateSessionMetadata(
     sessionId: string,
-    updates: Partial<Pick<SessionMetadata, 'title' | 'lastActiveAt' | 'sdkSessionId' | 'unifiedSession' | 'stats' | 'source' | 'lastMessagePreview' | 'titleSource' | 'runtime' | 'runtimeSessionId' | 'runtimeUsageTotals'>>
+    updates: Partial<Pick<SessionMetadata,
+        | 'title'
+        | 'lastActiveAt'
+        | 'sdkSessionId'
+        | 'unifiedSession'
+        | 'stats'
+        | 'source'
+        | 'lastMessagePreview'
+        | 'titleSource'
+        | 'runtime'
+        | 'runtimeSessionId'
+        | 'runtimeUsageTotals'
+        | 'model'
+        | 'permissionMode'
+        | 'mcpEnabledServers'
+        | 'providerId'
+        | 'providerEnvJson'
+        | 'configSnapshotAt'
+    >>
 ): SessionMetadata | null {
     const session = getSessionMetadata(sessionId);
     if (!session) {
@@ -595,12 +617,18 @@ export function updateSessionMetadata(
 }
 
 /**
- * Create a new session for the given agent directory
+ * Create a new session for the given agent directory.
+ *
+ * `snapshot` is the partial SessionMetadata produced by the caller (typically via
+ * `snapshotForOwnedSession()` for Desktop/Cron or `snapshotForImSession()` for IM).
+ * Hand-assembling fields here is forbidden — go through the helpers in
+ * `utils/session-snapshot.ts` so a new field added later cannot silently bypass
+ * snapshot capture (PRD §6.2 pit-of-success).
  */
-export function createSession(agentDir: string, runtime?: RuntimeType): SessionMetadata {
-    const session = createSessionMetadata(agentDir, runtime);
+export function createSession(agentDir: string, snapshot?: Partial<SessionMetadata>): SessionMetadata {
+    const session = createSessionMetadata(agentDir, snapshot);
     saveSessionMetadata(session);
-    console.log(`[SessionStore] Created session ${session.id} for ${agentDir} runtime=${session.runtime}`);
+    console.log(`[SessionStore] Created session ${session.id} for ${agentDir} runtime=${session.runtime} configSnapshot=${session.configSnapshotAt ? 'yes' : 'no'}`);
     return session;
 }
 
@@ -633,7 +661,7 @@ export function saveAttachment(
     // Create session-specific attachments directory
     const sessionAttachmentsDir = join(ATTACHMENTS_DIR, sessionId);
     if (!existsSync(sessionAttachmentsDir)) {
-        mkdirSync(sessionAttachmentsDir, { recursive: true });
+        ensureDirSync(sessionAttachmentsDir);
     }
 
     // Determine file extension

@@ -78,12 +78,31 @@ export const CUSTOM_EVENTS = {
     SKILL_COPIED_TO_PROJECT: 'skill-copied-to-project',
     /** Fired to open Settings page with optional section (e.g., 'mcp', 'providers') */
     OPEN_SETTINGS: 'open-settings',
+    /** Fired to open the Task Center singleton tab. Optional payload:
+     *  `{ autofocusSearch?: boolean }` — when true, the Task list panel
+     *  opens its search input and focuses it (used by Launcher 「我的
+     *  任务」 tab's search icon to continue the search intent across
+     *  tabs instead of forcing the user to re-click). */
+    OPEN_TASK_CENTER: 'open-task-center',
+    /**
+     * Fired to open a new chat tab primed with `/task-alignment` for a thought.
+     * Payload: `{ thoughtId: string; content: string; tags: string[] }`.
+     */
+    OPEN_AI_DISCUSSION: 'open-ai-discussion',
     /** Fired when user tries to open a Session that's already active in another Tab */
     JUMP_TO_TAB: 'jump-to-tab',
     /** Fired to launch AI bug report: opens new Chat tab with ~/.myagents workspace */
     LAUNCH_BUG_REPORT: 'launch-bug-report',
     /** Fired when a session title changes (auto-generated or user rename) — triggers refetch in history/task center */
     SESSION_TITLE_CHANGED: 'session-title-changed',
+    /**
+     * Fired to open a historical session in a new Chat tab.
+     * Payload: `{ sessionId: string; workspacePath: string }`.
+     * Used by Task Center's 任务详情 → 执行 session list so clicking a
+     * past execution opens it just like clicking an entry in the
+     * Launcher's 历史对话 list.
+     */
+    OPEN_SESSION_IN_NEW_TAB: 'open-session-in-new-tab',
     // CONFIG_CHANGED removed — ConfigProvider shares state via Context, no DOM event bridge needed
     // Note: CRON_TASK_STOPPED event removed
     // With Session-centric Sidecar (Owner model), stopping a cron task only releases

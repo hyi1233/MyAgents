@@ -36,7 +36,9 @@
 
 **开发约束**：
 - 修改 `bundled-agents/myagents_helper/` 的 CLAUDE.md 或 Skills 后，MUST bump `ADMIN_AGENT_VERSION`（`src-tauri/src/commands.rs`），否则用户端小助理不会更新。
-- 修改 `src/cli/myagents.ts` 或 `src/cli/myagents.cmd` 后，MUST bump `CLI_VERSION`（`src-tauri/src/commands.rs`），否则用户端 CLI 不会更新。两个版本门控独立运作。
+- 修改 `src/cli/myagents.ts` 或 `src/cli/myagents.cmd` 后，MUST bump `CLI_VERSION`（`src-tauri/src/commands.rs`），否则用户端 CLI 不会更新。
+- 修改 `bundled-skills/` 中 **system skill**（目前：`task-alignment` / `task-implement`，清单见 `SYSTEM_SKILLS` 常量）后，MUST bump `SYSTEM_SKILLS_VERSION`（`src-tauri/src/commands.rs`），否则用户端 skill 不会强制更新。新增 system skill 时：(1) 放入 `bundled-skills/<name>/`；(2) 把 `<name>` 加到 Rust `SYSTEM_SKILLS` 和 Bun `src/server/index.ts::SYSTEM_SKILLS` 两个清单（保持同步）；(3) bump 版本号。三个版本门控独立运作。
+- **Utility skill vs system skill 区分**：`bundled-skills/` 里的 skill 分两类 —— **system skill**（清单里的）随版本强制更新，用户自定义会被覆盖；**utility skill**（其它）首次 seed 后就归用户所有，bump 不再动用户副本。新增 skill 默认是 utility；只有和 app 流程强耦合的才升级为 system。
 
 ## 开发命令
 
@@ -120,7 +122,9 @@ npm run typecheck && npm run lint  # 代码质量检查
 - `messageGenerator()` 使用 `while(true)` 持续 yield，SDK subprocess 全程存活
 - 所有中止场景 MUST 使用 `abortPersistentSession()`（设置 abort 标志 + 唤醒 generator Promise 门控 + interrupt subprocess），禁止直接设置 `shouldAbortSession = true`（generator 会永久阻塞）
 - 配置变更时 MUST 先设 `resumeSessionId` 再 abort，否则 AI 会"失忆"
-- `abortPersistentSession()` 的调用场景：`setMcpServers`、`setAgents`、`resetSession`、`switchToSession`、`enqueueUserMessage` provider change、`rewindSession`
+- **两种重启机制不要混淆**：
+  - **直接 abort**（`abortPersistentSession()`）— 立即中断 + interrupt subprocess。触发点：`resetSession`、`switchToSession`、`rewindSession`、`recoverFromStaleSession`、`enqueueUserMessage` provider change、provider proxy 凭证变化、startup timeout、watchdog、end-of-turn drain、pre-warm drain
+  - **延迟重启**（`scheduleDeferredRestart('mcp' | 'agents')`）— 合并防抖 + 下次 pre-warm 时柔性重启。触发点：`setMcpServers`、`setAgents`。**不**等同于直接 abort（不会立即中断 in-flight turn，也不 interrupt subprocess）
 
 ### Pre-warm 机制
 
@@ -214,6 +218,7 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 | 新增手写 shim 不加入 `_handwritten.json` | `generate:sdk-shims` 下次运行覆盖手写文件 | 手写 shim MUST 同步加入 `sdk-shim/plugin-sdk/_handwritten.json` |
 | 新增 overlay/可关闭面板不调用 `useCloseLayer` | Cmd+W 跳过该面板直接关 Tab | 在组件内调用 `useCloseLayer(() => { onClose(); return true; }, zIndex)`，zIndex 取组件 CSS z-index 值 |
 | Overlay 遮罩层用裸 `<div>` + 手写 `onClick`/`onMouseDown` | 选中文字拖拽到面板外松手会误关闭 | 使用 `<OverlayBackdrop>` 组件（`@/components/OverlayBackdrop`），内置 `onMouseDown` + target guard |
+| 在 onClick 里用 `requestAnimationFrame(() => otherEl.focus())` 抢夺焦点 | macOS WebKit 触摸板 tap 事件合成在 <16ms 内完成，rAF 夺焦会插入 click 合成窗口 → WebKit 判定交互被打断 → 吞掉 click（物理按下正常、轻按首次无效，极隐蔽） | 按钮如果不该抢焦点，改用 `onMouseDown={retainFocusOnMouseDown}`（`@/utils/focusRetention`），原焦点元素天然保持聚焦，不需要再 rAF 夺回 |
 
 ---
 

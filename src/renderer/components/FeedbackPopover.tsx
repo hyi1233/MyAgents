@@ -5,22 +5,24 @@
  * Two modules: "AI 小助理" (opens BugReportOverlay) and "加入用户群" (shows QR code).
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Bot, Loader2, Users, X } from 'lucide-react';
+
 import { apiGetJson } from '@/api/apiFetch';
+import { Popover } from '@/components/ui/Popover';
 import { isTauriEnvironment } from '@/utils/browserMock';
 
 interface FeedbackPopoverProps {
+    open: boolean;
     onClose: () => void;
     onOpenBugReport: () => void;
-    /** Ref to the trigger button — excluded from outside-click detection */
-    triggerRef?: React.RefObject<HTMLElement | null>;
+    /** Ref to the trigger button — anchors the popover. */
+    triggerRef: React.RefObject<HTMLElement | null>;
 }
 
 const QR_CDN_URL = 'https://download.myagents.io/assets/feedback_qr_code.png';
 
-export default function FeedbackPopover({ onClose, onOpenBugReport, triggerRef }: FeedbackPopoverProps) {
-    const popoverRef = useRef<HTMLDivElement>(null);
+export default function FeedbackPopover({ open, onClose, onOpenBugReport, triggerRef }: FeedbackPopoverProps) {
     const isTauri = isTauriEnvironment();
     const [qrCodeUrl, setQrCodeUrl] = useState<string | null>(isTauri ? null : QR_CDN_URL);
     const [qrLoading, setQrLoading] = useState(isTauri);
@@ -43,37 +45,15 @@ export default function FeedbackPopover({ onClose, onOpenBugReport, triggerRef }
         return () => { cancelled = true; };
     }, [isTauri]);
 
-    // Click outside to close
-    useEffect(() => {
-        const handleClick = (e: MouseEvent) => {
-            const target = e.target as Node;
-            if (popoverRef.current && !popoverRef.current.contains(target)
-                && !(triggerRef?.current && triggerRef.current.contains(target))) {
-                onClose();
-            }
-        };
-        // Defer listener to avoid the opening click triggering immediate close
-        const timer = setTimeout(() => document.addEventListener('mousedown', handleClick), 0);
-        return () => {
-            clearTimeout(timer);
-            document.removeEventListener('mousedown', handleClick);
-        };
-    }, [onClose, triggerRef]);
-
-    // Escape to close
-    useEffect(() => {
-        const handleKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') onClose();
-        };
-        document.addEventListener('keydown', handleKey);
-        return () => document.removeEventListener('keydown', handleKey);
-    }, [onClose]);
-
     return (
-        <div
-            ref={popoverRef}
-            className="absolute right-0 top-full mt-1.5 z-[200] w-72 origin-top-right animate-[popoverIn_200ms_ease-out]
-                rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg"
+        <Popover
+            open={open}
+            onClose={onClose}
+            anchorRef={triggerRef}
+            placement="bottom-end"
+            offset={6}
+            zIndex={200}
+            className="w-72 rounded-xl shadow-lg"
         >
             {/* Header */}
             <div className="flex items-center justify-between px-4 pt-3.5 pb-2">
@@ -143,6 +123,6 @@ export default function FeedbackPopover({ onClose, onOpenBugReport, triggerRef }
                     </div>
                 </div>
             )}
-        </div>
+        </Popover>
     );
 }

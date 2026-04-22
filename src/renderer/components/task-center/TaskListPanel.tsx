@@ -1,0 +1,793 @@
+// TaskListPanel — right column of Task Center: task cards + filter bar.
+// Three sections: active (running/verifying), pending (todo/blocked/stopped),
+// finished (done/archived). PRD §7.2.
+//
+// Two render modes: a 2-column card view (default) and a dense single-line
+// list view (quick scan / filter). The choice is persisted in localStorage
+// so returning users see their last-picked view.
+//
+// Legacy cron tasks (CronTasks with no `task_id` back-pointer) are "上浮" here
+// alongside native tasks (PRD §11.4) — they render with a 「遗留」 badge and
+// their "remain in source chat tab" management pattern.
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CheckSquare, Plus } from 'lucide-react';
+
+import {
+  taskCenterAvailable,
+  taskDelete,
+  taskList,
+  taskRerun,
+  taskRun,
+  taskUpdateStatus,
+} from '@/api/taskCenter';
+import CustomSelect, { type SelectOption } from '@/components/CustomSelect';
+import { useToast } from '@/components/Toast';
+import { useConfig } from '@/hooks/useConfig';
+import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
+import type { Task, TaskStatus } from '@/../shared/types/task';
+import { canAutoUpgrade, isBenignAlreadyLinked, upgradeLegacyCron, type LegacyCronRaw } from './legacyUpgrade';
+import { DispatchTaskDialog } from './DispatchTaskDialog';
+import { LegacyCronOverlay } from './LegacyCronOverlay';
+import { TaskDetailOverlay } from './TaskDetailOverlay';
+import { TaskCardItem } from './views/TaskCardItem';
+import { TaskListRow } from './views/TaskListRow';
+import { SearchPill } from './SearchPill';
+import { ViewToggle, type TaskView } from './views/ViewToggle';
+import type { LegacyCronRow } from './views/types';
+
+/** Union of what the right-column list renders — a real Task or a legacy cron. */
+type TaskCardLike =
+  | { kind: 'task'; task: Task }
+  | { kind: 'legacy-cron'; legacy: LegacyCronRow };
+
+interface Props {
+  highlightTaskId?: string | null;
+  /** Bumped by parent to trigger re-fetch (tab activation, post-dispatch). */
+  refreshKey?: unknown;
+  /** Intent forwarded from `App.tsx`'s `OPEN_TASK_CENTER` event handler.
+   *  `autofocusSearch: true` + a changing `nonce` tells this panel to
+   *  programmatically focus the search input so the user can start typing
+   *  immediately. Firing the same intent twice in a row (user clicks the
+   *  Launcher search icon twice) requires the `nonce` to change — it's
+   *  the dependency `useEffect` watches. */
+  pendingIntent?: { autofocusSearch?: boolean; nonce: number } | null;
+}
+
+type Bucket = 'pending' | 'active' | 'finished';
+
+// "进行中" 的产品语义是「应当被执行的任务」，不是字面"正在跑"。
+// `stopped`（用户暂停）和 `blocked`（执行受阻）都是**临时子状态**，
+// 任务本身仍被认为该跑 —— 徽章的黄/灰配色已经区分了子状态，列表聚合
+// 不必再按这些小波动分桶。`规划中` 留给真正的新建未调度态（todo）——
+// 任务已被构思并创建，但尚未被调度器首次触发。
+const BUCKETS: Record<Bucket, { label: string; statuses: TaskStatus[] }> = {
+  active: { label: '进行中', statuses: ['running', 'verifying', 'stopped', 'blocked'] },
+  pending: { label: '规划中', statuses: ['todo'] },
+  finished: { label: '已完成', statuses: ['done', 'archived'] },
+};
+
+const VIEW_STORAGE_KEY = 'myagents:task-center:view';
+
+function loadStoredView(): TaskView {
+  if (typeof window === 'undefined') return 'card';
+  const raw = window.localStorage.getItem(VIEW_STORAGE_KEY);
+  return raw === 'list' ? 'list' : 'card';
+}
+
+export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Props) {
+  const toast = useToast();
+  const toastRef = useRef(toast);
+  useEffect(() => {
+    toastRef.current = toast;
+  }, [toast]);
+  const { projects } = useConfig();
+  const projectsRef = useRef(projects);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+  // Serialize reload() calls — belt-and-braces alongside the server-side
+  // `cmd_cron_set_task_id` link-if-null guard. Prevents the auto-upgrade
+  // sweep from interleaving with itself when SSE events and refreshKey
+  // bumps arrive back-to-back. A trailing `pending` flag catches reloads
+  // that land during an in-flight run so we never miss a state change.
+  const reloadInflightRef = useRef(false);
+  const reloadPendingRef = useRef(false);
+
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [legacy, setLegacy] = useState<LegacyCronRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState('');
+  // Workspace filter — empty string = "全部" (no filter). Stored by
+  // workspace path (same key the Task row uses), resolved to a
+  // display name via `projects` in the option list below.
+  const [workspaceFilter, setWorkspaceFilter] = useState<string>('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  // When set, `TaskDetailOverlay` opens already in edit mode — used by the
+  // card/row "编辑" menu item so the user lands straight on the editor
+  // instead of the read-only detail view.
+  const [selectedTaskStartEditing, setSelectedTaskStartEditing] = useState(false);
+  const [selectedLegacy, setSelectedLegacy] = useState<LegacyCronRow | null>(null);
+  const [view, setView] = useState<TaskView>(loadStoredView);
+  // Inline "新建任务" modal — opened by the header "+ 新建" button.
+  // Renders `DispatchTaskDialog` without a `thought` prop so it enters
+  // the dialog's blank-state branch (default once-mode).
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  // Per-id busy flag so only the affected card/row greys out during an action,
+  // instead of locking the whole panel.
+  const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
+
+  const updateView = useCallback((next: TaskView) => {
+    setView(next);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(VIEW_STORAGE_KEY, next);
+    }
+  }, []);
+
+  const reload = useCallback(async () => {
+    if (reloadInflightRef.current) {
+      reloadPendingRef.current = true;
+      return;
+    }
+    reloadInflightRef.current = true;
+    reloadPendingRef.current = false;
+    setLoading(true);
+    try {
+      const [nativeList, legacyList] = await Promise.all([
+        taskList({}),
+        fetchLegacyCronTasks(),
+      ]);
+      // Silent auto-upgrade (PRD §11.4 / §16.2). Any legacy row that has
+      // the prerequisites (prompt + resolvable workspace) is upgraded in
+      // place before we commit state. Rows that fail eligibility remain
+      // in the legacy list and can still be upgraded manually via the
+      // `LegacyCronOverlay` button (where we surface the actual error).
+      //
+      // The operation is idempotent — once a cron has `task_id` set,
+      // `fetchLegacyCronTasks` filters it out, so re-running this does
+      // nothing on subsequent reloads.
+      const { upgradedTasks, remainingLegacy, failedCount, firstError } =
+        await autoUpgradeEligible(legacyList, projectsRef.current);
+      const mergedNative = upgradedTasks.length
+        ? [...upgradedTasks, ...nativeList]
+        : nativeList;
+      setTasks(mergedNative);
+      setLegacy(remainingLegacy);
+      if (upgradedTasks.length > 0) {
+        toastRef.current.success(
+          `已自动升级 ${upgradedTasks.length} 个旧定时任务为新版任务`,
+        );
+      }
+      // Surface auto-upgrade failures so the user understands why the
+      // legacy badge is still there. Detail goes to the console; the
+      // toast trims to the first error (at most one per reload).
+      if (failedCount > 0) {
+        toastRef.current.error(
+          `${failedCount} 个遗留任务自动升级失败：${firstError ?? '未知错误'}。可在详情面板点击「升级为新版任务」手动重试。`,
+          8000,
+        );
+      }
+    } catch (err) {
+      console.error('[TaskListPanel] load failed', err);
+      setTasks([]);
+      setLegacy([]);
+    } finally {
+      setLoading(false);
+      reloadInflightRef.current = false;
+      if (reloadPendingRef.current) {
+        // A status change landed during this run — kick another pass so
+        // we don't lose the state that arrived mid-flight.
+        reloadPendingRef.current = false;
+        void reloadRef.current?.();
+      }
+    }
+  }, []);
+  // Self-reference so the trailing re-kick above can call the latest
+  // closure without adding `reload` to its own dep array.
+  const reloadRef = useRef<typeof reload>(reload);
+  useEffect(() => {
+    reloadRef.current = reload;
+  }, [reload]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload, refreshKey]);
+
+  // Projects are loaded asynchronously by `useConfig()` — when Task Center
+  // mounts before config is ready, `projects=[]` and the auto-upgrade sweep
+  // finds nothing eligible. Re-kick reload the moment config transitions
+  // from empty → populated so eligible legacy rows get upgraded without
+  // having to wait for an unrelated SSE event.
+  const hadProjectsRef = useRef(projects.length > 0);
+  useEffect(() => {
+    if (!hadProjectsRef.current && projects.length > 0) {
+      hadProjectsRef.current = true;
+      void reload();
+    }
+  }, [projects.length, reload]);
+
+  // Focus the search input when the parent forwards a `{ autofocusSearch:
+  // true }` intent. Triggered by the Launcher "我的任务" tab's search
+  // icon — it opens this tab and wants the user to start typing without
+  // an extra click. `nonce` is the change signal so firing the same
+  // intent twice (user clicks search icon again while the tab is open)
+  // still re-runs the effect. `requestAnimationFrame` waits for the
+  // layout pass that mounts the SearchPill input; focusing on the same
+  // tick silently drops when the element isn't yet attached.
+  const intentNonce = pendingIntent?.nonce ?? 0;
+  const intentAutofocus = pendingIntent?.autofocusSearch ?? false;
+  useEffect(() => {
+    if (!intentAutofocus || intentNonce === 0) return;
+    const raf = requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [intentAutofocus, intentNonce]);
+
+
+  // SSE: listen for task:status-changed events fired by Rust `update_status`
+  // and refetch so every open TaskCenter tab stays in sync with the source of
+  // truth. Guarded on Tauri because `listen` is a Tauri-only import.
+  useEffect(() => {
+    if (!taskCenterAvailable()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      if (cancelled) return;
+      const off = await listen('task:status-changed', () => {
+        void reload();
+      });
+      if (cancelled) {
+        off();
+      } else {
+        unlisten = off;
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [reload]);
+
+  // ── Per-task action handlers. Shared by card and list views via callbacks.
+  // Each one toggles `pendingIds[id]` around the RPC so only that one card
+  // disables its buttons while the request is in flight.
+  const runAction = useCallback(
+    async (taskId: string, label: string, fn: () => Promise<unknown>) => {
+      setPendingIds((prev) => {
+        const next = new Set(prev);
+        next.add(taskId);
+        return next;
+      });
+      try {
+        await fn();
+        // SSE will trigger a reload and refresh the list in-place.
+      } catch (e) {
+        toastRef.current.error(`${label}失败：${String(e)}`);
+      } finally {
+        setPendingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(taskId);
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  const handleRun = useCallback(
+    (task: Task) => runAction(task.id, '执行', () => taskRun(task.id)),
+    [runAction],
+  );
+  const handleStop = useCallback(
+    (task: Task) =>
+      runAction(task.id, '中止', () =>
+        taskUpdateStatus({ id: task.id, status: 'stopped', message: '用户手动中止' }),
+      ),
+    [runAction],
+  );
+  const handleRerun = useCallback(
+    (task: Task) => runAction(task.id, '重新派发', () => taskRerun(task.id)),
+    [runAction],
+  );
+  const handleDelete = useCallback(
+    (task: Task) => {
+      if (!window.confirm(`确认删除任务「${task.name}」？此操作不可恢复。`)) return;
+      void runAction(task.id, '删除', async () => {
+        await taskDelete(task.id);
+        // Optimistic removal — SSE will not fire a status-changed for delete.
+        setTasks((prev) => prev.filter((x) => x.id !== task.id));
+      });
+    },
+    [runAction],
+  );
+
+  const buckets = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+
+    const nativeCards: TaskCardLike[] = tasks.map((t) => ({
+      kind: 'task' as const,
+      task: t,
+    }));
+    const legacyCards: TaskCardLike[] = legacy.map((l) => ({
+      kind: 'legacy-cron' as const,
+      legacy: l,
+    }));
+    const all = [...nativeCards, ...legacyCards];
+
+    // Two-stage filter: workspace first (strict path equality), then
+    // free-text query. Workspace defaults to '' = "全部". Path is the
+    // authoritative key both Task and legacy CronTask carry.
+    const afterWorkspace = workspaceFilter
+      ? all.filter((c) =>
+          c.kind === 'task'
+            ? c.task.workspacePath === workspaceFilter
+            : c.legacy.workspacePath === workspaceFilter,
+        )
+      : all;
+
+    const filtered = needle
+      ? afterWorkspace.filter((c) => {
+          if (c.kind === 'task') {
+            const t = c.task;
+            return (
+              t.name.toLowerCase().includes(needle) ||
+              t.description?.toLowerCase().includes(needle) ||
+              t.tags.some((x) => x.toLowerCase().includes(needle))
+            );
+          }
+          return c.legacy.name.toLowerCase().includes(needle);
+        })
+      : afterWorkspace;
+
+    const out: Record<Bucket, TaskCardLike[]> = {
+      active: [],
+      pending: [],
+      finished: [],
+    };
+    for (const c of filtered) {
+      // Legacy → new-model status mapping. We use `hasExited` (derived
+      // from `CronTask.exit_reason`) to distinguish "ended naturally"
+      // from "user paused" — the scheduler sets exit_reason when end
+      // conditions trigger or the AI calls ExitCronTask, so this is a
+      // reliable signal that the cron is done, not just idle.
+      //   • running              → `running`  (active bucket)
+      //   • stopped + exited     → `done`     (finished bucket)
+      //   • stopped (no reason)  → `stopped`  (pending bucket — user
+      //                                        can restart from here)
+      const status: TaskStatus =
+        c.kind === 'task'
+          ? c.task.status
+          : c.legacy.status === 'running'
+            ? 'running'
+            : c.legacy.hasExited
+              ? 'done'
+              : 'stopped';
+      for (const [name, cfg] of Object.entries(BUCKETS) as Array<
+        [Bucket, typeof BUCKETS[Bucket]]
+      >) {
+        if (cfg.statuses.includes(status)) {
+          out[name].push(c);
+          break;
+        }
+      }
+    }
+    // Sort each bucket by updatedAt desc.
+    for (const bucket of Object.values(out)) {
+      bucket.sort((a, b) => {
+        const ta = a.kind === 'task' ? a.task.updatedAt : a.legacy.updatedAt;
+        const tb = b.kind === 'task' ? b.task.updatedAt : b.legacy.updatedAt;
+        return tb - ta;
+      });
+    }
+    return out;
+  }, [tasks, legacy, query, workspaceFilter]);
+
+  const clearSearch = useCallback(() => {
+    setQuery('');
+    searchInputRef.current?.blur();
+  }, []);
+
+  // Options for the workspace filter — only show the workspaces that
+  // actually appear in the user's task list, so the dropdown doesn't
+  // list every project the app knows about (most of which may have
+  // zero tasks). `'' → 全部` is the always-present first entry.
+  const workspaceOptions: SelectOption[] = useMemo(() => {
+    const taskPaths = new Set<string>();
+    for (const t of tasks) if (t.workspacePath) taskPaths.add(t.workspacePath);
+    for (const l of legacy) if (l.workspacePath) taskPaths.add(l.workspacePath);
+    const opts: SelectOption[] = [{ value: '', label: '全部工作区' }];
+    for (const p of projects) {
+      if (p.internal) continue;
+      if (!taskPaths.has(p.path)) continue;
+      opts.push({
+        value: p.path,
+        label: p.displayName || p.name || p.path.split('/').pop() || p.path,
+        icon: <WorkspaceIcon icon={p.icon} size={14} />,
+      });
+    }
+    // Include any path present in tasks but NOT in `projects` (e.g. the
+    // workspace was renamed / removed since the task was created) so
+    // users can still filter to orphan tasks rather than being locked
+    // out. Label uses the tail of the path.
+    for (const path of taskPaths) {
+      if (opts.some((o) => o.value === path)) continue;
+      opts.push({
+        value: path,
+        label: `${path.split('/').pop() ?? path} (已失效)`,
+      });
+    }
+    return opts;
+  }, [tasks, legacy, projects]);
+
+  // Guard against "zombie" filter state: if the user selected a
+  // workspace, then every task in that workspace gets deleted, the
+  // option vanishes from `workspaceOptions` but `workspaceFilter` would
+  // still be set → the bucket memo filters everything out and the
+  // panel goes blank with no visible control to clear it (the dropdown
+  // itself hides when `workspaceOptions.length <= 2`). Reset the filter
+  // back to "全部" whenever its current value is no longer selectable.
+  useEffect(() => {
+    if (
+      workspaceFilter &&
+      !workspaceOptions.some((o) => o.value === workspaceFilter)
+    ) {
+      setWorkspaceFilter('');
+    }
+  }, [workspaceFilter, workspaceOptions]);
+
+  const totalCount = tasks.length + legacy.length;
+
+  const openTaskDetail = (t: Task) => {
+    setSelectedTaskStartEditing(false);
+    setSelectedTask(t);
+  };
+  const openTaskForEdit = (t: Task) => {
+    setSelectedTaskStartEditing(true);
+    setSelectedTask(t);
+  };
+
+  const renderCard = (c: TaskCardLike) => {
+    if (c.kind === 'task') {
+      const t = c.task;
+      return (
+        <TaskCardItem
+          key={`t-${t.id}`}
+          task={t}
+          highlighted={highlightTaskId === t.id}
+          busy={pendingIds.has(t.id)}
+          onOpen={() => openTaskDetail(t)}
+          onEdit={() => openTaskForEdit(t)}
+          onRun={() => handleRun(t)}
+          onStop={() => handleStop(t)}
+          onRerun={() => handleRerun(t)}
+          onDelete={() => handleDelete(t)}
+        />
+      );
+    }
+    return (
+      <TaskCardItem
+        key={`l-${c.legacy.id}`}
+        legacy={c.legacy}
+        onOpen={() => setSelectedLegacy(c.legacy)}
+      />
+    );
+  };
+
+  const renderRow = (c: TaskCardLike) => {
+    if (c.kind === 'task') {
+      const t = c.task;
+      return (
+        <TaskListRow
+          key={`t-${t.id}`}
+          task={t}
+          highlighted={highlightTaskId === t.id}
+          busy={pendingIds.has(t.id)}
+          onOpen={() => openTaskDetail(t)}
+          onEdit={() => openTaskForEdit(t)}
+          onRun={() => handleRun(t)}
+          onStop={() => handleStop(t)}
+          onRerun={() => handleRerun(t)}
+          onDelete={() => handleDelete(t)}
+        />
+      );
+    }
+    return (
+      <TaskListRow
+        key={`l-${c.legacy.id}`}
+        legacy={c.legacy}
+        onOpen={() => setSelectedLegacy(c.legacy)}
+      />
+    );
+  };
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* Section header — label + persistent search pill + view toggle.
+          h-12 per DESIGN.md §7.4 (aligns with TaskCenter page header).
+          v0.1.69 polish: bottom hairline removed; breathing room
+          below replaces it as the separator, so the right column
+          reads as a single continuous surface from header → buckets. */}
+      <div className="flex h-12 items-center gap-3 px-4">
+        <div className="flex items-center gap-2">
+          {/* `relative top-[1px]` keeps optical centering consistent with
+              ThoughtPanel's Lightbulb — see the comment there. */}
+          <CheckSquare className="relative top-[1px] h-4 w-4 text-[var(--ink-muted)]" strokeWidth={1.5} />
+          <span className="text-[16px] font-semibold text-[var(--ink)]">
+            任务
+          </span>
+          {/* v0.1.69 — inline "+ 新建" entry point so users aren't forced
+              to enter the Task Center flow via a thought first. Opens
+              `DispatchTaskDialog` with no `thought` prop (dialog's
+              "新建任务" branch, defaulting to once-mode). Visual matches
+              the SearchPill's rounded-full pill + ghost treatment so
+              both affordances read as one header row of toolbelt actions.
+              Uses the same dark-pill tooltip pattern as ThoughtPanel's
+              FolderOpen / ThoughtCard's AI讨论 / 派发 buttons — browser
+              native `title=` was visually inconsistent with the rest of
+              the task-center surface. */}
+          <div className="group/newTask relative ml-1">
+            <button
+              type="button"
+              onClick={() => setShowCreateModal(true)}
+              aria-label="新建任务"
+              className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            >
+              <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
+              新建
+            </button>
+            <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)] px-2 py-1 text-[11px] font-medium text-[var(--paper)] opacity-0 shadow-md transition-opacity duration-150 group-hover/newTask:opacity-100">
+              新建任务
+            </span>
+          </div>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          {/* Workspace filter — hidden when there's only one (or zero)
+              workspaces producing tasks; the dropdown would be pointless
+              in that case and would just eat header width. */}
+          {workspaceOptions.length > 2 && (
+            <div className="w-[160px]">
+              <CustomSelect
+                value={workspaceFilter}
+                options={workspaceOptions}
+                onChange={setWorkspaceFilter}
+                compact
+                placeholder="全部工作区"
+              />
+            </div>
+          )}
+          <SearchPill
+            inputRef={searchInputRef}
+            value={query}
+            onChange={setQuery}
+            onClear={clearSearch}
+            placeholder="搜索任务…"
+          />
+          <ViewToggle value={view} onChange={updateView} />
+        </div>
+      </div>
+
+      {/* Outer padding is now uniform across card / list views. Previously
+          card used `px-4 py-3` on this wrapper while list used `px-3 pt-3`
+          on each inner section header — a 4px horizontal delta that made
+          the whole column visibly jump on view toggle. Both modes now
+          share the same left/right gutter; the list row component
+          (`TaskListRow`) keeps its own `px-3` for row-internal content. */}
+      <div className="@container flex-1 overflow-y-auto px-4 py-3">
+        {loading ? (
+          <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]">
+            加载中…
+          </div>
+        ) : totalCount === 0 ? (
+          <div className="py-12 text-center text-[13px] text-[var(--ink-muted)]">
+            还没有任务。在左栏记下想法后点「派发」即可创建任务。
+          </div>
+        ) : (
+          // Order: 进行中 → 已完成 → 规划中. Current work and recent results
+          // lead; long-tail scheduling sits at the bottom. (v0.1.69 polish)
+          (['active', 'finished', 'pending'] as Bucket[]).map((b) => {
+            const rows = buckets[b];
+            if (rows.length === 0) return null;
+            return view === 'card' ? (
+              <section key={b} className="mb-6">
+                <BucketHeader label={BUCKETS[b].label} count={rows.length} />
+                <div className="grid grid-cols-2 gap-3 @[900px]:grid-cols-3">
+                  {rows.map(renderCard)}
+                </div>
+              </section>
+            ) : (
+              <section key={b} className="mb-4">
+                <BucketHeader label={BUCKETS[b].label} count={rows.length} />
+                <div>{rows.map(renderRow)}</div>
+              </section>
+            );
+          })
+        )}
+      </div>
+
+      {selectedTask && (
+        <TaskDetailOverlay
+          task={selectedTask}
+          startEditing={selectedTaskStartEditing}
+          onClose={() => {
+            setSelectedTask(null);
+            setSelectedTaskStartEditing(false);
+          }}
+          onChanged={(next) => {
+            if (next === null) {
+              setTasks((prev) =>
+                prev.filter((x) => x.id !== selectedTask.id),
+              );
+              setSelectedTask(null);
+              setSelectedTaskStartEditing(false);
+            } else {
+              setTasks((prev) =>
+                prev.map((x) => (x.id === next.id ? next : x)),
+              );
+              setSelectedTask(next);
+            }
+          }}
+        />
+      )}
+
+      {selectedLegacy && (
+        <LegacyCronOverlay
+          legacy={selectedLegacy.raw}
+          onClose={() => setSelectedLegacy(null)}
+          onChanged={() => {
+            void reload();
+          }}
+          onUpgraded={(upgradedTask) => {
+            // PRD §11.4 — after upgrade the legacy back-pointer is set, so
+            // next reload filters it out of the legacy list. Switch the open
+            // overlay to the new TaskDetailOverlay for continuity.
+            setSelectedLegacy(null);
+            setTasks((prev) => {
+              const idx = prev.findIndex((x) => x.id === upgradedTask.id);
+              if (idx === -1) return [upgradedTask, ...prev];
+              return prev.map((x) => (x.id === upgradedTask.id ? upgradedTask : x));
+            });
+            setSelectedTask(upgradedTask);
+            toastRef.current.success(`「${upgradedTask.name}」已升级为新版任务`);
+            void reload();
+          }}
+        />
+      )}
+
+      {showCreateModal && (
+        <DispatchTaskDialog
+          onClose={() => setShowCreateModal(false)}
+          onDispatched={(created) => {
+            setShowCreateModal(false);
+            toastRef.current.success(`「${created.name}」已创建`);
+            void reload();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Bucket header — 11px uppercase label + muted count + flex-1 hairline
+ * rule, per the v0.1.69 visual mockup. Quiet enough to read as a
+ * section divider rather than a page heading; the task cards below
+ * carry the actual visual weight.
+ */
+function BucketHeader({ label, count }: { label: string; count: number }) {
+  return (
+    <div className="mb-2 flex items-center gap-2">
+      <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+        {label}
+      </span>
+      <span className="text-[11px] tabular-nums text-[var(--ink-subtle)]">
+        {count}
+      </span>
+      <span className="ml-1 h-px flex-1 bg-[var(--line-subtle)]" aria-hidden />
+    </div>
+  );
+}
+
+/**
+ * Pull every CronTask across workspaces and surface the ones that don't have
+ * a Task Center back-pointer (PRD §11.4 legacy upsurface). Returns `[]` when
+ * the Tauri environment isn't ready or the CLI round-trip fails — we don't
+ * want a transient error to blank out the whole task list.
+ */
+async function fetchLegacyCronTasks(): Promise<LegacyCronRow[]> {
+  if (!taskCenterAvailable()) return [];
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const all = (await invoke<Record<string, unknown>[]>(
+      'cmd_get_cron_tasks',
+    )) as Array<Record<string, unknown>>;
+    return all
+      .filter((t) => !t.taskId && !t.task_id)
+      .map<LegacyCronRow>((t) => {
+        const status = (t.status as string | undefined) === 'running' ? 'running' : 'stopped';
+        const updatedAt =
+          typeof t.updatedAt === 'string'
+            ? Date.parse(t.updatedAt)
+            : typeof t.createdAt === 'string'
+              ? Date.parse(t.createdAt)
+              : 0;
+        // `exit_reason` is populated by the scheduler when end-conditions
+        // trigger or the AI calls ExitCronTask — the signal we use to say
+        // "this cron is done, not paused". Defend against snake/camel as
+        // other raw fields do.
+        const exitReason =
+          (t.exitReason as string | null | undefined) ??
+          (t.exit_reason as string | null | undefined);
+        return {
+          id: String(t.id ?? ''),
+          name: String(t.name ?? t.prompt ?? '未命名定时任务').slice(0, 80),
+          status,
+          hasExited: status === 'stopped' && !!exitReason,
+          raw: t,
+          workspacePath: String(t.workspacePath ?? ''),
+          updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0,
+        };
+      });
+  } catch (err) {
+    console.warn('[TaskListPanel] fetchLegacyCronTasks failed', err);
+    return [];
+  }
+}
+
+/**
+ * Sweep a freshly-fetched legacy list and upgrade every eligible row to
+ * a new-model Task. Uses the same `upgradeLegacyCron` flow as the manual
+ * button in `LegacyCronOverlay` so the behaviour is identical — only the
+ * trigger differs. Rows that fail eligibility (no prompt, unknown
+ * workspace, etc.) stay in the legacy list untouched; the user can still
+ * upgrade them manually or dismiss them via the existing delete path.
+ *
+ * Errors are logged but do not abort the sweep — one bad row shouldn't
+ * leave the rest unmigrated.
+ */
+async function autoUpgradeEligible(
+  legacy: LegacyCronRow[],
+  projects: import('@/config/types').Project[],
+): Promise<{
+  upgradedTasks: Task[];
+  remainingLegacy: LegacyCronRow[];
+  failedCount: number;
+  firstError: string | null;
+}> {
+  const upgradedTasks: Task[] = [];
+  const remainingLegacy: LegacyCronRow[] = [];
+  let failedCount = 0;
+  let firstError: string | null = null;
+  for (const row of legacy) {
+    const raw = row.raw as LegacyCronRaw;
+    if (!canAutoUpgrade(raw, projects)) {
+      // Not counted as "failed" — these are known-ineligible (missing
+      // prompt / unresolvable workspace) and the user sees them in the
+      // legacy list with the manual upgrade button.
+      remainingLegacy.push(row);
+      continue;
+    }
+    try {
+      const { task } = await upgradeLegacyCron(raw, projects);
+      upgradedTasks.push(task);
+    } catch (err) {
+      if (isBenignAlreadyLinked(err)) {
+        // App-startup sweep won the race — this row is now migrated,
+        // just not by us. Drop it from `remainingLegacy` so it no
+        // longer renders the "遗留" badge; next `reload()` fetches the
+        // freshly-upgraded Task via the non-legacy path. No failure
+        // toast. (v0.1.69 cross-review W1)
+        continue;
+      }
+      console.warn('[TaskListPanel] auto-upgrade failed for', row.id, err);
+      remainingLegacy.push(row);
+      failedCount += 1;
+      if (!firstError) firstError = String(err);
+    }
+  }
+  return { upgradedTasks, remainingLegacy, failedCount, firstError };
+}
+
+export default TaskListPanel;

@@ -9,12 +9,16 @@ import { broadcast } from '../sse';
 import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
+import type { AskUserQuestionInput } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import type { RuntimeType } from '../../shared/types/runtime';
 import { isPendingSessionId } from '../../shared/constants';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
 import { createSessionMetadata } from '../types/session';
+import { snapshotForImSession, snapshotForOwnedSession } from '../utils/session-snapshot';
+import { findAgentByWorkspacePath } from '../utils/admin-config';
+import type { AgentConfig } from '../../shared/types/agent';
 import type { MessageUsage, SessionMessage } from '../types/session';
 import type { SystemInitInfo } from '../../shared/types/system';
 import { trackServer } from '../analytics';
@@ -91,17 +95,26 @@ let pendingThinkingActive = false;  // reasoning block started, even if no delta
 let pendingThinkingStartedAt = 0;   // timestamp for duration calculation / history reopen parity
 const pendingToolInputs = new Map<string, { name: string; inputJson: string }>(); // toolUseId → input accumulator
 type ExternalSessionState = 'idle' | 'running' | 'error';
-type ExternalPendingInteractiveRequest = {
-  type: 'permission:request';
-  data: {
-    requestId: string;
-    toolName: string;
-    toolUseId: string;
-    input: string;
+type ExternalPendingInteractiveRequest =
+  | {
+    type: 'permission:request';
+    data: {
+      requestId: string;
+      toolName: string;
+      toolUseId: string;
+      input: string;
+    };
+  }
+  | {
+    type: 'ask-user-question:request';
+    data: {
+      requestId: string;
+      questions: AskUserQuestionInput['questions'];
+      previewFormat: 'html' | 'markdown';
+    };
   };
-};
 let externalSessionState: ExternalSessionState = 'idle';
-let externalSystemInitPayload: { info: SystemInitInfo; sessionId: string; prewarm?: boolean } | null = null;
+let externalSystemInitPayload: { info: SystemInitInfo; sessionId: string; prewarm?: boolean; runtime: RuntimeType } | null = null;
 // True between the start of a pre-warm (no initialMessage) and the first real user turn.
 // Consumed by the session_init broadcast so the frontend knows not to flip isLoading:true
 // — a pre-warmed process is "alive but idle", not "processing a turn". Cleared when the
@@ -146,6 +159,7 @@ function resetModuleState(): void {
   pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
   pendingPermissionSuggestions.clear();
+  pendingExternalAskUserQuestions.clear();
   pendingExternalInteractiveRequests.clear();
   externalSystemInitPayload = null;
   externalSessionState = 'idle';
@@ -188,15 +202,30 @@ function clearPendingThinking(): void {
  *  Idempotent: no-op if metadata already exists. Used by both the initial
  *  message path (_doStartExternalSession) and the post-pre-warm Case 3 path
  *  (sendExternalMessage) — both need the same registration, so the logic
- *  lives here to prevent drift. */
+ *  lives here to prevent drift.
+ *
+ *  Snapshot policy mirrors agent-session.ts:enqueueUserMessage — desktop/cron
+ *  owners freeze config into the session (D2/D3/D9), IM owners live-follow
+ *  agent config (D4). The scenario flag is what v0.1.69 pre-warm broke:
+ *  pre-warm Tab → Case 3 first message used to always take the IM path, which
+ *  silently leaked agent config changes into owned desktop sessions. */
 function registerSessionMetadataIfNew(
   sessionId: string,
   workspacePath: string,
   messageText: string,
   origin: string,
+  scenario: InteractionScenario,
 ): void {
   if (!sessionId || getSessionMetadata(sessionId)) return;
-  const meta = createSessionMetadata(workspacePath);
+  const useLiveFollow = scenario.type === 'im' || scenario.type === 'agent-channel';
+  // Runtime field is overwritten below with `getCurrentRuntimeType()` to honor
+  // the actual sidecar runtime regardless of what the agent record claims
+  // (defense in depth — pre-warm Tab might have forced a different runtime).
+  const lazyAgent = findAgentByWorkspacePath(workspacePath) as AgentConfig | undefined;
+  const lazySnapshot = lazyAgent
+    ? (useLiveFollow ? snapshotForImSession(lazyAgent) : snapshotForOwnedSession(lazyAgent))
+    : undefined;
+  const meta = createSessionMetadata(workspacePath, lazySnapshot);
   meta.id = sessionId;
   meta.runtime = getCurrentRuntimeType();
   // Patch deferred runtimeSessionId from pre-warm session_init (if any).
@@ -349,6 +378,31 @@ let imCallbackNulledDuringTurn = false; // Prevents stale turn events leaking to
 // CC sends permission_suggestions in control_request; we echo them back as updatedPermissions
 // in control_response for "always_allow" so CC persists the rule.
 const pendingPermissionSuggestions = new Map<string, unknown[] | undefined>();
+
+// AskUserQuestion requests routed through external runtime (currently only CC has this tool).
+// CC sends the question payload via can_use_tool; we render the structured prompt in the UI
+// and echo the user's answers back as updatedInput when allowing the tool.
+const pendingExternalAskUserQuestions = new Map<string, { input: Record<string, unknown> }>();
+
+// Mirrors agent-session.ts `isValidAskUserQuestionInput`. Malformed input would crash
+// AskUserQuestionPrompt (which maps over `options` etc.); the fallback path on failure
+// is the generic permission card, so the user at least sees a denial affordance.
+function isAskUserQuestionInput(input: unknown): input is AskUserQuestionInput {
+  if (!input || typeof input !== 'object') return false;
+  const obj = input as Record<string, unknown>;
+  if (!Array.isArray(obj.questions) || obj.questions.length === 0) return false;
+  return obj.questions.every((q: unknown) => {
+    if (!q || typeof q !== 'object') return false;
+    const question = q as Record<string, unknown>;
+    return (
+      typeof question.question === 'string' &&
+      typeof question.header === 'string' &&
+      Array.isArray(question.options) &&
+      question.options.length >= 2 &&
+      typeof question.multiSelect === 'boolean'
+    );
+  });
+}
 
 /** Fire IM callback only if not stale (guard mirrors agent-session.ts pattern) */
 function fireImCallback(event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string): void {
@@ -519,7 +573,7 @@ export function getExternalSessionState(): ExternalSessionState {
   return externalSessionState;
 }
 
-export function getExternalSystemInitPayload(): { info: SystemInitInfo; sessionId: string; prewarm?: boolean } | null {
+export function getExternalSystemInitPayload(): { info: SystemInitInfo; sessionId: string; prewarm?: boolean; runtime: RuntimeType } | null {
   return externalSystemInitPayload;
 }
 
@@ -802,7 +856,7 @@ async function _doStartExternalSession(options: {
 
     // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
     if (!options.resumeSessionId) {
-      registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message');
+      registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
     }
   }
 
@@ -1012,7 +1066,7 @@ export async function sendExternalMessage(
     // Normally this happens inside startExternalSession's initialMessage block,
     // but pre-warm calls startExternalSession WITHOUT an initialMessage, so we
     // have to register here when the first actual message arrives via Case 3.
-    registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm');
+    registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm', lastScenario);
 
     // Persist user message immediately (crash safety)
     if (lastSessionId) {
@@ -1052,6 +1106,58 @@ export async function respondExternalPermission(
 }
 
 /**
+ * Whether an outstanding external AskUserQuestion request is tracked for this requestId.
+ * Used by the HTTP layer to route /api/ask-user-question/respond to the external runtime
+ * when the request originated from CC (rather than the builtin SDK handler).
+ */
+export function hasPendingExternalAskUserQuestion(requestId: string): boolean {
+  return pendingExternalAskUserQuestions.has(requestId);
+}
+
+/**
+ * Deliver the user's AskUserQuestion answers (or a cancellation) back to the external runtime.
+ * For CC: allow the tool call with `updatedInput = { ...original, answers }`, or deny on cancel.
+ */
+export async function respondExternalAskUserQuestion(
+  requestId: string,
+  answers: Record<string, string> | null,
+): Promise<boolean> {
+  const pending = pendingExternalAskUserQuestions.get(requestId);
+  if (!pending) {
+    console.warn(`[external-session] Unknown AskUserQuestion requestId: ${requestId}`);
+    return false;
+  }
+  // Check process liveness BEFORE consuming the pending entry (cross-review C4):
+  // previously we deleted up front, so a transient "process gone" state silently
+  // discarded the answer and left the user with no affordance to retry. Keeping
+  // the entry when we can't deliver lets the caller observe the failure and the
+  // routing layer keep sending it to the external handler, not the builtin one.
+  if (!activeProcess || !activeRuntime) {
+    console.warn(`[external-session] No active process for AskUserQuestion response requestId=${requestId} — session likely stopped before user answered`);
+    return false;
+  }
+
+  try {
+    if (answers === null) {
+      console.log(`[external-session] AskUserQuestion cancelled for requestId=${requestId}`);
+      await activeRuntime.respondPermission(activeProcess, requestId, 'deny', '用户取消了问答');
+    } else {
+      console.log(`[external-session] AskUserQuestion answered for requestId=${requestId}`);
+      const updatedInput = { ...pending.input, answers };
+      await activeRuntime.respondPermission(activeProcess, requestId, 'allow_once', undefined, undefined, updatedInput);
+    }
+    // Delete only after successful delivery — if respondPermission throws
+    // (e.g. stdin closed mid-write) the caller can retry.
+    pendingExternalAskUserQuestions.delete(requestId);
+    pendingExternalInteractiveRequests.delete(requestId);
+    return true;
+  } catch (err) {
+    console.error(`[external-session] respondPermission failed for requestId=${requestId}:`, err);
+    return false;
+  }
+}
+
+/**
  * Stop the active external session
  */
 export async function stopExternalSession(): Promise<boolean> {
@@ -1076,6 +1182,7 @@ export async function stopExternalSession(): Promise<boolean> {
     // consistent regardless of what runs next.
     isPrewarmingSession = false;
     pendingPermissionSuggestions.clear();  // Prevent stale suggestions leaking across sessions
+    pendingExternalAskUserQuestions.clear();  // Stale AskUserQuestion requestIds would misroute to new session
     pendingExternalInteractiveRequests.clear();
     externalSystemInitPayload = null;
     // Notify IM stream callback if active (prevents orphaned SSE streams on user-stop)
@@ -1411,6 +1518,28 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'permission_request':
+      // AskUserQuestion carries a structured payload (questions/options/previews) and
+      // needs the dedicated wizard UI, not the generic allow/deny card. Route it through
+      // the ask-user-question:request channel so the frontend mounts AskUserQuestionPrompt
+      // and the user's answers flow back as CC `updatedInput.answers`.
+      if (event.toolName === 'AskUserQuestion' && isAskUserQuestionInput(event.input)) {
+        pendingExternalAskUserQuestions.set(event.requestId, { input: event.input as Record<string, unknown> });
+        const questions = event.input.questions;
+        const previewFormat: 'html' | 'markdown' = 'html';
+        pendingExternalInteractiveRequests.set(event.requestId, {
+          type: 'ask-user-question:request',
+          data: { requestId: event.requestId, questions, previewFormat },
+        });
+        broadcast('ask-user-question:request', {
+          requestId: event.requestId,
+          questions,
+          previewFormat,
+        });
+        // IM/agent-channel bots can't render AskUserQuestion; claude-code.ts already
+        // puts it in --disallowed-tools for those scenarios, so no imStreamCallback fan-out here.
+        break;
+      }
+
       // Store suggestions so respondExternalPermission can echo them back for "always_allow"
       pendingPermissionSuggestions.set(event.requestId, event.suggestions);
       pendingExternalInteractiveRequests.set(event.requestId, {
@@ -1478,6 +1607,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         },
         sessionId: lastSessionId,
         prewarm: isPrewarmingSession || undefined,
+        // Authoritative runtime tag — the spawning runtime is the one running this
+        // process, regardless of any later agent.runtime drift. Frontend uses this
+        // to freeze sessionRuntime at session-creation time so the bottom-bar
+        // display stays consistent with how messages actually route.
+        runtime: getCurrentRuntimeType(),
       };
       broadcast('chat:system-init', externalSystemInitPayload);
       break;
@@ -1512,50 +1646,58 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     case 'session_complete':
       clearWatchdog();
       console.log(`[external-session] session_complete: subtype=${event.subtype}, result=${(event.result || '').length > 0 ? `${(event.result || '').length}chars` : 'empty'}, turnCompleted=${turnCompleted}, assistantText=${currentAssistantText.length}chars`);
-      if (event.subtype === 'success') {
-        // CC slash commands (e.g. /context, /cost) return output directly in `result`
-        // without streaming text_delta events. Only broadcast if NO turn completed
-        // (turnCompleted means text was already streamed + persisted normally).
-        if (event.result && !turnCompleted && !currentAssistantText.trim()) {
-          broadcast('chat:message-chunk', event.result);
-          currentAssistantText += event.result;
-          pendingTextBuffer += event.result;
-        }
-        // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
-        if (!turnCompleted) {
-          lastTurnSucceeded = true;
-          persistTurnResult();
-        }
-      } else {
-        const errorMessage = event.result || 'Session ended with error';
-        // Suppress user-visible error when the external runtime's persistent process
-        // dies while idle (after a turn already completed, with no new turn in flight).
-        // Common cause: OS memory pressure / SIGKILL (exit 137) after tens of minutes
-        // of inactivity on Codex/Gemini. The next sendExternalMessage will hit the
-        // "Previous process exited, resuming" branch and transparently spawn a fresh
-        // process — the user never needed to see an error in the first place.
-        //
-        // Repro: user reported "Gemini process exited with code 137" toast after
-        // leaving a session idle for 26 minutes with no interaction. See
-        // ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt final session_complete line.
-        const isIdleExit = turnCompleted && !currentAssistantText.trim();
-        // Pre-warm exit: process crashed after spawn but before any user turn
+      {
+        // Pre-warm exit: process died after spawn but before any user turn
         // started. `currentTurnStartTime === 0` distinguishes this from a
-        // mid-turn failure (which sets the timestamp at turn kickoff). Silent
-        // failure — the next user message will retry through the normal path.
+        // mid-turn exit (which sets the timestamp at turn kickoff). Applies to
+        // BOTH subtypes:
+        //   - subtype='error' (SIGKILL / init timeout) → silent retry on send
+        //   - subtype='success' (graceful exit code 0 during our timeout kill)
+        //     → would otherwise fall through to persistTurnResult and broadcast
+        //     chat:message-complete — triggering a misleading "任务完成" OS
+        //     notification on an empty tab that never ran a turn.
         const isPrewarmExit = !turnCompleted && currentTurnStartTime === 0;
-        if (isIdleExit) {
-          console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
-        } else if (isPrewarmExit) {
-          console.log(`[external-session] Ignoring pre-warm exit "${errorMessage}" — no user turn was in flight; next send will start fresh`);
+        if (isPrewarmExit) {
+          console.log(`[external-session] Ignoring pre-warm exit (subtype=${event.subtype}) — no user turn was in flight; next send will start fresh`);
+        } else if (event.subtype === 'success') {
+          // CC slash commands (e.g. /context, /cost) return output directly in `result`
+          // without streaming text_delta events. Only broadcast if NO turn completed
+          // (turnCompleted means text was already streamed + persisted normally).
+          if (event.result && !turnCompleted && !currentAssistantText.trim()) {
+            broadcast('chat:message-chunk', event.result);
+            currentAssistantText += event.result;
+            pendingTextBuffer += event.result;
+          }
+          // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
+          if (!turnCompleted) {
+            lastTurnSucceeded = true;
+            persistTurnResult();
+          }
         } else {
-          broadcast('chat:agent-error', { message: errorMessage });
-          broadcast('chat:message-error', errorMessage);
-          fireImCallback('error', errorMessage);
-          resetTurnAccumulators(); // Prevent stale content leaking into next turn
+          const errorMessage = event.result || 'Session ended with error';
+          // Suppress user-visible error when the external runtime's persistent process
+          // dies while idle (after a turn already completed, with no new turn in flight).
+          // Common cause: OS memory pressure / SIGKILL (exit 137) after tens of minutes
+          // of inactivity on Codex/Gemini. The next sendExternalMessage will hit the
+          // "Previous process exited, resuming" branch and transparently spawn a fresh
+          // process — the user never needed to see an error in the first place.
+          //
+          // Repro: user reported "Gemini process exited with code 137" toast after
+          // leaving a session idle for 26 minutes with no interaction. See
+          // ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt final session_complete line.
+          const isIdleExit = turnCompleted && !currentAssistantText.trim();
+          if (isIdleExit) {
+            console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
+          } else {
+            broadcast('chat:agent-error', { message: errorMessage });
+            broadcast('chat:message-error', errorMessage);
+            fireImCallback('error', errorMessage);
+            resetTurnAccumulators(); // Prevent stale content leaking into next turn
+          }
         }
       }
       pendingPermissionSuggestions.clear();
+      pendingExternalAskUserQuestions.clear();
       pendingExternalInteractiveRequests.clear();
       externalSystemInitPayload = null;
       setExternalSessionState('idle');

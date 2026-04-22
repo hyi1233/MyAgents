@@ -1,10 +1,11 @@
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
+import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
+import { ensureDirSync } from './utils/fs-utils';
 import { processImage, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
@@ -24,6 +25,9 @@ import { parsePartialJson } from '../shared/parsePartialJson';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
+import { snapshotForImSession, snapshotForOwnedSession } from './utils/session-snapshot';
+import { findAgentByWorkspacePath } from './utils/admin-config';
+import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
 import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
@@ -161,7 +165,7 @@ export function syncProjectUserConfig(projectDir: string): void {
   const projectSkillsDir = join(projectDir, '.claude', 'skills');
 
   if (existsSync(userSkillsDir)) {
-    mkdirSync(projectSkillsDir, { recursive: true });
+    ensureDirSync(projectSkillsDir);
 
     // Read disabled list from skills-config.json
     let disabled: string[] = [];
@@ -235,7 +239,7 @@ export function syncProjectUserConfig(projectDir: string): void {
   const projectCommandsDir = join(projectDir, '.claude', 'commands');
 
   if (existsSync(userCommandsDir)) {
-    mkdirSync(projectCommandsDir, { recursive: true });
+    ensureDirSync(projectCommandsDir);
 
     // Track managed command filenames for dangling symlink cleanup
     const managedCommandFiles = new Set<string>();
@@ -404,6 +408,25 @@ const pendingConfigRestart = new Set<RestartReason>();
  *  one turn collapse into a single restart at the next drain point. */
 function scheduleDeferredRestart(reason: RestartReason): void {
   pendingConfigRestart.add(reason);
+}
+
+/**
+ * v0.1.69 T14: Return true if the current session is locked — its config was
+ * captured as a snapshot at creation (see types/session.ts). Callers that
+ * react to AgentConfig change events should consult this before scheduling a
+ * restart: a snapshotted session owns MCP/agents/provider/model/permissionMode
+ * and does NOT follow later agent changes, so restarting would be wasted work
+ * (the frontend already passes the session-resolved list → fingerprint is
+ * stable → no restart needed). If the frontend misbehaves and sends the
+ * agent's raw list, this guard prevents the mis-call from thrashing the SDK.
+ *
+ * IM sessions intentionally leave `configSnapshotAt` undefined (D4
+ * live-follow), so this returns false and the legacy restart path runs.
+ */
+function isCurrentSessionSnapshotted(): boolean {
+  if (!sessionId) return false;
+  const meta = getSessionMetadata(sessionId);
+  return Boolean(meta?.configSnapshotAt);
 }
 
 /** True when at least one reason is pending. */
@@ -699,7 +722,35 @@ export function getStreamingAssistantId(): string | null {
 const pendingMidTurnQueue: Array<{
   queueId: string;
   userMessage: Pick<MessageWire, 'id' | 'role' | 'content' | 'timestamp' | 'attachments'>;
+  // Retained for hard-kill recovery. Pending items have already been yielded to SDK
+  // stdin — SDK owns them. But if the subprocess is about to die (abortPersistentSession
+  // or interruptCurrentResponse hard-kill escalation), the SDK will never consume them.
+  // rescuePendingToQueue() moves this back to messageQueue front so the recovery
+  // session re-delivers it. See forceExecuteQueueItem pending branch.
+  sourceItem: MessageQueueItem;
 }> = [];
+
+/**
+ * Rescue pending mid-turn items back to messageQueue front when the SDK subprocess
+ * is about to die (abortPersistentSession or interruptCurrentResponse hard-kill).
+ *
+ * Why: pending items have been yielded to SDK stdin. If the subprocess dies before
+ * consuming them, they are lost — the user's text vanishes. Moving them back to
+ * messageQueue lets the recovery session (started by schedulePreWarm in the safety
+ * net) re-deliver them to the fresh subprocess.
+ *
+ * Must NOT be called when SDK stays alive (e.g. interrupt ACK without close) —
+ * double-delivery would occur: once via stdin buffer, once via messageQueue.
+ */
+function rescuePendingToQueue(): void {
+  if (pendingMidTurnQueue.length === 0) return;
+  console.log(`[agent] Rescuing ${pendingMidTurnQueue.length} pending mid-turn message(s) → messageQueue front`);
+  // Preserve original order: reverse-iterate so the first pending becomes messageQueue[0].
+  for (let i = pendingMidTurnQueue.length - 1; i >= 0; i--) {
+    messageQueue.unshift(pendingMidTurnQueue[i].sourceItem);
+  }
+  pendingMidTurnQueue.length = 0;
+}
 
 /**
  * Flush deferred mid-turn user messages: push to messages[] and broadcast queue:started.
@@ -729,8 +780,9 @@ function abortPersistentSession(): void {
   }
 
   shouldAbortSession = true;
-  // Discard pending mid-turn messages (session is being torn down)
-  pendingMidTurnQueue.length = 0;
+  // Subprocess is about to die — rescue pending items so the recovery session
+  // re-delivers them instead of losing them with the dead stdin buffer.
+  rescuePendingToQueue();
   // Notify IM stream callback before abort
   if (imStreamCallback) {
     imStreamCallback('error', '会话已中断，请重新发送');
@@ -1015,9 +1067,16 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
   // subprocess + all stdio MCP servers repeatedly, destroying in-process state.
   // The timer in schedulePreWarm() batches these into a single abort+restart.
   if (mcpChanged && querySession) {
-    const ids = servers.map(s => s.id).join(', ') || 'none';
-    console.log(`[agent] MCP config changed → [${ids}], deferring restart to pre-warm debounce`);
-    scheduleDeferredRestart('mcp');
+    if (isCurrentSessionSnapshotted()) {
+      // v0.1.69 T14: Locked session owns its MCP list — agent-level toggles don't apply here.
+      // Expected frontend behavior is to pass the session-resolved list so mcpChanged is false;
+      // if we got here, it means someone passed the agent's raw list. Log and skip restart.
+      console.log(`[agent] MCP changed but session ${sessionId} is snapshotted — skip restart (snapshot is authoritative)`);
+    } else {
+      const ids = servers.map(s => s.id).join(', ') || 'none';
+      console.log(`[agent] MCP config changed → [${ids}], deferring restart to pre-warm debounce`);
+      scheduleDeferredRestart('mcp');
+    }
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -1062,8 +1121,13 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
 
   // Defer restart to pre-warm debounce (same as setMcpServers — see comment there).
   if (agentsChanged && querySession) {
-    console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), deferring restart to pre-warm debounce`);
-    scheduleDeferredRestart('agents');
+    if (isCurrentSessionSnapshotted()) {
+      // v0.1.69 T14: Locked session owns its sub-agents — skip restart (same rationale as MCP).
+      console.log(`[agent] Sub-agents changed but session ${sessionId} is snapshotted — skip restart`);
+    } else {
+      console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), deferring restart to pre-warm debounce`);
+      scheduleDeferredRestart('agents');
+    }
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -1175,7 +1239,13 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
 
   // If a session is running, its subprocess has the OLD provider env.
   // Restart so the next session picks up the updated environment.
-  if (querySession) {
+  // v0.1.69 T14: Locked sessions own their provider — agent-level provider sync
+  // should not abort them. The snapshot in the Sidecar's startup env is
+  // authoritative; a later /api/provider/set from Rust reflecting an agent
+  // config change must be ignored at the restart-scheduling layer.
+  if (isCurrentSessionSnapshotted()) {
+    console.log(`[agent] provider changed (${oldLabel} → ${newLabel}) but session ${sessionId} is snapshotted — skip abort/restart`);
+  } else if (querySession) {
     if (isProcessing && !isPreWarming) {
       // Active user turn in progress — defer restart to avoid killing mid-response.
       // The restart will fire after the current turn completes (pendingConfigRestart).
@@ -2637,6 +2707,24 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   // Currently used for diagnostic logging only (parallel data collection).
   // Future: may replace self-built sessionState tracking for more accurate turn boundary detection.
   env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS = '1';
+  // Declare MyAgents as the inference-routing host. Tells CC's `managedEnv` layer
+  // (see claude-code/src/utils/managedEnv.ts withoutHostManagedProviderVars) to
+  // strip the 26 provider-routing vars (ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY /
+  // ANTHROPIC_AUTH_TOKEN / ANTHROPIC_DEFAULT_*_MODEL / CLAUDE_CODE_USE_BEDROCK
+  // etc.) out of ALL settings-sourced env — both ~/.claude.json.env and
+  // ~/.claude/settings.json.env — before they're `Object.assign`'d into the
+  // subprocess's process.env during applyConfigEnvironmentVariables().
+  //
+  // Effect: external tools like cc-switch / Claude Code Router that write those
+  // vars into user settings cannot silently redirect MyAgents requests to a
+  // third-party endpoint. `settingSources: ['project']` already excludes
+  // settings.json from the merged-settings path, but getGlobalConfig().env
+  // (~/.claude.json) is merged unconditionally — this flag closes that hole.
+  //
+  // Does NOT affect: Keychain OAuth lookup (subscription auth), env vars we pass
+  // directly via options.env, parent-shell env vars inherited from our process.
+  // Only settings-file-sourced provider vars are stripped.
+  env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
   // DO NOT set CLAUDE_CONFIG_DIR here — it would change the Keychain service name
   // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
   // into project .claude/skills/ by syncProjectUserConfig() instead.
@@ -3705,7 +3793,10 @@ export function getAndClearLastAgentError(): string | null {
  */
 function clearMessageState(): void {
   messages.length = 0;
-  messageQueue.length = 0;
+  // Queue clearing is always explicit (broadcast queue:cancelled to the frontend).
+  // Defensive: in practice, resetSession / switchToSession drain earlier (before
+  // awaitSessionTermination); initializeAgent is typically called on an empty queue.
+  drainQueueWithCancellation();
   pendingMidTurnQueue.length = 0;
   streamIndexToToolId.clear();
   streamIndexToBlockType.clear();
@@ -3724,10 +3815,31 @@ function clearMessageState(): void {
   sessionStorageStateSaved = false;
 }
 
-/** 排空消息队列，逐条广播 queue:cancelled。用于 session 意外死亡时通知前端清除队列 UI。 */
+/**
+ * 排空消息队列，逐条广播 queue:cancelled。**清 messageQueue 的唯一正路**。
+ *
+ * 设计契约（architectural invariant）：
+ *   - 任何想清空 messageQueue 的地方都 MUST 走这个函数，禁止裸 `messageQueue.length = 0`
+ *     或逐项 splice。裸清是前端 pills 残留的来源。
+ *   - 频繁调用是幂等的（空队列 early-return），不必担心"多调一次"。
+ *
+ * 调用者：
+ *   - interruptCurrentResponse（停止按钮 / 无活跃 turn 的孤儿清理）
+ *   - resetSession / switchToSession / recoverFromStaleSession / rewindSession
+ *     （session 重置路径）
+ *   - enqueueUserMessage 的 Provider 切换分支（避免 phantom pills）
+ *   - clearMessageState（防御：initializeAgent 等路径通常队列为空 → no-op）
+ *   - startStreamingSession 的 finally safety net，仅当 preWarmDisabled 时
+ *     （正常模式下队列跨 session 存活，由 schedulePreWarm 接管）
+ *
+ * 不调用者：
+ *   - 正常 turn-complete 路径（队列由 generator 自然 drain）
+ *   - abortPersistentSession（只转移 pending，不清 messageQueue；
+ *     队列的清除由 abort 的上游调用者决定）
+ */
 function drainQueueWithCancellation(): void {
   if (messageQueue.length === 0) return;
-  console.log(`[agent] Draining ${messageQueue.length} queued messages (session dead)`);
+  console.log(`[agent] Draining ${messageQueue.length} queued messages (explicit cancel)`);
   for (const item of messageQueue) {
     item.resolve();
     broadcast('queue:cancelled', { queueId: item.id });
@@ -3823,7 +3935,8 @@ export async function resetSession(): Promise<void> {
   if (querySession || sessionTerminationPromise) {
     console.log('[agent] resetSession: terminating existing SDK session');
     abortPersistentSession();
-    messageQueue.length = 0; // Clear queue so old session doesn't pick up stale messages
+    // Explicit cancel — broadcasts queue:cancelled so frontend clears pills immediately.
+    drainQueueWithCancellation();
 
     await awaitSessionTermination(10_000, 'resetSession');
     console.log('[agent] resetSession: SDK session terminated (or timed out)');
@@ -3922,7 +4035,10 @@ async function recoverFromStaleSession(): Promise<void> {
     if (querySession || sessionTerminationPromise) {
       console.log('[agent] recoverFromStaleSession: terminating failed SDK subprocess');
       abortPersistentSession();
-      messageQueue.length = 0;
+      // Explicit cancel — this recovery path preserves visible message history but
+      // the queue is discarded. Without broadcast, queued pills would linger forever
+      // (no chat:init follows this path — that's the whole point of stale recovery).
+      drainQueueWithCancellation();
       await awaitSessionTermination(10_000, 'recoverFromStaleSession');
       querySession = null;
     }
@@ -4015,6 +4131,19 @@ export async function initializeAgent(
   // 3. saveSessionMessages incremental append works correctly (messages.slice(existingCount))
   // Same pattern as switchToSession's message loading.
   // Also load for cross-runtime sessions (sessionRegistered=false but messages exist for display).
+  //
+  // Note on the "two-sidecar ID collision" scenario (originally called Bug B):
+  // that scenario would require a concurrent writer's disk flush to lag behind
+  // its metadata stats. `saveSessionMessages` in SessionStore.ts writes the
+  // JSONL via appendFileSync BEFORE it updates `stats.messageCount` under the
+  // sessions-lock, so `diskCount === 0 && stats.messageCount > 0` is unreachable
+  // through normal mutations. Bug A's rotate-per-tick fix additionally removes
+  // the cron pathway that could have produced two concurrent sidecars for the
+  // same session. A prior version of this file carried a defensive seed based
+  // on `stats.messageCount`, but `messageCount` only counts user messages
+  // (SessionStore.ts calculateSessionStats), whereas messageSequence indexes
+  // every persisted message — so the seed would under-count and still collide.
+  // Removed rather than fixed: the disk-first write order is the real guard.
   if (initialSessionId && getSessionMetadata(initialSessionId)) {
     const sessionData = getSessionData(initialSessionId);
     if (sessionData?.messages?.length) {
@@ -4042,7 +4171,12 @@ export async function initializeAgent(
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { resolveWorkspaceConfig } = require('./utils/admin-config');
-      const resolved = resolveWorkspaceConfig(agentDir);
+      // v0.1.69: pass session metadata so the sidecar prefers session snapshot
+      // (`meta.model`, `meta.providerId/EnvJson`, `meta.mcpEnabledServers`) over the
+      // agent's current values. For IM sessions (which deliberately don't snapshot
+      // these fields), this is a no-op — the agent fallback handles them.
+      const sessionMetaForResolve = sessionId ? getSessionMetadata(sessionId) : null;
+      const resolved = resolveWorkspaceConfig(agentDir, sessionMetaForResolve);
       // Only self-resolve MCP for sessions with initialPrompt (IM/Cron).
       // Tab sessions must NOT self-resolve: the frontend's /api/mcp/set is the
       // authoritative source, and self-resolve produces slightly different field
@@ -4118,7 +4252,9 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   if (querySession || sessionTerminationPromise) {
     console.log('[agent] switchToSession: aborting current session');
     abortPersistentSession();
-    messageQueue.length = 0; // Clear queue before waiting so old session doesn't pick up stale messages
+    // Explicit cancel — broadcasts queue:cancelled so frontend clears pills immediately
+    // (chat:init follows but that's seconds later, after awaitSessionTermination).
+    drainQueueWithCancellation();
     await awaitSessionTermination(10_000, 'switchToSession');
     querySession = null;
   }
@@ -4331,9 +4467,10 @@ export async function enqueueUserMessage(
     querySession = null;
     isProcessing = false;
     setSessionState('idle');
-    // Clear message queue to avoid duplicate messages
-    // The current message will be added to the queue below
-    messageQueue.length = 0;
+    // Explicit cancel — broadcasts queue:cancelled so frontend clears stale pills
+    // before the new message (added below) fires queue:added. Without this, the UI
+    // would show old pills as phantoms alongside the new one.
+    drainQueueWithCancellation();
     // Clear stream state mappings (will be rebuilt by new session)
     streamIndexToToolId.clear();
     toolResultIndexToId.clear();
@@ -4397,15 +4534,29 @@ export async function enqueueUserMessage(
       }
       console.log(`[agent] session ${sessionId} already exists in SessionStore, preserving stats`);
     } else {
-      // Brand new session — create metadata
-      const sessionMeta = createSessionMetadata(agentDir);
+      // Brand new session — create metadata. v0.1.69: lazy creation covers two cases:
+      //   (a) Desktop first-send with a pending session ID (App.tsx generates a
+      //       `pending-<tabId>` placeholder and never calls POST /sessions; the real
+      //       session is materialized here). → owned snapshot (self-contained).
+      //   (b) IM Bot / agent-channel first message. → im snapshot (live-follow).
+      // Dispatch on `currentScenario.type` set by the caller before enqueue:
+      //   - 'desktop' / 'cron' → owned (config frozen into session)
+      //   - 'im' / 'agent-channel' → live-follow (only runtime recorded)
+      // If the agent lookup misses (workspace not registered), snapshot is `{}` and
+      // `resolveSessionConfig`'s lazy fallback (meta ?? agent) covers it.
+      const lazyAgent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+      const useLiveFollow = currentScenario.type === 'im' || currentScenario.type === 'agent-channel';
+      const lazySnapshot = lazyAgent
+        ? (useLiveFollow ? snapshotForImSession(lazyAgent) : snapshotForOwnedSession(lazyAgent))
+        : undefined;
+      const sessionMeta = createSessionMetadata(agentDir, lazySnapshot);
       sessionMeta.id = sessionId;
       sessionMeta.title = trimmed ? trimmed.slice(0, 40) : '图片消息';
       if (sessionMeta.title.length < trimmed.length) {
         sessionMeta.title += '...';
       }
       saveSessionMetadata(sessionMeta);
-      console.log(`[agent] session ${sessionId} persisted to SessionStore`);
+      console.log(`[agent] session ${sessionId} persisted to SessionStore (lazy, scenario=${currentScenario.type}, snapshot=${lazyAgent ? (useLiveFollow ? 'im' : 'owned') : 'none'})`);
     }
   } else {
     // Update session title from first real message if needed
@@ -4431,7 +4582,7 @@ export async function enqueueUserMessage(
     console.log(`[agent] pre-warm → active, first user message, sessionRegistered=${sessionRegistered}`);
     // Replay buffered system_init so frontend gets tools/session info
     if (systemInitInfo) {
-      broadcast('chat:system-init', { info: systemInitInfo, sessionId });
+      broadcast('chat:system-init', { info: systemInitInfo, sessionId, runtime: 'builtin' });
     }
   }
   // Cancel any pending pre-warm timer (user is sending a message now).
@@ -4720,6 +4871,9 @@ export async function interruptCurrentResponse(): Promise<boolean> {
     // with resumeSessionId (no data loss, no amnesia). (#60)
     if (!interrupted && querySession) {
       console.warn('[agent] Force-closing SDK session (interrupt unresponsive)');
+      // Rescue pending items BEFORE close: SDK stdin buffer dies with the subprocess.
+      // Must run before close() so the recovery session re-delivers them.
+      rescuePendingToQueue();
       const session = querySession;
       querySession = null;
       try { session.close(); } catch { /* already dead */ }
@@ -4748,6 +4902,8 @@ export async function interruptCurrentResponse(): Promise<boolean> {
         postInterruptTurnEndResolve = null;
         if (querySession) {
           console.warn('[agent] Force-closing: turn did not complete 3s after interrupt (hung MCP tool?)');
+          // Rescue pending items BEFORE close: see rescuePendingToQueue() doc.
+          rescuePendingToQueue();
           const session = querySession;
           querySession = null;
           try { session.close(); } catch { /* already dead */ }
@@ -4798,7 +4954,12 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
 
   // 消息可能已被 wakeGenerator 直接投递给 generator（跳过 messageQueue），
   // 此时它在 pendingMidTurnQueue 中（已 yield 给 SDK stdin，等待 AI 消费）。
-  // 这种情况下中断当前响应即可让 SDK 更快处理该消息。
+  //
+  // 两种情况的 force-execute 都走 interruptCurrentResponse：
+  //   - 响应式路径：SDK ACK interrupt → 处理当前 turn 的剩余内容 → 消费下一条
+  //     stdin 输入（即 pending 项）→ AI 回应
+  //   - 硬杀路径：interrupt 超时 → session.close() 前 rescuePendingToQueue() 把
+  //     pending 项搬回 messageQueue 队首 → 新 session pre-warm 起来后接手
   const inPendingMidTurn = index === -1 && pendingMidTurnQueue.some(p => p.queueId === queueId);
 
   if (index === -1 && !inPendingMidTurn) return false;
@@ -4810,8 +4971,6 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
   }
 
   if (isSessionActive()) {
-    // Session 存活：中断当前响应，generator 会自然消费队列头部
-    // （或 pendingMidTurnQueue 中的消息在中断后被 SDK 立即处理）
     await interruptCurrentResponse();
   } else {
     // Session 已死：generator 不存在，无人消费队列。
@@ -4894,7 +5053,8 @@ export async function rewindSession(userMessageId: string): Promise<{
 
     // 4. 中止当前 session（需要新 session 用 resumeSessionAt 截断 SDK 历史）
     abortPersistentSession();
-    messageQueue.length = 0;
+    // Explicit cancel — broadcasts queue:cancelled so frontend clears pills.
+    drainQueueWithCancellation();
     await awaitSessionTermination(10_000, 'rewind');
     shouldAbortSession = false;
 
@@ -5016,8 +5176,21 @@ export function forkSession(assistantMessageId: string): {
   const sourceTitle = sourceMeta?.title || 'Chat';
 
   try {
-    // 3. Create new session metadata with forkFrom
-    const newSession = createSessionMetadata(currentAgentDir);
+    // 3. Create new session metadata with forkFrom.
+    // v0.1.69: Inherit the source session's snapshot (model/permission/mcp/provider/runtime).
+    // Forking from a "locked" Desktop session yields a locked clone with the same config —
+    // Branching off a conversation should not silently change AI behavior. The user can
+    // still PATCH the forked session afterward to detach it.
+    const inheritedSnapshot: Partial<typeof sourceMeta> = sourceMeta ? {
+      runtime: sourceMeta.runtime,
+      model: sourceMeta.model,
+      permissionMode: sourceMeta.permissionMode,
+      mcpEnabledServers: sourceMeta.mcpEnabledServers ? [...sourceMeta.mcpEnabledServers] : undefined,
+      providerId: sourceMeta.providerId,
+      providerEnvJson: sourceMeta.providerEnvJson,
+      configSnapshotAt: sourceMeta.configSnapshotAt,
+    } : {};
+    const newSession = createSessionMetadata(currentAgentDir, inheritedSnapshot);
     newSession.title = `🌿 ${sourceTitle}`;
     newSession.titleSource = 'auto';
     newSession.forkFrom = {
@@ -5579,7 +5752,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Buffer system_init during pre-warm; replay when first user message arrives
         if (!isPreWarming) {
           sessionRegistered = true;  // SDK 确认注册，后续必须 resume
-          broadcast('chat:system-init', { info: systemInitInfo, sessionId });
+          broadcast('chat:system-init', { info: systemInitInfo, sessionId, runtime: 'builtin' });
         } else {
           // Pre-warm 不设 sessionRegistered — 这是核心设计约束
           // Pre-warm 的 system_init 只意味着 subprocess 准备好了，
@@ -6578,10 +6751,26 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Failure counting is handled uniformly in the finally block via preWarmStartedOk flag,
     // so we don't increment preWarmFailCount here — avoids double-counting when both
     // catch and finally execute for the same failed pre-warm.
-    if (!isPreWarming) {
+    //
+    // Also skip when `shouldAbortSession` is set: that flag means WE asked
+    // the SDK subprocess to die (resetSession, rewind, config-change restart,
+    // user deleting the current session, etc.). If the abort lands mid-turn
+    // while a tool call is in flight, the CLI's stdout gets truncated and
+    // the SDK's `readMessages` parser throws
+    //   "Claude Code returned an error result: [ede_diagnostic]
+    //    result_type=user last_content_type=n/a stop_reason=tool_use"
+    // That's an expected side-effect of the abort, not a real failure — the
+    // user already saw the reset/delete go through and shouldn't then get a
+    // red "message-error" banner about it. Pit-of-success: any SDK error
+    // during an active abort is by definition our doing, not a provider/infra
+    // issue to surface. Error is still logged above (line 6611–6612) for
+    // debugging, just not broadcast.
+    if (!isPreWarming && !shouldAbortSession) {
       broadcast('chat:message-error', userFacingError);
       handleMessageError(errorMessage);
       setSessionState('error');
+    } else if (shouldAbortSession) {
+      console.log(`[agent] Suppressing SDK error surfaced during abort (expected): ${errorMessage}`);
     }
   } finally {
     clearTimeout(startupTimeoutId);
@@ -6612,11 +6801,22 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       isStreamingMessage = false;
     }
 
-    // Session 意外死亡时排空队列，通知前端清除 "排队中" UI。
-    // 不在主动 abort 时排空 — 调用方（resetSession/switchToSession 等）有自己的清理流程。
-    if (!wasPreWarming && !shouldAbortSession && messageQueue.length > 0) {
-      drainQueueWithCancellation();
-    }
+    // Queue lifecycle invariant: messageQueue survives session restarts by default.
+    // Any drain decision belongs to the caller that triggered the exit, not here:
+    //   - interruptCurrentResponse (stop button): drains only when called with no
+    //     active turn (orphaned queue). When a turn is in flight, stop cancels
+    //     THAT turn; queued messages naturally flow into the recovery session.
+    //   - forceExecuteQueueItem: the force-executed item MUST survive a hard-kill
+    //     escalation into the recovery session. Both messageQueue items and items
+    //     already in pendingMidTurnQueue are covered — the latter via rescuePending
+    //     ToQueue() called inside interruptCurrentResponse's close() paths.
+    //   - abortPersistentSession callers (config changes, provider switch): preserve
+    //     queue so the restarted session picks up pending work. The abort also
+    //     rescues pending mid-turn items back into messageQueue.
+    //   - resetSession / switchToSession / recoverFromStaleSession / rewindSession:
+    //     explicitly call drainQueueWithCancellation (broadcasts queue:cancelled).
+    //   - Subprocess crash without explicit abort: preserve queue — the safety net
+    //     below reschedules pre-warm so the new session drains it.
 
     // 安全关闭 SDK session
     const session = querySession;
@@ -6672,10 +6872,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // block — it cancels the pre-warm timer and steals isPreWarming flag, causing BOTH branches
     // above to miss. Without this, messages sit in queue indefinitely until a window refocus
     // or other external event triggers a re-sync.
+    //
+    // preWarmDisabled fallback: in --no-pre-warm mode (CLI flag for dev/test), schedulePreWarm
+    // is a no-op, so no recovery is coming. Drain the queue explicitly so the frontend clears
+    // its pills and the user knows to resend. Without this, queue preservation + disabled
+    // pre-warm = orphaned-forever.
     if (messageQueue.length > 0 && !preWarmTimer && !isProcessing && querySession === null) {
-      console.warn(`[agent] Safety net: ${messageQueue.length} orphaned message(s) in queue, scheduling recovery`);
-      preWarmFailCount = 0;
-      schedulePreWarm();
+      if (preWarmDisabled) {
+        console.warn(`[agent] Safety net: ${messageQueue.length} orphaned message(s), pre-warm disabled → draining`);
+        drainQueueWithCancellation();
+      } else {
+        console.warn(`[agent] Safety net: ${messageQueue.length} orphaned message(s) in queue, scheduling recovery`);
+        preWarmFailCount = 0;
+        schedulePreWarm();
+      }
     }
   }
 }
@@ -6708,7 +6918,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       isPreWarming = false;
       if (systemInitInfo) {
         sessionRegistered = true;
-        broadcast('chat:system-init', { info: systemInitInfo, sessionId });
+        broadcast('chat:system-init', { info: systemInitInfo, sessionId, runtime: 'builtin' });
       }
       if (preWarmTimer) {
         clearTimeout(preWarmTimer);
@@ -6762,6 +6972,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
             timestamp: userMessage.timestamp,
             attachments: userMessage.attachments,
           },
+          sourceItem: item,
         });
       }
     }

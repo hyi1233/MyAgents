@@ -115,7 +115,7 @@ export default memo(function SortableTabItem({
                     e.stopPropagation();
                     onCloseTab(tab.id);
                 }}
-                title="关闭标签页"
+                title={`关闭标签页 (${navigator.platform.toLowerCase().includes('mac') ? '⌘W' : 'Ctrl+W'})`}
             >
                 <X className="h-3 w-3" />
             </button>

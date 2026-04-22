@@ -7,12 +7,13 @@
 // Session: --session-id / --resume
 
 import { spawn, type Subprocess } from 'bun';
-import { writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { writeFileSync , existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
+import { ensureDirSync } from '../utils/fs-utils';
 
 /**
  * Build CC CLI message content — string for text-only, array of content blocks for images+text.
@@ -70,7 +71,7 @@ process.stdin.resume();
  */
 function generateHookSettings(sidecarPort: number): string | null {
   try {
-    mkdirSync(HOOK_DIR, { recursive: true });
+    ensureDirSync(HOOK_DIR);
 
     // Write forwarder script (idempotent)
     const forwarderPath = join(HOOK_DIR, 'forwarder.cjs');
@@ -403,6 +404,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     decision: 'deny' | 'allow_once' | 'always_allow',
     reason?: string,
     suggestions?: unknown[],
+    updatedInput?: Record<string, unknown>,
   ): Promise<void> {
     // CC control_response schema (PermissionPromptToolResultSchema.ts):
     // allow: { behavior, updatedInput (required), updatedPermissions?, decisionClassification? }
@@ -415,7 +417,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           subtype: 'success' as const,
           response: {
             behavior: 'allow' as const,
-            updatedInput: {},  // Required by CC schema — empty = use original input
+            // Required by CC schema. Empty = use original input (common case).
+            // Populated for AskUserQuestion: caller injects `answers` so CC sees the user's reply.
+            updatedInput: updatedInput ?? {},
             decisionClassification: decision === 'always_allow' ? 'user_permanent' as const : 'user_temporary' as const,
             // For always_allow: echo permission_suggestions back as updatedPermissions
             // so CC persists the rule and doesn't re-prompt for this tool

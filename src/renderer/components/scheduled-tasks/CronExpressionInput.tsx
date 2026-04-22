@@ -4,7 +4,7 @@
  * Advanced: raw cron expression input for power users
  */
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { AlertCircle, Code2 } from 'lucide-react';
 import CustomSelect from '@/components/CustomSelect';
 
@@ -12,9 +12,26 @@ interface CronExpressionInputProps {
   expr: string;
   tz: string;
   onChange: (expr: string, tz: string) => void;
+  /**
+   * When provided (together with `onIntervalChange`), renders an
+   * additional "固定周期" chip alongside daily/weekdays/weekly/monthly.
+   * Selecting it swaps the time/day pickers for a single "每 N 分钟"
+   * numeric input and clears the cron expression via `onChange('', tz)`
+   * so the backend's `schedule_from_task` falls back to its Every branch.
+   *
+   * This collapses Task Center's prior outer "简单 / 高级" toggle into
+   * one unified chip row — every recurring schedule is now picked the
+   * same way. Scheduled-task callers (Chat tab) don't pass this prop,
+   * so the old 4-chip behaviour is preserved there.
+   */
+  intervalMinutes?: number;
+  onIntervalChange?: (n: number) => void;
 }
 
-type Frequency = 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'custom';
+type Frequency = 'interval' | 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'custom';
+const MIN_INTERVAL = 5;
+const MAX_INTERVAL = 10080; // 7 days in minutes
+const DEFAULT_INTERVAL = 30;
 
 const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
 const WEEKDAY_CRON = [1, 2, 3, 4, 5, 6, 0]; // cron weekday values (0=Sun, 1=Mon...)
@@ -65,6 +82,7 @@ function buildCronFromVisual(freq: Frequency, hour: number, minute: number, week
 }
 
 const FREQ_OPTIONS: { value: Frequency; label: string }[] = [
+  { value: 'interval', label: '固定周期' },
   { value: 'daily', label: '每天' },
   { value: 'weekdays', label: '工作日' },
   { value: 'weekly', label: '每周' },
@@ -81,34 +99,103 @@ const MONTHDAY_OPTIONS = Array.from({ length: 28 }, (_, i) => ({
   value: String(i + 1), label: `${i + 1} 号`,
 }));
 
-export default function CronExpressionInput({ expr, tz, onChange }: CronExpressionInputProps) {
-  // Try to parse existing expr into visual mode
-  const initial = useMemo(() => parseCronToVisual(expr), []);  // eslint-disable-line react-hooks/exhaustive-deps
+export default function CronExpressionInput({
+  expr,
+  tz,
+  onChange,
+  intervalMinutes,
+  onIntervalChange,
+}: CronExpressionInputProps) {
+  const intervalEnabled = intervalMinutes !== undefined && onIntervalChange !== undefined;
+  const visibleFreqOptions = useMemo(
+    () =>
+      intervalEnabled
+        ? FREQ_OPTIONS
+        : FREQ_OPTIONS.filter((o) => o.value !== 'interval'),
+    [intervalEnabled],
+  );
 
-  const [mode, setMode] = useState<'visual' | 'custom'>(initial ? 'visual' : 'custom');
-  const [freq, setFreq] = useState<Frequency>(initial?.freq ?? 'daily');
+  // Try to parse existing expr into visual mode. Initial freq priority:
+  //   1. Caller opted into interval mode + expr is empty → 'interval'
+  //   2. expr parseable into daily/weekdays/weekly/monthly → that freq
+  //   3. Otherwise → 'custom' (raw cron textbox)
+  const initial = useMemo(() => parseCronToVisual(expr), []);  // eslint-disable-line react-hooks/exhaustive-deps
+  const initialFreq: Frequency = useMemo(() => {
+    if (intervalEnabled && !expr.trim()) return 'interval';
+    return initial?.freq ?? 'daily';
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const initialMode: 'visual' | 'custom' = useMemo(() => {
+    if (intervalEnabled && !expr.trim()) return 'visual';
+    return initial ? 'visual' : 'custom';
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const [mode, setMode] = useState<'visual' | 'custom'>(initialMode);
+  const [freq, setFreq] = useState<Frequency>(initialFreq);
   const [hour, setHour] = useState(initial?.hour ?? 8);
   const [minute, setMinute] = useState(initial?.minute ?? 0);
   const [weekdays, setWeekdays] = useState<number[]>(initial?.weekdays ?? [1]);
   const [monthDay, setMonthDay] = useState(initial?.monthDay ?? 1);
   const [customExpr, setCustomExpr] = useState(expr);
+  // Local interval-minutes state — seeded from prop on mount. We keep a
+  // local copy so clicking a non-interval chip can still preserve the
+  // user's chosen N if they click back to 固定周期 later. Parent is
+  // notified via `onIntervalChange`.
+  const [intervalValue, setIntervalValue] = useState<number>(
+    intervalMinutes ?? DEFAULT_INTERVAL,
+  );
 
   // Description + next times (for both modes)
   const [description, setDescription] = useState('');
   const [parseError, setParseError] = useState('');
   const [nextTimes, setNextTimes] = useState<string[]>([]);
 
-  // When visual state changes, build cron and notify parent
+  // Stabilize `onChange` via a ref so the sync effect below doesn't depend
+  // on consumer callback identity. Parents commonly pass inline
+  // `setCronExpression={(v) => setDraft((d) => ({ ...d, cronExpression: v }))}`
+  // style setters (e.g. `TaskEditPanel`) whose identity changes on every
+  // parent render. Without this ref, `syncVisualToParent` re-created each
+  // render → effect re-fires → calls `onChange` → parent re-renders →
+  // infinite loop (React error #185 when the user interacts with the time
+  // dropdown).
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
+
+  // When visual state changes, build cron and notify parent. The
+  // 'interval' freq is special: it clears the cron expression (so the
+  // backend falls through to `intervalMinutes`) and is *not* a cron
+  // shape, so we never call `buildCronFromVisual` for it.
+  const onIntervalChangeRef = useRef(onIntervalChange);
+  useEffect(() => {
+    onIntervalChangeRef.current = onIntervalChange;
+  }, [onIntervalChange]);
+
   const syncVisualToParent = useCallback(() => {
     if (mode !== 'visual') return;
+    if (freq === 'interval') {
+      onChangeRef.current('', tz);
+      onIntervalChangeRef.current?.(intervalValue);
+      return;
+    }
     const newExpr = buildCronFromVisual(freq, hour, minute, weekdays, monthDay);
-    onChange(newExpr, tz);
-  }, [mode, freq, hour, minute, weekdays, monthDay, tz, onChange]);
+    onChangeRef.current(newExpr, tz);
+  }, [mode, freq, hour, minute, weekdays, monthDay, tz, intervalValue]);
 
   useEffect(() => { syncVisualToParent(); }, [syncVisualToParent]);
 
-  // Parse cron for preview
+  // Parse cron for preview. Interval mode has no cron to parse — it
+  // renders its own static hint ("每 N 分钟触发") and skips both the
+  // cronstrue description and the next-3-times block.
   useEffect(() => {
+    if (mode === 'visual' && freq === 'interval') {
+      setDescription('');
+      setParseError('');
+      setNextTimes([]);
+      return;
+    }
     let cancelled = false;
     const currentExpr = mode === 'custom' ? customExpr : buildCronFromVisual(freq, hour, minute, weekdays, monthDay);
 
@@ -145,6 +232,21 @@ export default function CronExpressionInput({ expr, tz, onChange }: CronExpressi
     setFreq(f);
   }, []);
 
+  const handleIntervalInputChange = useCallback((raw: string) => {
+    const n = Math.max(MIN_INTERVAL, Math.min(MAX_INTERVAL, Number(raw) || MIN_INTERVAL));
+    setIntervalValue(n);
+    // Only notify the interval callback here. The `onChange('', tz)`
+    // that previously sat below was a duplicate of what
+    // `syncVisualToParent`'s effect emits on the next render (triggered
+    // by the setIntervalValue above) — and when a consumer (e.g.
+    // ScheduleTypeTabs) reacts to the empty-expr path by also re-
+    // emitting a schedule, the stale-closure read of intervalMinutes
+    // within the same event tick clobbered the new value. Letting the
+    // effect handle the sync serialises the two calls across a commit
+    // boundary so closures see the latest state.
+    onIntervalChangeRef.current?.(n);
+  }, []);
+
   const toggleWeekday = useCallback((day: number) => {
     setWeekdays(prev => {
       const next = prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day];
@@ -154,15 +256,15 @@ export default function CronExpressionInput({ expr, tz, onChange }: CronExpressi
 
   const handleCustomExprChange = useCallback((val: string) => {
     setCustomExpr(val);
-    onChange(val, tz);
-  }, [onChange, tz]);
+    onChangeRef.current(val, tz);
+  }, [tz]);
 
   const handleSwitchToCustom = useCallback(() => {
     const currentExpr = buildCronFromVisual(freq, hour, minute, weekdays, monthDay);
     setCustomExpr(currentExpr);
     setMode('custom');
-    onChange(currentExpr, tz);
-  }, [freq, hour, minute, weekdays, monthDay, onChange, tz]);
+    onChangeRef.current(currentExpr, tz);
+  }, [freq, hour, minute, weekdays, monthDay, tz]);
 
   const [canSwitchToVisual, setCanSwitchToVisual] = useState(true);
 
@@ -192,9 +294,12 @@ export default function CronExpressionInput({ expr, tz, onChange }: CronExpressi
     <div className="space-y-3">
       {mode === 'visual' ? (
         <>
-          {/* Frequency selector */}
+          {/* Frequency selector — `固定周期` chip is only shown when the
+              caller opted in via `intervalMinutes` + `onIntervalChange`.
+              Chat tab's ScheduleTypeTabs passes it; pre-v0.1.69 callers
+              that don't get the same 5th chip and keep the legacy 4. */}
           <div className="flex flex-wrap gap-1.5">
-            {FREQ_OPTIONS.map(opt => (
+            {visibleFreqOptions.map(opt => (
               <button
                 key={opt.value}
                 type="button"
@@ -210,56 +315,80 @@ export default function CronExpressionInput({ expr, tz, onChange }: CronExpressi
             ))}
           </div>
 
-          {/* Time picker */}
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-[var(--ink-muted)]">时间</span>
-            <CustomSelect value={String(hour)} options={HOUR_OPTIONS} onChange={v => setHour(Number(v))} compact className="w-20" />
-            <span className="text-sm text-[var(--ink-muted)]">:</span>
-            <CustomSelect value={String(minute)} options={MINUTE_OPTIONS} onChange={v => setMinute(Number(v))} compact className="w-20" />
-          </div>
-
-          {/* Weekly: day picker */}
-          {freq === 'weekly' && (
-            <div className="flex items-center gap-1.5">
-              <span className="mr-1 text-xs text-[var(--ink-muted)]">周几</span>
-              {WEEKDAY_LABELS.map((label, i) => {
-                const cronDay = WEEKDAY_CRON[i];
-                const isSelected = weekdays.includes(cronDay);
-                return (
-                  <button
-                    key={label}
-                    type="button"
-                    onClick={() => toggleWeekday(cronDay)}
-                    className={`flex h-7 w-7 items-center justify-center rounded-full text-[12px] font-medium transition-colors ${
-                      isSelected
-                        ? 'bg-[var(--accent)] text-white'
-                        : 'bg-[var(--paper)] border border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--line-strong)]'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Monthly: day picker */}
-          {freq === 'monthly' && (
+          {/* Interval mode: single "每 N 分钟" input. Replaces the
+              time/weekday/month pickers entirely — interval schedules
+              fire every N minutes regardless of clock time, so those
+              pickers are meaningless here. */}
+          {freq === 'interval' ? (
             <div className="flex items-center gap-2">
-              <span className="text-xs text-[var(--ink-muted)]">日期</span>
-              <CustomSelect value={String(monthDay)} options={MONTHDAY_OPTIONS} onChange={v => setMonthDay(Number(v))} compact className="w-24" />
+              <span className="text-xs text-[var(--ink-muted)]">每</span>
+              <input
+                type="number"
+                min={MIN_INTERVAL}
+                max={MAX_INTERVAL}
+                value={intervalValue}
+                onChange={e => handleIntervalInputChange(e.target.value)}
+                className="w-24 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-1.5 text-[13px] text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none"
+              />
+              <span className="text-xs text-[var(--ink-muted)]">
+                分钟触发一次(最少 {MIN_INTERVAL} 分钟)
+              </span>
             </div>
-          )}
+          ) : (
+            <>
+              {/* Time picker — shared by daily / weekdays / weekly / monthly */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-[var(--ink-muted)]">时间</span>
+                <CustomSelect value={String(hour)} options={HOUR_OPTIONS} onChange={v => setHour(Number(v))} compact className="w-20" />
+                <span className="text-sm text-[var(--ink-muted)]">:</span>
+                <CustomSelect value={String(minute)} options={MINUTE_OPTIONS} onChange={v => setMinute(Number(v))} compact className="w-20" />
+              </div>
 
-          {/* Switch to custom */}
-          <button
-            type="button"
-            onClick={handleSwitchToCustom}
-            className="flex items-center gap-1 text-[11px] text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)] transition-colors"
-          >
-            <Code2 className="h-3 w-3" />
-            使用 Cron 表达式
-          </button>
+              {/* Weekly: day picker */}
+              {freq === 'weekly' && (
+                <div className="flex items-center gap-1.5">
+                  <span className="mr-1 text-xs text-[var(--ink-muted)]">周几</span>
+                  {WEEKDAY_LABELS.map((label, i) => {
+                    const cronDay = WEEKDAY_CRON[i];
+                    const isSelected = weekdays.includes(cronDay);
+                    return (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() => toggleWeekday(cronDay)}
+                        className={`flex h-7 w-7 items-center justify-center rounded-full text-[12px] font-medium transition-colors ${
+                          isSelected
+                            ? 'bg-[var(--accent)] text-white'
+                            : 'bg-[var(--paper)] border border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--line-strong)]'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Monthly: day picker */}
+              {freq === 'monthly' && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-[var(--ink-muted)]">日期</span>
+                  <CustomSelect value={String(monthDay)} options={MONTHDAY_OPTIONS} onChange={v => setMonthDay(Number(v))} compact className="w-24" />
+                </div>
+              )}
+
+              {/* Switch to custom — hidden in interval mode (cron has
+                  no clean way to express "every N minutes" for N > 59). */}
+              <button
+                type="button"
+                onClick={handleSwitchToCustom}
+                className="flex items-center gap-1 text-[11px] text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)] transition-colors"
+              >
+                <Code2 className="h-3 w-3" />
+                使用 Cron 表达式
+              </button>
+            </>
+          )}
         </>
       ) : (
         <>
@@ -298,25 +427,32 @@ export default function CronExpressionInput({ expr, tz, onChange }: CronExpressi
         </>
       )}
 
-      {/* Preview (always shown) */}
-      {description && !parseError && (
-        <div className="rounded-[var(--radius-sm)] border border-[var(--line)] px-3 py-2">
-          <p className="text-[13px] font-medium text-[var(--ink-secondary)]">{description}</p>
-          {nextTimes.length > 0 && (
-            <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
-              {nextTimes.map((time, i) => (
-                <span key={i} className="text-[11px] text-[var(--ink-muted)]">• {time}</span>
-              ))}
-            </div>
-          )}
-        </div>
+      {/* Preview (cron description + next-3 times). Hidden in interval
+          mode — there's no cron to describe and "next fire" depends on
+          when the task was dispatched, not the clock. */}
+      {mode === 'visual' && freq === 'interval' ? null : (
+        description && !parseError && (
+          <div className="rounded-[var(--radius-sm)] border border-[var(--line)] px-3 py-2">
+            <p className="text-[13px] font-medium text-[var(--ink-secondary)]">{description}</p>
+            {nextTimes.length > 0 && (
+              <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
+                {nextTimes.map((time, i) => (
+                  <span key={i} className="text-[11px] text-[var(--ink-muted)]">• {time}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        )
       )}
 
-      {/* Timezone */}
-      <div className="flex items-center gap-2">
-        <span className="text-xs text-[var(--ink-muted)]">时区</span>
-        <CustomSelect value={tz} options={tzOptions} onChange={v => onChange(mode === 'custom' ? customExpr : buildCronFromVisual(freq, hour, minute, weekdays, monthDay), v)} compact className="w-48" />
-      </div>
+      {/* Timezone — also irrelevant for interval mode (an N-minute
+          cadence is timezone-independent). */}
+      {!(mode === 'visual' && freq === 'interval') && (
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[var(--ink-muted)]">时区</span>
+          <CustomSelect value={tz} options={tzOptions} onChange={v => onChangeRef.current(mode === 'custom' ? customExpr : buildCronFromVisual(freq, hour, minute, weekdays, monthDay), v)} compact className="w-48" />
+        </div>
+      )}
     </div>
   );
 }

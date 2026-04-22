@@ -6,10 +6,12 @@
 import { randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
-import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveClaudeCodeCli, buildClaudeSessionEnv } from './agent-session';
+import { ensureDirSync } from './utils/fs-utils';
+import { getLastBridgeError } from './openai-bridge';
 // Subscription types (keep in sync with src/renderer/types/subscription.ts)
 export interface SubscriptionInfo {
   accountUuid?: string;
@@ -78,6 +80,13 @@ async function verifyViaSdk(
     logPrefix: string;
     parseError: (text: string, originalText?: string) => VerifyError;
     settingSources: ('user' | 'project')[];
+    /**
+     * Real upstream baseUrl this verify targets (user-config baseUrl, NOT the
+     * loopback ANTHROPIC_BASE_URL we set for OpenAI-bridge mode). Used to
+     * scope bridge-error diagnostics so a concurrent verify of a DIFFERENT
+     * provider can't leak its error into this one's timeout message.
+     */
+    upstreamBaseUrlForDiagnostics?: string;
   },
 ): Promise<{ success: boolean; error?: string; detail?: string }> {
   const TIMEOUT_MS = 30000;
@@ -94,7 +103,7 @@ async function verifyViaSdk(
     // Use ~/.myagents/projects/ as cwd — a dedicated app directory with guaranteed permissions.
     // Avoids potential permission or .claude/ config issues in home directory.
     const cwd = join(homedir(), '.myagents', 'projects');
-    mkdirSync(cwd, { recursive: true });
+    ensureDirSync(cwd);
 
     async function* simplePrompt() {
       yield {
@@ -146,11 +155,36 @@ async function verifyViaSdk(
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<{ success: false; error: string; detail?: string }>((resolve) => {
       timeoutId = setTimeout(() => {
-        // Priority: real API error collected during retries > stderr > generic timeout
+        // Priority: real API error collected > bridge connect failure > stderr > generic timeout
         if (firstAuthError) {
           console.log(`[${logPrefix}] timeout but have auth error collected, using it`);
           resolve({ success: false, error: firstAuthError.error, detail: firstAuthError.detail });
           return;
+        }
+        // OpenAI-bridge connect failures (TLS rejection, socket closed, proxy interception, …)
+        // never reach the SDK as `assistant.error` — the SDK sees our 502 and retries until the
+        // outer timeout fires. Inspect the bridge's last-error ref and surface the real reason
+        // ONLY when we can prove the error belongs to this verify:
+        //   (1) caller supplied its real upstream baseUrl (opt-in — subscription / direct
+        //       Anthropic paths don't pass it because they aren't bridge-routed; staying silent
+        //       there avoids leaking unrelated concurrent bridge traffic into their timeout);
+        //   (2) bridge-error timestamp is inside our verify window;
+        //   (3) bridge-error upstreamUrl matches ours at a path boundary (exact match OR
+        //       startsWith baseUrl+'/...'), so neighboring prefixes like `.../v1` vs `.../v11/...`
+        //       don't cross-match across providers on the same host.
+        // Purely informational transparency — nothing about retry or success logic changes.
+        const expectedBase = opts.upstreamBaseUrlForDiagnostics;
+        if (expectedBase) {
+          const bridgeErr = getLastBridgeError();
+          const normalizedBase = expectedBase.replace(/\/+$/, '');
+          const urlMatches = !!bridgeErr
+            && (bridgeErr.upstreamUrl === normalizedBase
+              || bridgeErr.upstreamUrl.startsWith(normalizedBase + '/'));
+          if (bridgeErr && bridgeErr.timestamp >= startTime && urlMatches) {
+            console.log(`[${logPrefix}] timeout with bridge error in window: ${bridgeErr.message}`);
+            resolve({ success: false, error: `无法连接到供应商：${bridgeErr.message}` });
+            return;
+          }
         }
         const stderrHint = stderrMessages.length > 0
           ? ` (stderr: ${stderrMessages.join('; ').slice(0, 200)})`
@@ -282,6 +316,12 @@ export async function verifyProviderViaSdk(
     // MUST NOT use 'user' — it reads ~/.claude/settings.json which may contain
     // enabledPlugins causing 30s+ initialization and triggering our timeout.
     settingSources: ['project'],
+    // Scope bridge-error diagnostics to this provider's real upstream — but
+    // ONLY when the OpenAI bridge is actually in play. Anthropic-protocol
+    // providers call their baseUrl directly (no bridge), so any bridge error
+    // in the window belongs to some OTHER concurrent session, not us. See
+    // verifyViaSdk.opts.upstreamBaseUrlForDiagnostics docstring.
+    upstreamBaseUrlForDiagnostics: apiProtocol === 'openai' ? baseUrl : undefined,
   });
 }
 
@@ -293,7 +333,7 @@ export async function verifyProviderViaSdk(
 export async function fetchSdkSupportedModels(): Promise<Array<{ value: string; displayName: string; description: string }>> {
   const cliPath = resolveClaudeCodeCli();
   const cwd = join(homedir(), '.myagents', 'projects');
-  mkdirSync(cwd, { recursive: true });
+  ensureDirSync(cwd);
 
   // Use default Anthropic env (includes proxy config, NO_PROXY etc.)
   const env = buildClaudeSessionEnv();

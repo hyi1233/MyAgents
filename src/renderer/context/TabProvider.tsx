@@ -15,6 +15,7 @@ import type { ReactNode } from 'react';
 
 import { track } from '@/analytics';
 import { generateSessionTitle } from '@/api/sessionClient';
+import type { SessionMetadata } from '@/api/sessionClient';
 import { createSseConnection, type SseConnection } from '@/api/SseConnection';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
@@ -29,7 +30,7 @@ import type { TerminalReason } from '../../shared/terminalReason';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
-import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar } from '@/api/tauriClient';
+import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache } from '@/api/tauriClient';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { refreshWorkspaceFileIndex } from '@/api/searchClient';
 import type { PermissionMode } from '@/config/types';
@@ -309,6 +310,7 @@ export default function TabProvider({
     const loadingOlderRef = useRef(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
     const [sessionRuntime, setSessionRuntime] = useState<string | null>(null);
+    const [sessionMeta, setSessionMeta] = useState<SessionMetadata | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const [unifiedLogs, setUnifiedLogs] = useState<LogEntry[]>([]);
     const [systemInitInfo, setSystemInitInfo] = useState<SystemInitInfo | null>(null);
@@ -467,6 +469,7 @@ export default function TabProvider({
         setLastTerminalReason(null);
         setUnifiedLogs([]);
         setLogs([]);
+        setSessionMeta(null);
         clearInteractiveState();
         // Reset auto-title state for new conversation
         autoTitleAttemptedRef.current = false;
@@ -601,6 +604,30 @@ export default function TabProvider({
             };
         });
     }, [setStreamingMessage]);
+
+    /**
+     * Drain any RAF-batched text chunks into the React update queue BEFORE a new content block
+     * starts (tool_use / server_tool_use / thinking).
+     *
+     * Without this, the handler race goes:
+     *   1. chat:message-chunk pushes into pendingChunksRef + schedules RAF  (NO state update yet)
+     *   2. chat:tool-use-start runs synchronously and setStreamingMessage-appends a tool block
+     *   3. RAF fires → flushPendingChunks sees tool block as last, so it opens a NEW text block
+     *      after the tool — splitting what was logically one continuous SDK text block into
+     *      [text-head] [tool] [text-tail] with the tool card wedged mid-sentence.
+     *
+     * Calling this before any block-starting handler enqueues the pending-text updater first,
+     * so React applies `merge-into-last-text-block` before `append-new-block`.
+     */
+    const flushPendingChunksNow = useCallback(() => {
+        if (rafIdRef.current) {
+            cancelAnimationFrame(rafIdRef.current);
+            rafIdRef.current = null;
+        }
+        if (pendingChunksRef.current.length > 0) {
+            flushPendingChunks();
+        }
+    }, [flushPendingChunks]);
 
     // Cleanup RAF on unmount
     useEffect(() => {
@@ -914,6 +941,10 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping thinking-start (new session, stale event)');
                     break;
                 }
+                // Drain RAF-batched text chunks before opening a new thinking block,
+                // otherwise the trailing text of the previous text block lands AFTER the
+                // thinking block (see flushPendingChunksNow docstring).
+                flushPendingChunksNow();
                 const { index } = data as { index: number };
                 setStreamingMessage(prev => {
                     const thinkingBlock: ContentBlock = {
@@ -966,6 +997,10 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping tool-use-start (new session, stale event)');
                     break;
                 }
+                // Drain RAF-batched text chunks before opening the tool block, otherwise the
+                // tool card ends up wedged inside a single SDK text block (see
+                // flushPendingChunksNow docstring — this is the primary bug the helper fixes).
+                flushPendingChunksNow();
                 const tool = data as ToolUse;
 
                 // Track tool_use event
@@ -1019,6 +1054,9 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping server-tool-use-start (new session, stale event)');
                     break;
                 }
+                // Drain RAF-batched text chunks before opening the tool block (see
+                // flushPendingChunksNow docstring).
+                flushPendingChunksNow();
                 const tool = data as ToolUse;
 
                 // Track tool_use event (server-side tools)
@@ -1356,9 +1394,19 @@ export default function TabProvider({
             }
 
             case 'chat:system-init': {
-                const payload = data as { info: SystemInitInfo; sessionId?: string; prewarm?: boolean } | null;
+                const payload = data as { info: SystemInitInfo; sessionId?: string; prewarm?: boolean; runtime?: string } | null;
                 if (payload?.info) {
                     setSystemInitInfo(payload.info);
+                    // v0.1.69: backend tags every system-init with the runtime that
+                    // actually spawned the process (builtin / claude-code / codex /
+                    // gemini). Freezing it here means a session created in this tab
+                    // gets its sessionRuntime set on first system-init and is never
+                    // affected by later agent.runtime changes — Chat.tsx's
+                    // currentRuntime = sessionRuntime ?? agentRuntime then keeps the
+                    // bottom-bar display consistent with how messages route.
+                    if (payload.runtime) {
+                        setSessionRuntime(payload.runtime);
+                    }
 
                     // Mark session as active (prevents loadSession from interrupting) and loading.
                     // Do NOT set isStreamingRef — that must only be set when a streaming message
@@ -1806,7 +1854,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, clearSessionActive, resetPaginationState]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, flushPendingChunksNow, clearSessionActive, resetPaginationState]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -1847,6 +1895,14 @@ export default function TabProvider({
             // ensureSessionSidecar includes health check — sidecar is ready when it returns
             await ensureSessionSidecar(sid, agentDir, 'tab', tabId);
             if (!isMountedRef.current) return;
+            // Invalidate the per-tab URL cache before reconnecting. The restart
+            // may have bound a new port, and direct `getTabServerUrl(tabId)`
+            // consumers (Markdown, FileAction, DirectoryPanel) would otherwise
+            // hit the stale cached URL forever. SSE / session-keyed HTTP auto
+            // pick the new port via `getSessionPort`, but tab-keyed callers
+            // need an explicit bust. This keeps the pit-of-success guarantee
+            // symmetric across startup AND mid-session recovery.
+            resetTabServerUrlCache(tabId);
             // Disconnect old SSE and reconnect with fresh port
             if (sseRef.current) {
                 await sseRef.current.disconnect();
@@ -1864,8 +1920,16 @@ export default function TabProvider({
         }
     }, [tabId, agentDir]);
 
-    // Connect SSE
-    // Uses Session-centric port lookup via currentSessionIdRef
+    // Connect SSE.
+    // Uses Session-centric port lookup via currentSessionIdRef.
+    //
+    // No explicit boot-window retry here — `sse.connect()` internally calls
+    // `getTabServerUrl()`, which as of v0.1.69 waits for the Sidecar to
+    // become ready (polls `cmd_get_tab_server_url` with backoff up to ~9s)
+    // instead of throwing on the first miss. The AI-讨论 pre-seed race
+    // (Chat mounts before `ensureSessionSidecar` finishes) is absorbed at
+    // the `tauriClient` layer so every consumer — SSE, HTTP, DirectoryPanel,
+    // model push — is automatically correct. See `tauriClient.getTabServerUrl`.
     const connectSse = useCallback(async () => {
         if (sseRef.current?.isConnected()) return;
 
@@ -2344,6 +2408,12 @@ export default function TabProvider({
             // Old sessions (pre-v0.1.60) have no runtime field → treat as 'builtin'.
             // null is reserved strictly for "session not loaded yet" (initial state).
             setSessionRuntime(response.session.runtime || 'builtin');
+            // Strip SessionData.messages so sessionMeta holds just the metadata slice
+            // (prevents accidental reliance on .messages elsewhere and keeps the
+            // snapshot concept clean — SessionData is a superset of SessionMetadata).
+            const { messages: _meta_messages, ...metaOnly } = response.session as SessionMetadata & { messages?: unknown };
+            void _meta_messages;
+            setSessionMeta(metaOnly as SessionMetadata);
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
             if (!options?.skipLoadingReset) {
@@ -2789,6 +2859,7 @@ export default function TabProvider({
         isSessionLoading,
         sessionState,
         sessionRuntime,
+        sessionMeta,
         logs,
         unifiedLogs,
         systemInitInfo,
@@ -2811,6 +2882,7 @@ export default function TabProvider({
         setSystemInitInfo,
         setAgentError,
         setLastTerminalReason,
+        setSessionMeta,
         connectSse,
         disconnectSse,
         sendMessage,
@@ -2831,7 +2903,7 @@ export default function TabProvider({
         // Cron task exit handler ref (mutable, no need in deps)
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
-        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime,
+        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage

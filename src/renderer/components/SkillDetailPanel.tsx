@@ -14,6 +14,7 @@ import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Markdown from '@/components/Markdown';
 import MonacoEditor from '@/components/MonacoEditor';
+import { Popover } from '@/components/ui/Popover';
 import type { SkillFrontmatter, SkillDetail } from '../../shared/skillsTypes';
 import { sanitizeFolderName } from '../../shared/utils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
@@ -94,8 +95,8 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
         // 下拉菜单状态
         const [showContextMenu, setShowContextMenu] = useState(false);
         const [showAgentMenu, setShowAgentMenu] = useState(false);
-        const contextMenuRef = useRef<HTMLDivElement>(null);
-        const agentMenuRef = useRef<HTMLDivElement>(null);
+        const contextBtnRef = useRef<HTMLButtonElement>(null);
+        const agentBtnRef = useRef<HTMLButtonElement>(null);
 
         // 输入框 refs 用于焦点控制
         const nameInputRef = useRef<HTMLInputElement>(null);
@@ -170,19 +171,8 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
             loadSkill();
         }, [name, scope, agentDir, startInEditMode, api, isInTabContext]);
 
-        // 点击外部关闭下拉菜单
-        useEffect(() => {
-            const handleClickOutside = (e: MouseEvent) => {
-                if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
-                    setShowContextMenu(false);
-                }
-                if (agentMenuRef.current && !agentMenuRef.current.contains(e.target as Node)) {
-                    setShowAgentMenu(false);
-                }
-            };
-            document.addEventListener('click', handleClickOutside);
-            return () => document.removeEventListener('click', handleClickOutside);
-        }, []);
+        // Outside-click + Escape are handled by the `<Popover>` primitive
+        // on each dropdown below.
 
         const handleEdit = useCallback((field?: 'name' | 'description' | 'body') => {
             setFocusField(field || 'name');
@@ -626,112 +616,122 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                 {/* Context - 自定义下拉 */}
                                 <div>
                                     <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">执行上下文</label>
-                                    <div className="relative" ref={contextMenuRef}>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (isEditing) {
-                                                    setShowContextMenu(!showContextMenu);
-                                                    setShowAgentMenu(false);
-                                                } else {
-                                                    handleEdit();
-                                                }
-                                            }}
-                                            className={`flex w-full items-center justify-between rounded-lg border border-[var(--line)] px-3 py-2 text-left text-sm transition-colors ${
-                                                isEditing ? 'bg-[var(--paper)] hover:border-[var(--ink-muted)]/50' : 'bg-[var(--paper-inset)]/30 opacity-70'
-                                            }`}
-                                        >
-                                            <span className={context ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
-                                                {context === 'fork' ? 'fork (独立子代理)' : '默认 (主会话上下文)'}
-                                            </span>
-                                            <ChevronDown className="h-4 w-4 text-[var(--ink-muted)]" />
-                                        </button>
-                                        {showContextMenu && isEditing && (
-                                            <div className="absolute left-0 top-full z-50 mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-lg">
-                                                {[
-                                                    { value: '', label: '默认 (主会话上下文)', desc: '在当前对话上下文中执行' },
-                                                    { value: 'fork', label: 'fork (独立子代理)', desc: '在独立的子代理中执行' },
-                                                ].map((option) => (
-                                                    <button
-                                                        key={option.value}
-                                                        type="button"
-                                                        onClick={() => {
-                                                            setContext(option.value);
-                                                            setShowContextMenu(false);
-                                                        }}
-                                                        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-inset)] ${
-                                                            context === option.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
-                                                        }`}
-                                                    >
-                                                        <div>
-                                                            <div className="font-medium">{option.label}</div>
-                                                            <div className="text-xs text-[var(--ink-muted)]">{option.desc}</div>
-                                                        </div>
-                                                        {context === option.value && <Check className="h-4 w-4" />}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
+                                    <button
+                                        ref={contextBtnRef}
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (isEditing) {
+                                                setShowContextMenu(!showContextMenu);
+                                                setShowAgentMenu(false);
+                                            } else {
+                                                handleEdit();
+                                            }
+                                        }}
+                                        className={`flex w-full items-center justify-between rounded-lg border border-[var(--line)] px-3 py-2 text-left text-sm transition-colors ${
+                                            isEditing ? 'bg-[var(--paper)] hover:border-[var(--ink-muted)]/50' : 'bg-[var(--paper-inset)]/30 opacity-70'
+                                        }`}
+                                    >
+                                        <span className={context ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
+                                            {context === 'fork' ? 'fork (独立子代理)' : '默认 (主会话上下文)'}
+                                        </span>
+                                        <ChevronDown className="h-4 w-4 text-[var(--ink-muted)]" />
+                                    </button>
+                                    <Popover
+                                        open={showContextMenu && isEditing}
+                                        onClose={() => setShowContextMenu(false)}
+                                        anchorRef={contextBtnRef}
+                                        placement="bottom-start"
+                                        matchAnchorWidth
+                                        zIndex={50}
+                                        className="py-1 shadow-lg"
+                                    >
+                                        {[
+                                            { value: '', label: '默认 (主会话上下文)', desc: '在当前对话上下文中执行' },
+                                            { value: 'fork', label: 'fork (独立子代理)', desc: '在独立的子代理中执行' },
+                                        ].map((option) => (
+                                            <button
+                                                key={option.value}
+                                                type="button"
+                                                onClick={() => {
+                                                    setContext(option.value);
+                                                    setShowContextMenu(false);
+                                                }}
+                                                className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-inset)] ${
+                                                    context === option.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
+                                                }`}
+                                            >
+                                                <div>
+                                                    <div className="font-medium">{option.label}</div>
+                                                    <div className="text-xs text-[var(--ink-muted)]">{option.desc}</div>
+                                                </div>
+                                                {context === option.value && <Check className="h-4 w-4" />}
+                                            </button>
+                                        ))}
+                                    </Popover>
                                 </div>
 
                                 {/* Agent - 自定义下拉 */}
                                 <div>
                                     <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">代理类型</label>
-                                    <div className="relative" ref={agentMenuRef}>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (isEditing) {
-                                                    setShowAgentMenu(!showAgentMenu);
-                                                    setShowContextMenu(false);
-                                                } else {
-                                                    handleEdit();
-                                                }
-                                            }}
-                                            className={`flex w-full items-center justify-between rounded-lg border border-[var(--line)] px-3 py-2 text-left text-sm transition-colors ${
-                                                isEditing ? 'bg-[var(--paper)] hover:border-[var(--ink-muted)]/50' : 'bg-[var(--paper-inset)]/30 opacity-70'
-                                            }`}
-                                        >
-                                            <span className={agent ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
-                                                {agent === 'Explore' && 'Explore (探索代理)'}
-                                                {agent === 'Plan' && 'Plan (规划代理)'}
-                                                {agent === 'general-purpose' && 'general-purpose (通用代理)'}
-                                                {!agent && '默认 (自动选择)'}
-                                            </span>
-                                            <ChevronDown className="h-4 w-4 text-[var(--ink-muted)]" />
-                                        </button>
-                                        {showAgentMenu && isEditing && (
-                                            <div className="absolute left-0 top-full z-50 mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-lg">
-                                                {[
-                                                    { value: '', label: '默认 (自动选择)', desc: '由 Claude 根据任务自动选择' },
-                                                    { value: 'Explore', label: 'Explore (探索代理)', desc: '适合代码搜索和探索任务' },
-                                                    { value: 'Plan', label: 'Plan (规划代理)', desc: '适合方案设计和任务规划' },
-                                                    { value: 'general-purpose', label: 'general-purpose (通用代理)', desc: '通用任务处理' },
-                                                ].map((option) => (
-                                                    <button
-                                                        key={option.value}
-                                                        type="button"
-                                                        onClick={() => {
-                                                            setAgent(option.value);
-                                                            setShowAgentMenu(false);
-                                                        }}
-                                                        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-inset)] ${
-                                                            agent === option.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
-                                                        }`}
-                                                    >
-                                                        <div>
-                                                            <div className="font-medium">{option.label}</div>
-                                                            <div className="text-xs text-[var(--ink-muted)]">{option.desc}</div>
-                                                        </div>
-                                                        {agent === option.value && <Check className="h-4 w-4" />}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
+                                    <button
+                                        ref={agentBtnRef}
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (isEditing) {
+                                                setShowAgentMenu(!showAgentMenu);
+                                                setShowContextMenu(false);
+                                            } else {
+                                                handleEdit();
+                                            }
+                                        }}
+                                        className={`flex w-full items-center justify-between rounded-lg border border-[var(--line)] px-3 py-2 text-left text-sm transition-colors ${
+                                            isEditing ? 'bg-[var(--paper)] hover:border-[var(--ink-muted)]/50' : 'bg-[var(--paper-inset)]/30 opacity-70'
+                                        }`}
+                                    >
+                                        <span className={agent ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
+                                            {agent === 'Explore' && 'Explore (探索代理)'}
+                                            {agent === 'Plan' && 'Plan (规划代理)'}
+                                            {agent === 'general-purpose' && 'general-purpose (通用代理)'}
+                                            {!agent && '默认 (自动选择)'}
+                                        </span>
+                                        <ChevronDown className="h-4 w-4 text-[var(--ink-muted)]" />
+                                    </button>
+                                    <Popover
+                                        open={showAgentMenu && isEditing}
+                                        onClose={() => setShowAgentMenu(false)}
+                                        anchorRef={agentBtnRef}
+                                        placement="bottom-start"
+                                        matchAnchorWidth
+                                        zIndex={50}
+                                        className="py-1 shadow-lg"
+                                    >
+                                        {[
+                                            { value: '', label: '默认 (自动选择)', desc: '由 Claude 根据任务自动选择' },
+                                            { value: 'Explore', label: 'Explore (探索代理)', desc: '适合代码搜索和探索任务' },
+                                            { value: 'Plan', label: 'Plan (规划代理)', desc: '适合方案设计和任务规划' },
+                                            { value: 'general-purpose', label: 'general-purpose (通用代理)', desc: '通用任务处理' },
+                                        ].map((option) => (
+                                            <button
+                                                key={option.value}
+                                                type="button"
+                                                onClick={() => {
+                                                    setAgent(option.value);
+                                                    setShowAgentMenu(false);
+                                                }}
+                                                className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-inset)] ${
+                                                    agent === option.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
+                                                }`}
+                                            >
+                                                <div>
+                                                    <div className="font-medium">{option.label}</div>
+                                                    <div className="text-xs text-[var(--ink-muted)]">{option.desc}</div>
+                                                </div>
+                                                {agent === option.value && <Check className="h-4 w-4" />}
+                                            </button>
+                                        ))}
+                                    </Popover>
                                 </div>
 
                                 {/* Argument Hint */}

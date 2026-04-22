@@ -348,15 +348,18 @@ Hover 文字: var(--ink)
 Hover: 添加 var(--shadow-sm)
 ```
 
-#### 紧凑卡片（Grid 内技能/Agent/命令/IM Bot）
+#### 紧凑卡片（Grid 内技能/命令/工作区 + 任务中心想法/任务）
 ```
 背景: var(--paper-elevated)
-边框: 1px solid var(--line)
-圆角: var(--radius-lg)
+边框: 无（v2.3+）
+圆角: var(--radius-lg) 或 --radius-xl
 内边距: var(--space-4) (p-4, 16px)
-Hover: border-color 加深至 var(--line-strong), 添加 var(--shadow-sm), translate-y-[-1px] 微上浮
-动效: transition-all（颜色 + 阴影 + 位移同步过渡）
+静态: 无阴影（纯填色，融在底纸上）
+Hover: shadow-sm（0 2px 8px rgb(28 22 18 / 0.08)）
+动效: transition-shadow（仅阴影过渡，无边框/位移）
 ```
+
+**v2.3 变更原因**：同一列表密集堆叠 N 张卡时，边框 + hover 位移会让页面显得"稀碎"。取消边框、用阴影强度变化承载 hover 反馈，卡片更像"漂在温暖纸张上"，静态整体感更强。
 
 ### 6.3 输入框 (Inputs)
 
@@ -600,10 +603,12 @@ transition: background var(--duration-fast),
             border-color var(--duration-fast),
             transform var(--duration-fast);
 
-/* 点击反馈 — 统一 scale(0.98)，全局生效 */
-button:active:not(:disabled),
-[role="button"]:active,
-[data-tree-row]:active {
+/* 点击反馈 — 统一 scale(0.98)，全局生效
+   `:not(:has(...))` 保证只有最内层被按下的元素缩放；点卡片内部按钮时，
+   外层卡片不会跟着动。 */
+button:active:not(:disabled):not(:has(:is(button, [role="button"], [data-tree-row]):active)),
+[role="button"]:active:not(:has(:is(button, [role="button"], [data-tree-row]):active)),
+[data-tree-row]:active:not(:has(:is(button, [role="button"], [data-tree-row]):active)) {
   transform: scale(0.98);
 }
 

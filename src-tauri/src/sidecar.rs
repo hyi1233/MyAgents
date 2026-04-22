@@ -2448,6 +2448,7 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
                     "[sidecar] Session {} Sidecar still starting on port {}, adding owner {:?}",
                     session_id, sidecar.port, owner
                 );
+                validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-starting");
                 sidecar.add_owner(owner);
                 return Ok(EnsureSidecarResult { port: sidecar.port, is_new: false });
             }
@@ -2485,6 +2486,7 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
                         "[sidecar] Session {} replacement on port {} is {:?}, adding owner and returning",
                         session_id, sidecar.port, sidecar.state
                     );
+                    validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-replacement");
                     sidecar.add_owner(owner);
                     return Ok(EnsureSidecarResult {
                         port: sidecar.port,
@@ -2501,6 +2503,7 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
                         "[sidecar] Session {} Sidecar HTTP healthy on port {}, adding owner {:?}",
                         session_id, port, owner
                     );
+                    validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-http-healthy");
                     sidecar.add_owner(owner);
                     return Ok(EnsureSidecarResult {
                         port,
@@ -4015,4 +4018,41 @@ fn resolve_session_runtime(session_id: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// v0.1.69 T13: Runtime invariant check on Sidecar reuse.
+///
+/// Under the v0.1.69 layered-snapshot model, a session's `runtime` is part of
+/// its immutable identity (stamped at creation in sessions.json). The Sidecar
+/// was spawned with MYAGENTS_RUNTIME derived from the owner-aware priority
+/// chain. These two MUST stay aligned for the lifetime of the Sidecar — a
+/// cross-runtime session switch opens a new Tab (Scenario 1.5 / T12), it
+/// doesn't swap the runtime under a live Sidecar.
+///
+/// If we detect a mismatch on a reuse path, it indicates either:
+///   (a) T12's new-tab gate missed a case
+///   (b) Session metadata was mutated post-creation (shouldn't happen)
+///   (c) Two sessions with different runtimes ended up sharing a sidecar entry
+///
+/// We log loudly with `[sidecar][runtime-drift-on-reuse]` so the bug surfaces
+/// in `grep` of unified logs, but do NOT kill the sidecar. Killing here could
+/// orphan shared desktop owners whose SSE streams depend on it — the
+/// invariant violation is worth investigating, not worth amplifying into a
+/// user-visible regression. The IM-router drift check at
+/// `kill_sidecar_if_runtime_differs` is still the correct place to kill, and
+/// only fires when all owners are Agent-type.
+fn validate_sidecar_runtime_invariant(
+    session_id: &str,
+    sidecar_runtime: Option<&str>,
+    site: &str,
+) {
+    let sidecar_rt = sidecar_runtime.unwrap_or("builtin");
+    let session_rt = resolve_session_runtime(session_id);
+    let session_rt_str = session_rt.as_deref().unwrap_or("builtin");
+    if sidecar_rt != session_rt_str {
+        ulog_error!(
+            "[sidecar][runtime-drift-on-reuse] session={} site={} sidecar_runtime={} session_runtime={} — T12 gate may have missed a case; not killing to avoid orphaning shared owners",
+            session_id, site, sidecar_rt, session_rt_str
+        );
+    }
 }

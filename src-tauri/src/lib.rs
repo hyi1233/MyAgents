@@ -9,15 +9,18 @@ pub mod cron_task;
 pub mod im;
 pub mod local_http;
 pub mod logger;
+pub mod legacy_upgrade;
 pub mod management_api;
 pub mod process_cmd;
 mod proxy_config;
 pub mod system_binary;
 mod sidecar;
 mod sse_proxy;
+pub mod task;
 pub mod terminal;
 pub mod browser;
 pub mod search;
+pub mod thought;
 mod tray;
 mod updater;
 
@@ -101,6 +104,18 @@ pub fn run() {
     let browser_state_for_exit = browser_state.clone();
     let browser_state_for_window = browser_state.clone();
 
+    // Create Task Center state (v0.1.69 — thought & task stores)
+    let data_dir = app_dirs::myagents_data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let thought_state: thought::ManagedThoughtStore =
+        Arc::new(thought::ThoughtStore::new(data_dir.join("thoughts")));
+    let task_state: task::ManagedTaskStore =
+        Arc::new(task::TaskStore::new(data_dir.clone()));
+    // Expose the same Arcs via OnceLock singletons so the Rust Management API
+    // (used by Bun CLI bridge → /api/admin/task/*) can read/write tasks without
+    // access to Tauri `State`. They point at the same inner store.
+    thought::set_thought_store(thought_state.clone());
+    task::set_task_store(task_state.clone());
+
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
 
@@ -129,6 +144,8 @@ pub fn run() {
         .manage(agent_state)
         .manage(terminal_state)
         .manage(browser_state)
+        .manage(thought_state)
+        .manage(task_state)
         // SearchEngine will be added as managed state in .setup()
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
@@ -177,6 +194,8 @@ pub fn run() {
             commands::cmd_sync_admin_agent,
             // CLI sync (independent version gate)
             commands::cmd_sync_cli,
+            // System skills sync (task-alignment / task-implement etc.)
+            commands::cmd_sync_system_skills,
             // Cron task commands
             cron_task::cmd_create_cron_task,
             cron_task::cmd_start_cron_task,
@@ -272,6 +291,31 @@ pub fn run() {
             search::cmd_search_index_status,
             search::cmd_invalidate_workspace_index,
             search::cmd_refresh_workspace_index,
+            search::cmd_search_thoughts,
+            search::cmd_search_tasks,
+            // Task Center — Thought commands (v0.1.69)
+            thought::cmd_thought_create,
+            thought::cmd_thought_list,
+            thought::cmd_thought_get,
+            thought::cmd_thought_update,
+            thought::cmd_thought_delete,
+            thought::cmd_thought_open_dir,
+            // Task Center — Task commands (v0.1.69)
+            task::cmd_task_create_direct,
+            task::cmd_task_create_from_alignment,
+            task::cmd_task_list,
+            task::cmd_task_get,
+            task::cmd_task_update,
+            task::cmd_task_update_status,
+            task::cmd_task_append_session,
+            task::cmd_task_write_alignment_metadata,
+            task::cmd_task_archive,
+            task::cmd_task_delete,
+            task::cmd_task_read_doc,
+            task::cmd_task_write_doc,
+            task::cmd_task_open_docs_dir,
+            task::cmd_task_get_run_stats,
+            legacy_upgrade::cmd_task_upgrade_legacy_cron,
         ])
         .setup(|app| {
             // Initialize logging FIRST — acquire_lock() and cleanup_stale_sidecars()

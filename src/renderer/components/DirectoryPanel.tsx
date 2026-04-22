@@ -387,6 +387,9 @@ const DirectoryPanel = memo(
           setDirectoryInfo(data);
         })
         .catch((err) => {
+          // Sidecar boot races are absorbed at the `tauriClient.getTabServerUrl`
+          // layer (it waits for readiness before returning), so a failure
+          // here means something genuinely went wrong — surface it.
           setError(
             err instanceof Error
               ? err.message

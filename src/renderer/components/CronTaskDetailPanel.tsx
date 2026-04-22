@@ -4,7 +4,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BarChart2, Bell, Check, Clock, FileText, Flag, FolderOpen, History, MessageSquare, Pencil, Play, Square, Trash2, X } from 'lucide-react';
+import { ArrowUpToLine, BarChart2, Bell, Check, Clock, FileText, Flag, FolderOpen, History, MessageSquare, Pencil, Play, Square, Trash2, X } from 'lucide-react';
 
 import type { CronTask, CronSchedule, CronEndConditions } from '@/types/cronTask';
 import {
@@ -24,6 +24,8 @@ import CustomSelect from './CustomSelect';
 import TaskRunHistory from './scheduled-tasks/TaskRunHistory';
 import ScheduleTypeTabs from './scheduled-tasks/ScheduleTypeTabs';
 import * as cronClient from '@/api/cronTaskClient';
+import { getSessionDetails, type SessionMetadata } from '@/api/sessionClient';
+import { patchAgentConfig } from '@/config/services/agentConfigService';
 import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
@@ -84,9 +86,26 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
     const project = useMemo(() => projects.find(p => p.path === task.workspacePath), [projects, task.workspacePath]);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [showStopConfirm, setShowStopConfirm] = useState(false);
+    const [showSyncConfirm, setShowSyncConfirm] = useState(false);
     const [isDeleting, setIsDeleting] = useState(false);
     const [isResuming, setIsResuming] = useState(false);
     const [isStopping, setIsStopping] = useState(false);
+    const [isSyncing, setIsSyncing] = useState(false);
+    const [sessionMeta, setSessionMeta] = useState<SessionMetadata | null>(null);
+
+    // Load session metadata to detect snapshot lock (single_session mode only)
+    const internalSessionId = task.internalSessionId || task.sessionId;
+    useEffect(() => {
+        if (!internalSessionId || task.runMode !== 'single_session') return;
+        void (async () => {
+            const data = await getSessionDetails(internalSessionId);
+            if (isMountedRef.current) setSessionMeta(data);
+        })();
+    }, [internalSessionId, task.runMode]);
+
+    const canSyncToAgent = task.runMode === 'single_session'
+        && !!project?.agentId
+        && !!sessionMeta?.configSnapshotAt;
 
     // Edit mode
     const [isEditing, setIsEditing] = useState(false);
@@ -159,6 +178,31 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
     const handleResume = useCallback(async () => { setIsResuming(true); try { await onResume(task.id); } finally { if (isMountedRef.current) setIsResuming(false); } }, [task.id, onResume]);
     const handleStop = useCallback(async () => { if (!onStop) return; setIsStopping(true); try { await onStop(task.id); } catch { /* caller handles */ } finally { if (isMountedRef.current) { setIsStopping(false); setShowStopConfirm(false); } } }, [task.id, onStop]);
 
+    // v0.1.69 T16: push session snapshot back to agent (single_session owned sessions only).
+    // providerEnvJson is intentionally NOT passed — patchAgentConfig auto-resolves it from the
+    // current provider registry + API keys, so a stale-rotated key in the snapshot doesn't
+    // overwrite the agent's fresh credentials.
+    const handleSyncToAgent = useCallback(async () => {
+        if (!sessionMeta || !project?.agentId) return;
+        setIsSyncing(true);
+        try {
+            await patchAgentConfig(project.agentId, {
+                model: sessionMeta.model,
+                permissionMode: sessionMeta.permissionMode,
+                mcpEnabledServers: sessionMeta.mcpEnabledServers,
+                providerId: sessionMeta.providerId,
+            });
+            if (!isMountedRef.current) return;
+            toast.success('已同步到 Agent');
+            setShowSyncConfirm(false);
+        } catch (err) {
+            if (!isMountedRef.current) return;
+            toast.error(`同步失败: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+            if (isMountedRef.current) setIsSyncing(false);
+        }
+    }, [sessionMeta, project?.agentId, toast]);
+
     const resumeCheck = checkCanResume(task);
     const displayName = task.name || task.prompt.slice(0, 40) + (task.prompt.length > 40 ? '...' : '');
     const scheduleDesc = formatScheduleDescription(task);
@@ -177,6 +221,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
         <>
             {showDeleteConfirm && <ConfirmDialog title="删除定时任务" message={`确定要删除「${displayName}」吗？此操作不可撤销。`} confirmText="删除" cancelText="取消" confirmVariant="danger" loading={isDeleting} onConfirm={handleDelete} onCancel={() => setShowDeleteConfirm(false)} />}
             {showStopConfirm && <ConfirmDialog title="停止定时任务" message={`确定要停止「${displayName}」吗？停止后可以重新恢复。`} confirmText="停止" cancelText="取消" confirmVariant="danger" loading={isStopping} onConfirm={handleStop} onCancel={() => setShowStopConfirm(false)} />}
+            {showSyncConfirm && <ConfirmDialog title="同步到 Agent" message={`将该任务的会话配置（模型、权限模式、MCP 启用列表、供应商）写回所属 Agent。这会覆盖 Agent 当前的默认值，影响之后新开的会话。确定继续？`} confirmText="同步" cancelText="取消" loading={isSyncing} onConfirm={handleSyncToAgent} onCancel={() => setShowSyncConfirm(false)} />}
 
             <OverlayBackdrop onClose={onClose} className="z-50" style={{ animation: 'overlayFadeIn 200ms ease-out' }}>
                 <div className="flex h-[80vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg"
@@ -416,6 +461,15 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     <Trash2 className="h-3.5 w-3.5" />删除
                                 </button>
                                 <div className="flex items-center gap-2.5">
+                                    {canSyncToAgent && (
+                                        <button
+                                            onClick={() => setShowSyncConfirm(true)}
+                                            title="将该会话的锁定配置（模型 / 权限 / MCP / 供应商）写回 Agent 默认值"
+                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-4 py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors"
+                                        >
+                                            <ArrowUpToLine className="h-3.5 w-3.5" />同步到 Agent
+                                        </button>
+                                    )}
                                     <button onClick={startEditing} className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-4 py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors">
                                         <Pencil className="h-3.5 w-3.5" />编辑
                                     </button>
