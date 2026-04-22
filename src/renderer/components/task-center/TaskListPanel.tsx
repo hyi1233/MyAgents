@@ -575,7 +575,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
           the whole column visibly jump on view toggle. Both modes now
           share the same left/right gutter; the list row component
           (`TaskListRow`) keeps its own `px-3` for row-internal content. */}
-      <div className="flex-1 overflow-y-auto px-4 py-3">
+      <div className="@container flex-1 overflow-y-auto px-4 py-3">
         {loading ? (
           <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]">
             加载中…
@@ -593,7 +593,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
             return view === 'card' ? (
               <section key={b} className="mb-6">
                 <BucketHeader label={BUCKETS[b].label} count={rows.length} />
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 gap-3 @[900px]:grid-cols-3">
                   {rows.map(renderCard)}
                 </div>
               </section>
