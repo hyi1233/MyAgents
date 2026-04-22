@@ -270,14 +270,10 @@ A good alignment ends in one of these four places. Pick the right one based on w
 **① Worth doing — create the task.** Scope is clear and the user agrees it's worth the investment. After writing all four docs, invoke:
 
 ```bash
-myagents task create-from-alignment <alignmentSessionId> \
-  --name "<短任务名>" \
-  --workspaceId <workspaceId> \
-  --workspacePath <workspacePath> \
-  --sourceThoughtId <sourceThoughtId>
+myagents task create-from-alignment <alignmentSessionId> --name "<短任务名>"
 ```
 
-Substitute the four values from the prompt's parameter dictionary; pick `--name` yourself based on the task. The CLI renames the docs directory to `~/.myagents/tasks/<newTaskId>/`, backfills the source thought's `convertedTaskIds`, and registers the task with `dispatchOrigin=ai-aligned`. Then tell the user: 「已创建任务『XXX』，可在「任务」面板查看。需要现在派发执行吗？」If yes → `myagents task run <newTaskId>`.
+Only two arguments are needed: the `alignmentSessionId` (first positional, from the prompt's parameter dictionary) and `--name` (pick one yourself based on the discussion). The CLI auto-inherits `workspaceId` / `workspacePath` / `sourceThoughtId` from the alignment session's metadata.json sidecar — **do not re-pass them from the prompt**; the UUIDs in the prompt are informational only and retyping them is a common source of typos that silently bind the task to the wrong workspace. The CLI renames the docs directory to `~/.myagents/tasks/<newTaskId>/`, backfills the source thought's `convertedTaskIds`, and registers the task with `dispatchOrigin=ai-aligned`. Then tell the user: 「已创建任务『XXX』，可在「任务」面板查看。需要现在派发执行吗？」If yes → `myagents task run <newTaskId>` (or pass `--run` on the create call above to chain create+dispatch atomically).
 
 **② Should be split.** The "one thought" actually bundles multiple independent tasks. Don't force them into a single alignment.md. Explain the split to the user, then:
 

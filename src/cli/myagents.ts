@@ -33,7 +33,14 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
   while (i < args.length) {
     const arg = args[i];
     if (arg.startsWith('--')) {
-      const key = arg.slice(2);
+      // Support both `--key value` and `--key=value` forms. The equals form
+      // is ubiquitous in GNU-style CLIs; without it, callers (especially AI
+      // agents) get silently-dropped values + confusing "missing flag" errors
+      // downstream.
+      const raw = arg.slice(2);
+      const eq = raw.indexOf('=');
+      const key = eq >= 0 ? raw.slice(0, eq) : raw;
+      const inlineValue = eq >= 0 ? raw.slice(eq + 1) : undefined;
       // Boolean flags (no value follows)
       if (key === 'help' || key === 'json' || key === 'dry-run' || key === 'disable-nonessential') {
         flags[camelCase(key)] = true;
@@ -45,39 +52,60 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
       // below must NOT run for repeatable flags — it would overwrite the
       // accumulated array with `true`.
       if (repeatable.has(key)) {
+        const cKey = camelCase(key);
+        const arr = (flags[cKey] as string[]) || [];
+        if (inlineValue !== undefined) {
+          arr.push(inlineValue);
+          flags[cKey] = arr;
+          i++;
+          continue;
+        }
         const value = args[i + 1];
         if (value === undefined) {
           // No value — normalize to empty array (not boolean) to keep type consistent
-          const cKey = camelCase(key);
           if (!flags[cKey]) flags[cKey] = [];
           i++;
           continue;
         }
-        // Collect values under camelCase key for consistency with non-repeatable flags
-        const cKey = camelCase(key);
-        const arr = (flags[cKey] as string[]) || [];
         arr.push(value);
         flags[cKey] = arr;
         i += 2;
         continue;
       }
       // Key-value flags (non-repeatable)
+      if (inlineValue !== undefined) {
+        flags[camelCase(key)] = inlineValue;
+        i++;
+        continue;
+      }
       const value = args[i + 1];
       if (value === undefined || value.startsWith('--')) {
         flags[camelCase(key)] = true;
         i++;
         continue;
       }
-      {
-        flags[camelCase(key)] = value;
-        i += 2;
-      }
+      flags[camelCase(key)] = value;
+      i += 2;
     } else {
       positional.push(arg);
       i++;
     }
   }
   return { positional, flags };
+}
+
+/**
+ * Reject flags that arrived without a value (parser fell back to `true`
+ * when the next token was another `--flag`). Surfaces a clear, exit-1
+ * CLI error BEFORE any HTTP call — prevents the downstream handler from
+ * seeing a bool where it expected a string and returning an opaque
+ * "transport/parse failed" error to the AI caller.
+ */
+function assertStringFlag(value: unknown, flagName: string): asserts value is string | undefined {
+  if (value === true) {
+    console.error(`Error: --${flagName} requires a value (e.g. --${flagName} foo or --${flagName}=foo)`);
+    process.exit(2);
+  }
 }
 
 function camelCase(s: string): string {
@@ -1162,6 +1190,7 @@ function buildRequestBody(
     if (action === 'archive') return { id: rest[0], message: flags.message };
     if (action === 'delete') return { id: rest[0] };
     if (action === 'create-direct') {
+      assertStringFlag(flags.name, 'name');
       return {
         name: rest[0] || flags.name,
         executor: flags.executor ?? 'agent',
@@ -1182,6 +1211,7 @@ function buildRequestBody(
       // task title (to avoid ambiguity when the user writes a task name that
       // happens to parse as a sessionId). An empty alignmentSessionId will be
       // rejected by the Rust layer's `validate_safe_id`.
+      assertStringFlag(flags.name, 'name');
       return {
         name: flags.name,
         executor: flags.executor ?? 'agent',

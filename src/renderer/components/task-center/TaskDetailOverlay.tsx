@@ -167,38 +167,44 @@ export function TaskDetailOverlay({
   }, []);
 
   // Live-update on external transitions (CLI / scheduler / other window).
+  // Listen to both `task:status-changed` (state transitions) and
+  // `task:session-appended` (new runs linked to this task) — the latter is
+  // critical for the "任务执行" section to show runs that fire while the
+  // overlay is open.
   useEffect(() => {
-    let off: (() => void) | undefined;
+    const unlisteners: Array<() => void> = [];
     let cancelled = false;
+    const reloadIfMatches = async (taskId: string | undefined) => {
+      if (cancelled || !isMountedRef.current) return;
+      if (taskId !== task.id) return;
+      try {
+        const fresh = await taskGet(task.id);
+        if (cancelled || !isMountedRef.current) return;
+        if (fresh) {
+          setTask(fresh);
+          setReloadToken((n) => n + 1);
+        }
+      } catch {
+        /* silent */
+      }
+    };
     void (async () => {
       const { listen } = await import('@tauri-apps/api/event');
       if (cancelled) return;
-      const unlisten = await listen<{ taskId?: string }>(
-        'task:status-changed',
-        async (evt) => {
-          if (cancelled || !isMountedRef.current) return;
-          if (evt.payload?.taskId !== task.id) return;
-          try {
-            const fresh = await taskGet(task.id);
-            if (cancelled || !isMountedRef.current) return;
-            if (fresh) {
-              setTask(fresh);
-              setReloadToken((n) => n + 1);
-            }
-          } catch {
-            /* silent */
-          }
-        },
-      );
-      if (cancelled) {
-        unlisten();
-      } else {
-        off = unlisten;
+      for (const evt of ['task:status-changed', 'task:session-appended']) {
+        const unlisten = await listen<{ taskId?: string }>(evt, (e) => {
+          void reloadIfMatches(e.payload?.taskId);
+        });
+        if (cancelled) {
+          unlisten();
+        } else {
+          unlisteners.push(unlisten);
+        }
       }
     })();
     return () => {
       cancelled = true;
-      off?.();
+      for (const off of unlisteners) off();
     };
   }, [task.id]);
 

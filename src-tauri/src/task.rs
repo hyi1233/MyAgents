@@ -1172,13 +1172,33 @@ impl TaskStore {
         // launch time). Falling back to the sidecar file means AI callers can
         // just pass `--name` — no need to re-type UUIDs already baked in at
         // session creation.
+        // Distinguish "file missing" from "file corrupt":
+        // - missing → fallback to explicit args (the documented happy path)
+        // - corrupt → log and fall back, so post-mortem log search reveals
+        //   the real cause instead of the misleading "workspaceId missing"
+        //   error that would otherwise surface below.
         let meta_path = src.join("metadata.json");
-        let metadata: Option<AlignmentSessionMetadata> = if meta_path.exists() {
-            fs::read_to_string(&meta_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<AlignmentSessionMetadata>(&s).ok())
-        } else {
-            None
+        let metadata: Option<AlignmentSessionMetadata> = match fs::read_to_string(&meta_path) {
+            Ok(s) => match serde_json::from_str::<AlignmentSessionMetadata>(&s) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    ulog_warn!(
+                        "[task] alignment metadata.json parse failed at {}: {} — falling back to explicit args",
+                        meta_path.display(),
+                        e,
+                    );
+                    None
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                ulog_warn!(
+                    "[task] alignment metadata.json read failed at {}: {} — falling back to explicit args",
+                    meta_path.display(),
+                    e,
+                );
+                None
+            }
         };
 
         let workspace_id = input
@@ -1916,6 +1936,7 @@ impl TaskStore {
             .ok_or_else(|| String::from(TaskOpError::not_found(id)))?
             .clone();
         let mut updated = existing;
+        let mut changed = false;
         if !updated.session_ids.iter().any(|s| s == session_id) {
             updated.session_ids.push(session_id.to_string());
             updated.updated_at = now_ms();
@@ -1923,6 +1944,25 @@ impl TaskStore {
             next.insert(updated.id.clone(), updated.clone());
             Self::persist_locked(&self.jsonl_path, &next)?;
             *inner = next;
+            changed = true;
+        }
+        // Drop the write lock before emitting — listeners may call back
+        // into TaskStore (e.g. overlay refetch) and we don't want a
+        // re-entrant deadlock.
+        drop(inner);
+        if changed {
+            // Surfaces newly-linked sessions to TaskDetailOverlay while it's
+            // already open. Without this the "任务执行" section under-reports
+            // until the user closes and reopens the overlay (review HIGH
+            // finding: a pre-existing silent mutation that became visible
+            // after promoting TaskSessionsList to the second block).
+            emit_task_event(
+                "task:session-appended",
+                serde_json::json!({
+                    "taskId": updated.id,
+                    "sessionId": session_id,
+                }),
+            );
         }
         Ok(updated)
     }
@@ -2600,26 +2640,33 @@ pub async fn cmd_task_append_session(
 /// ensures its existence. `validate_safe_id` guards against `..` / slashes
 /// in the id per the rest of this module's path-safety pattern.
 #[tauri::command]
-#[allow(non_snake_case)]
 pub async fn cmd_task_write_alignment_metadata(
-    alignmentSessionId: String,
-    workspaceId: String,
-    workspacePath: String,
-    sourceThoughtId: Option<String>,
+    alignment_session_id: String,
+    workspace_id: String,
+    workspace_path: String,
+    source_thought_id: Option<String>,
 ) -> Result<(), String> {
-    validate_safe_id(&alignmentSessionId, "alignmentSessionId")?;
-    let dir = task_docs_dir(&alignmentSessionId)?;
+    validate_safe_id(&alignment_session_id, "alignmentSessionId")?;
+    let dir = task_docs_dir(&alignment_session_id)?;
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir alignment dir: {}", e))?;
     let meta = AlignmentSessionMetadata {
-        workspace_id: workspaceId,
-        workspace_path: workspacePath,
-        source_thought_id: sourceThoughtId,
+        workspace_id,
+        workspace_path,
+        source_thought_id,
         created_at: now_ms(),
     };
     let json = serde_json::to_string_pretty(&meta)
         .map_err(|e| format!("serialize alignment metadata: {}", e))?;
-    fs::write(dir.join("metadata.json"), json)
-        .map_err(|e| format!("write alignment metadata: {}", e))?;
+    // Atomic tmp+rename — matches the module's `write_atomic_text` convention
+    // (task.md / progress.md writes). Concurrent writers for the same
+    // alignment id cannot produce a half-written file; a crash mid-write
+    // leaves the old file (or no file) but never a corrupt one.
+    write_atomic_text(&dir.join("metadata.json"), &json)?;
+    ulog_debug!(
+        "[task] wrote alignment metadata id={} thought={:?}",
+        alignment_session_id,
+        meta.source_thought_id,
+    );
     Ok(())
 }
 
