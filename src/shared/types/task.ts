@@ -223,6 +223,10 @@ export interface TaskCreateFromAlignmentInput {
   executionMode: TaskExecutionMode;
   runMode?: TaskRunMode;
   endConditions?: EndConditions;
+  /** Per-task model override. Omit to inherit the Agent workspace default. */
+  model?: string;
+  /** Per-task permission mode override. Runtime-specific values — see `myagents runtime describe <runtime>`. */
+  permissionMode?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
   sourceThoughtId?: string;

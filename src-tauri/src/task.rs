@@ -464,6 +464,16 @@ pub struct TaskCreateFromAlignmentInput {
     pub run_mode: Option<TaskRunMode>,
     #[serde(default)]
     pub end_conditions: Option<TaskEndConditions>,
+    // ── Execution overrides (must stay in lockstep with TaskCreateDirectInput) ──
+    // Without these fields the Bun admin-api would accept `--model` /
+    // `--permissionMode` flags from the CLI, validate them, enrich the success
+    // response as if the override took effect — and then serde would silently
+    // drop the keys here, leaving the persisted Task with `None` for both.
+    // That's exactly the silent-data-loss bug the cross-review flagged.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
     #[serde(default)]
     pub runtime: Option<String>,
     #[serde(default)]
@@ -1242,8 +1252,14 @@ impl TaskStore {
             cron_expression: None,
             cron_timezone: None,
             dispatch_at: None,
-            model: None,
-            permission_mode: None,
+            // Per-task overrides — surface the CLI-provided values so the
+            // execution path in Bun (`/cron/execute-sync` via T15 snapshot
+            // resolution) actually picks them up. Prior to v0.1.69's
+            // cross-review fixes these were hardcoded `None` which silently
+            // dropped every `--model` / `--permissionMode` flag passed to
+            // `task create-from-alignment`.
+            model: input.model,
+            permission_mode: input.permission_mode,
             preselected_session_id: None,
             runtime: input.runtime,
             runtime_config: input.runtime_config,

@@ -2,10 +2,13 @@
 name: self-config
 description: >-
   MyAgents 应用的统一管理入口——通过 myagents CLI 帮用户完成配置、运维和状态查询。
-  涵盖六大能力域：(1) MCP 工具接入与管理，(2) 模型服务商配置与验证，(3) Agent Channel 管理与运行时状态，
-  (4) 定时任务(cron)的创建/启停/删除/查看执行记录，(5) OpenClaw 社区插件安装/卸载，(6) 通用配置读写与版本查看。
+  涵盖八大能力域：(1) MCP 工具接入与管理，(2) 模型服务商配置与验证，(3) Agent Channel 管理与运行时状态，
+  (4) 定时任务(cron)的创建/启停/删除/查看执行记录，(5) OpenClaw 社区插件安装/卸载，(6) 通用配置读写与版本查看，
+  (7) Agent Runtime 发现(runtime list/describe)与 Agent 默认设置查看(agent show)，
+  (8) 任务中心 task/thought 管理（v0.1.69+，含任务级 runtime/model/permissionMode 覆盖）。
   当用户涉及以下任何一种意图时必须触发此技能：管理定时任务、查看/操作 cron、安装/卸载插件、
-  添加/测试模型服务商、接入 MCP 工具、查看 Agent 连接状态、修改应用配置、查看版本号。
+  添加/测试模型服务商、接入 MCP 工具、查看 Agent 连接状态、修改应用配置、查看版本号、
+  创建或派发任务中心任务、查看 Runtime 装机情况。
   即使用户没有说"配置"二字，只要意图是对 MyAgents 本身做查看或操作（而非让 AI 执行具体业务任务），
   就应该使用此技能。注意：管理定时任务时使用此技能（通过 CLI），不要直接调用 im-cron MCP 工具——
   im-cron 是 AI 在自己的会话中管理任务用的，self-config 才是帮用户管理应用级任务的正确入口。
@@ -169,6 +172,22 @@ myagents cron runs <taskId>                     # 查看执行历史
 myagents cron status                            # 查看任务概览（总数/运行中/下次执行）
 ```
 
+### 查看 Runtime 装机与 model/permissionMode 清单（v0.1.69+）
+
+在为任务配 `--runtime` / `--model` / `--permissionMode` 之前，**先用这三条发现命令把值查清楚**，不要靠猜。
+
+```bash
+myagents runtime list                      # 哪些 runtime 装了/没装，装了是啥版本
+myagents runtime list --json               # 机器可读：installed/version/path
+myagents runtime describe codex            # 某 runtime 的 model 清单 + permissionMode 枚举
+myagents runtime describe builtin          # 内置 SDK 的 permissionMode：auto/plan/fullAgency/custom
+myagents agent show <agent-id>             # 看某 Agent 的 effective 默认（runtime/model/permissionMode）
+```
+
+**为什么单独拆出来**：每个外部 runtime 有自己的 model 动态清单（Codex/Gemini 会 spawn CLI 查）和自己的 permissionMode 枚举（`suggest` / `auto-edit` / `full-auto` 等 ≠ 内置的 `auto` / `plan` / `fullAgency`）。`--help` 只列 flag 名不列值 —— 值靠这些命令现场查，不会因文档漂移而错。
+
+**`agent show` 的用途**：当用户说"我这个 Agent 现在啥配置"或你要决定"任务 override 是不是多余"时，用 `agent show <id>` 看 `effectiveDefaults`。它会按 runtime 正确分层（外部 runtime 优先读 `runtimeConfig.{model,permissionMode}`，builtin 读 `agent.{model,permissionMode}`），不会骗你。
+
 ### 管理任务中心（v0.1.69+）
 
 任务中心是用户沉淀「想法」并派发为可执行任务的产品面板。用户可能说"看下我还有啥没做完的任务"、"把这个想法派发出去"、"帮我在任务中心创建一个任务"。
@@ -181,23 +200,59 @@ myagents task list                                          # 列出所有任务
 myagents task list --status running                         # 仅进行中的任务
 myagents task list --workspaceId ws-abc                     # 仅指定工作区
 myagents task get <taskId>                                  # 查看任务详情 + statusHistory
+
+myagents task create-direct --name "..." \                   # 直接创建任务
+    --workspaceId <id> --workspacePath <abs> \
+    --taskMdFile <path> | --taskMdContent "<body>"
+myagents task create-from-alignment <alignmentSessionId> \   # 从 AI 对齐 session 物化
+    --name "..."                                             # (workspaceId/Path 自动继承)
+
 myagents task run <taskId>                                  # 立即派发一个 todo 任务
 myagents task rerun <taskId>                                # 从 blocked/stopped/done 重新派发
 myagents task update-status <taskId> done --message "完成"  # 更新状态（含审计字段）
-myagents task update-progress <taskId> "阶段 1/3 已完成"    # 仅追加 progress.md，不改 status
 myagents task archive <taskId>                              # 归档（仅用户可操作）
 myagents task delete <taskId>                               # 软删除（30 天保留）
 ```
 
+#### 任务级 Runtime/Model/PermissionMode 覆盖（v0.1.69+ 重点）
+
+`task create-direct` / `task create-from-alignment` 支持**仅对该任务生效**的覆盖 flag，不会改 Agent 工作区的默认配置：
+
+```bash
+myagents task create-direct --name "review PR" \
+    --workspaceId <id> --workspacePath <abs> \
+    --taskMdFile ./review-prompt.md \
+    --runtime codex --model gpt-5.2 --permissionMode full-auto
+```
+
+| Flag | 语义 |
+|------|------|
+| `--runtime`         | `builtin` / `claude-code` / `codex` / `gemini` —— 不传则继承工作区默认 |
+| `--model`           | 值取决于 runtime，**先用 `myagents runtime describe <runtime>` 查** |
+| `--permissionMode`  | 值取决于 runtime，**同样先 `runtime describe` 查** |
+| `--runtimeConfig`   | JSON 对象字符串，附加 runtime 专属配置（罕用） |
+
+**典型触发**："用 Claude Code 做实现、用 Codex 做 review" —— 你应该创建**两个**任务，分别指定不同 `--runtime`。同一工作区下的 Agent 默认保持不变。
+
+**输入方式**：
+- `--taskMdFile <path>` —— 任务正文 markdown 的文件路径（**推荐**，多行/含 backtick 用这个）
+- `--taskMdContent "<string>"` —— 内联字符串（仅适合单行简短内容）
+- 两者互斥，都传则 `--taskMdFile` 胜。大小上限都是 1 MB。
+
+**验证与恢复路径**：
+- 创建前 CLI 会前置校验：未装的 runtime、该 runtime 下不存在的 model、不合法的 permissionMode 都会被拒绝，错误带 `→ Run: myagents runtime describe <rt>` 指引
+- 未传 `--runtime` 但传了 `--model` / `--permissionMode`：CLI 会从 `workspaceId`/`workspacePath` 解出 Agent 默认 runtime，用它的枚举校验；解不出则拒绝
+- 创建成功后输出会打印 `overridesRequested` vs `overridden`，如果你传了 override 但没落到持久化态上会**明确提示 drift**（通常意味着后端版本太旧）
+
 **状态机约束**（PRD §9.1）：
 - `update-status` 只能走合法转换：`todo→running→verifying→done`（或 `→blocked/stopped`）、`done→archived` 等，非法会 `invalid_transition` 拒绝
 - `archived` 只能由用户通过 UI / CLI 设置，AI 走 CLI 会被 `archive_user_only` 拒绝
-- `update-status` 会自动追加 `statusHistory`、写 `progress.md`、发桌面通知（如果订阅），`update-progress` 只改 `progress.md`
+- `update-status` 会自动追加 `statusHistory`、写 `progress.md`、发桌面通知（如果订阅）
 
-调度方式有三种：
+调度方式有三种（给 scheduled/recurring/loop 模式用）：
 - `--schedule "*/30 * * * *"` — 标准 cron 表达式
 - `--every 15` — 每 N 分钟
-- 一次性任务（通过 API 的 `at` 类型）
+- 一次性任务（通过 `--dispatchAt` 传时间戳）
 
 ### 管理社区插件
 

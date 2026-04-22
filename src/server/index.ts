@@ -39,8 +39,9 @@ import {
   handleMcpList, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
   handleMcpOAuthDiscover, handleMcpOAuthStart, handleMcpOAuthStatus, handleMcpOAuthRevoke,
   handleModelList, handleModelAdd, handleModelRemove, handleModelSetKey, handleModelSetDefault, handleModelVerify,
-  handleAgentList, handleAgentEnable, handleAgentDisable, handleAgentSet,
+  handleAgentList, handleAgentShow, handleAgentEnable, handleAgentDisable, handleAgentSet,
   handleAgentChannelList, handleAgentChannelAdd, handleAgentChannelRemove,
+  handleRuntimeList, handleRuntimeDescribe,
   handleConfigGet, handleConfigSet, handleStatus, handleReload, handleHelp,
   handleVersion,
   handleCronList, handleCronCreate, handleCronStop, handleCronStart, handleCronDelete, handleCronUpdate, handleCronRuns, handleCronStatus,
@@ -201,6 +202,7 @@ import {
   prewarmExternalSession,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
+import { VALID_RUNTIMES } from '../shared/types/runtime';
 import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
 
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
@@ -1124,12 +1126,15 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
 
   // Agent commands
   if (route === 'agent/list') return handleAgentList();
+  if (route === 'agent/show') return handleAgentShow(payload as Parameters<typeof handleAgentShow>[0]);
   if (route === 'agent/enable') return handleAgentEnable(payload as Parameters<typeof handleAgentEnable>[0]);
   if (route === 'agent/disable') return handleAgentDisable(payload as Parameters<typeof handleAgentDisable>[0]);
   if (route === 'agent/set') return handleAgentSet(payload as Parameters<typeof handleAgentSet>[0]);
   if (route === 'agent/channel/list') return handleAgentChannelList(payload as Parameters<typeof handleAgentChannelList>[0]);
   if (route === 'agent/channel/add') return handleAgentChannelAdd(payload as Parameters<typeof handleAgentChannelAdd>[0]);
   if (route === 'agent/channel/remove') return handleAgentChannelRemove(payload as Parameters<typeof handleAgentChannelRemove>[0]);
+  if (route === 'runtime/list') return await handleRuntimeList();
+  if (route === 'runtime/describe') return await handleRuntimeDescribe(payload as Parameters<typeof handleRuntimeDescribe>[0]);
 
   // Agent runtime status
   if (route === 'agent/runtime-status') return await handleAgentRuntimeStatus();
@@ -2311,6 +2316,38 @@ async function main() {
           }
         }
 
+        // Per-task override precedence (v0.1.69 cross-review fix):
+        //
+        // Task-level `model` / `permissionMode` set at task creation time (via
+        // CLI `--model` / `--permissionMode` flags on `task create-direct` /
+        // `task create-from-alignment`) are explicit per-task intent — the user
+        // said "this task should run with this model regardless of what the
+        // session/agent defaults are". They must therefore win over both
+        // (a) the agent default copied into a fresh new_session snapshot, and
+        // (b) the historical session snapshot reused by single_session mode.
+        //
+        // We apply on top of `effectiveModel` / `effectiveRuntimeConfig` rather
+        // than injecting into the snapshot, so the behavior is identical for
+        // both run modes and the snapshot itself stays a pure derivation of
+        // session history.
+        //
+        // Without this block, the CLI surface accepts and validates overrides,
+        // `enrichTaskCreateResponse` echoes them back as "overridden" — but
+        // dispatch silently falls back to the snapshot value. That's the
+        // silent-data-loss bug cross-review flagged on 2026-04-22.
+        if (payload.model) {
+          effectiveModel = payload.model;
+          if (effectiveRuntimeConfig) {
+            effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model };
+          }
+        }
+        if (payload.permissionMode) {
+          effectiveRuntimeConfig = {
+            ...(effectiveRuntimeConfig ?? {}),
+            permissionMode: payload.permissionMode,
+          };
+        }
+
         // Set cron task context so the exit_cron_task tool knows which task is running
         // Pass sessionId for proper isolation between concurrent tasks
         setCronTaskContext(taskId, aiCanExit ?? false, effectiveSessionId);
@@ -2637,8 +2674,10 @@ async function main() {
           return jsonResponse({ success: false, error: 'agentDir is required.' }, 400);
         }
 
-        const VALID_RUNTIMES = ['builtin', 'claude-code', 'codex', 'gemini'] as const;
-        const runtimeValue = VALID_RUNTIMES.includes(payload?.runtime as typeof VALID_RUNTIMES[number])
+        // Use the shared VALID_RUNTIMES constant — same list that drives
+        // admin-api validation and HELP_TEXTS. A local literal here used to
+        // silently drift when new runtimes landed.
+        const runtimeValue = (VALID_RUNTIMES as readonly string[]).includes(payload?.runtime as string)
           ? (payload.runtime as import('../shared/types/runtime').RuntimeType)
           : undefined;
         // v0.1.69 Desktop session = owned snapshot. Capture model/permission/mcp/provider

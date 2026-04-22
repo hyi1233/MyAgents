@@ -123,7 +123,8 @@ Usage: myagents <command> [options]
 Commands:
   mcp       Manage MCP tool servers
   model     Manage model providers
-  agent     Manage agents & channels
+  agent     Manage agents & channels (+ 'agent show <id>' for effective defaults)
+  runtime   Inspect Agent Runtimes (list installed + describe models/modes)
   skill     Manage skills (install from URL, list, enable/disable, sync)
   cron      Manage scheduled tasks (list/add/runs/exit ...)
   task      Manage Task Center tasks (list/get/update-status/run/rerun ...)
@@ -157,6 +158,9 @@ Examples:
   myagents skill remove my-skill
   myagents skill sync
   myagents cron list
+  myagents runtime list                       # see installed runtimes + install hints
+  myagents runtime describe codex             # models + permission modes
+  myagents agent show <agent-id>              # effective defaults for a workspace
   myagents task list
   myagents task get <taskId>            # returns metadata + docs paths
                                         # (task.md / verify.md / progress.md /
@@ -168,11 +172,19 @@ Examples:
   myagents task append-session <taskId> <sessionId>
   myagents task run <taskId>
   myagents task rerun <taskId>
+  myagents task create-direct --name "review PR" \\
+      --workspaceId proj --workspacePath /path/to/proj \\
+      --taskMdContent "Review this PR and file findings in progress.md" \\
+      --runtime codex --model gpt-5.2 --permissionMode full-auto
+    # Per-task runtime/model/permissionMode overrides — consult
+    #   myagents runtime list  +  myagents runtime describe <runtime>
+    # before choosing values. Omit any flag to inherit the agent workspace default.
   myagents task create-from-alignment <alignmentSessionId> --name "新任务"
     # Backend auto-inherits workspaceId / workspacePath / sourceThoughtId
     # from the alignment session's metadata (set when 「AI 讨论」 launched).
     # Pass --run to dispatch immediately in the same call.
     # Pass --json for machine-readable output (task_id + docs_path).
+    # Same per-task override flags as create-direct apply here.
   myagents thought list
   myagents plugin list
   myagents version
@@ -226,6 +238,19 @@ function printResult(group: string, action: string, result: Record<string, unkno
 
   if (!result.success) {
     console.error(`Error: ${result.error}`);
+    // Structured recovery hint (v0.1.69+): print `→ Run: <command>   <message>`
+    // below the error line in human mode so a downstream AI reader has a
+    // concrete next step, not just a rejection. JSON mode preserves the full
+    // shape via the `JSON.stringify` branch above.
+    const hint = result.recoveryHint as { recoveryCommand?: string; message?: string } | undefined;
+    if (hint && typeof hint === 'object') {
+      if (hint.recoveryCommand) {
+        const suffix = hint.message ? `   ${hint.message}` : '';
+        console.error(`  \u2192 Run: ${hint.recoveryCommand}${suffix}`);
+      } else if (hint.message) {
+        console.error(`  ${hint.message}`);
+      }
+    }
     return;
   }
 
@@ -302,6 +327,18 @@ function printResult(group: string, action: string, result: Record<string, unkno
     printAgentRuntimeStatus(result.data as Record<string, unknown>);
     return;
   }
+  if (group === 'agent' && action === 'show') {
+    printAgentShow(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'runtime' && action === 'list') {
+    printRuntimeList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
+  if (group === 'runtime' && action === 'describe') {
+    printRuntimeDescribe(result.data as Record<string, unknown>);
+    return;
+  }
   if (group === 'status') {
     printStatus(result.data as Record<string, unknown>);
     return;
@@ -319,10 +356,12 @@ function printResult(group: string, action: string, result: Record<string, unkno
     return;
   }
 
-  // Task create-from-alignment — AI-facing flow: print task_id + docs path
-  // + next-step hint so the caller doesn't have to guess the id via
+  // Task create-* — AI-facing flow: print task_id + docs path + next-step
+  // hint + any override echo so the caller doesn't have to guess the id via
   // `ls -lt ~/.myagents/tasks/`. JSON mode above returns the full payload.
-  if (group === 'task' && action === 'create-from-alignment') {
+  // Both `create-direct` and `create-from-alignment` go through the same
+  // `enrichTaskCreateResponse` server-side, so one printer covers both.
+  if (group === 'task' && (action === 'create-direct' || action === 'create-from-alignment')) {
     printTaskCreateResult(result.data as Record<string, unknown>);
     return;
   }
@@ -374,7 +413,39 @@ function printTaskCreateResult(data: Record<string, unknown>): void {
   if (id) console.log(`  task_id:   ${id}`);
   if (name) console.log(`  name:      ${name}`);
   console.log(`  docs_path: ${displayDocs}`);
-  console.log(`  next:      myagents task run ${id}`);
+
+  // Surface which runtime/model/permission overrides actually landed on the
+  // persisted task (read from the server-returned Task record, not echoed
+  // from the request). Visible here — not buried in --json — because the AI
+  // needs to confirm "the override I specified stuck" before dispatching.
+  // A mismatch between `overridesRequested` and `overridden` indicates the
+  // server silently dropped a field, which the AI should flag to the user.
+  const overridden = (data?.overridden as string[] | undefined) ?? [];
+  const overridesRequested = (data?.overridesRequested as string[] | undefined) ?? [];
+  const overrides = (data?.overrides as Record<string, unknown> | undefined) ?? {};
+  if (overridden.length > 0) {
+    console.log(`  overrides: ${overridden.join(', ')}`);
+    for (const field of overridden) {
+      const v = overrides[field];
+      if (v !== null && v !== undefined && v !== '') {
+        const display = typeof v === 'object' ? JSON.stringify(v) : String(v);
+        console.log(`    ${field.padEnd(14)} = ${display}`);
+      }
+    }
+  } else {
+    console.log('  overrides: (none — inherits workspace defaults)');
+  }
+  // Drift warning: requested override didn't reach the persisted task.
+  const droppedFields = overridesRequested.filter(f => !overridden.includes(f));
+  if (droppedFields.length > 0) {
+    console.log('');
+    console.log(`  \u26A0 warning: requested overrides were NOT persisted: ${droppedFields.join(', ')}`);
+    console.log('    This likely indicates a server-side deserialization gap — please report.');
+  }
+
+  const nextSteps = data?.nextSteps as Record<string, string> | undefined;
+  const dispatch = nextSteps?.dispatch ?? (id ? `myagents task run ${id}` : '');
+  if (dispatch) console.log(`  next:      ${dispatch}`);
 
   // If --run was bundled with create, the backend also dispatched; echo
   // the dispatch summary inline so the caller sees both in one output.
@@ -383,6 +454,124 @@ function printTaskCreateResult(data: Record<string, unknown>): void {
     console.log('');
     printTaskDispatchResult('run', runResult);
   }
+}
+
+/**
+ * Format `myagents runtime list` output.
+ *
+ * Structure each row as `runtime  installed  version  displayName`, with
+ * non-installed rows following up on the next line with the install hint.
+ * AI callers scan this to learn which `--runtime` values are safe to pass.
+ */
+function printRuntimeList(rows: Array<Record<string, unknown>>): void {
+  if (!rows || rows.length === 0) {
+    console.log('No runtimes found.');
+    return;
+  }
+  const pad = (s: string, n: number) => s.padEnd(n);
+  console.log(pad('RUNTIME', 14) + pad('INSTALLED', 11) + pad('VERSION', 18) + 'NAME');
+  for (const row of rows) {
+    const rt = String(row.runtime ?? '');
+    const installed = row.installed ? 'yes' : 'no';
+    const version = String(row.version ?? '').split('\n')[0].slice(0, 16) || '-';
+    console.log(pad(rt, 14) + pad(installed, 11) + pad(version, 18) + String(row.displayName ?? ''));
+    const hint = row.notInstalledHint;
+    if (hint) console.log(`    \u2192 ${String(hint)}`);
+  }
+  console.log('');
+  console.log('Describe a runtime:  myagents runtime describe <runtime>');
+}
+
+/**
+ * Format `myagents runtime describe <runtime>` output.
+ *
+ * Show the four things an AI needs before choosing override values:
+ *   - install state (version string when installed, install hint otherwise)
+ *   - available models  (`--model` accepts any of these)
+ *   - permission modes  (`--permissionMode` accepts any of these)
+ *   - default permission mode (so the caller knows what "no override" means)
+ */
+function printRuntimeDescribe(data: Record<string, unknown>): void {
+  const runtime = String(data.runtime ?? '');
+  const name = String(data.displayName ?? runtime);
+  const installed = data.installed ? 'yes' : 'no';
+  const version = data.version ? ` (${String(data.version).split('\n')[0]})` : '';
+  console.log(`${name}  [${runtime}]`);
+  console.log(`  installed: ${installed}${version}`);
+  const defaultMode = String(data.defaultPermissionMode ?? '');
+  if (defaultMode) console.log(`  default permissionMode: ${defaultMode}`);
+
+  const models = (data.models as Array<Record<string, unknown>>) ?? [];
+  console.log('');
+  console.log('Models:');
+  if (models.length === 0) {
+    console.log('  (none reported — runtime may not be installed, or has no static model list)');
+  } else {
+    for (const m of models) {
+      const value = String(m.value ?? '');
+      const display = String(m.displayName ?? '');
+      const mark = m.isDefault ? ' *' : '';
+      console.log(`  ${value.padEnd(28) || '(default)'}  ${display}${mark}`);
+    }
+  }
+
+  const modes = (data.permissionModes as Array<Record<string, unknown>>) ?? [];
+  console.log('');
+  console.log('Permission modes:');
+  if (modes.length === 0) {
+    console.log('  (runtime uses the built-in PermissionMode enum; set via --permissionMode)');
+  } else {
+    for (const mode of modes) {
+      const value = String(mode.value ?? '');
+      const label = String(mode.label ?? '');
+      const desc = String(mode.description ?? '');
+      console.log(`  ${value.padEnd(22)} ${label}${desc ? '  —  ' + desc : ''}`);
+    }
+  }
+
+  const note = data.note;
+  if (note) {
+    console.log('');
+    console.log(`Note: ${String(note)}`);
+  }
+}
+
+/**
+ * Format `myagents agent show <id>` output.
+ *
+ * Exposes the resolved defaults an AI would need to decide whether a task
+ * override is meaningful or a no-op. Keys are printed one-per-line with
+ * `(inherits provider / workspace default)` for null/empty values so the
+ * reader doesn't have to guess what an absent field means.
+ */
+function printAgentShow(data: Record<string, unknown>): void {
+  if (!data) {
+    console.log('No agent data.');
+    return;
+  }
+  console.log(`Agent:       ${String(data.name ?? '')}`);
+  console.log(`  id:        ${String(data.id ?? '')}`);
+  console.log(`  enabled:   ${data.enabled ? 'yes' : 'no'}`);
+  if (data.workspacePath) console.log(`  workspace: ${String(data.workspacePath)}`);
+  const channelCount = data.channelCount;
+  if (typeof channelCount === 'number') console.log(`  channels:  ${channelCount}`);
+  console.log('');
+  console.log('Effective defaults:');
+  const defaults = (data.effectiveDefaults as Record<string, unknown>) ?? {};
+  const fmt = (v: unknown): string => {
+    if (v === null || v === undefined || v === '') return '(inherits default)';
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  };
+  console.log(`  runtime:        ${fmt(defaults.runtime)}`);
+  console.log(`  model:          ${fmt(defaults.model)}`);
+  console.log(`  permissionMode: ${fmt(defaults.permissionMode)}`);
+  console.log(`  providerId:     ${fmt(defaults.providerId)}`);
+  if (defaults.runtimeConfig) {
+    console.log(`  runtimeConfig:  ${JSON.stringify(defaults.runtimeConfig)}`);
+  }
+  console.log('');
+  console.log('Describe this runtime:  myagents runtime describe <runtime>');
 }
 
 /**
@@ -1011,6 +1200,7 @@ function buildRequestBody(
   // Agent commands
   if (group === 'agent') {
     if (action === 'enable' || action === 'disable') return { id: rest[0] || flags.id };
+    if (action === 'show') return { id: rest[0] || flags.id };
     if (action === 'set') return { id: rest[0], key: rest[1], value: tryParseJson(rest[2]) };
     if (action === 'channel') {
       const channelAction = rest[0] || 'list'; // list | add | remove
@@ -1019,6 +1209,15 @@ function buildRequestBody(
       if (channelAction === 'remove') return { agentId: rest[1], channelId: rest[2] };
       return { agentId: rest[1] };
     }
+    return {};
+  }
+
+  // Runtime discovery commands (v0.1.69+): `myagents runtime list|describe`
+  // Pure query endpoints — no body mutation — meant to be consulted BEFORE
+  // choosing values for `task create-direct --runtime/--model/...`.
+  if (group === 'runtime') {
+    if (action === 'list') return {};
+    if (action === 'describe') return { runtime: rest[0] || flags.runtime };
     return {};
   }
 
@@ -1191,19 +1390,31 @@ function buildRequestBody(
     if (action === 'delete') return { id: rest[0] };
     if (action === 'create-direct') {
       assertStringFlag(flags.name, 'name');
+      // Resolve task.md body: `--taskMdFile` (industry-standard for long
+      // text — avoids shell-escape hell for multi-line / backtick / quoted
+      // markdown) takes precedence over `--taskMdContent` when both are
+      // set. Mirrors the `cron add --prompt-file` pattern above.
+      const taskMdContent = resolveTaskMdContent(flags);
       return {
         name: rest[0] || flags.name,
         executor: flags.executor ?? 'agent',
         description: flags.description,
         workspaceId: flags.workspaceId,
         workspacePath: flags.workspacePath,
-        taskMdContent: flags.taskMdContent ?? rest.slice(1).join(' '),
+        taskMdContent,
         executionMode: flags.executionMode ?? 'once',
         runMode: flags.runMode,
         sourceThoughtId: flags.sourceThoughtId,
         tags: typeof flags.tags === 'string'
           ? (flags.tags as string).split(',').map(s => s.trim()).filter(Boolean)
           : undefined,
+        // Per-task runtime overrides. Admin-api validates these before
+        // forwarding to Rust — if the caller mistypes a value, they get a
+        // recovery hint pointing to `runtime list` / `runtime describe`.
+        runtime: flags.runtime,
+        model: flags.model,
+        permissionMode: flags.permissionMode,
+        runtimeConfig: parseRuntimeConfigFlag(flags.runtimeConfig),
       };
     }
     if (action === 'create-from-alignment') {
@@ -1225,6 +1436,12 @@ function buildRequestBody(
         tags: typeof flags.tags === 'string'
           ? (flags.tags as string).split(',').map(s => s.trim()).filter(Boolean)
           : undefined,
+        // Identical override contract to create-direct above — keep these two
+        // in lockstep.
+        runtime: flags.runtime,
+        model: flags.model,
+        permissionMode: flags.permissionMode,
+        runtimeConfig: parseRuntimeConfigFlag(flags.runtimeConfig),
       };
     }
     if (action === 'run' || action === 'rerun') {
@@ -1284,6 +1501,100 @@ function tryParseJson(value: string | undefined): unknown {
   } catch {
     return value;
   }
+}
+
+/** Hard cap for `--taskMdContent` (inline string). Mirrors the `--taskMdFile`
+ *  1 MB cap so neither ingress path can ship a pathologically large body
+ *  through to Rust, where it would bloat `.task/<id>/task.md` without bound. */
+const TASK_MD_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Resolve `task create-direct --taskMdFile` / `--taskMdContent` into a
+ * single `taskMdContent` string.
+ *
+ * Precedence (both flags set → `--taskMdFile` wins):
+ *   1. `--taskMdFile <path>` — read the file (size + NUL guarded).
+ *      Chosen as primary because inline markdown on the shell is hostile to
+ *      backticks, quotes, and newlines.
+ *   2. `--taskMdContent <string>` — raw inline content (size-guarded).
+ *
+ * Earlier revisions silently joined trailing positional args as a "legacy"
+ * fallback — that was undocumented surface area and a fat-fingered positional
+ * could silently become task body. Removed after cross-review (v0.1.69).
+ */
+function resolveTaskMdContent(
+  flags: Record<string, unknown>,
+): string | undefined {
+  const filePath = flags.taskMdFile;
+  if (filePath !== undefined && filePath !== '') {
+    if (typeof filePath !== 'string') {
+      console.error('Error: --taskMdFile must be a file path string');
+      process.exit(2);
+    }
+    try {
+      // Lazy require — same pattern as the cron `--prompt-file` reader
+      // (keeps startup fast for commands that don't need fs).
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('fs') as typeof import('fs');
+      const stat = fs.statSync(filePath);
+      if (stat.size > TASK_MD_MAX_BYTES) {
+        console.error(`Error: --taskMdFile "${filePath}" is ${stat.size} bytes, exceeds ${TASK_MD_MAX_BYTES} (1 MB) limit`);
+        process.exit(1);
+      }
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      if (raw.includes('\0')) {
+        console.error(`Error: --taskMdFile "${filePath}" contains NUL bytes (is this a binary file?)`);
+        process.exit(1);
+      }
+      return raw;
+    } catch (err) {
+      console.error(`Error: failed to read --taskMdFile "${filePath}": ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  }
+  const contentFlag = flags.taskMdContent;
+  if (typeof contentFlag === 'string' && contentFlag !== '') {
+    // Byte-length cap — a 1 MB inline arg on the shell is almost always a
+    // copy-paste gone wrong, and downstream JSON serialisation / logging
+    // would otherwise choke silently.
+    const byteLen = Buffer.byteLength(contentFlag, 'utf-8');
+    if (byteLen > TASK_MD_MAX_BYTES) {
+      console.error(`Error: --taskMdContent is ${byteLen} bytes, exceeds ${TASK_MD_MAX_BYTES} (1 MB) limit. Use --taskMdFile for large content.`);
+      process.exit(1);
+    }
+    return contentFlag;
+  }
+  return undefined;
+}
+
+/**
+ * Parse the value of `--runtimeConfig` (a JSON object string) into an object.
+ *
+ * Fails hard (exit 2) on malformed JSON — unlike `tryParseJson` which falls
+ * back to the raw string. Reason: silently forwarding a broken string to the
+ * server would surface as a cryptic Rust deserialization error 3 hops later.
+ * An early, typed rejection with "must be a JSON object" is a much more
+ * fixable error for the AI caller.
+ */
+function parseRuntimeConfigFlag(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string') {
+    console.error('Error: --runtimeConfig must be a JSON object string (e.g. --runtimeConfig \'{"model":"o3"}\')');
+    process.exit(2);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Error: --runtimeConfig is not valid JSON: ${msg}`);
+    process.exit(2);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error('Error: --runtimeConfig must be a JSON object (not array, null, or primitive)');
+    process.exit(2);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------

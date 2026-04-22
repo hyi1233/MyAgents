@@ -11,6 +11,70 @@
 export type RuntimeType = 'builtin' | 'claude-code' | 'codex' | 'gemini';
 
 /**
+ * Canonical runtime type list — single source of truth.
+ *
+ * Used by:
+ *   - Server-side validation (admin-api.ts task creation guards).
+ *   - CLI help-text generation (admin-api.ts HELP_TEXTS).
+ *   - Factory / runtime switch statements.
+ *
+ * Adding a runtime? Update the `RuntimeType` union above, then extend
+ * this tuple. The `_exhaustiveRuntimeCheck` helper below makes typecheck
+ * fail if the two drift — so you don't get a stale list that compiles
+ * silently and produces an incomplete `--help` / validator allowlist.
+ */
+export const VALID_RUNTIMES = [
+  'builtin',
+  'claude-code',
+  'codex',
+  'gemini',
+] as const satisfies readonly RuntimeType[];
+
+/**
+ * Compile-time exhaustiveness gate: fails `npm run typecheck` if a new
+ * `RuntimeType` variant is added to the union without adding the same string
+ * to `VALID_RUNTIMES`. The type-level assertion at the bottom never runs at
+ * runtime — it just blocks the build on drift.
+ */
+type _VALID_RUNTIMES_UNION = (typeof VALID_RUNTIMES)[number];
+type _AssertRuntimeExhaustive = RuntimeType extends _VALID_RUNTIMES_UNION
+  ? _VALID_RUNTIMES_UNION extends RuntimeType
+    ? true
+    : ['VALID_RUNTIMES has strings not in RuntimeType']
+  : ['RuntimeType has variants missing from VALID_RUNTIMES'];
+// Exported purely to satisfy the "unused" lint rule — the type-level assertion
+// on this declaration is what fails the build on drift; the runtime value
+// itself is inert.
+export const _exhaustiveRuntimeCheck: _AssertRuntimeExhaustive = true;
+
+/** Human-readable display names keyed by runtime type. */
+export const RUNTIME_DISPLAY_NAMES: Record<RuntimeType, string> = {
+  builtin: 'Built-in (Claude Agent SDK)',
+  'claude-code': 'Claude Code CLI',
+  codex: 'OpenAI Codex CLI',
+  gemini: 'Google Gemini CLI (ACP)',
+};
+
+/**
+ * Structured hint for recoverable CLI errors.
+ *
+ * Emitted by Admin-API handlers when they reject a request for a reason that
+ * the caller (AI agent or human) can fix by running one more command. The CLI
+ * surfaces `recoveryCommand` as `→ Run: <cmd>` under the error line so the
+ * reader can copy-paste to correct course without digging through --help.
+ *
+ * Design note: kept separate from the existing `AdminResponse.hint: string`
+ * field — that one is a free-form success tip ("Server added."), this one is
+ * specifically about recovering from failure.
+ */
+export interface RecoveryHint {
+  /** Exact CLI command that will help the caller retry correctly. */
+  recoveryCommand?: string;
+  /** Short explanatory text shown alongside the command. */
+  message?: string;
+}
+
+/**
  * Runtime detection result
  */
 export interface RuntimeDetection {
@@ -128,6 +192,41 @@ export const GEMINI_PERMISSION_MODES: RuntimePermissionMode[] = [
   },
 ];
 
+// ─── Built-in Claude Agent SDK permission modes ───
+//
+// These mirror the `PermissionMode` string union in `src/server/agent-session.ts`
+// (`'auto' | 'plan' | 'fullAgency' | 'custom'`). Exposing them here lets
+// `myagents runtime describe builtin` show the same allowlist other runtimes
+// expose — otherwise the discovery flow returns an empty permissionModes list
+// for builtin and the AI caller has no way to know what values `--permissionMode`
+// accepts without reading source code.
+export const BUILTIN_PERMISSION_MODES: RuntimePermissionMode[] = [
+  {
+    value: 'auto',
+    label: 'Auto',
+    icon: '\u{1F916}',  // 🤖
+    description: '默认模式，工具按需申请权限',
+  },
+  {
+    value: 'plan',
+    label: 'Plan',
+    icon: '\u{1F4CB}',  // 📋
+    description: '规划模式，只读不执行',
+  },
+  {
+    value: 'fullAgency',
+    label: 'Full Agency',
+    icon: '\u26A1',      // ⚡
+    description: '跳过所有权限确认（Cron 任务默认）',
+  },
+  {
+    value: 'custom',
+    label: 'Custom',
+    icon: '\u{1F527}',  // 🔧
+    description: '用户自定义的权限规则',
+  },
+];
+
 // ─── Codex permission modes (pre-defined for v2) ───
 
 export const CODEX_PERMISSION_MODES: RuntimePermissionMode[] = [
@@ -159,12 +258,17 @@ export const CODEX_PERMISSION_MODES: RuntimePermissionMode[] = [
 
 /**
  * Get permission modes for a given runtime type
+ *
+ * Returns the exhaustive allowlist for every runtime — including builtin —
+ * so callers (UI dropdowns, `runtime describe`, validators) don't have to
+ * special-case the builtin path.
  */
 export function getRuntimePermissionModes(runtime: RuntimeType): RuntimePermissionMode[] {
   switch (runtime) {
     case 'claude-code': return CC_PERMISSION_MODES;
     case 'codex': return CODEX_PERMISSION_MODES;
     case 'gemini': return GEMINI_PERMISSION_MODES;
+    case 'builtin': return BUILTIN_PERMISSION_MODES;
     default: return [];
   }
 }
@@ -193,6 +297,7 @@ export function getDefaultRuntimePermissionMode(runtime: RuntimeType): string {
     case 'claude-code': return 'default';
     case 'codex': return 'full-auto';
     case 'gemini': return 'autoEdit';  // D5: desktop default = Auto Edit
+    case 'builtin': return 'auto';
     default: return '';
   }
 }
