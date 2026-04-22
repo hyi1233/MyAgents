@@ -16,7 +16,7 @@ import type { RuntimeType } from '../../shared/types/runtime';
 import { isPendingSessionId } from '../../shared/constants';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
 import { createSessionMetadata } from '../types/session';
-import { snapshotForImSession } from '../utils/session-snapshot';
+import { snapshotForImSession, snapshotForOwnedSession } from '../utils/session-snapshot';
 import { findAgentByWorkspacePath } from '../utils/admin-config';
 import type { AgentConfig } from '../../shared/types/agent';
 import type { MessageUsage, SessionMessage } from '../types/session';
@@ -202,23 +202,29 @@ function clearPendingThinking(): void {
  *  Idempotent: no-op if metadata already exists. Used by both the initial
  *  message path (_doStartExternalSession) and the post-pre-warm Case 3 path
  *  (sendExternalMessage) — both need the same registration, so the logic
- *  lives here to prevent drift. */
+ *  lives here to prevent drift.
+ *
+ *  Snapshot policy mirrors agent-session.ts:enqueueUserMessage — desktop/cron
+ *  owners freeze config into the session (D2/D3/D9), IM owners live-follow
+ *  agent config (D4). The scenario flag is what v0.1.69 pre-warm broke:
+ *  pre-warm Tab → Case 3 first message used to always take the IM path, which
+ *  silently leaked agent config changes into owned desktop sessions. */
 function registerSessionMetadataIfNew(
   sessionId: string,
   workspacePath: string,
   messageText: string,
   origin: string,
+  scenario: InteractionScenario,
 ): void {
   if (!sessionId || getSessionMetadata(sessionId)) return;
-  // v0.1.69: Same lazy-creation reasoning as agent-session.ts:enqueueUserMessage —
-  // POST /sessions and Cron `new_task` pre-create metadata, so this lazy path
-  // realistically only fires for IM Bot first-message on an external runtime.
-  // IM uses live-follow (runtime only). The runtime field is overwritten below
-  // with `getCurrentRuntimeType()` to honor the actual sidecar runtime regardless
-  // of what the agent record claims (defense in depth — pre-warm Tab might have
-  // forced a different runtime).
+  const useLiveFollow = scenario.type === 'im' || scenario.type === 'agent-channel';
+  // Runtime field is overwritten below with `getCurrentRuntimeType()` to honor
+  // the actual sidecar runtime regardless of what the agent record claims
+  // (defense in depth — pre-warm Tab might have forced a different runtime).
   const lazyAgent = findAgentByWorkspacePath(workspacePath) as AgentConfig | undefined;
-  const lazySnapshot = lazyAgent ? snapshotForImSession(lazyAgent) : undefined;
+  const lazySnapshot = lazyAgent
+    ? (useLiveFollow ? snapshotForImSession(lazyAgent) : snapshotForOwnedSession(lazyAgent))
+    : undefined;
   const meta = createSessionMetadata(workspacePath, lazySnapshot);
   meta.id = sessionId;
   meta.runtime = getCurrentRuntimeType();
@@ -850,7 +856,7 @@ async function _doStartExternalSession(options: {
 
     // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
     if (!options.resumeSessionId) {
-      registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message');
+      registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
     }
   }
 
@@ -1060,7 +1066,7 @@ export async function sendExternalMessage(
     // Normally this happens inside startExternalSession's initialMessage block,
     // but pre-warm calls startExternalSession WITHOUT an initialMessage, so we
     // have to register here when the first actual message arrives via Case 3.
-    registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm');
+    registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm', lastScenario);
 
     // Persist user message immediately (crash safety)
     if (lastSessionId) {
@@ -1121,24 +1127,34 @@ export async function respondExternalAskUserQuestion(
     console.warn(`[external-session] Unknown AskUserQuestion requestId: ${requestId}`);
     return false;
   }
-  pendingExternalAskUserQuestions.delete(requestId);
-  pendingExternalInteractiveRequests.delete(requestId);
-
+  // Check process liveness BEFORE consuming the pending entry (cross-review C4):
+  // previously we deleted up front, so a transient "process gone" state silently
+  // discarded the answer and left the user with no affordance to retry. Keeping
+  // the entry when we can't deliver lets the caller observe the failure and the
+  // routing layer keep sending it to the external handler, not the builtin one.
   if (!activeProcess || !activeRuntime) {
-    console.warn('[external-session] No active process for AskUserQuestion response');
+    console.warn(`[external-session] No active process for AskUserQuestion response requestId=${requestId} — session likely stopped before user answered`);
     return false;
   }
 
-  if (answers === null) {
-    console.log(`[external-session] AskUserQuestion cancelled for requestId=${requestId}`);
-    await activeRuntime.respondPermission(activeProcess, requestId, 'deny', '用户取消了问答');
+  try {
+    if (answers === null) {
+      console.log(`[external-session] AskUserQuestion cancelled for requestId=${requestId}`);
+      await activeRuntime.respondPermission(activeProcess, requestId, 'deny', '用户取消了问答');
+    } else {
+      console.log(`[external-session] AskUserQuestion answered for requestId=${requestId}`);
+      const updatedInput = { ...pending.input, answers };
+      await activeRuntime.respondPermission(activeProcess, requestId, 'allow_once', undefined, undefined, updatedInput);
+    }
+    // Delete only after successful delivery — if respondPermission throws
+    // (e.g. stdin closed mid-write) the caller can retry.
+    pendingExternalAskUserQuestions.delete(requestId);
+    pendingExternalInteractiveRequests.delete(requestId);
     return true;
+  } catch (err) {
+    console.error(`[external-session] respondPermission failed for requestId=${requestId}:`, err);
+    return false;
   }
-
-  console.log(`[external-session] AskUserQuestion answered for requestId=${requestId}`);
-  const updatedInput = { ...pending.input, answers };
-  await activeRuntime.respondPermission(activeProcess, requestId, 'allow_once', undefined, undefined, updatedInput);
-  return true;
 }
 
 /**

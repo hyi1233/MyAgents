@@ -5199,7 +5199,13 @@ async function main() {
             answers: Record<string, string> | null;  // null means user cancelled
           };
 
-          if (shouldUseExternalRuntime() && isExternalSessionActive() && hasPendingExternalAskUserQuestion(payload.requestId)) {
+          // Route by pending-request ownership, NOT live session state
+          // (cross-review C4): if we track this requestId as external, the
+          // answer belongs to CC even if the process just died. Deferring to
+          // the builtin handler would return "unknown request" and silently
+          // lose the user's input. External handler returns false + logs on
+          // process-gone, surfacing the failure to the UI.
+          if (shouldUseExternalRuntime() && hasPendingExternalAskUserQuestion(payload.requestId)) {
             const success = await respondExternalAskUserQuestion(payload.requestId, payload.answers);
             return jsonResponse({ success });
           }

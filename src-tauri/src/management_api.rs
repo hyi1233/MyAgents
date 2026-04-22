@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use crate::cron_task::{
     self, CronDelivery, CronSchedule, CronTask, CronTaskConfig, TaskProviderEnv,
 };
-use crate::ulog_info;
+use crate::{ulog_info, ulog_warn, ulog_error};
 use crate::im::{self, ManagedImBots, ManagedAgents};
 use crate::im::adapter::ImStreamAdapter;
 use crate::im::bridge;
@@ -124,11 +124,11 @@ pub async fn start_management_api() -> Result<u16, String> {
 
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
-            log::error!("[management-api] Server error: {}", e);
+            ulog_error!("[management-api] Server error: {}", e);
         }
     });
 
-    log::info!(
+    ulog_info!(
         "[management-api] Started on http://127.0.0.1:{}",
         port
     );
@@ -280,9 +280,9 @@ async fn create_cron_handler(
             // Auto-start the task
             let task_id = task.id.clone();
             if let Err(e) = manager.start_task(&task_id).await {
-                log::warn!("[management-api] Created task {} but failed to start: {}", task_id, e);
+                ulog_warn!("[management-api] Created task {} but failed to start: {}", task_id, e);
             } else if let Err(e) = manager.start_task_scheduler(&task_id).await {
-                log::warn!("[management-api] Started task {} but failed to start scheduler: {}", task_id, e);
+                ulog_warn!("[management-api] Started task {} but failed to start scheduler: {}", task_id, e);
             }
 
             // Fetch enriched task to get computed nextExecutionAt
@@ -669,7 +669,7 @@ async fn send_media_handler(
                     "error": format!("Image too large: {:.1} MB (max 10 MB)", data_len as f64 / (1024.0 * 1024.0))
                 }));
             }
-            log::info!("[send-media] Sending image: {} ({} bytes) to {}", filename, data_len, req.chat_id);
+            ulog_info!("[send-media] Sending image: {} ({} bytes) to {}", filename, data_len, req.chat_id);
             match adapter.send_photo(&req.chat_id, data, &filename, req.caption.as_deref()).await {
                 Ok(_) => Json(serde_json::json!({
                     "ok": true, "fileName": filename, "fileSize": data_len
@@ -702,7 +702,7 @@ async fn send_media_handler(
                 "txt" => "text/plain",
                 _ => "application/octet-stream",
             };
-            log::info!("[send-media] Sending file: {} ({} bytes, {}) to {}", filename, data_len, mime, req.chat_id);
+            ulog_info!("[send-media] Sending file: {} ({} bytes, {}) to {}", filename, data_len, mime, req.chat_id);
             match adapter.send_file(&req.chat_id, data, &filename, mime, req.caption.as_deref()).await {
                 Ok(_) => Json(serde_json::json!({
                     "ok": true, "fileName": filename, "fileSize": data_len

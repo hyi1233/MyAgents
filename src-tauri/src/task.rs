@@ -1004,26 +1004,37 @@ impl TaskStore {
             deleted_at: None,
         };
 
-        // Build the proposed next map, persist FIRST, then swap in-memory state.
-        // This prevents the "persist failed but we already mutated memory" class
-        // of bugs — the store stays consistent with disk.
+        // Materialize task.md FIRST, commit JSONL LAST (fix cross-review C3):
+        // if the docs dir is unwritable (disk full, permissions, etc.) the task.md
+        // write fails before the JSONL row is durable. Previous ordering left an
+        // "orphan JSONL row with no task.md" on disk after restart — a real
+        // integrity violation, not just a recoverable hiccup. Worst case now is
+        // an orphan empty directory with no JSONL row referencing it, which is
+        // harmless (never shows up in list()) and can be swept by a background
+        // cleanup job later.
         let mut inner = self.inner.write().await;
-        let mut next = inner.clone();
-        next.insert(id.clone(), t.clone());
-        Self::persist_locked(&self.jsonl_path, &next)?;
-
-        // JSONL committed — now materialize the task.md payload. Failing at this
-        // point leaves an orphan JSONL row, which is recoverable on next boot
-        // (the row is visible but `~/.myagents/tasks/<id>/task.md` is missing; we log loudly).
         fs::create_dir_all(&task_dir)
             .map_err(|e| format!("Failed to create task doc dir: {}", e))?;
         let task_md = task_dir.join("task.md");
-        if let Err(e) = write_atomic_text(&task_md, &input.task_md_content) {
-            ulog_warn!(
-                "[task] jsonl committed but task.md write failed id={} — recoverable on UI reopen: {}",
-                id, e
-            );
-            return Err(format!("Failed to write task.md: {}", e));
+        write_atomic_text(&task_md, &input.task_md_content)
+            .map_err(|e| format!("Failed to write task.md: {}", e))?;
+
+        let mut next = inner.clone();
+        next.insert(id.clone(), t.clone());
+        if let Err(e) = Self::persist_locked(&self.jsonl_path, &next) {
+            // JSONL write failed — roll back the docs dir so we don't leave
+            // orphan directories on disk. `remove_dir_all` is best-effort
+            // (already-interrupted filesystem may leave stragglers); log and
+            // continue so the caller gets the actual error, not a cleanup one.
+            if let Err(cleanup_err) = fs::remove_dir_all(&task_dir) {
+                ulog_warn!(
+                    "[task] jsonl write failed AND task_dir cleanup failed id={} path={} err={}",
+                    id,
+                    task_dir.display(),
+                    cleanup_err
+                );
+            }
+            return Err(e);
         }
         *inner = next;
         drop(inner);
@@ -1125,20 +1136,28 @@ impl TaskStore {
             deleted_at: None,
         };
 
+        // Materialize task.md FIRST, commit JSONL LAST (same ordering invariant
+        // as create_direct — see fix for C3). Orphan docs dir on JSONL failure is
+        // harmless; orphan JSONL row without task.md is an integrity violation.
         let mut inner = self.inner.write().await;
-        let mut next = inner.clone();
-        next.insert(id.clone(), t.clone());
-        Self::persist_locked(&self.jsonl_path, &next)?;
-
         fs::create_dir_all(&task_dir)
             .map_err(|e| format!("Failed to create task doc dir: {}", e))?;
         let task_md = task_dir.join("task.md");
-        if let Err(e) = write_atomic_text(&task_md, &input.task_md_content) {
-            ulog_warn!(
-                "[task] migrated jsonl committed but task.md write failed id={}: {}",
-                id, e
-            );
-            return Err(format!("Failed to write task.md: {}", e));
+        write_atomic_text(&task_md, &input.task_md_content)
+            .map_err(|e| format!("Failed to write task.md: {}", e))?;
+
+        let mut next = inner.clone();
+        next.insert(id.clone(), t.clone());
+        if let Err(e) = Self::persist_locked(&self.jsonl_path, &next) {
+            if let Err(cleanup_err) = fs::remove_dir_all(&task_dir) {
+                ulog_warn!(
+                    "[task] migrated jsonl write failed AND task_dir cleanup failed id={} path={} err={}",
+                    id,
+                    task_dir.display(),
+                    cleanup_err
+                );
+            }
+            return Err(e);
         }
         *inner = next;
         drop(inner);
@@ -1171,6 +1190,22 @@ impl TaskStore {
     ) -> Result<Task, String> {
         validate_task_name(&input.name)?;
         validate_safe_id(&input.alignment_session_id, "alignmentSessionId")?;
+        // The AI-discussion path (想法 → /task-alignment → create-from-alignment)
+        // does not surface schedule fields in its input contract, yet the
+        // `executionMode` is passed through unchanged. If we accept recurring /
+        // scheduled / loop here we persist a Task with `interval_minutes=None`,
+        // `cron_expression=None`, `dispatch_at=None` — a subsequent `task run`
+        // fails with "no resolvable schedule" and the user cannot fix it from
+        // the CLI (no --cron flag on this subcommand). Gate at the boundary so
+        // the error surfaces at creation time with actionable guidance.
+        if !matches!(input.execution_mode, TaskExecutionMode::Once) {
+            return Err(format!(
+                "create-from-alignment only supports executionMode=once; \
+                 to set a schedule, create the task and then `myagents task update <id> \
+                 --cronExpression <expr>` or use `create-direct` (got {:?})",
+                input.execution_mode
+            ));
+        }
 
         let src = task_docs_dir(&input.alignment_session_id)?;
         if !src.exists() {
@@ -2081,8 +2116,11 @@ fn now_ms() -> i64 {
 }
 
 /// Strict id validator — rejects `..`, path separators, `\0`, leading `.`, and
-/// anything not ASCII alphanumeric / `-` / `_`. This is the pit-of-success guard
-/// against `taskId="../../etc/passwd"` and similar injections (CC + Codex review).
+/// anything not ASCII alphanumeric / `-` / `_`. Also rejects Windows reserved
+/// device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) case-insensitively —
+/// creating a file/dir with these names on Windows triggers OS-level errors
+/// regardless of extension. This is the pit-of-success guard against
+/// `taskId="../../etc/passwd"` and similar injections (CC + Codex review).
 pub fn validate_safe_id(value: &str, label: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 128 {
         return Err(format!("{} is empty or too long", label));
@@ -2095,6 +2133,18 @@ pub fn validate_safe_id(value: &str, label: &str) -> Result<(), String> {
         if !ok {
             return Err(format!("{} contains invalid character {:?}", label, ch));
         }
+    }
+    let upper = value.to_ascii_uppercase();
+    const WINDOWS_RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if WINDOWS_RESERVED.iter().any(|r| upper == *r) {
+        return Err(format!(
+            "{} matches a Windows reserved device name ({})",
+            label, upper
+        ));
     }
     Ok(())
 }
@@ -2571,9 +2621,13 @@ pub async fn cmd_task_create_from_alignment(
     thought_state: tauri::State<'_, crate::thought::ManagedThoughtStore>,
     input: TaskCreateFromAlignmentInput,
 ) -> Result<Task, String> {
-    let source_thought_id = input.source_thought_id.clone();
     let created = task_state.create_from_alignment(input).await?;
-    if let Some(thought_id) = source_thought_id {
+    // Resolve thought↔task linkage from the CREATED task, not the raw input
+    // (cross-review fix): source_thought_id may have been auto-inherited from
+    // alignment metadata.json inside create_from_alignment, in which case the
+    // input never carried it. Reading from `created` covers both code paths
+    // uniformly and matches the HTTP handler in management_api.rs.
+    if let Some(thought_id) = created.source_thought_id.clone() {
         if let Err(e) = thought_state.link_task(&thought_id, &created.id).await {
             ulog_warn!(
                 "[task] created {} but thought link_task failed: {}",
