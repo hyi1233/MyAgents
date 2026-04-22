@@ -1,5 +1,5 @@
 import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
-import { rename, rm, stat } from 'fs/promises';
+import { copyFile as copyFileAsync, readdir as readdirAsync, rename, rm, stat } from 'fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
 import AdmZip from 'adm-zip';
@@ -1249,29 +1249,32 @@ function stripYamlFrontmatter(content: string): string {
 }
 
 /**
- * Recursively copy a directory (synchronous version)
- * Security: Skips symbolic links to prevent following links to sensitive locations
- * @param src Source directory path
- * @param dest Destination directory path
- * @param logPrefix Optional prefix for log messages
+ * Recursively copy a directory using fs/promises.
+ * Every filesystem call yields to the event loop — important for HTTP handlers
+ * that bulk-copy multiple folders. A sync implementation would block Bun's
+ * event loop long enough for the Rust health monitor (/health with 2 s timeout,
+ * 15 s interval) to declare the sidecar unresponsive and respawn it on a fresh
+ * port mid-copy — which was the root cause of the "sync-from-claude crashes
+ * the sidecar" report in issue #96.
+ *
+ * Security: Skips symbolic links to prevent following links to sensitive locations.
  */
-function copyDirRecursiveSync(src: string, dest: string, logPrefix = '[copyDir]'): void {
-  ensureDirSync(dest);
-  const entries = readdirSync(src, { withFileTypes: true });
+async function copyDirRecursive(src: string, dest: string, logPrefix = '[copyDir]'): Promise<void> {
+  await ensureDir(dest);
+  const entries = await readdirAsync(src, { withFileTypes: true });
   for (const entry of entries) {
     const srcPath = join(src, entry.name);
     const destPath = join(dest, entry.name);
 
-    // Security: Skip symbolic links to prevent following links to sensitive locations
     if (entry.isSymbolicLink()) {
       console.warn(`${logPrefix} Skipping symlink: ${srcPath}`);
       continue;
     }
 
     if (entry.isDirectory()) {
-      copyDirRecursiveSync(srcPath, destPath, logPrefix);
+      await copyDirRecursive(srcPath, destPath, logPrefix);
     } else {
-      copyFileSync(srcPath, destPath);
+      await copyFileAsync(srcPath, destPath);
     }
   }
 }
@@ -6035,12 +6038,16 @@ async function main() {
           let failed = 0;
           const errors: string[] = [];
 
+          // Async copy — yields to the event loop so the Rust health monitor's
+          // /health probe (2 s timeout, 15 s interval) keeps succeeding while the
+          // bulk sync runs. Blocking here was the root cause of the "sidecar
+          // respawns mid-sync, port jumps" symptom users saw on Windows.
           for (const folder of syncableFolders) {
             const srcDir = join(claudeSkillsDir, folder);
             const destDir = join(userSkillsBaseDir, folder);
 
             try {
-              copyDirRecursiveSync(srcDir, destDir, '[api/skill/sync-from-claude]');
+              await copyDirRecursive(srcDir, destDir, '[api/skill/sync-from-claude]');
 
               // Ensure SKILL.md exists — Claude Code may use different file names
               const skillMdPath = join(destDir, 'SKILL.md');
@@ -6298,8 +6305,9 @@ async function main() {
           // Ensure global skills directory exists
           ensureDirSync(userSkillsBaseDir);
 
-          // Copy the skill folder
-          copyDirRecursiveSync(srcDir, destDir, '[api/skill/copy-to-global]');
+          // Copy the skill folder — async variant so /health stays responsive
+          // while large skills copy (see copyDirRecursive doc).
+          await copyDirRecursive(srcDir, destDir, '[api/skill/copy-to-global]');
 
           // Bump generation + sync symlinks into project
           bumpSkillsGeneration();
@@ -6376,6 +6384,12 @@ async function main() {
             filename: string;
             content: string; // Base64 encoded file content
             scope: 'user' | 'project';
+            /**
+             * Optional explicit folder name. Bypasses heuristic derivation from
+             * filename / frontmatter. Required when uploading a bare `SKILL.md`
+             * file — see `.md` branch below.
+             */
+            folderName?: string;
           };
 
           if (!payload.filename || !payload.content) {
@@ -6393,8 +6407,11 @@ async function main() {
           // Decode base64 content to buffer
           const fileBuffer = Buffer.from(payload.content, 'base64');
 
-          // Helper: Try to extract name from SKILL.md content
-          const extractNameFromContent = (content: string): string | null => {
+          // Helper: Try to extract name from SKILL.md frontmatter only.
+          // Scope: `.zip` / `.skill` branch. Archives already have stronger
+          // fallbacks (top-level directory, then filename stem) — we don't want
+          // a body `# heading` to silently override them.
+          const extractFrontmatterName = (content: string): string | null => {
             try {
               const parsed = parseFullSkillContent(content);
               if (parsed.frontmatter.name) {
@@ -6405,6 +6422,25 @@ async function main() {
             }
             return null;
           };
+
+          // Helper used only by the `.md` branch. Adds the first `# heading`
+          // fallback so bare SKILL.md uploads without frontmatter `name:` can
+          // still yield a meaningful directory name instead of the reserved
+          // "SKILL" filename stem.
+          const extractNameForMdUpload = (content: string): string | null => {
+            try {
+              const { name } = parseSkillFrontmatter(content);
+              return name ?? null;
+            } catch {
+              return null;
+            }
+          };
+
+          // `SKILL.md` is the convention-reserved filename inside every skill
+          // folder — it identifies the file's role, not the skill's identity.
+          // Using its stem as a folder-name fallback collapses every distinct
+          // upload onto the same directory (issue #96).
+          const isReservedSkillStem = (stem: string): boolean => /^skill$/i.test(stem);
 
           if (ext === '.zip' || ext === '.skill') {
             // Handle zip/skill files - extract to skills directory
@@ -6434,7 +6470,7 @@ async function main() {
                 const entryName = entry.entryName.toLowerCase();
                 if (entryName.endsWith('skill.md') && !entry.isDirectory) {
                   const mdContent = entry.getData().toString('utf-8');
-                  const nameFromContent = extractNameFromContent(mdContent);
+                  const nameFromContent = extractFrontmatterName(mdContent);
                   if (nameFromContent) {
                     rootFolderName = nameFromContent;
                     break;
@@ -6509,9 +6545,25 @@ async function main() {
             const mdContent = fileBuffer.toString('utf-8');
             const mdFilename = basename(payload.filename, '.md');
 
-            // Try to get name from frontmatter, fallback to filename
-            const nameFromContent = extractNameFromContent(mdContent);
-            const folderName = sanitizeFolderName(nameFromContent || mdFilename);
+            // Folder-name priority: explicit payload.folderName → frontmatter.name
+            // (or first `# heading`) → filename stem, but NEVER the reserved stem
+            // "SKILL" (the convention filename for every skill's definition file).
+            const nameFromContent = extractNameForMdUpload(mdContent);
+            const fallbackFromFilename = isReservedSkillStem(mdFilename) ? null : mdFilename;
+            const rawFolderName = payload.folderName || nameFromContent || fallbackFromFilename;
+
+            if (!rawFolderName) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error:
+                    '无法确定技能目录名：上传文件名为 SKILL.md 且正文缺少可用标识。请任选其一：在 frontmatter 中添加 name 字段、在正文添加 `# <技能名>` 标题、或在请求中提供 folderName 参数。',
+                },
+                400,
+              );
+            }
+
+            const folderName = sanitizeFolderName(rawFolderName);
             const skillDir = join(baseDir, folderName);
 
             if (existsSync(skillDir)) {
@@ -6616,29 +6668,30 @@ async function main() {
             return jsonResponse({ success: false, error: `技能 "${folderName}" 已存在` }, 409);
           }
 
-          // Copy folder recursively
-          const copyDir = (src: string, dest: string) => {
-            ensureDirSync(dest);
-            const entries = readdirSync(src);
-
+          // Copy folder recursively — async so the sidecar's /health probe
+          // stays responsive during large imports (see copyDirRecursive doc).
+          // Keeps the hidden-file / __MACOSX filter that distinguishes this
+          // path from the bulk-sync variant.
+          const copyImportedSkillDir = async (src: string, dest: string): Promise<void> => {
+            await ensureDir(dest);
+            const entries = await readdirAsync(src, { withFileTypes: true });
             for (const entry of entries) {
-              // Skip hidden files and __MACOSX
-              if (entry.startsWith('.') || entry === '__MACOSX') continue;
-
-              const srcPath = join(src, entry);
-              const destPath = join(dest, entry);
-              const stats = statSync(srcPath);
-
-              if (stats.isDirectory()) {
-                copyDir(srcPath, destPath);
+              if (entry.name.startsWith('.') || entry.name === '__MACOSX') continue;
+              if (entry.isSymbolicLink()) {
+                console.warn(`[api/skill/import-folder] Skipping symlink: ${join(src, entry.name)}`);
+                continue;
+              }
+              const srcPath = join(src, entry.name);
+              const destPath = join(dest, entry.name);
+              if (entry.isDirectory()) {
+                await copyImportedSkillDir(srcPath, destPath);
               } else {
-                // Copy file
-                copyFileSync(srcPath, destPath);
+                await copyFileAsync(srcPath, destPath);
               }
             }
           };
 
-          copyDir(sourcePath, targetDir);
+          await copyImportedSkillDir(sourcePath, targetDir);
 
           if (payload.scope === 'user') {
             bumpSkillsGeneration();
@@ -7356,13 +7409,16 @@ async function main() {
                 conflicts.push(folder);
                 continue;
               }
-              // overwrite: remove existing first
-              rmSync(destDir, { recursive: true, force: true });
+              // overwrite: remove existing first. Async `rm` so a large tree
+              // doesn't block the event loop (same rationale as copyDirRecursive).
+              await rm(destDir, { recursive: true, force: true });
               overwritten++;
             }
 
             try {
-              copyDirRecursiveSync(srcDir, destDir, '[api/agent/sync-from-claude]');
+              // Async copy — see copyDirRecursive doc. Blocking here would starve
+              // the /health probe and trigger a spurious sidecar restart on Windows.
+              await copyDirRecursive(srcDir, destDir, '[api/agent/sync-from-claude]');
               synced++;
 
               // Auto-generate _meta.json from frontmatter
