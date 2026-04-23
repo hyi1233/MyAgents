@@ -10,6 +10,8 @@ import { SearchPill } from './SearchPill';
 import { ThoughtInput } from './ThoughtInput';
 import { ThoughtCard } from './ThoughtCard';
 import { useConfig } from '@/hooks/useConfig';
+// `projects` (not `config.agents`) feeds the # picker — see
+// useThoughtTagCandidates for the rationale.
 import { useThoughtTagCandidates } from '@/hooks/useThoughtTagCandidates';
 import type { Thought } from '@/../shared/types/thought';
 
@@ -114,12 +116,16 @@ export function ThoughtPanel({
     return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
   }, [thoughts]);
 
-  // Picker candidates — history tags + agent workspace names (sanitized to
-  // pass the Rust `#` parser). Workspace names surface as default options
-  // even when no thought has used them yet, so a brand-new agent is
-  // discoverable the first time the user presses `#`.
-  const { config } = useConfig();
-  const tagCandidates = useThoughtTagCandidates(thoughts, config.agents ?? null);
+  // Picker candidates — history tags + user-visible workspace names
+  // (sanitized to pass the Rust `#` parser). Workspace names surface as
+  // default options even when no thought has used them yet, so a brand-
+  // new workspace is discoverable the first time the user presses `#`.
+  // Uses `projects` (what the Launcher actually shows) rather than
+  // `config.agents` so the candidate list matches the visible workspace
+  // inventory 1:1 — including plain workspaces not yet upgraded to
+  // Agents, and excluding internal workspaces like `~/.myagents`.
+  const { projects } = useConfig();
+  const tagCandidates = useThoughtTagCandidates(thoughts, projects);
 
   // Search panel shows the tag cloud only when the user has focused the
   // search input AND hasn't narrowed by text or picked a tag yet. Typing

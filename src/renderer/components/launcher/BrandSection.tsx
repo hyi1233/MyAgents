@@ -18,7 +18,6 @@ import RecentThoughtsRow from '@/components/task-center/RecentThoughtsRow';
 import { ThoughtInput, type ThoughtInputHandle } from '@/components/task-center/ThoughtInput';
 import { useToast } from '@/components/Toast';
 import { thoughtList, taskCenterAvailable } from '@/api/taskCenter';
-import { useConfig } from '@/hooks/useConfig';
 import { useThoughtTagCandidates } from '@/hooks/useThoughtTagCandidates';
 import { hasOverlayLayer } from '@/utils/closeLayer';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
@@ -141,8 +140,12 @@ export default memo(function BrandSection({
         };
     }, [modeSegmentEnabled, mode, reloadThoughts]);
 
-    const { config } = useConfig();
-    const tagCandidates = useThoughtTagCandidates(thoughts, config.agents ?? null);
+    // Feed the # picker with `projects` (the same data backing the Agent
+    // Workspace panel on the right) rather than `config.agents` — the
+    // latter skips plain workspaces not yet upgraded to Agents AND leaks
+    // internal workspaces like `~/.myagents`, producing a candidate list
+    // that didn't match what the user sees on screen.
+    const tagCandidates = useThoughtTagCandidates(thoughts, projects);
 
     // Refs for imperative focus. Both inputs stay mounted (hidden via CSS
     // when the other mode is active) so typed-but-not-yet-sent text
