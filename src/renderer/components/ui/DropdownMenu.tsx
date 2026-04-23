@@ -47,7 +47,12 @@ export interface DropdownMenuProps {
   size?: 'sm' | 'md';
   /** Locks the trigger + all items during a busy async op. */
   disabled?: boolean;
-  /** Popover z-index override. Default 40; overlays pass `OVERLAY_Z + 1`. */
+  /**
+   * Popover z-index override. Default inherits from `<Popover>` (260 — above
+   * standard OverlayBackdrop tiers, below ConfirmDialog). Overlays that need
+   * a precise layering relationship with their own backdrop can pass
+   * `OVERLAY_Z + 1` or similar.
+   */
   zIndex?: number;
   /** Menu minimum width in px. Default 140. */
   minWidth?: number;

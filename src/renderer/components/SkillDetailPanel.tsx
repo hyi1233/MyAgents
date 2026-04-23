@@ -643,7 +643,6 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                         anchorRef={contextBtnRef}
                                         placement="bottom-start"
                                         matchAnchorWidth
-                                        zIndex={50}
                                         className="py-1 shadow-lg"
                                     >
                                         {[
@@ -704,7 +703,6 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                         anchorRef={agentBtnRef}
                                         placement="bottom-start"
                                         matchAnchorWidth
-                                        zIndex={50}
                                         className="py-1 shadow-lg"
                                     >
                                         {[
