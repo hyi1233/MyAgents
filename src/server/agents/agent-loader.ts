@@ -201,6 +201,52 @@ const LAYOUT_PRIORITY: Record<AgentLayout, number> = {
 };
 
 /**
+ * Build an AgentItem from a markdown file path, or return undefined if the
+ * file is not a valid agent (read error, missing name/description frontmatter).
+ *
+ * Shared by scanAgents (full sweep) and findAgent (short-circuit lookup) so
+ * the validation and meta-reading rules live in one place.
+ */
+function buildAgentItem(
+    baseDir: string,
+    mdPath: string,
+    scope: 'user' | 'project',
+): AgentItem | undefined {
+    let content: string;
+    try {
+        content = readFileSync(mdPath, 'utf-8');
+    } catch (err) {
+        console.warn(`[agent-loader] Failed to read ${mdPath}:`, err);
+        return undefined;
+    }
+
+    const { name, description } = parseAgentFrontmatter(content);
+    // Claude Code protocol: both fields required and non-empty.
+    // Missing frontmatter = silent skip (the file is probably a doc).
+    if (!name || !description) return undefined;
+
+    const { folderName, layout } = classifyLayout(baseDir, mdPath);
+
+    // _meta.json only lives next to 'folder' layout agents. For flat/nested
+    // layouts, there's no unambiguous place for a sidecar file (parent dir
+    // is shared), so we don't try to read one.
+    const meta = layout === 'folder'
+        ? readAgentMeta(join(baseDir, folderName))
+        : undefined;
+
+    return {
+        name: meta?.displayName || name || folderName,
+        description,
+        scope,
+        path: mdPath,
+        folderName,
+        layout,
+        ...(meta ? { meta } : {}),
+        ...(meta?.author === 'claude-code-sync' ? { synced: true } : {}),
+    };
+}
+
+/**
  * Scan a directory for agent definition files.
  *
  * Recognises the three layouts above. An agent is registered iff its
@@ -216,42 +262,11 @@ export function scanAgents(dir: string, scope: 'user' | 'project'): AgentItem[] 
 
     try {
         for (const mdPath of walkMarkdown(dir)) {
-            let content: string;
-            try {
-                content = readFileSync(mdPath, 'utf-8');
-            } catch (err) {
-                console.warn(`[agent-loader] Failed to read ${mdPath}:`, err);
-                continue;
-            }
-
-            const { name, description } = parseAgentFrontmatter(content);
-            // Claude Code protocol: both fields required and non-empty.
-            // Missing frontmatter = silent skip (the file is probably a doc).
-            if (!name || !description) continue;
-
-            const { folderName, layout } = classifyLayout(dir, mdPath);
-
-            // _meta.json only lives next to 'folder' layout agents.
-            // For flat/nested layouts, there's no unambiguous place for a
-            // sidecar file (parent dir is shared), so we don't try to read one.
-            const meta = layout === 'folder'
-                ? readAgentMeta(join(dir, folderName))
-                : undefined;
-
-            const candidate: AgentItem = {
-                name: meta?.displayName || name || folderName,
-                description,
-                scope,
-                path: mdPath,
-                folderName,
-                layout,
-                ...(meta ? { meta } : {}),
-                ...(meta?.author === 'claude-code-sync' ? { synced: true } : {}),
-            };
-
-            const existing = byFolderName.get(folderName);
-            if (!existing || LAYOUT_PRIORITY[layout] > LAYOUT_PRIORITY[existing.layout]) {
-                byFolderName.set(folderName, candidate);
+            const candidate = buildAgentItem(dir, mdPath, scope);
+            if (!candidate) continue;
+            const existing = byFolderName.get(candidate.folderName);
+            if (!existing || LAYOUT_PRIORITY[candidate.layout] > LAYOUT_PRIORITY[existing.layout]) {
+                byFolderName.set(candidate.folderName, candidate);
             }
         }
     } catch (error) {
@@ -349,14 +364,40 @@ export function loadEnabledAgents(
 }
 
 /**
- * Find a previously-scanned agent by (folderName, scope) and return the
- * full AgentItem — used by GET/PUT/DELETE handlers to resolve `folderName`
- * to a real on-disk path. Returns `undefined` if no match.
+ * Find an agent by (folderName, scope) and return the full AgentItem.
+ * Used by GET/PUT/DELETE handlers to resolve `folderName` to a real on-disk
+ * path without assuming the `<base>/<name>/<name>.md` layout.
+ *
+ * Short-circuits vs a full scan:
+ *   * classifyLayout is pure-path — wrong folderName rejects before readFile
+ *   * 'folder' layout wins LAYOUT_PRIORITY outright, so we return on first
+ *     folder-match without walking the rest of the tree
+ *   * flat/nested candidates are held until the walk ends (in case a higher-
+ *     priority folder match appears later) — at worst, one full walk
  */
 export function findAgent(
     baseDir: string,
     scope: 'user' | 'project',
     folderName: string,
 ): AgentItem | undefined {
-    return scanAgents(baseDir, scope).find(a => a.folderName === folderName);
+    if (!baseDir || !existsSync(baseDir)) return undefined;
+
+    let best: AgentItem | undefined;
+    try {
+        for (const mdPath of walkMarkdown(baseDir)) {
+            const classified = classifyLayout(baseDir, mdPath);
+            if (classified.folderName !== folderName) continue;
+
+            const candidate = buildAgentItem(baseDir, mdPath, scope);
+            if (!candidate) continue;
+
+            if (candidate.layout === 'folder') return candidate;
+            if (!best || LAYOUT_PRIORITY[candidate.layout] > LAYOUT_PRIORITY[best.layout]) {
+                best = candidate;
+            }
+        }
+    } catch (error) {
+        console.warn(`[agent-loader] Error finding ${folderName} in ${baseDir}:`, error);
+    }
+    return best;
 }
