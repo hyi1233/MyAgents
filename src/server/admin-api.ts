@@ -1416,7 +1416,7 @@ export function handleVersion(): AdminResponse {
   // MYAGENTS_VERSION can be injected by the build system as a fallback.
   const version = process.env.npm_package_version
     ?? process.env.MYAGENTS_VERSION
-    ?? '0.1.51';
+    ?? '0.1.70';
   return { success: true, data: { version } };
 }
 

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.70] - 2026-04-24
+
+### Added
+- **`myagents mcp show <id>`**：查看单个 MCP 服务器的完整配置、全局 / 工作区两级启用状态、传输层（command/args/url）和脱敏后的 env/headers。和 `agent show` 并列，三个查看命令（`agent show` / `mcp show` / `runtime describe`）现在形态对等。
+- **`cron add/update --schedule` 支持 JSON 形式**：除了原有的 cron 表达式字符串（`"*/30 * * * *"`），现在也接受与内部数据结构对齐的 JSON 对象 —— `{"kind":"at","at":"..."}` / `{"kind":"every","minutes":30}` / `{"kind":"cron","expr":"...","tz":"..."}` / `{"kind":"loop"}`。CLI 层做 per-kind 字段与类型校验，格式错误在边界就清晰给出，不再把"Failed to parse JSON"一路甩到用户脸上。
+- **`cron add/update --message` 别名**：`--message` 现在是 `--prompt` 的正式别名（内部 wire 字段本来就叫 `message`，这个直觉是对的）。
+
+### Fixed
+- **SubAgent 模型修改后 `myagents reload` 立即生效**：之前编辑 `~/.myagents/agents/<agent>/<name>.md` 的 `model:` 后必须重启整个 app 才能生效。根因分三层：`handleReload` 只重载 MCP 不扫 sub-agent `.md`、`setAgents()` 只比对名字不比内容（相同名字不同 model 被当作"无变化"）、Tab / Cron / Background 会话的 snapshot 守卫也会跳过重启。现在 reload 会重扫 `.md`、用内容指纹识别变化、并通过新增的 `forceReloadActiveSession()` 显式绕过 snapshot 守卫触发会话重启（snapshot 继续保护 React state-sync 之类的高频噪声调用）。
+- **MCP 工具返回 `[object Object]` 与 MyAgents 无关**：经排查确认 MCP tool_result 在 MyAgents 内是原样透传（字符串不动、非字符串走 `JSON.stringify`），`[object Object]` 这类字符串是上游 MCP server 自己在组装返回字段时用 JS 对象默认 `toString()` 造成的，请到对应 MCP 仓库报告。
+
+---
+
 ## [0.1.69] - 2026-04-23
 
 ### Added
