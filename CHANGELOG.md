@@ -10,13 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.70] - 2026-04-24
 
 ### Added
-- **`myagents mcp show <id>`**：查看单个 MCP 服务器的完整配置、全局 / 工作区两级启用状态、传输层（command/args/url）和脱敏后的 env/headers。和 `agent show` 并列，三个查看命令（`agent show` / `mcp show` / `runtime describe`）现在形态对等。
-- **`cron add/update --schedule` 支持 JSON 形式**：除了原有的 cron 表达式字符串（`"*/30 * * * *"`），现在也接受与内部数据结构对齐的 JSON 对象 —— `{"kind":"at","at":"..."}` / `{"kind":"every","minutes":30}` / `{"kind":"cron","expr":"...","tz":"..."}` / `{"kind":"loop"}`。CLI 层做 per-kind 字段与类型校验，格式错误在边界就清晰给出，不再把"Failed to parse JSON"一路甩到用户脸上。
-- **`cron add/update --message` 别名**：`--message` 现在是 `--prompt` 的正式别名（内部 wire 字段本来就叫 `message`，这个直觉是对的）。
+- **启动页「想法」模式拥有和任务中心一模一样的体验**：输入 `#` 弹候选、文本里 `#标签` 实时高亮、输入框下方有 `#` 按钮，⌘/Ctrl+Enter 提交。任务/想法模式切换时草稿和附件完整保留，不再因切换丢失。
+- **`#` 标签候选默认包含所有 Agent 工作区名字**：按下 `#` 一眼就能把想法归类到任意工作区，不需要先手动打过一次该 tag 才出现在候选里。和右侧的「Agent 工作区」面板一一对应（过滤掉诊断目录等内部工作区）。
+- **`myagents mcp show <id>`**：查看单个 MCP 服务器的完整配置、全局 / 工作区两级启用状态、传输层信息（env / headers 自动脱敏）。和 `agent show` / `runtime describe` 形态对等。
+- **`myagents cron --schedule` 支持 JSON 形式**：除了原有的 cron 表达式（`"*/30 * * * *"`），现在也直接接受与内部结构一致的 JSON —— `{"kind":"at","at":"..."}` / `{"kind":"every","minutes":30}` / `{"kind":"cron","expr":"...","tz":"..."}` / `{"kind":"loop"}`。字段校验在 CLI 边界立即报错，不再出现莫名的 "Failed to parse JSON"。`--message` 是 `--prompt` 的正式别名。
+- **SiliconFlow 预设刷新**：Kimi K2.6、GLM 5.1、MiniMax M2.5 开箱即用。
+
+### Improved
+- **Agent 设置的「模型」下拉只显示可用供应商**：和 AI 对话框的模型切换器完全一致 —— 只显示已配置 API Key 或完成订阅登录的供应商。如果之前保存的供应商后来失去了凭据，会显示「⚠ 暂不可用」提示你重新选择。
+- **Cmd/Ctrl+Shift+T 快捷键在启动页真正切换任务/想法模式**：之前这个组合键和新开 Tab 撞车，按下去直接新开 Tab 而不是切换模式；现在两个快捷键各行其道。
+- **弹层遮挡优化**：嵌在 Overlay 里的下拉菜单（Runtime 选择器 / Skill 详情 / BugReport 模型选择 / Template 图标选择等）不再被自身面板遮住。
+- **SubAgent 模型 / 工具 / 提示词修改立刻生效**：编辑 `~/.myagents/agents/<agent>/<name>.md` 后执行 `myagents reload`，下一轮对话就能看到新配置，不再需要重启整个应用。
 
 ### Fixed
-- **SubAgent 模型修改后 `myagents reload` 立即生效**：之前编辑 `~/.myagents/agents/<agent>/<name>.md` 的 `model:` 后必须重启整个 app 才能生效。根因分三层：`handleReload` 只重载 MCP 不扫 sub-agent `.md`、`setAgents()` 只比对名字不比内容（相同名字不同 model 被当作"无变化"）、Tab / Cron / Background 会话的 snapshot 守卫也会跳过重启。现在 reload 会重扫 `.md`、用内容指纹识别变化、并通过新增的 `forceReloadActiveSession()` 显式绕过 snapshot 守卫触发会话重启（snapshot 继续保护 React state-sync 之类的高频噪声调用）。
-- **MCP 工具返回 `[object Object]` 与 MyAgents 无关**：经排查确认 MCP tool_result 在 MyAgents 内是原样透传（字符串不动、非字符串走 `JSON.stringify`），`[object Object]` 这类字符串是上游 MCP server 自己在组装返回字段时用 JS 对象默认 `toString()` 造成的，请到对应 MCP 仓库报告。
+- **Windows 首次启动卡 10 秒**：旧 Sidecar 清理移到后台，主线程不再阻塞，打开应用瞬时可见 UI。
+- **外部 Runtime（Claude Code / Gemini）会话自动恢复**：当 CLI 那边清理掉会话 ID 后，MyAgents 能检测到并自动新开对话，不再死循环报错。
+- **技能稳定性**：symlink / junction 形式的技能目录现在能正确识别并展示；skill 安装后 `/health` 不再短暂阻塞；sub-agent 扫描对齐 Claude Agent SDK 最新协议，非标准布局的 Agent 目录也能正确找到。
+- **Chat Tab 切换时偶现的 UI 状态错乱**：按 PRD v0.1.69 §4.3 对齐双写策略。
+- **CLI 错误信息友好化**：`myagents mcp show` 从原来的「Unknown admin route」恢复为正常命令；`cron --schedule` 错误提示在 CLI 边界清晰给出。
+
+### Notes
+- GetNote MCP（社区第三方工具）的 `list_notes` 返回 tag 显示为 `[object Object]` 是**上游 MCP server 自己的序列化 bug**，与 MyAgents 无关，请到对应仓库报告。MyAgents 对 MCP 返回内容是原样透传的。
 
 ---
 
