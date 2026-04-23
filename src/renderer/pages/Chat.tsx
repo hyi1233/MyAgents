@@ -45,6 +45,7 @@ import {
   resolveProvider,
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
+import type { AgentConfig } from '../../shared/types/agent';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes } from '../../shared/types/runtime';
@@ -1299,6 +1300,42 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (updated) setSessionMeta(updated);
   }, [sessionId, setSessionMeta]);
 
+  // Persist a Tab-UI config change to session snapshot (owned) + project + agent.
+  // See PRD v0.1.69 §4.3 rule 2. Toasts on persistence failure without rolling
+  // back local UI state — the user already sees their intent in the UI and the
+  // current session is using the value in-memory; only on-disk drift is
+  // surfaced so the user knows to retry or expects a possible revert on reload.
+  //
+  // `model: null` means "clear"; `patchAgentConfig` uses undefined for the same
+  // intent, so we normalize here so callers don't have to.
+  const persistTabConfigChange = useCallback(async (patch: {
+    providerId?: string;
+    model?: string | null;
+    permissionMode?: PermissionMode;
+    mcpEnabledServers?: string[];
+  }) => {
+    try {
+      if (isOwnedSession) {
+        await patchSnapshot(patch);
+      }
+      if (currentProject) {
+        await patchProject(currentProject.id, patch);
+        if (currentProject.agentId) {
+          const agentPatch: Partial<Omit<AgentConfig, 'id'>> = {};
+          if (patch.providerId !== undefined) agentPatch.providerId = patch.providerId;
+          if (patch.model !== undefined) agentPatch.model = patch.model ?? undefined;
+          if (patch.permissionMode !== undefined) agentPatch.permissionMode = patch.permissionMode;
+          if (patch.mcpEnabledServers !== undefined) agentPatch.mcpEnabledServers = patch.mcpEnabledServers;
+          await patchAgentConfig(currentProject.agentId, agentPatch);
+        }
+      }
+    } catch (err) {
+      console.error('[chat] tab config dual-write failed:', err);
+      toastRef.current.warning('配置未能完全保存，重启后可能恢复旧值');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.agentId to avoid churn on unrelated project changes
+  }, [isOwnedSession, currentProject?.id, currentProject?.agentId, patchSnapshot, patchProject]);
+
   // Handle workspace MCP toggle — Tab UI edits dual-write:
   // (1) session snapshot so THIS session uses the new tool set immediately (owned sessions only
   //     — unlocked/IM have no snapshot);
@@ -1312,17 +1349,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     setWorkspaceMcpEnabled(newEnabled);
 
-    if (isOwnedSession) {
-      void patchSnapshot({ mcpEnabledServers: newEnabled });
-    }
-    if (currentProject) {
-      // Persist to project config (patchProject updates disk AND projects React state,
-      // keeping currentProject.mcpEnabledServers in sync for tab-activate sync at L672)
-      void patchProject(currentProject.id, { mcpEnabledServers: newEnabled });
-      if (currentProject?.agentId) {
-        void patchAgentConfig(currentProject.agentId, { mcpEnabledServers: newEnabled });
-      }
-    }
+    void persistTabConfigChange({ mcpEnabledServers: newEnabled });
 
     // Get the effective MCP servers and send to backend
     const effectiveServers = mcpServers.filter(s =>
@@ -1674,15 +1701,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       // Same dual-write policy as handleModelChange (PRD §4.3 rule 2).
       if (targetModel) {
         setSelectedModel(targetModel);
-        if (isOwnedSession) {
-          void patchSnapshot({ model: targetModel });
-        }
-        if (currentProject) {
-          void patchProject(currentProject.id, { model: targetModel });
-          if (currentProject?.agentId) {
-            void patchAgentConfig(currentProject.agentId, { model: targetModel });
-          }
-        }
+        void persistTabConfigChange({ model: targetModel });
       }
       return;
     }
@@ -1718,17 +1737,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Write back: owned session snapshots this choice locally so the current session
     // keeps using it; agent/project always gets written so FUTURE new sessions inherit
     // the user's latest preference (PRD v0.1.69 §4.3 rule 2 dual-write).
-    if (isOwnedSession) {
-      void patchSnapshot({ providerId, model: model ?? null });
-    }
-    if (currentProject) {
-      void patchProject(currentProject.id, { providerId, model: model ?? null });
-      if (currentProject?.agentId) {
-        void patchAgentConfig(currentProject.agentId, { providerId, model: model ?? undefined });
-      }
-    }
+    void persistTabConfigChange({ providerId, model: model ?? null });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
-  }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider?.id, isOwnedSession, patchSnapshot]);
+  }, [selectedProviderId, providers, currentProvider?.id, persistTabConfigChange]);
 
   // Handle model change with analytics tracking.
   // Dual-write per PRD v0.1.69 §4.3 rule 2 "写 Session + 向上写 Agent": owned sessions
@@ -1744,32 +1755,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     track('model_switch', { model });
 
     setSelectedModel(model);
-    if (isOwnedSession) {
-      void patchSnapshot({ model });
-    }
-    if (currentProject) {
-      void patchProject(currentProject.id, { model });
-      if (currentProject?.agentId) {
-        void patchAgentConfig(currentProject.agentId, { model });
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
-  }, [selectedModel, currentProject?.id, patchProject, isOwnedSession, patchSnapshot]);
+    void persistTabConfigChange({ model });
+  }, [selectedModel, persistTabConfigChange]);
 
   // Handle permission mode change — same dual-write policy as handleModelChange.
   const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
     setPermissionMode(mode);
-    if (isOwnedSession) {
-      void patchSnapshot({ permissionMode: mode });
-    }
-    if (currentProject) {
-      void patchProject(currentProject.id, { permissionMode: mode });
-      if (currentProject?.agentId) {
-        void patchAgentConfig(currentProject.agentId, { permissionMode: mode });
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
-  }, [currentProject?.id, patchProject, isOwnedSession, patchSnapshot]);
+    void persistTabConfigChange({ permissionMode: mode });
+  }, [persistTabConfigChange]);
 
   // Cross-runtime SDK protection: only fires when the multiAgentRuntime feature
   // gate is OFF but the session was created by an external runtime (Codex/CC/
@@ -1954,37 +1947,51 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const runtime = pendingRuntimeChange;
     setPendingRuntimeChange(null);
     if (!runtime || !currentAgent) return;
+    // Unified Tab-UI dual-write policy (matches handleModelChange /
+    // handlePermissionModeChange / etc., PRD v0.1.69 §4.3 rule 2 extended to
+    // runtime): fork a new Tab pinned to the chosen runtime AND update the
+    // workspace template. The confirm dialog's copy explicitly tells the user
+    // both halves will happen, so mutating agent.runtime is no longer a
+    // surprise-leak — it's the advertised behavior.
+    //
+    // Why this is safe despite the older "deliberately do NOT" comment:
+    //   - Existing Tabs with non-empty sessions hydrate currentRuntime from
+    //     SessionMetadata.runtime (session-self-contained, D1). Changing
+    //     agent.runtime doesn't flip their displayed runtime because their
+    //     session snapshot is authoritative.
+    //   - Empty Tabs and new Sidecars (Bot / Cron / new Tab) read agent.runtime
+    //     as the template — which is EXACTLY the semantic we want.
+    //   - The fork-new-tab step is still required because switching the current
+    //     session's runtime in-place is an incompatibility hard-guard (D6).
+    //
+    // Ordering (cross-review Codex Warning): create the fork FIRST — if that
+    // fails we leave the workspace default untouched. Only after the session
+    // is confirmed created do we persist the agent patch. This prevents the
+    // "future Tabs silently inherit new runtime even though user's fork
+    // failed" leak.
+    if (!onForkSession || !agentDir) return;
+    let session: { id: string } | undefined;
     try {
-      // Unified Tab-UI dual-write policy (matches handleModelChange /
-      // handlePermissionModeChange / etc., PRD v0.1.69 §4.3 rule 2 extended to
-      // runtime): fork a new Tab pinned to the chosen runtime AND update the
-      // workspace template. The confirm dialog's copy explicitly tells the user
-      // both halves will happen, so mutating agent.runtime is no longer a
-      // surprise-leak — it's the advertised behavior.
-      //
-      // Why this is safe despite the older "deliberately do NOT" comment:
-      //   - Existing Tabs with non-empty sessions hydrate currentRuntime from
-      //     SessionMetadata.runtime (session-self-contained, D1). Changing
-      //     agent.runtime doesn't flip their displayed runtime because their
-      //     session snapshot is authoritative.
-      //   - Empty Tabs and new Sidecars (Bot / Cron / new Tab) read agent.runtime
-      //     as the template — which is EXACTLY the semantic we want. The user's
-      //     intent "use this runtime from now on" should propagate.
-      //   - The fork-new-tab step is still required because switching the current
-      //     session's runtime in-place is an incompatibility hard-guard (D6).
-      if (currentAgent.id) {
-        await patchAgentConfig(currentAgent.id, { runtime });
-      }
-      if (onForkSession && agentDir) {
-        const { createSession } = await import('@/api/sessionClient');
-        const session = await createSession(agentDir, runtime);
-        const runtimeLabel = getRuntimeDisplayLabel(runtime);
-        onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
-      }
+      const { createSession } = await import('@/api/sessionClient');
+      session = await createSession(agentDir, runtime);
     } catch (err) {
-      console.error('[chat] Failed to switch runtime:', err);
-      toastRef.current.error('切换 Runtime 失败');
+      console.error('[chat] Failed to create session for runtime fork:', err);
+      toastRef.current.error('切换 Runtime 失败：无法创建新会话');
+      return;
     }
+    // Fork succeeded — now persist workspace default. Agent patch failure
+    // is non-fatal (fork is done, user already sees the new Tab opening);
+    // we surface a secondary toast so the inconsistency isn't silent.
+    if (currentAgent.id) {
+      try {
+        await patchAgentConfig(currentAgent.id, { runtime });
+      } catch (err) {
+        console.warn('[chat] Runtime fork succeeded but agent template update failed:', err);
+        toastRef.current.warning('新 Tab 已打开，但工作区默认 Runtime 未能更新');
+      }
+    }
+    const runtimeLabel = getRuntimeDisplayLabel(runtime);
+    onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
   }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir]);
 
   // Cross-protocol provider switch confirm: save new provider to project, create new session in new tab.
@@ -1993,6 +2000,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const pending = pendingProviderSwitch;
     setPendingProviderSwitch(null);
     if (!pending || !agentDir || !onForkSession) return;
+
+    // Ordering constraint (cross-review Codex Warning): session snapshot
+    // captures `providerId` at creation time via `snapshotForOwnedSession`
+    // reading the current agent. If we created the session before patching
+    // the agent, the snapshot would freeze the OLD provider — so the new Tab
+    // would still be bound to the old one. Hence: patch first, then create.
+    //
+    // To prevent the "agent default silently drifted even though fork
+    // failed" leak, we snapshot the prior provider/model and roll back if
+    // `createSession` throws.
+    const priorProviderId = currentProject?.providerId;
+    const priorModel = currentProject?.model;
+    const priorAgentProviderId = currentAgent?.providerId;
+    const priorAgentModel = currentAgent?.model;
+
     try {
       // 1. Save provider + model to project config so the new tab picks it up
       if (currentProject) {
@@ -2009,10 +2031,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       onForkSession(session.id, agentDir, `${newProvider?.name ?? 'Claude'} 会话`);
     } catch (err) {
       console.error('[chat] Failed to create cross-provider session:', err);
-      toastRef.current.error('创建新会话失败');
+      // Roll back the agent / project config so workspace default stays on
+      // the provider the user actually got to keep using.
+      try {
+        if (currentProject && priorProviderId !== undefined) {
+          await patchProject(currentProject.id, { providerId: priorProviderId, model: priorModel ?? null });
+          if (currentProject?.agentId) {
+            await patchAgentConfig(currentProject.agentId, {
+              providerId: priorAgentProviderId,
+              model: priorAgentModel,
+            });
+          }
+          await refreshConfig();
+        }
+      } catch (rollbackErr) {
+        console.warn('[chat] Provider rollback after failed fork also failed:', rollbackErr);
+      }
+      toastRef.current.error('创建新会话失败，工作区 Provider 已恢复');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.agentId
-  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers, currentRuntime]);
+  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers, currentRuntime, currentProject?.providerId, currentProject?.model, currentAgent?.providerId, currentAgent?.model]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {

@@ -2232,6 +2232,17 @@ pub async fn monitor_session_sidecars(
     struct RecoveryEntry {
         workspace: std::path::PathBuf,
         owners: Vec<SidecarOwner>,
+        /// Snapshot of the dead sidecar's `runtime` field (MYAGENTS_RUNTIME env
+        /// var that it was originally spawned with). Captured at the time the
+        /// dead sidecar is detected so that auto-restart can pin the new
+        /// sidecar to the same runtime regardless of which owner happens to
+        /// come first in the `Vec<SidecarOwner>` ordering (owners is collected
+        /// from a HashSet — iteration order is not deterministic). Without
+        /// this, a session with both Agent and Tab owners could restart with
+        /// the wrong runtime resolution branch (Agent → re-resolve from agent
+        /// config; Tab/Cron → read session metadata), producing different
+        /// runtimes across hash-random restarts. See cross-review Codex #2.
+        runtime: Option<String>,
         failures: u32,
     }
     let mut recovery: HashMap<String, RecoveryEntry> = HashMap::new();
@@ -2253,6 +2264,7 @@ pub async fn monitor_session_sidecars(
                     recovery.insert(sid.clone(), RecoveryEntry {
                         workspace: sc.workspace_path.clone(),
                         owners: sc.owners.iter().cloned().collect(),
+                        runtime: sc.runtime.clone(),
                         failures: 0,
                     });
                 }
@@ -2307,12 +2319,21 @@ pub async fn monitor_session_sidecars(
             let first_owner = entry.owners[0].clone();
             let workspace = entry.workspace.clone();
             let owners_snapshot = entry.owners.clone();
+            // Pin the restart to the same runtime the dead sidecar was running
+            // with. `ensure_session_sidecar` would otherwise re-resolve runtime
+            // via an owner-type branch (Agent → agent config; Tab/Cron → session
+            // meta → agent fallback), and since `owners[0]` is picked from a
+            // HashSet the owner type is non-deterministic when a session has
+            // mixed owners. See cross-review Codex #2.
+            let pinned_runtime = entry.runtime.clone();
             let mgr = manager.clone();
             let app = app_handle.clone();
             let sid = session_id.clone();
 
             match tokio::task::spawn_blocking(move || {
-                ensure_session_sidecar(&app, &mgr, &sid, &workspace, first_owner)
+                ensure_session_sidecar_with_runtime_override(
+                    &app, &mgr, &sid, &workspace, first_owner, pinned_runtime,
+                )
             })
             .await
             {
@@ -2423,6 +2444,14 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
 
     // Ensure file descriptor limit is high enough for Bun
     ensure_high_file_descriptor_limit();
+
+    // Block briefly if startup cleanup is still running — same barrier as
+    // `start_tab_sidecar`. Without this, Cron task recovery / session-monitor
+    // auto-restart / IM message arrival during the startup window would spawn
+    // a new session sidecar that races with the stale-process sweep (the very
+    // case db58545 set out to prevent). In the common case this returns
+    // immediately (AtomicBool load; cleanup completes in ~50 ms).
+    wait_for_startup_cleanup(Duration::from_secs(15));
 
     ulog_debug!("[sidecar] Acquiring manager lock...");
     let mut manager_guard = manager.lock().map_err(|e| {

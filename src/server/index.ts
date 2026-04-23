@@ -7352,6 +7352,12 @@ async function main() {
 
       // GET /api/agent/sync-check - Check if there are agents to sync from Claude Code
       // NOTE: Must be before /api/agent/:name to avoid wildcard capture
+      //
+      // Driven by `scanAgents()` so the three SDK-recognised layouts (folder /
+      // flat / nested) are all counted — same rule the loader uses for runtime
+      // discovery. Agents that Claude Code's SDK sees but that only have a
+      // top-level `.md` file (flat) or a subdirectory path (nested) used to
+      // silently disappear from the sync UI; now they're first-class.
       if (pathname === '/api/agent/sync-check' && request.method === 'GET') {
         try {
           const claudeAgentsDir = join(homeDir, '.claude', 'agents');
@@ -7359,34 +7365,32 @@ async function main() {
             return jsonResponse({ canSync: false, count: 0, folders: [] });
           }
 
-          // Follow junctions (issue #104). Missing junction-mounted agents on
-          // either side of the compare would make conflictFolders fall out
-          // of the set, so a subsequent sync-from-claude with overwrite could
-          // clobber the user's mounted tree.
-          const claudeFolders = readdirSync(claudeAgentsDir, { withFileTypes: true })
-            .filter(entry => isDirEntry(entry, join(claudeAgentsDir, entry.name))
-              && !entry.name.startsWith('_') && !entry.name.startsWith('.'))
-            .map(entry => entry.name);
+          // scanAgents handles: junctions (via realpath), all 3 layouts,
+          // frontmatter validation, dedup by folderName with layout priority.
+          // Scope arg ('user') only affects the returned AgentItem.scope —
+          // not the scan behavior.
+          const claudeAgents = scanAgents(claudeAgentsDir, 'user');
 
-          if (claudeFolders.length === 0) {
+          if (claudeAgents.length === 0) {
             return jsonResponse({ canSync: false, count: 0, folders: [] });
           }
 
-          const myagentsFolders = new Set<string>();
-          if (existsSync(userAgentsBaseDir)) {
-            const entries = readdirSync(userAgentsBaseDir, { withFileTypes: true });
-            for (const entry of entries) {
-              if (isDirEntry(entry, join(userAgentsBaseDir, entry.name))) myagentsFolders.add(entry.name);
-            }
-          }
+          const myagentsAgents = scanAgents(userAgentsBaseDir, 'user');
+          const myagentsSet = new Set(myagentsAgents.map(a => a.folderName));
 
-          const newFolders = claudeFolders.filter(f => !myagentsFolders.has(f) && isValidFolderName(f));
-          const conflictFolders = claudeFolders.filter(f => myagentsFolders.has(f) && isValidFolderName(f));
-          const allValidFolders = claudeFolders.filter(f => isValidFolderName(f));
+          // folderName is the canonical agent identity (e.g. "code-reviewer"
+          // for flat, "team/reviewer" for nested, "novels" for folder). The
+          // client passes these back to sync-from-claude, and we re-validate
+          // them against scanAgents output at that time — no raw filesystem
+          // name is trusted across the request boundary.
+          const allFolders = claudeAgents.map(a => a.folderName);
+          const newFolders = claudeAgents.filter(a => !myagentsSet.has(a.folderName)).map(a => a.folderName);
+          const conflictFolders = claudeAgents.filter(a => myagentsSet.has(a.folderName)).map(a => a.folderName);
+
           return jsonResponse({
-            canSync: allValidFolders.length > 0,
-            count: allValidFolders.length,
-            folders: allValidFolders,
+            canSync: allFolders.length > 0,
+            count: allFolders.length,
+            folders: allFolders,
             newFolders,
             conflictFolders,
           });
@@ -7399,28 +7403,37 @@ async function main() {
       // POST /api/agent/sync-from-claude - Sync agents from Claude Code to MyAgents
       // NOTE: Must be before /api/agent/:name to avoid wildcard capture
       // Supports conflict handling: mode = 'skip' (default) | 'overwrite'
+      //
+      // Preserves the source agent's layout:
+      //   folder  (.claude/agents/foo/foo.md)        → ~/.myagents/agents/foo/foo.md  + _meta.json
+      //   flat    (.claude/agents/foo.md)            → ~/.myagents/agents/foo.md       (no _meta.json — flat has no home for it)
+      //   nested  (.claude/agents/team/reviewer.md)  → ~/.myagents/agents/team/reviewer.md  (ditto)
+      //
+      // Why preserve instead of canonicalize to `folder`: `nested` folderNames
+      // contain `/` (e.g. "team/reviewer"), which collapses ambiguously if
+      // flattened — "team/reviewer" and just "reviewer" would collide. Keeping
+      // the source layout is lossless + matches Claude Code's own storage
+      // convention. `scanAgents()` (loader side) already reads all three.
       if (pathname === '/api/agent/sync-from-claude' && request.method === 'POST') {
         try {
           const payload = await request.json().catch(() => ({})) as { mode?: 'skip' | 'overwrite'; folders?: string[] };
           const conflictMode = payload.mode || 'skip';
-          const selectedFolders = payload.folders; // Optional: sync only these specific folders
+          const selectedFolders = payload.folders; // Optional: sync only these specific folderNames
 
           const claudeAgentsDir = join(homeDir, '.claude', 'agents');
           if (!existsSync(claudeAgentsDir)) {
             return jsonResponse({ success: false, synced: 0, failed: 0, skipped: 0, overwritten: 0, error: 'Claude Code agents directory not found' }, 404);
           }
 
-          const claudeFolders = readdirSync(claudeAgentsDir, { withFileTypes: true })
-            // Follow junctions (issue #104) — otherwise junction-mounted agents
-            // in ~/.claude/agents/ silently drop from the sync set.
-            .filter(entry => isDirEntry(entry, join(claudeAgentsDir, entry.name))
-              && !entry.name.startsWith('_') && !entry.name.startsWith('.') && isValidFolderName(entry.name))
-            .map(entry => entry.name);
+          // Enumerate via the same protocol-aligned scanner that sync-check uses.
+          // Index by folderName so selectedFolders can only reach agents the
+          // scanner actually saw — no raw-path injection across the boundary.
+          const claudeAgents = scanAgents(claudeAgentsDir, 'user');
+          const claudeByName = new Map(claudeAgents.map(a => [a.folderName, a]));
 
-          // Filter to selected folders if specified
           const foldersToSync = selectedFolders
-            ? claudeFolders.filter(f => selectedFolders.includes(f))
-            : claudeFolders;
+            ? selectedFolders.filter(f => claudeByName.has(f))
+            : Array.from(claudeByName.keys());
 
           if (foldersToSync.length === 0) {
             return jsonResponse({ success: true, synced: 0, failed: 0, skipped: 0, overwritten: 0, message: 'No agents to sync' });
@@ -7437,49 +7450,81 @@ async function main() {
           const errors: string[] = [];
           const conflicts: string[] = [];
 
-          for (const folder of foldersToSync) {
-            const srcDir = join(claudeAgentsDir, folder);
-            const destDir = join(userAgentsBaseDir, folder);
-            const alreadyExists = existsSync(destDir);
-
-            if (alreadyExists) {
-              if (conflictMode === 'skip') {
-                skipped++;
-                conflicts.push(folder);
-                continue;
-              }
-              // overwrite: remove existing first. Async `rm` so a large tree
-              // doesn't block the event loop (same rationale as copyDirRecursive).
-              await rm(destDir, { recursive: true, force: true });
-              overwritten++;
-            }
+          for (const folderName of foldersToSync) {
+            const src = claudeByName.get(folderName);
+            if (!src) continue;  // defensive, already filtered above
 
             try {
-              // Async copy — see copyDirRecursive doc. Blocking here would starve
-              // the /health probe and trigger a spurious sidecar restart on Windows.
-              await copyDirRecursive(srcDir, destDir, '[api/agent/sync-from-claude]');
-              synced++;
-
-              // Auto-generate _meta.json from frontmatter
-              const mdPath = join(destDir, `${folder}.md`);
-              const metaPath = join(destDir, '_meta.json');
-              if (existsSync(mdPath) && !existsSync(metaPath)) {
-                try {
-                  const content = readFileSync(mdPath, 'utf-8');
-                  const { name: agentName } = parseAgentFrontmatter(content);
-                  const meta = {
-                    displayName: agentName || folder,
-                    author: 'claude-code-sync',
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
-                  };
-                  writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
-                } catch { /* _meta.json generation is optional */ }
+              // Conflict probe via the SAME scanner used for sync-check, so the
+              // "conflict" decision is symmetric regardless of which layout the
+              // existing agent lives in on our side (folder vs flat vs nested).
+              const existing = findAgent(userAgentsBaseDir, 'user', folderName);
+              if (existing) {
+                if (conflictMode === 'skip') {
+                  skipped++;
+                  conflicts.push(folderName);
+                  continue;
+                }
+                // Overwrite: delete the existing agent's own path, which may
+                // be in a different layout than the source. `rm({ recursive,
+                // force })` handles both file (flat/nested .md) and directory
+                // (folder layout) targets. For folder layout we strip back to
+                // the folder itself to avoid leaving a ghost _meta.json.
+                const existingTarget = existing.layout === 'folder'
+                  ? dirname(existing.path)  // the <folderName>/ directory
+                  : existing.path;          // the .md file itself
+                await rm(existingTarget, { recursive: true, force: true });
+                overwritten++;
               }
+
+              // Compute target path from the SOURCE's layout (preserve).
+              // For folder layout, copy the whole source directory (may include
+              // sibling resources like README.md, data files, etc.). For
+              // flat/nested, it's a single-file copy.
+              if (src.layout === 'folder') {
+                const srcDir = dirname(src.path);
+                const destDir = join(userAgentsBaseDir, folderName);
+                await copyDirRecursive(srcDir, destDir, '[api/agent/sync-from-claude]');
+
+                // Write _meta.json (only folder layout has a stable home for it).
+                // Auto-generated from frontmatter.name so the UI shows a friendly
+                // displayName and recognises the agent as synced via the
+                // `claude-code-sync` author marker.
+                const mdPath = join(destDir, `${folderName}.md`);
+                const metaPath = join(destDir, '_meta.json');
+                if (existsSync(mdPath) && !existsSync(metaPath)) {
+                  try {
+                    const content = readFileSync(mdPath, 'utf-8');
+                    const { name: agentName } = parseAgentFrontmatter(content);
+                    const meta = {
+                      displayName: agentName || folderName,
+                      author: 'claude-code-sync',
+                      createdAt: new Date().toISOString(),
+                      updatedAt: new Date().toISOString(),
+                    };
+                    writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+                  } catch { /* _meta.json generation is optional */ }
+                }
+              } else {
+                // flat or nested: single-file copy. For nested we need to
+                // `ensureDir` the parent chain (e.g. "team/" for folderName
+                // "team/reviewer"). For flat the parent is userAgentsBaseDir
+                // which we already ensured above.
+                //
+                // folderName for flat is the stem ("foo" → "foo.md"); for
+                // nested it's the POSIX stem path ("team/reviewer" →
+                // "team/reviewer.md"). Joining with path.join naturally
+                // produces the correct OS-specific path on Windows.
+                const destPath = join(userAgentsBaseDir, `${folderName}.md`);
+                await ensureDir(dirname(destPath));
+                await copyFileAsync(src.path, destPath);
+              }
+
+              synced++;
             } catch (copyError) {
               failed++;
-              errors.push(`${folder}: ${copyError instanceof Error ? copyError.message : 'Unknown error'}`);
-              console.error(`[api/agent/sync-from-claude] Failed to copy "${folder}":`, copyError);
+              errors.push(`${folderName}: ${copyError instanceof Error ? copyError.message : 'Unknown error'}`);
+              console.error(`[api/agent/sync-from-claude] Failed to sync "${folderName}":`, copyError);
             }
           }
 

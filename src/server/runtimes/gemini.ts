@@ -895,9 +895,24 @@ export class GeminiRuntime implements AgentRuntime {
       // that unambiguously mean "the stored session is gone" — broader
       // matches like "invalid session" could false-trigger on unrelated
       // auth/format errors and destroy a resumable session unnecessarily.
+      //
+      // Cross-review Codex/cc Warning: log the full error message at every
+      // resume-failure point so a future Gemini CLI error-string change is a
+      // noisy log, not a silent data-loss regression. Whenever operators see
+      // a "session reload failed, will retry fresh" without a matching
+      // `StaleRuntimeSessionError`, they can tell the regex needs updating.
       const msg = err instanceof Error ? err.message : String(err);
-      if (options.resumeSessionId && /session not found|no conversation found|unknown session|session does not exist/i.test(msg)) {
-        throw new StaleRuntimeSessionError(options.resumeSessionId, msg);
+      if (options.resumeSessionId) {
+        if (/session not found|no conversation found|unknown session|session does not exist/i.test(msg)) {
+          console.warn(
+            `[gemini] Resume session ${options.resumeSessionId} reported stale, will retry fresh. Error: ${msg}`,
+          );
+          throw new StaleRuntimeSessionError(options.resumeSessionId, msg);
+        }
+        console.warn(
+          `[gemini] Resume session ${options.resumeSessionId} failed with non-stale error (not treated as stale). ` +
+          `If this should trigger a fresh retry, update the stale-session regex in gemini.ts. Error: ${msg}`,
+        );
       }
       throw err;
     }

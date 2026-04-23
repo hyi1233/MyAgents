@@ -1103,8 +1103,20 @@ export function handleReload(workspacePath?: string): AdminResponse {
     // Filter by project if workspace is known
     const projects = loadProjects();
     const project = projects.find(p => p.path === effectiveWorkspace);
-    const projectEnabled = new Set(project?.mcpEnabledServers ?? []);
-    effectiveServers = allServers.filter(s => globalEnabled.has(s.id) && projectEnabled.has(s.id));
+    if (project) {
+      const projectEnabled = new Set(project.mcpEnabledServers ?? []);
+      effectiveServers = allServers.filter(s => globalEnabled.has(s.id) && projectEnabled.has(s.id));
+    } else {
+      // Workspace path doesn't match any registered project (transient state
+      // during project-rename, or unregistered workspace). Without this
+      // branch we'd silently push ZERO MCP servers — cross-review Agent-1
+      // W6. Fall back to the "no workspace" branch (globally enabled) so
+      // reload is a no-op on MCP rather than a destructive clear.
+      console.warn(
+        `[admin-api] handleReload: workspace ${effectiveWorkspace} not found in projects; falling back to global MCP set`,
+      );
+      effectiveServers = allServers.filter(s => globalEnabled.has(s.id));
+    }
   } else {
     // Fallback: use all globally enabled servers
     effectiveServers = allServers.filter(s => globalEnabled.has(s.id));
