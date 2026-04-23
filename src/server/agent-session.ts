@@ -5,7 +5,7 @@ import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
-import { ensureDirSync } from './utils/fs-utils';
+import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { processImage, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
@@ -183,13 +183,23 @@ export function syncProjectUserConfig(projectDir: string): void {
     const managedSkillNames = new Set<string>();
 
     for (const entry of readdirSync(userSkillsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
+      // isDirEntry follows symlinks + Windows junctions (issue #104).
+      // Without it, junction-mounted skills never reach the project symlink
+      // bridge, so they're invisible to the SDK too (not just the UI).
+      const target = join(userSkillsDir, entry.name);
+      if (!isDirEntry(entry, target)) continue;
       if (entry.name.startsWith('.')) continue;
       if (isSkillBlockedOnPlatform(entry.name)) continue;
+      // Require SKILL.md to match scanSkills/scanSkillsDir's definition of
+      // a "valid skill". Without this guard, a junction pointing at an
+      // arbitrary directory (or a plain empty dir under ~/.myagents/skills/)
+      // would produce a project-level symlink that the SDK follows but the
+      // UI scanners skip — inviting the "runtime vs UI" divergence we're
+      // fixing.
+      if (!existsSync(join(target, 'SKILL.md'))) continue;
 
       managedSkillNames.add(entry.name);
       const linkPath = join(projectSkillsDir, entry.name);
-      const target = join(userSkillsDir, entry.name);
 
       if (disabled.includes(entry.name)) {
         // Disabled: remove symlink if we created one (never remove real dirs)
@@ -1096,6 +1106,40 @@ function mcpConfigFingerprint(servers: McpServerDefinition[]): string {
   );
 }
 
+/**
+ * Stable fingerprint of the sub-agent definition set.
+ *
+ * Covers the fields the SDK actually consumes per `AgentDefinition` — model,
+ * tools, disallowedTools, description, prompt body, skills, maxTurns — so an
+ * edit to `model:` in `<name>.md` frontmatter (a common reload case) gets
+ * detected as a real change and triggers a deferred restart.
+ *
+ * The previous fingerprint hashed only `Object.keys(...).sort()`, which meant
+ * "same agent names → no change" even when the payload differed. That was
+ * the root cause of `myagents reload` silently ignoring frontmatter edits
+ * (GitHub #98).
+ */
+function agentsFingerprint(agents: Record<string, AgentDefinition> | null): string {
+  if (!agents) return '';
+  return JSON.stringify(
+    Object.keys(agents)
+      .sort()
+      .map(name => {
+        const a = agents[name];
+        return {
+          name,
+          description: a.description,
+          prompt: a.prompt,
+          tools: a.tools,
+          disallowedTools: a.disallowedTools,
+          model: a.model,
+          skills: a.skills,
+          maxTurns: a.maxTurns,
+        };
+      }),
+  );
+}
+
 
 /**
  * Get current MCP servers
@@ -1110,9 +1154,14 @@ export function getMcpServers(): McpServerDefinition[] | null {
  * If agents changed and a session is running, it will be restarted with resume
  */
 export function setAgents(agents: Record<string, AgentDefinition>): void {
-  const currentNames = currentAgentDefinitions ? Object.keys(currentAgentDefinitions).sort().join(',') : '';
+  // Content fingerprint (not just names) — frontmatter-only edits (e.g. changing
+  // `model:` on an existing sub-agent) MUST trigger a restart. Names-only diff
+  // silently dropped these edits and forced users to restart the whole app (#98).
+  const currentFingerprint = agentsFingerprint(currentAgentDefinitions);
+  const nextFingerprint = agentsFingerprint(agents);
+  const agentsChanged = currentFingerprint !== nextFingerprint;
+
   const newNames = Object.keys(agents).sort().join(',');
-  const agentsChanged = currentNames !== newNames;
 
   currentAgentDefinitions = agents;
   if (isDebugMode) {
@@ -1125,7 +1174,7 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
       // v0.1.69 T14: Locked session owns its sub-agents — skip restart (same rationale as MCP).
       console.log(`[agent] Sub-agents changed but session ${sessionId} is snapshotted — skip restart`);
     } else {
-      console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), deferring restart to pre-warm debounce`);
+      console.log(`[agent] Sub-agents content changed (${newNames || 'none'}), deferring restart to pre-warm debounce`);
       scheduleDeferredRestart('agents');
     }
   }
@@ -1291,6 +1340,48 @@ function providerEnvEqual(a: ProviderEnv | undefined, b: ProviderEnv | undefined
  * Uses debounce to batch rapid config changes during tab initialization.
  * The pre-warmed session is invisible to the frontend until the first user message.
  */
+/**
+ * Force a session restart triggered by an explicit `myagents reload`.
+ *
+ * Unlike `setMcpServers` / `setAgents` / provider / proxy paths, this bypasses
+ * the `isCurrentSessionSnapshotted()` guard. The snapshot guard exists to
+ * protect owned sessions (Tab / Cron / Background) from noise — e.g. React
+ * state sync firing `/api/mcp/set` 7× in 4s shouldn't thrash the SDK.
+ *
+ * Reload is the opposite: a deliberate, user-/AI-initiated request to re-read
+ * the config from disk and apply it to the running session. If we don't
+ * restart here, the user's edited `.md` frontmatter (new model, new tools)
+ * sits in memory but the running subprocess keeps delegating to the old
+ * definitions — forcing an app restart (#98).
+ *
+ * Callers MUST have already updated in-memory state (`setMcpServers` +
+ * `setAgents`) before invoking this. Active turns are respected via the same
+ * deferred-restart mechanism; idle sessions abort immediately.
+ */
+export function forceReloadActiveSession(reason: RestartReason = 'mcp'): void {
+  if (querySession) {
+    if (isProcessing && !isPreWarming) {
+      console.log(`[agent] reload requested during active turn → deferring restart (reason=${reason})`);
+      scheduleDeferredRestart(reason);
+    } else {
+      console.log(`[agent] reload requested → aborting session (reason=${reason}, preWarm=${isPreWarming})`);
+      abortPersistentSession();
+    }
+  } else if (isProcessing) {
+    // Startup window: startStreamingSession() is in progress but querySession
+    // hasn't been assigned yet. buildClaudeSessionEnv() may have already read
+    // the pre-reload state. Defer the restart so it fires after the first turn
+    // completes — mirrors the provider-change path (search for the same
+    // comment in setSessionProviderEnv).
+    console.log(`[agent] reload requested during session startup → deferring restart (reason=${reason})`);
+    scheduleDeferredRestart(reason);
+  }
+  preWarmFailCount = 0;
+  if (!isProcessing || isPreWarming) {
+    schedulePreWarm();
+  }
+}
+
 function schedulePreWarm(): void {
   if (preWarmTimer) clearTimeout(preWarmTimer);
   if (!agentDir) return;

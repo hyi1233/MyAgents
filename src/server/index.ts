@@ -1,5 +1,5 @@
 import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
-import { rename, rm, stat } from 'fs/promises';
+import { copyFile as copyFileAsync, readdir as readdirAsync, rename, rm, stat } from 'fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
 import AdmZip from 'adm-zip';
@@ -22,10 +22,10 @@ import { analyseTree, buildInstallPayload, writeSkillFiles, type SkillCandidate 
 import { isPreviewable } from '../shared/fileTypes';
 import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
-import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta } from './agents/agent-loader';
+import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
 import type { McpServerDefinition } from '../renderer/config/types';
-import { ensureDirSync, ensureDir } from './utils/fs-utils';
+import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
 import {
   setCronTaskContext,
   clearCronTaskContext,
@@ -36,7 +36,7 @@ import {
 import { setImCronContext } from './tools/im-cron-tool';
 import {
   handleSkillList, handleSkillInfo, handleSkillAdd, handleSkillRemove, handleSkillToggle, handleSkillSync,
-  handleMcpList, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
+  handleMcpList, handleMcpShow, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
   handleMcpOAuthDiscover, handleMcpOAuthStart, handleMcpOAuthStatus, handleMcpOAuthRevoke,
   handleModelList, handleModelAdd, handleModelRemove, handleModelSetKey, handleModelSetDefault, handleModelVerify,
   handleAgentList, handleAgentShow, handleAgentEnable, handleAgentDisable, handleAgentSet,
@@ -1105,6 +1105,7 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
 
   // MCP commands
   if (route === 'mcp/list') return handleMcpList();
+  if (route === 'mcp/show') return handleMcpShow(payload as Parameters<typeof handleMcpShow>[0]);
   if (route === 'mcp/add') return handleMcpAdd(payload as Parameters<typeof handleMcpAdd>[0]);
   if (route === 'mcp/remove') return handleMcpRemove(payload as Parameters<typeof handleMcpRemove>[0]);
   if (route === 'mcp/enable') return handleMcpEnable(payload as Parameters<typeof handleMcpEnable>[0]);
@@ -1249,29 +1250,32 @@ function stripYamlFrontmatter(content: string): string {
 }
 
 /**
- * Recursively copy a directory (synchronous version)
- * Security: Skips symbolic links to prevent following links to sensitive locations
- * @param src Source directory path
- * @param dest Destination directory path
- * @param logPrefix Optional prefix for log messages
+ * Recursively copy a directory using fs/promises.
+ * Every filesystem call yields to the event loop — important for HTTP handlers
+ * that bulk-copy multiple folders. A sync implementation would block Bun's
+ * event loop long enough for the Rust health monitor (/health with 2 s timeout,
+ * 15 s interval) to declare the sidecar unresponsive and respawn it on a fresh
+ * port mid-copy — which was the root cause of the "sync-from-claude crashes
+ * the sidecar" report in issue #96.
+ *
+ * Security: Skips symbolic links to prevent following links to sensitive locations.
  */
-function copyDirRecursiveSync(src: string, dest: string, logPrefix = '[copyDir]'): void {
-  ensureDirSync(dest);
-  const entries = readdirSync(src, { withFileTypes: true });
+async function copyDirRecursive(src: string, dest: string, logPrefix = '[copyDir]'): Promise<void> {
+  await ensureDir(dest);
+  const entries = await readdirAsync(src, { withFileTypes: true });
   for (const entry of entries) {
     const srcPath = join(src, entry.name);
     const destPath = join(dest, entry.name);
 
-    // Security: Skip symbolic links to prevent following links to sensitive locations
     if (entry.isSymbolicLink()) {
       console.warn(`${logPrefix} Skipping symlink: ${srcPath}`);
       continue;
     }
 
     if (entry.isDirectory()) {
-      copyDirRecursiveSync(srcPath, destPath, logPrefix);
+      await copyDirRecursive(srcPath, destPath, logPrefix);
     } else {
-      copyFileSync(srcPath, destPath);
+      await copyFileAsync(srcPath, destPath);
     }
   }
 }
@@ -5444,7 +5448,9 @@ async function main() {
             try {
               const skillFolders = readdirSync(skillsDir, { withFileTypes: true });
               for (const folder of skillFolders) {
-                if (!folder.isDirectory()) continue;
+                // isDirEntry follows symlinks + Windows junctions (issue #104);
+                // bare `isDirectory()` alone drops junction-mounted skills.
+                if (!isDirEntry(folder, join(skillsDir, folder.name))) continue;
                 if (isSkillBlockedOnPlatform(folder.name)) continue;
                 // Skip disabled user-level skills in slash commands
                 if (scope === 'user' && skillsConfig.disabled.includes(folder.name)) continue;
@@ -5871,7 +5877,8 @@ async function main() {
             try {
               const folders = readdirSync(dir, { withFileTypes: true });
               for (const folder of folders) {
-                if (!folder.isDirectory()) continue;
+                // isDirEntry follows symlinks + Windows junctions (issue #104).
+                if (!isDirEntry(folder, join(dir, folder.name))) continue;
                 if (isSkillBlockedOnPlatform(folder.name)) continue;
                 const skillMdPath = join(dir, folder.name, 'SKILL.md');
                 if (!existsSync(skillMdPath)) continue;
@@ -5950,21 +5957,26 @@ async function main() {
             return jsonResponse({ canSync: false, count: 0, folders: [] });
           }
 
-          // Get folders in Claude Code skills directory
+          // Get folders in Claude Code skills directory (follow junctions — issue #104).
+          // Users sometimes mount their skills hub into ~/.claude/skills/ via
+          // junction too; bare `isDirectory()` would miss them asymmetrically
+          // with the myagentsFolders side.
           const claudeFolders = readdirSync(claudeSkillsDir, { withFileTypes: true })
-            .filter(entry => entry.isDirectory())
+            .filter(entry => isDirEntry(entry, join(claudeSkillsDir, entry.name)))
             .map(entry => entry.name);
 
           if (claudeFolders.length === 0) {
             return jsonResponse({ canSync: false, count: 0, folders: [] });
           }
 
-          // Get existing folders in MyAgents skills directory
+          // Get existing folders in MyAgents skills directory.
+          // isDirEntry follows junctions (issue #104) so mounted skills count
+          // as existing, preventing sync-from-claude from overwriting them.
           const myagentsFolders = new Set<string>();
           if (existsSync(userSkillsBaseDir)) {
             const entries = readdirSync(userSkillsBaseDir, { withFileTypes: true });
             for (const entry of entries) {
-              if (entry.isDirectory()) {
+              if (isDirEntry(entry, join(userSkillsBaseDir, entry.name))) {
                 myagentsFolders.add(entry.name);
               }
             }
@@ -5998,9 +6010,9 @@ async function main() {
             return jsonResponse({ success: false, synced: 0, failed: 0, error: 'Claude Code skills directory not found' }, 404);
           }
 
-          // Get folders in Claude Code skills directory
+          // Get folders in Claude Code skills directory (follow junctions — issue #104)
           const claudeFolders = readdirSync(claudeSkillsDir, { withFileTypes: true })
-            .filter(entry => entry.isDirectory())
+            .filter(entry => isDirEntry(entry, join(claudeSkillsDir, entry.name)))
             .map(entry => entry.name);
 
           if (claudeFolders.length === 0) {
@@ -6012,11 +6024,11 @@ async function main() {
             ensureDirSync(userSkillsBaseDir);
           }
 
-          // Get existing folders in MyAgents skills directory
+          // Get existing folders in MyAgents skills directory (follow junctions — issue #104)
           const myagentsFolders = new Set<string>();
           const entries = readdirSync(userSkillsBaseDir, { withFileTypes: true });
           for (const entry of entries) {
-            if (entry.isDirectory()) {
+            if (isDirEntry(entry, join(userSkillsBaseDir, entry.name))) {
               myagentsFolders.add(entry.name);
             }
           }
@@ -6035,12 +6047,16 @@ async function main() {
           let failed = 0;
           const errors: string[] = [];
 
+          // Async copy — yields to the event loop so the Rust health monitor's
+          // /health probe (2 s timeout, 15 s interval) keeps succeeding while the
+          // bulk sync runs. Blocking here was the root cause of the "sidecar
+          // respawns mid-sync, port jumps" symptom users saw on Windows.
           for (const folder of syncableFolders) {
             const srcDir = join(claudeSkillsDir, folder);
             const destDir = join(userSkillsBaseDir, folder);
 
             try {
-              copyDirRecursiveSync(srcDir, destDir, '[api/skill/sync-from-claude]');
+              await copyDirRecursive(srcDir, destDir, '[api/skill/sync-from-claude]');
 
               // Ensure SKILL.md exists — Claude Code may use different file names
               const skillMdPath = join(destDir, 'SKILL.md');
@@ -6298,8 +6314,9 @@ async function main() {
           // Ensure global skills directory exists
           ensureDirSync(userSkillsBaseDir);
 
-          // Copy the skill folder
-          copyDirRecursiveSync(srcDir, destDir, '[api/skill/copy-to-global]');
+          // Copy the skill folder — async variant so /health stays responsive
+          // while large skills copy (see copyDirRecursive doc).
+          await copyDirRecursive(srcDir, destDir, '[api/skill/copy-to-global]');
 
           // Bump generation + sync symlinks into project
           bumpSkillsGeneration();
@@ -6376,6 +6393,12 @@ async function main() {
             filename: string;
             content: string; // Base64 encoded file content
             scope: 'user' | 'project';
+            /**
+             * Optional explicit folder name. Bypasses heuristic derivation from
+             * filename / frontmatter. Required when uploading a bare `SKILL.md`
+             * file — see `.md` branch below.
+             */
+            folderName?: string;
           };
 
           if (!payload.filename || !payload.content) {
@@ -6393,8 +6416,11 @@ async function main() {
           // Decode base64 content to buffer
           const fileBuffer = Buffer.from(payload.content, 'base64');
 
-          // Helper: Try to extract name from SKILL.md content
-          const extractNameFromContent = (content: string): string | null => {
+          // Helper: Try to extract name from SKILL.md frontmatter only.
+          // Scope: `.zip` / `.skill` branch. Archives already have stronger
+          // fallbacks (top-level directory, then filename stem) — we don't want
+          // a body `# heading` to silently override them.
+          const extractFrontmatterName = (content: string): string | null => {
             try {
               const parsed = parseFullSkillContent(content);
               if (parsed.frontmatter.name) {
@@ -6405,6 +6431,25 @@ async function main() {
             }
             return null;
           };
+
+          // Helper used only by the `.md` branch. Adds the first `# heading`
+          // fallback so bare SKILL.md uploads without frontmatter `name:` can
+          // still yield a meaningful directory name instead of the reserved
+          // "SKILL" filename stem.
+          const extractNameForMdUpload = (content: string): string | null => {
+            try {
+              const { name } = parseSkillFrontmatter(content);
+              return name ?? null;
+            } catch {
+              return null;
+            }
+          };
+
+          // `SKILL.md` is the convention-reserved filename inside every skill
+          // folder — it identifies the file's role, not the skill's identity.
+          // Using its stem as a folder-name fallback collapses every distinct
+          // upload onto the same directory (issue #96).
+          const isReservedSkillStem = (stem: string): boolean => /^skill$/i.test(stem);
 
           if (ext === '.zip' || ext === '.skill') {
             // Handle zip/skill files - extract to skills directory
@@ -6434,7 +6479,7 @@ async function main() {
                 const entryName = entry.entryName.toLowerCase();
                 if (entryName.endsWith('skill.md') && !entry.isDirectory) {
                   const mdContent = entry.getData().toString('utf-8');
-                  const nameFromContent = extractNameFromContent(mdContent);
+                  const nameFromContent = extractFrontmatterName(mdContent);
                   if (nameFromContent) {
                     rootFolderName = nameFromContent;
                     break;
@@ -6509,9 +6554,25 @@ async function main() {
             const mdContent = fileBuffer.toString('utf-8');
             const mdFilename = basename(payload.filename, '.md');
 
-            // Try to get name from frontmatter, fallback to filename
-            const nameFromContent = extractNameFromContent(mdContent);
-            const folderName = sanitizeFolderName(nameFromContent || mdFilename);
+            // Folder-name priority: explicit payload.folderName → frontmatter.name
+            // (or first `# heading`) → filename stem, but NEVER the reserved stem
+            // "SKILL" (the convention filename for every skill's definition file).
+            const nameFromContent = extractNameForMdUpload(mdContent);
+            const fallbackFromFilename = isReservedSkillStem(mdFilename) ? null : mdFilename;
+            const rawFolderName = payload.folderName || nameFromContent || fallbackFromFilename;
+
+            if (!rawFolderName) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error:
+                    '无法确定技能目录名：上传文件名为 SKILL.md 且正文缺少可用标识。请任选其一：在 frontmatter 中添加 name 字段、在正文添加 `# <技能名>` 标题、或在请求中提供 folderName 参数。',
+                },
+                400,
+              );
+            }
+
+            const folderName = sanitizeFolderName(rawFolderName);
             const skillDir = join(baseDir, folderName);
 
             if (existsSync(skillDir)) {
@@ -6616,29 +6677,30 @@ async function main() {
             return jsonResponse({ success: false, error: `技能 "${folderName}" 已存在` }, 409);
           }
 
-          // Copy folder recursively
-          const copyDir = (src: string, dest: string) => {
-            ensureDirSync(dest);
-            const entries = readdirSync(src);
-
+          // Copy folder recursively — async so the sidecar's /health probe
+          // stays responsive during large imports (see copyDirRecursive doc).
+          // Keeps the hidden-file / __MACOSX filter that distinguishes this
+          // path from the bulk-sync variant.
+          const copyImportedSkillDir = async (src: string, dest: string): Promise<void> => {
+            await ensureDir(dest);
+            const entries = await readdirAsync(src, { withFileTypes: true });
             for (const entry of entries) {
-              // Skip hidden files and __MACOSX
-              if (entry.startsWith('.') || entry === '__MACOSX') continue;
-
-              const srcPath = join(src, entry);
-              const destPath = join(dest, entry);
-              const stats = statSync(srcPath);
-
-              if (stats.isDirectory()) {
-                copyDir(srcPath, destPath);
+              if (entry.name.startsWith('.') || entry.name === '__MACOSX') continue;
+              if (entry.isSymbolicLink()) {
+                console.warn(`[api/skill/import-folder] Skipping symlink: ${join(src, entry.name)}`);
+                continue;
+              }
+              const srcPath = join(src, entry.name);
+              const destPath = join(dest, entry.name);
+              if (entry.isDirectory()) {
+                await copyImportedSkillDir(srcPath, destPath);
               } else {
-                // Copy file
-                copyFileSync(srcPath, destPath);
+                await copyFileAsync(srcPath, destPath);
               }
             }
           };
 
-          copyDir(sourcePath, targetDir);
+          await copyImportedSkillDir(sourcePath, targetDir);
 
           if (payload.scope === 'user') {
             bumpSkillsGeneration();
@@ -7240,6 +7302,28 @@ async function main() {
         return hasValidDir ? join(effectiveAgentDir, '.claude', 'agents') : '';
       };
 
+      // Validate an agent folderName accepted by GET/PUT/DELETE /api/agent/:name.
+      //
+      // Unlike `isValidItemName` (which rejects '/'), agents now use a
+      // path-like identity for the 'nested' layout (e.g. `team/reviewer`).
+      // Security rests on two things: each segment still flows through
+      // `isValidItemName` (blocking '..', '\\', Windows reserved names,
+      // control chars, reserved punctuation), and findAgent() only ever
+      // returns real on-disk paths produced by scanAgents — the value we
+      // receive is matched by string equality against scanned folderNames,
+      // never concatenated into a path.
+      const isValidAgentFolderName = (name: string): boolean => {
+        if (!name || name.length > 512) return false;
+        if (name.includes('\\')) return false;
+        // eslint-disable-next-line no-control-regex -- explicit control-char ban for filename-like input
+        if (/[\x00-\x1f\x7f]/.test(name)) return false;
+        for (const seg of name.split('/')) {
+          if (!seg || seg === '.' || seg === '..') return false;
+          if (!isValidItemName(seg)) return false;
+        }
+        return true;
+      };
+
       // GET /api/agents - List all agents (with scope filter)
       if (pathname === '/api/agents' && request.method === 'GET') {
         try {
@@ -7268,6 +7352,12 @@ async function main() {
 
       // GET /api/agent/sync-check - Check if there are agents to sync from Claude Code
       // NOTE: Must be before /api/agent/:name to avoid wildcard capture
+      //
+      // Driven by `scanAgents()` so the three SDK-recognised layouts (folder /
+      // flat / nested) are all counted — same rule the loader uses for runtime
+      // discovery. Agents that Claude Code's SDK sees but that only have a
+      // top-level `.md` file (flat) or a subdirectory path (nested) used to
+      // silently disappear from the sync UI; now they're first-class.
       if (pathname === '/api/agent/sync-check' && request.method === 'GET') {
         try {
           const claudeAgentsDir = join(homeDir, '.claude', 'agents');
@@ -7275,29 +7365,32 @@ async function main() {
             return jsonResponse({ canSync: false, count: 0, folders: [] });
           }
 
-          const claudeFolders = readdirSync(claudeAgentsDir, { withFileTypes: true })
-            .filter(entry => entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('.'))
-            .map(entry => entry.name);
+          // scanAgents handles: junctions (via realpath), all 3 layouts,
+          // frontmatter validation, dedup by folderName with layout priority.
+          // Scope arg ('user') only affects the returned AgentItem.scope —
+          // not the scan behavior.
+          const claudeAgents = scanAgents(claudeAgentsDir, 'user');
 
-          if (claudeFolders.length === 0) {
+          if (claudeAgents.length === 0) {
             return jsonResponse({ canSync: false, count: 0, folders: [] });
           }
 
-          const myagentsFolders = new Set<string>();
-          if (existsSync(userAgentsBaseDir)) {
-            const entries = readdirSync(userAgentsBaseDir, { withFileTypes: true });
-            for (const entry of entries) {
-              if (entry.isDirectory()) myagentsFolders.add(entry.name);
-            }
-          }
+          const myagentsAgents = scanAgents(userAgentsBaseDir, 'user');
+          const myagentsSet = new Set(myagentsAgents.map(a => a.folderName));
 
-          const newFolders = claudeFolders.filter(f => !myagentsFolders.has(f) && isValidFolderName(f));
-          const conflictFolders = claudeFolders.filter(f => myagentsFolders.has(f) && isValidFolderName(f));
-          const allValidFolders = claudeFolders.filter(f => isValidFolderName(f));
+          // folderName is the canonical agent identity (e.g. "code-reviewer"
+          // for flat, "team/reviewer" for nested, "novels" for folder). The
+          // client passes these back to sync-from-claude, and we re-validate
+          // them against scanAgents output at that time — no raw filesystem
+          // name is trusted across the request boundary.
+          const allFolders = claudeAgents.map(a => a.folderName);
+          const newFolders = claudeAgents.filter(a => !myagentsSet.has(a.folderName)).map(a => a.folderName);
+          const conflictFolders = claudeAgents.filter(a => myagentsSet.has(a.folderName)).map(a => a.folderName);
+
           return jsonResponse({
-            canSync: allValidFolders.length > 0,
-            count: allValidFolders.length,
-            folders: allValidFolders,
+            canSync: allFolders.length > 0,
+            count: allFolders.length,
+            folders: allFolders,
             newFolders,
             conflictFolders,
           });
@@ -7310,25 +7403,37 @@ async function main() {
       // POST /api/agent/sync-from-claude - Sync agents from Claude Code to MyAgents
       // NOTE: Must be before /api/agent/:name to avoid wildcard capture
       // Supports conflict handling: mode = 'skip' (default) | 'overwrite'
+      //
+      // Preserves the source agent's layout:
+      //   folder  (.claude/agents/foo/foo.md)        → ~/.myagents/agents/foo/foo.md  + _meta.json
+      //   flat    (.claude/agents/foo.md)            → ~/.myagents/agents/foo.md       (no _meta.json — flat has no home for it)
+      //   nested  (.claude/agents/team/reviewer.md)  → ~/.myagents/agents/team/reviewer.md  (ditto)
+      //
+      // Why preserve instead of canonicalize to `folder`: `nested` folderNames
+      // contain `/` (e.g. "team/reviewer"), which collapses ambiguously if
+      // flattened — "team/reviewer" and just "reviewer" would collide. Keeping
+      // the source layout is lossless + matches Claude Code's own storage
+      // convention. `scanAgents()` (loader side) already reads all three.
       if (pathname === '/api/agent/sync-from-claude' && request.method === 'POST') {
         try {
           const payload = await request.json().catch(() => ({})) as { mode?: 'skip' | 'overwrite'; folders?: string[] };
           const conflictMode = payload.mode || 'skip';
-          const selectedFolders = payload.folders; // Optional: sync only these specific folders
+          const selectedFolders = payload.folders; // Optional: sync only these specific folderNames
 
           const claudeAgentsDir = join(homeDir, '.claude', 'agents');
           if (!existsSync(claudeAgentsDir)) {
             return jsonResponse({ success: false, synced: 0, failed: 0, skipped: 0, overwritten: 0, error: 'Claude Code agents directory not found' }, 404);
           }
 
-          const claudeFolders = readdirSync(claudeAgentsDir, { withFileTypes: true })
-            .filter(entry => entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('.') && isValidFolderName(entry.name))
-            .map(entry => entry.name);
+          // Enumerate via the same protocol-aligned scanner that sync-check uses.
+          // Index by folderName so selectedFolders can only reach agents the
+          // scanner actually saw — no raw-path injection across the boundary.
+          const claudeAgents = scanAgents(claudeAgentsDir, 'user');
+          const claudeByName = new Map(claudeAgents.map(a => [a.folderName, a]));
 
-          // Filter to selected folders if specified
           const foldersToSync = selectedFolders
-            ? claudeFolders.filter(f => selectedFolders.includes(f))
-            : claudeFolders;
+            ? selectedFolders.filter(f => claudeByName.has(f))
+            : Array.from(claudeByName.keys());
 
           if (foldersToSync.length === 0) {
             return jsonResponse({ success: true, synced: 0, failed: 0, skipped: 0, overwritten: 0, message: 'No agents to sync' });
@@ -7345,46 +7450,81 @@ async function main() {
           const errors: string[] = [];
           const conflicts: string[] = [];
 
-          for (const folder of foldersToSync) {
-            const srcDir = join(claudeAgentsDir, folder);
-            const destDir = join(userAgentsBaseDir, folder);
-            const alreadyExists = existsSync(destDir);
-
-            if (alreadyExists) {
-              if (conflictMode === 'skip') {
-                skipped++;
-                conflicts.push(folder);
-                continue;
-              }
-              // overwrite: remove existing first
-              rmSync(destDir, { recursive: true, force: true });
-              overwritten++;
-            }
+          for (const folderName of foldersToSync) {
+            const src = claudeByName.get(folderName);
+            if (!src) continue;  // defensive, already filtered above
 
             try {
-              copyDirRecursiveSync(srcDir, destDir, '[api/agent/sync-from-claude]');
-              synced++;
-
-              // Auto-generate _meta.json from frontmatter
-              const mdPath = join(destDir, `${folder}.md`);
-              const metaPath = join(destDir, '_meta.json');
-              if (existsSync(mdPath) && !existsSync(metaPath)) {
-                try {
-                  const content = readFileSync(mdPath, 'utf-8');
-                  const { name: agentName } = parseAgentFrontmatter(content);
-                  const meta = {
-                    displayName: agentName || folder,
-                    author: 'claude-code-sync',
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
-                  };
-                  writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
-                } catch { /* _meta.json generation is optional */ }
+              // Conflict probe via the SAME scanner used for sync-check, so the
+              // "conflict" decision is symmetric regardless of which layout the
+              // existing agent lives in on our side (folder vs flat vs nested).
+              const existing = findAgent(userAgentsBaseDir, 'user', folderName);
+              if (existing) {
+                if (conflictMode === 'skip') {
+                  skipped++;
+                  conflicts.push(folderName);
+                  continue;
+                }
+                // Overwrite: delete the existing agent's own path, which may
+                // be in a different layout than the source. `rm({ recursive,
+                // force })` handles both file (flat/nested .md) and directory
+                // (folder layout) targets. For folder layout we strip back to
+                // the folder itself to avoid leaving a ghost _meta.json.
+                const existingTarget = existing.layout === 'folder'
+                  ? dirname(existing.path)  // the <folderName>/ directory
+                  : existing.path;          // the .md file itself
+                await rm(existingTarget, { recursive: true, force: true });
+                overwritten++;
               }
+
+              // Compute target path from the SOURCE's layout (preserve).
+              // For folder layout, copy the whole source directory (may include
+              // sibling resources like README.md, data files, etc.). For
+              // flat/nested, it's a single-file copy.
+              if (src.layout === 'folder') {
+                const srcDir = dirname(src.path);
+                const destDir = join(userAgentsBaseDir, folderName);
+                await copyDirRecursive(srcDir, destDir, '[api/agent/sync-from-claude]');
+
+                // Write _meta.json (only folder layout has a stable home for it).
+                // Auto-generated from frontmatter.name so the UI shows a friendly
+                // displayName and recognises the agent as synced via the
+                // `claude-code-sync` author marker.
+                const mdPath = join(destDir, `${folderName}.md`);
+                const metaPath = join(destDir, '_meta.json');
+                if (existsSync(mdPath) && !existsSync(metaPath)) {
+                  try {
+                    const content = readFileSync(mdPath, 'utf-8');
+                    const { name: agentName } = parseAgentFrontmatter(content);
+                    const meta = {
+                      displayName: agentName || folderName,
+                      author: 'claude-code-sync',
+                      createdAt: new Date().toISOString(),
+                      updatedAt: new Date().toISOString(),
+                    };
+                    writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+                  } catch { /* _meta.json generation is optional */ }
+                }
+              } else {
+                // flat or nested: single-file copy. For nested we need to
+                // `ensureDir` the parent chain (e.g. "team/" for folderName
+                // "team/reviewer"). For flat the parent is userAgentsBaseDir
+                // which we already ensured above.
+                //
+                // folderName for flat is the stem ("foo" → "foo.md"); for
+                // nested it's the POSIX stem path ("team/reviewer" →
+                // "team/reviewer.md"). Joining with path.join naturally
+                // produces the correct OS-specific path on Windows.
+                const destPath = join(userAgentsBaseDir, `${folderName}.md`);
+                await ensureDir(dirname(destPath));
+                await copyFileAsync(src.path, destPath);
+              }
+
+              synced++;
             } catch (copyError) {
               failed++;
-              errors.push(`${folder}: ${copyError instanceof Error ? copyError.message : 'Unknown error'}`);
-              console.error(`[api/agent/sync-from-claude] Failed to copy "${folder}":`, copyError);
+              errors.push(`${folderName}: ${copyError instanceof Error ? copyError.message : 'Unknown error'}`);
+              console.error(`[api/agent/sync-from-claude] Failed to sync "${folderName}":`, copyError);
             }
           }
 
@@ -7606,36 +7746,42 @@ async function main() {
       }
 
       // GET /api/agent/:name - Get agent detail
+      //
+      // `folderName` is the UI-facing stable id (see agent-loader.ts for its
+      // computation rules). We can't hard-assemble the path as
+      // `<base>/<folderName>/<folderName>.md` anymore — flat/nested layouts
+      // live elsewhere — so we scan and look up by folderName, reusing
+      // `AgentItem.path` / `.layout` from there.
       if (pathname.startsWith('/api/agent/') && request.method === 'GET') {
         try {
           const agentName = decodeURIComponent(pathname.replace('/api/agent/', ''));
-          if (!isValidItemName(agentName)) {
+          if (!isValidAgentFolderName(agentName)) {
             return jsonResponse({ success: false, error: 'Invalid agent name' }, 400);
           }
-          const scope = url.searchParams.get('scope') || 'project';
+          const scope = (url.searchParams.get('scope') || 'project') as 'user' | 'project';
           const queryAgentDir = url.searchParams.get('agentDir');
           const agentsDir = getProjectAgentsDir(queryAgentDir);
           const baseDir = scope === 'user' ? userAgentsBaseDir : agentsDir;
-          const agentPath = join(baseDir, agentName, `${agentName}.md`);
 
-          if (!existsSync(agentPath)) {
+          const item = findAgent(baseDir, scope, agentName);
+          if (!item) {
             return jsonResponse({ success: false, error: 'Agent not found' }, 404);
           }
 
-          const content = readFileSync(agentPath, 'utf-8');
+          const content = readFileSync(item.path, 'utf-8');
           const { frontmatter, body } = parseFullAgentContent(content);
-          const meta = readAgentMeta(join(baseDir, agentName));
 
           return jsonResponse({
             success: true,
             agent: {
-              name: frontmatter.name || agentName,
-              folderName: agentName,
-              path: agentPath,
+              name: frontmatter.name || item.folderName,
+              folderName: item.folderName,
+              path: item.path,
               scope,
+              layout: item.layout,
               frontmatter,
               body,
-              ...(meta ? { meta } : {}),
+              ...(item.meta ? { meta: item.meta } : {}),
             }
           });
         } catch (error) {
@@ -7644,11 +7790,21 @@ async function main() {
         }
       }
 
-      // PUT /api/agent/:name - Update agent (with optional folder rename)
+      // PUT /api/agent/:name - Update agent (with optional folder rename for
+      // 'folder' layout only)
+      //
+      // Lookup is by (folderName, scope) via findAgent(); we never reassemble
+      // the path. Rename stays restricted to the canonical 'folder' layout:
+      //   - flat agents live next to siblings and would collide on rename
+      //   - nested agents belong to a user-managed directory tree (Claude
+      //     Code plugin, synced-in content, etc.) — renaming would mutate
+      //     their container out from under them
+      // Callers can relocate such agents by hand; UI should hide the rename
+      // affordance when `layout !== 'folder'`.
       if (pathname.startsWith('/api/agent/') && request.method === 'PUT') {
         try {
           const agentName = decodeURIComponent(pathname.replace('/api/agent/', ''));
-          if (!isValidItemName(agentName)) {
+          if (!isValidAgentFolderName(agentName)) {
             return jsonResponse({ success: false, error: 'Invalid agent name' }, 400);
           }
           const payload = await request.json() as {
@@ -7662,16 +7818,24 @@ async function main() {
 
           const agentsDir = getProjectAgentsDir(payload.agentDir || null);
           const baseDir = payload.scope === 'user' ? userAgentsBaseDir : agentsDir;
-          let currentFolderName = agentName;
-          let agentFolderDir = join(baseDir, currentFolderName);
-          let agentPath = join(agentFolderDir, `${currentFolderName}.md`);
 
-          if (!existsSync(agentPath)) {
+          const item = findAgent(baseDir, payload.scope, agentName);
+          if (!item) {
             return jsonResponse({ success: false, error: 'Agent not found' }, 404);
           }
 
-          // Handle folder rename if newFolderName is provided and different
+          let currentFolderName = item.folderName;
+          let agentPath = item.path;
+          let agentFolderDir = dirname(item.path);
+
+          // Rename is only meaningful for the 'folder' layout
           if (payload.newFolderName && payload.newFolderName !== currentFolderName) {
+            if (item.layout !== 'folder') {
+              return jsonResponse({
+                success: false,
+                error: `当前 Agent 布局为 ${item.layout}，不支持重命名。请手动调整文件结构后再试。`,
+              }, 400);
+            }
             const newFolderName = payload.newFolderName;
             if (!isValidItemName(newFolderName)) {
               return jsonResponse({ success: false, error: 'Invalid new folder name' }, 400);
@@ -7687,29 +7851,32 @@ async function main() {
             currentFolderName = newFolderName;
 
             // Rename the .md file inside to match new folder name
-            const oldMdPath = join(agentFolderDir, `${agentName}.md`);
+            const oldMdPath = join(agentFolderDir, `${item.folderName}.md`);
             agentPath = join(agentFolderDir, `${newFolderName}.md`);
             if (existsSync(oldMdPath)) {
               renameSync(oldMdPath, agentPath);
             }
 
             writeFileSync(agentPath, content, 'utf-8');
-            // Update _meta.json displayName to match the new name (scanAgents uses displayName as priority)
             const existingMeta = readAgentMeta(agentFolderDir);
             const updatedMeta = { ...existingMeta, ...payload.meta, displayName: payload.frontmatter.name || newFolderName, updatedAt: new Date().toISOString() };
             writeAgentMeta(agentFolderDir, updatedMeta);
             return jsonResponse({ success: true, path: agentPath, folderName: currentFolderName });
           }
 
-          // No rename, just update content
+          // No rename — update content in place regardless of layout
           const content = serializeAgentContent(payload.frontmatter, payload.body);
           writeFileSync(agentPath, content, 'utf-8');
-          // Always sync _meta.json displayName with frontmatter name
-          const existingMeta = readAgentMeta(agentFolderDir);
-          if (payload.meta || (payload.frontmatter.name && payload.frontmatter.name !== existingMeta?.displayName)) {
-            const updatedMeta = { ...existingMeta, ...payload.meta, updatedAt: new Date().toISOString() };
-            if (payload.frontmatter.name) updatedMeta.displayName = payload.frontmatter.name;
-            writeAgentMeta(agentFolderDir, updatedMeta);
+
+          // _meta.json only lives next to 'folder' layout agents. For flat /
+          // nested, skip — there's no unambiguous place for it.
+          if (item.layout === 'folder') {
+            const existingMeta = readAgentMeta(agentFolderDir);
+            if (payload.meta || (payload.frontmatter.name && payload.frontmatter.name !== existingMeta?.displayName)) {
+              const updatedMeta = { ...existingMeta, ...payload.meta, updatedAt: new Date().toISOString() };
+              if (payload.frontmatter.name) updatedMeta.displayName = payload.frontmatter.name;
+              writeAgentMeta(agentFolderDir, updatedMeta);
+            }
           }
           return jsonResponse({ success: true, path: agentPath, folderName: currentFolderName });
         } catch (error) {
@@ -7719,23 +7886,33 @@ async function main() {
       }
 
       // DELETE /api/agent/:name - Delete agent
+      //
+      // Deletion shape depends on layout:
+      //   - folder: remove the whole <base>/<folderName>/ directory
+      //   - flat:   remove the single <base>/<folderName>.md file
+      //   - nested: remove only the .md file, leave the surrounding directory
+      //             structure alone (it's user- or plugin-managed)
       if (pathname.startsWith('/api/agent/') && request.method === 'DELETE') {
         try {
           const agentName = decodeURIComponent(pathname.replace('/api/agent/', ''));
-          if (!isValidItemName(agentName)) {
+          if (!isValidAgentFolderName(agentName)) {
             return jsonResponse({ success: false, error: 'Invalid agent name' }, 400);
           }
-          const scope = url.searchParams.get('scope') || 'project';
+          const scope = (url.searchParams.get('scope') || 'project') as 'user' | 'project';
           const queryAgentDir = url.searchParams.get('agentDir');
           const agentsDir = getProjectAgentsDir(queryAgentDir);
           const baseDir = scope === 'user' ? userAgentsBaseDir : agentsDir;
-          const agentFolderDir = join(baseDir, agentName);
 
-          if (!existsSync(agentFolderDir)) {
+          const item = findAgent(baseDir, scope, agentName);
+          if (!item) {
             return jsonResponse({ success: false, error: 'Agent not found' }, 404);
           }
 
-          rmSync(agentFolderDir, { recursive: true, force: true });
+          if (item.layout === 'folder') {
+            rmSync(dirname(item.path), { recursive: true, force: true });
+          } else {
+            rmSync(item.path, { force: true });
+          }
           return jsonResponse({ success: true });
         } catch (error) {
           console.error('[api/agent] Error:', error);

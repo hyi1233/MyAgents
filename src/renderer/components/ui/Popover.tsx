@@ -48,7 +48,20 @@ export interface PopoverProps {
   closeOnOutsideClick?: boolean;
   /** Dismiss on Escape. Default true. */
   closeOnEscape?: boolean;
-  /** Stacking layer. Default 40 — above inline content, below `OverlayBackdrop` (200). */
+  /**
+   * Stacking layer. Default 260 — above every `<OverlayBackdrop>` in the app
+   * (z-200/210/250) yet below the ConfirmDialog tier (z-300).
+   *
+   * Rationale: a Popover anchored to a button *inside* an overlay should float
+   * above that overlay's panel, not disappear behind it. The earlier default
+   * of 40 predated the OverlayBackdrop stacking hierarchy and caused
+   * RuntimeSelector / SkillDetailPanel / AgentDetailPanel / BugReportOverlay
+   * dropdowns to render behind their own host overlay — user visible as
+   * "click the dropdown and nothing happens" (issue reported 2026-04-23).
+   *
+   * Callers only need to override when they specifically want the popover
+   * stacked below a particular overlay, or above the ConfirmDialog tier.
+   */
   zIndex?: number;
   /** Content styles — merged with the default chrome. */
   className?: string;
@@ -72,7 +85,7 @@ export function Popover({
   matchAnchorWidth = false,
   closeOnOutsideClick = true,
   closeOnEscape = true,
-  zIndex = 40,
+  zIndex = 260,
   className = '',
   style,
   unstyled = false,

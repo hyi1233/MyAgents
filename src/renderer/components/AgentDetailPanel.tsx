@@ -405,6 +405,12 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
 
         const expectedFolderName = agentName.trim() ? sanitizeFolderName(agentName.trim()) : '';
 
+        // Rename (folder + inner .md file) is only supported for the canonical
+        // 'folder' layout — flat single-file agents and nested (plugin-style)
+        // layouts keep their on-disk paths. Users can still edit frontmatter.name
+        // here; only the disk structure stays put.
+        const canRename = agent?.layout === 'folder';
+
         const handleSave = useCallback(async () => {
             if (!agent) return;
             if (!agentName.trim()) {
@@ -437,7 +443,10 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
 
                 const newFolderName = sanitizeFolderName(agentName.trim());
                 const nameWasModified = agentName.trim() !== originalAgentName;
-                const shouldRename = nameWasModified && newFolderName && newFolderName !== agent.folderName;
+                // Rename stays gated on layout even if the name changed —
+                // flat/nested agents still get their frontmatter.name updated
+                // (handled in the body write), just not the surrounding file.
+                const shouldRename = canRename && nameWasModified && newFolderName && newFolderName !== agent.folderName;
 
                 const payload = isInTabContext
                     ? { scope, frontmatter, body, ...(shouldRename ? { newFolderName } : {}) }
@@ -478,7 +487,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
             } finally {
                 setSaving(false);
             }
-        }, [agent, agentName, description, body, model, toolsTags, disallowedToolsTags, maxTurns, permissionMode, memory, skillsTags, hooksYaml, name, scope, agentDir, originalAgentName, onSaved, api, isInTabContext]);
+        }, [agent, canRename, agentName, description, body, model, toolsTags, disallowedToolsTags, maxTurns, permissionMode, memory, skillsTags, hooksYaml, name, scope, agentDir, originalAgentName, onSaved, api, isInTabContext]);
 
         const handleDelete = useCallback(async () => {
             if (!agent) return;
@@ -641,8 +650,15 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                             className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
                             placeholder="Agent 名称"
                         />
-                        {/* Folder name hint */}
-                        {agentName.trim() && expectedFolderName !== name && (
+                        {/* Folder name hint — only for the canonical 'folder' layout.
+                            flat/nested agents keep their path; name edits only touch frontmatter. */}
+                        {!canRename && agent && agentName.trim() !== originalAgentName && (
+                            <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                当前 Agent 布局为 <code className="rounded bg-[var(--paper-inset)] px-1">{agent.layout}</code>，
+                                仅更新显示名，文件路径不变（<code className="rounded bg-[var(--paper-inset)] px-1">{agent.folderName}</code>）
+                            </p>
+                        )}
+                        {canRename && agentName.trim() && expectedFolderName !== name && (
                             <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                 文件夹将重命名为: {expectedFolderName}
                             </p>

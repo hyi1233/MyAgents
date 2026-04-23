@@ -379,7 +379,6 @@ export default memo(function TemplateLibraryDialog({
                                                 anchorRef={iconBtnRef}
                                                 placement="bottom-start"
                                                 offset={6}
-                                                zIndex={220}
                                                 className="w-[280px] rounded-xl p-2 shadow-lg"
                                             >
                                                 <div className="max-h-[200px] overflow-y-auto overscroll-contain">

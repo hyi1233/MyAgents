@@ -9,6 +9,10 @@ import { thoughtList, thoughtOpenDir, taskCenterAvailable } from '@/api/taskCent
 import { SearchPill } from './SearchPill';
 import { ThoughtInput } from './ThoughtInput';
 import { ThoughtCard } from './ThoughtCard';
+import { useConfig } from '@/hooks/useConfig';
+// `projects` (not `config.agents`) feeds the # picker — see
+// useThoughtTagCandidates for the rationale.
+import { useThoughtTagCandidates } from '@/hooks/useThoughtTagCandidates';
 import type { Thought } from '@/../shared/types/thought';
 
 interface Props {
@@ -99,8 +103,9 @@ export function ThoughtPanel({
     [],
   );
 
-  // Full tag list, sorted by frequency. Feeds both the `#` autocomplete in
-  // ThoughtInput and the search-expanded tag panel below.
+  // History-only tag list — drives the search-box tag cloud below, which is
+  // an inventory of tags the user has *actually used*. Including agent names
+  // here would make the cloud show phantom tags that filter nothing.
   const allTags = useMemo(() => {
     const counts = new Map<string, number>();
     for (const t of thoughts) {
@@ -110,6 +115,17 @@ export function ThoughtPanel({
     }
     return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
   }, [thoughts]);
+
+  // Picker candidates — history tags + user-visible workspace names
+  // (sanitized to pass the Rust `#` parser). Workspace names surface as
+  // default options even when no thought has used them yet, so a brand-
+  // new workspace is discoverable the first time the user presses `#`.
+  // Uses `projects` (what the Launcher actually shows) rather than
+  // `config.agents` so the candidate list matches the visible workspace
+  // inventory 1:1 — including plain workspaces not yet upgraded to
+  // Agents, and excluding internal workspaces like `~/.myagents`.
+  const { projects } = useConfig();
+  const tagCandidates = useThoughtTagCandidates(thoughts, projects);
 
   // Search panel shows the tag cloud only when the user has focused the
   // search input AND hasn't narrowed by text or picked a tag yet. Typing
@@ -282,7 +298,7 @@ export function ThoughtPanel({
       <div className="p-3">
         <ThoughtInput
           onCreated={(t) => setThoughts((prev) => [t, ...prev])}
-          existingTags={allTags}
+          existingTags={tagCandidates}
           autoFocus={autoFocusInput}
         />
       </div>

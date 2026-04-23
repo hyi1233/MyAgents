@@ -267,10 +267,6 @@ export default function BugReportOverlay({
                                     onClose={() => setShowModelMenu(false)}
                                     anchorRef={modelBtnRef}
                                     placement="top-start"
-                                    // BugReportOverlay itself sits at z-200
-                                    // (OverlayBackdrop); the model dropdown
-                                    // must stack above it.
-                                    zIndex={220}
                                     className="w-[260px] max-h-[300px] overflow-y-auto rounded-xl py-1 shadow-lg"
                                 >
                                     {(() => {

@@ -676,9 +676,13 @@ export default function App() {
         return;
       }
 
-      if (e.key === 't' || e.key === 'T') {
+      if (!e.shiftKey && !e.altKey && (e.key === 't' || e.key === 'T')) {
+        // Cmd/Ctrl+T — new tab. `!e.shiftKey` guard lets Cmd+Shift+T
+        // flow through to page-level handlers (e.g. Launcher BrandSection
+        // uses it as the 任务/想法 mode-toggle chord). Without this guard
+        // Cmd+Shift+T would silently collapse onto "new tab" and users
+        // couldn't reach the mode toggle from the keyboard at all.
         e.preventDefault();
-        // New tab
         if (tabsRef.current.length < MAX_TABS) {
           const newTab = createNewTab();
           setTabs((prev) => [...prev, newTab]);
