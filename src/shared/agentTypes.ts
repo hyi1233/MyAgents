@@ -35,6 +35,17 @@ export interface AgentMeta {
 }
 
 /**
+ * On-disk layout form an agent file takes.
+ * - 'folder': <base>/<folderName>/<folderName>.md  (MyAgents canonical, created by /api/agent/create)
+ * - 'flat':   <base>/<folderName>.md                (Claude Code convention, single-file agent)
+ * - 'nested': <base>/<dir>/.../<stem>.md            (arbitrary depth, folderName = 'dir/.../stem')
+ *
+ * Only 'folder' supports rename + _meta.json. 'flat' / 'nested' are editable in place
+ * but cannot be renamed via UI (the file/dir layout is user-owned).
+ */
+export type AgentLayout = 'folder' | 'flat' | 'nested';
+
+/**
  * Agent item in list view
  */
 export interface AgentItem {
@@ -43,6 +54,7 @@ export interface AgentItem {
     scope: 'user' | 'project';
     path: string;
     folderName: string;
+    layout: AgentLayout;
     meta?: AgentMeta;
     synced?: boolean;         // true if synced from Claude Code
 }
@@ -55,6 +67,7 @@ export interface AgentDetail {
     folderName: string;
     path: string;
     scope: 'user' | 'project';
+    layout: AgentLayout;
     frontmatter: Partial<AgentFrontmatter>;
     body: string;
     meta?: AgentMeta;

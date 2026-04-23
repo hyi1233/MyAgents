@@ -22,7 +22,7 @@ import { analyseTree, buildInstallPayload, writeSkillFiles, type SkillCandidate 
 import { isPreviewable } from '../shared/fileTypes';
 import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
-import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta } from './agents/agent-loader';
+import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
 import type { McpServerDefinition } from '../renderer/config/types';
 import { ensureDirSync, ensureDir } from './utils/fs-utils';
@@ -7293,6 +7293,28 @@ async function main() {
         return hasValidDir ? join(effectiveAgentDir, '.claude', 'agents') : '';
       };
 
+      // Validate an agent folderName accepted by GET/PUT/DELETE /api/agent/:name.
+      //
+      // Unlike `isValidItemName` (which rejects '/'), agents now use a
+      // path-like identity for the 'nested' layout (e.g. `team/reviewer`).
+      // Security rests on two things: each segment still flows through
+      // `isValidItemName` (blocking '..', '\\', Windows reserved names,
+      // control chars, reserved punctuation), and findAgent() only ever
+      // returns real on-disk paths produced by scanAgents — the value we
+      // receive is matched by string equality against scanned folderNames,
+      // never concatenated into a path.
+      const isValidAgentFolderName = (name: string): boolean => {
+        if (!name || name.length > 512) return false;
+        if (name.includes('\\')) return false;
+        // eslint-disable-next-line no-control-regex -- explicit control-char ban for filename-like input
+        if (/[\x00-\x1f\x7f]/.test(name)) return false;
+        for (const seg of name.split('/')) {
+          if (!seg || seg === '.' || seg === '..') return false;
+          if (!isValidItemName(seg)) return false;
+        }
+        return true;
+      };
+
       // GET /api/agents - List all agents (with scope filter)
       if (pathname === '/api/agents' && request.method === 'GET') {
         try {
@@ -7662,36 +7684,42 @@ async function main() {
       }
 
       // GET /api/agent/:name - Get agent detail
+      //
+      // `folderName` is the UI-facing stable id (see agent-loader.ts for its
+      // computation rules). We can't hard-assemble the path as
+      // `<base>/<folderName>/<folderName>.md` anymore — flat/nested layouts
+      // live elsewhere — so we scan and look up by folderName, reusing
+      // `AgentItem.path` / `.layout` from there.
       if (pathname.startsWith('/api/agent/') && request.method === 'GET') {
         try {
           const agentName = decodeURIComponent(pathname.replace('/api/agent/', ''));
-          if (!isValidItemName(agentName)) {
+          if (!isValidAgentFolderName(agentName)) {
             return jsonResponse({ success: false, error: 'Invalid agent name' }, 400);
           }
-          const scope = url.searchParams.get('scope') || 'project';
+          const scope = (url.searchParams.get('scope') || 'project') as 'user' | 'project';
           const queryAgentDir = url.searchParams.get('agentDir');
           const agentsDir = getProjectAgentsDir(queryAgentDir);
           const baseDir = scope === 'user' ? userAgentsBaseDir : agentsDir;
-          const agentPath = join(baseDir, agentName, `${agentName}.md`);
 
-          if (!existsSync(agentPath)) {
+          const item = findAgent(baseDir, scope, agentName);
+          if (!item) {
             return jsonResponse({ success: false, error: 'Agent not found' }, 404);
           }
 
-          const content = readFileSync(agentPath, 'utf-8');
+          const content = readFileSync(item.path, 'utf-8');
           const { frontmatter, body } = parseFullAgentContent(content);
-          const meta = readAgentMeta(join(baseDir, agentName));
 
           return jsonResponse({
             success: true,
             agent: {
-              name: frontmatter.name || agentName,
-              folderName: agentName,
-              path: agentPath,
+              name: frontmatter.name || item.folderName,
+              folderName: item.folderName,
+              path: item.path,
               scope,
+              layout: item.layout,
               frontmatter,
               body,
-              ...(meta ? { meta } : {}),
+              ...(item.meta ? { meta: item.meta } : {}),
             }
           });
         } catch (error) {
@@ -7700,11 +7728,21 @@ async function main() {
         }
       }
 
-      // PUT /api/agent/:name - Update agent (with optional folder rename)
+      // PUT /api/agent/:name - Update agent (with optional folder rename for
+      // 'folder' layout only)
+      //
+      // Lookup is by (folderName, scope) via findAgent(); we never reassemble
+      // the path. Rename stays restricted to the canonical 'folder' layout:
+      //   - flat agents live next to siblings and would collide on rename
+      //   - nested agents belong to a user-managed directory tree (Claude
+      //     Code plugin, synced-in content, etc.) — renaming would mutate
+      //     their container out from under them
+      // Callers can relocate such agents by hand; UI should hide the rename
+      // affordance when `layout !== 'folder'`.
       if (pathname.startsWith('/api/agent/') && request.method === 'PUT') {
         try {
           const agentName = decodeURIComponent(pathname.replace('/api/agent/', ''));
-          if (!isValidItemName(agentName)) {
+          if (!isValidAgentFolderName(agentName)) {
             return jsonResponse({ success: false, error: 'Invalid agent name' }, 400);
           }
           const payload = await request.json() as {
@@ -7718,16 +7756,24 @@ async function main() {
 
           const agentsDir = getProjectAgentsDir(payload.agentDir || null);
           const baseDir = payload.scope === 'user' ? userAgentsBaseDir : agentsDir;
-          let currentFolderName = agentName;
-          let agentFolderDir = join(baseDir, currentFolderName);
-          let agentPath = join(agentFolderDir, `${currentFolderName}.md`);
 
-          if (!existsSync(agentPath)) {
+          const item = findAgent(baseDir, payload.scope, agentName);
+          if (!item) {
             return jsonResponse({ success: false, error: 'Agent not found' }, 404);
           }
 
-          // Handle folder rename if newFolderName is provided and different
+          let currentFolderName = item.folderName;
+          let agentPath = item.path;
+          let agentFolderDir = dirname(item.path);
+
+          // Rename is only meaningful for the 'folder' layout
           if (payload.newFolderName && payload.newFolderName !== currentFolderName) {
+            if (item.layout !== 'folder') {
+              return jsonResponse({
+                success: false,
+                error: `当前 Agent 布局为 ${item.layout}，不支持重命名。请手动调整文件结构后再试。`,
+              }, 400);
+            }
             const newFolderName = payload.newFolderName;
             if (!isValidItemName(newFolderName)) {
               return jsonResponse({ success: false, error: 'Invalid new folder name' }, 400);
@@ -7743,29 +7789,32 @@ async function main() {
             currentFolderName = newFolderName;
 
             // Rename the .md file inside to match new folder name
-            const oldMdPath = join(agentFolderDir, `${agentName}.md`);
+            const oldMdPath = join(agentFolderDir, `${item.folderName}.md`);
             agentPath = join(agentFolderDir, `${newFolderName}.md`);
             if (existsSync(oldMdPath)) {
               renameSync(oldMdPath, agentPath);
             }
 
             writeFileSync(agentPath, content, 'utf-8');
-            // Update _meta.json displayName to match the new name (scanAgents uses displayName as priority)
             const existingMeta = readAgentMeta(agentFolderDir);
             const updatedMeta = { ...existingMeta, ...payload.meta, displayName: payload.frontmatter.name || newFolderName, updatedAt: new Date().toISOString() };
             writeAgentMeta(agentFolderDir, updatedMeta);
             return jsonResponse({ success: true, path: agentPath, folderName: currentFolderName });
           }
 
-          // No rename, just update content
+          // No rename — update content in place regardless of layout
           const content = serializeAgentContent(payload.frontmatter, payload.body);
           writeFileSync(agentPath, content, 'utf-8');
-          // Always sync _meta.json displayName with frontmatter name
-          const existingMeta = readAgentMeta(agentFolderDir);
-          if (payload.meta || (payload.frontmatter.name && payload.frontmatter.name !== existingMeta?.displayName)) {
-            const updatedMeta = { ...existingMeta, ...payload.meta, updatedAt: new Date().toISOString() };
-            if (payload.frontmatter.name) updatedMeta.displayName = payload.frontmatter.name;
-            writeAgentMeta(agentFolderDir, updatedMeta);
+
+          // _meta.json only lives next to 'folder' layout agents. For flat /
+          // nested, skip — there's no unambiguous place for it.
+          if (item.layout === 'folder') {
+            const existingMeta = readAgentMeta(agentFolderDir);
+            if (payload.meta || (payload.frontmatter.name && payload.frontmatter.name !== existingMeta?.displayName)) {
+              const updatedMeta = { ...existingMeta, ...payload.meta, updatedAt: new Date().toISOString() };
+              if (payload.frontmatter.name) updatedMeta.displayName = payload.frontmatter.name;
+              writeAgentMeta(agentFolderDir, updatedMeta);
+            }
           }
           return jsonResponse({ success: true, path: agentPath, folderName: currentFolderName });
         } catch (error) {
@@ -7775,23 +7824,33 @@ async function main() {
       }
 
       // DELETE /api/agent/:name - Delete agent
+      //
+      // Deletion shape depends on layout:
+      //   - folder: remove the whole <base>/<folderName>/ directory
+      //   - flat:   remove the single <base>/<folderName>.md file
+      //   - nested: remove only the .md file, leave the surrounding directory
+      //             structure alone (it's user- or plugin-managed)
       if (pathname.startsWith('/api/agent/') && request.method === 'DELETE') {
         try {
           const agentName = decodeURIComponent(pathname.replace('/api/agent/', ''));
-          if (!isValidItemName(agentName)) {
+          if (!isValidAgentFolderName(agentName)) {
             return jsonResponse({ success: false, error: 'Invalid agent name' }, 400);
           }
-          const scope = url.searchParams.get('scope') || 'project';
+          const scope = (url.searchParams.get('scope') || 'project') as 'user' | 'project';
           const queryAgentDir = url.searchParams.get('agentDir');
           const agentsDir = getProjectAgentsDir(queryAgentDir);
           const baseDir = scope === 'user' ? userAgentsBaseDir : agentsDir;
-          const agentFolderDir = join(baseDir, agentName);
 
-          if (!existsSync(agentFolderDir)) {
+          const item = findAgent(baseDir, scope, agentName);
+          if (!item) {
             return jsonResponse({ success: false, error: 'Agent not found' }, 404);
           }
 
-          rmSync(agentFolderDir, { recursive: true, force: true });
+          if (item.layout === 'folder') {
+            rmSync(dirname(item.path), { recursive: true, force: true });
+          } else {
+            rmSync(item.path, { force: true });
+          }
           return jsonResponse({ success: true });
         } catch (error) {
           console.error('[api/agent] Error:', error);
