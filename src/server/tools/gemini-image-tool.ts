@@ -2,8 +2,10 @@
 // Uses Shadow Session to maintain Gemini multi-turn context (contents[] + thought_signature)
 // In-process MCP server (same pattern as cron-tools / im-media)
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
+// SDK + zod are loaded lazily inside createGeminiImageServer() via dynamic
+// import. configure/validate are plain exports that builtin-mcp-meta.ts
+// pulls in on-demand via a proxy load(), so they never force SDK eval
+// either. See builtin-mcp-meta.ts for registration.
 import { existsSync , writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -679,7 +681,9 @@ async function editImageHandler(args: {
 
 // ============= MCP Server =============
 
-export function createGeminiImageServer() {
+export async function createGeminiImageServer() {
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
   return createSdkMcpServer({
     name: 'gemini-image',
     version: '1.0.0',
@@ -725,71 +729,72 @@ You MUST provide the contextId from a previous generate_image or edit_image resu
   });
 }
 
-export const geminiImageServer = createGeminiImageServer();
-
-// ============= Builtin MCP Registry =============
-
-import { registerBuiltinMcp } from './builtin-mcp-registry';
+// ============= Configure / Validate (light — no SDK/zod dependency) =============
+// These are exported as plain named exports so that builtin-mcp-meta.ts can
+// reference them via dynamic import without pulling in the SDK. `configure`
+// is called at session start (via buildSdkMcpServers); `validate` is called
+// when the user clicks Test/Enable in Settings.
 
 // Cache for verified API key + baseUrl pair (avoids re-validation on every enable toggle)
 let verifiedCacheKey = '';
 
-registerBuiltinMcp('gemini-image', {
-  server: geminiImageServer,
+export function configureGeminiImage(
+  env: Record<string, string>,
+  ctx: { sessionId: string; workspace?: string },
+): void {
+  setGeminiImageConfig({
+    apiKey: env.GEMINI_API_KEY || '',
+    baseUrl: env.GEMINI_BASE_URL || '',
+    model: env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image',
+    defaultAspectRatio: env.GEMINI_DEFAULT_ASPECT_RATIO || 'auto',
+    defaultImageSize: env.GEMINI_DEFAULT_IMAGE_SIZE || 'auto',
+    thinkingLevel: env.GEMINI_THINKING_LEVEL || 'auto',
+    searchGrounding: env.GEMINI_SEARCH_GROUNDING === 'true',
+    maxContextTurns: parseInt(env.MAX_CONTEXT_TURNS || '20', 10),
+    sessionId: ctx.sessionId,
+    workspace: ctx.workspace,
+  });
+}
 
-  configure: (env, ctx) => {
-    setGeminiImageConfig({
-      apiKey: env.GEMINI_API_KEY || '',
-      baseUrl: env.GEMINI_BASE_URL || '',
-      model: env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image',
-      defaultAspectRatio: env.GEMINI_DEFAULT_ASPECT_RATIO || 'auto',
-      defaultImageSize: env.GEMINI_DEFAULT_IMAGE_SIZE || 'auto',
-      thinkingLevel: env.GEMINI_THINKING_LEVEL || 'auto',
-      searchGrounding: env.GEMINI_SEARCH_GROUNDING === 'true',
-      maxContextTurns: parseInt(env.MAX_CONTEXT_TURNS || '20', 10),
-      sessionId: ctx.sessionId,
-      workspace: ctx.workspace,
+export async function validateGeminiImage(
+  env: Record<string, string>,
+): Promise<{ type: string; message: string } | null> {
+  const apiKey = env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    return { type: 'runtime_error', message: '请先配置 Gemini API Key' };
+  }
+
+  const baseUrl = env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com/v1beta';
+
+  // Skip if this key+baseUrl pair was already verified
+  const cacheKey = `${apiKey}@${baseUrl}`;
+  if (cacheKey === verifiedCacheKey) return null;
+  try {
+    console.log('[api/mcp/enable] Verifying Gemini API key...');
+    const resp = await fetch(`${baseUrl}/models?key=${apiKey}`, {
+      signal: AbortSignal.timeout(15_000),
     });
-  },
-
-  validate: async (env) => {
-    const apiKey = env.GEMINI_API_KEY?.trim();
-    if (!apiKey) {
-      return { type: 'runtime_error', message: '请先配置 Gemini API Key' };
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      let msg = `API Key 验证失败 (HTTP ${resp.status})`;
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed.error?.message) msg = parsed.error.message;
+      } catch { /* not JSON */ }
+      console.error(`[api/mcp/enable] Gemini key verification failed: ${msg}`);
+      return { type: 'runtime_error', message: msg };
     }
-
-    const baseUrl = env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com/v1beta';
-
-    // Skip if this key+baseUrl pair was already verified
-    const cacheKey = `${apiKey}@${baseUrl}`;
-    if (cacheKey === verifiedCacheKey) return null;
-    try {
-      console.log('[api/mcp/enable] Verifying Gemini API key...');
-      const resp = await fetch(`${baseUrl}/models?key=${apiKey}`, {
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!resp.ok) {
-        const body = await resp.text().catch(() => '');
-        let msg = `API Key 验证失败 (HTTP ${resp.status})`;
-        try {
-          const parsed = JSON.parse(body);
-          if (parsed.error?.message) msg = parsed.error.message;
-        } catch { /* not JSON */ }
-        console.error(`[api/mcp/enable] Gemini key verification failed: ${msg}`);
-        return { type: 'runtime_error', message: msg };
-      }
-      verifiedCacheKey = cacheKey;
-      console.log('[api/mcp/enable] Gemini API key verified successfully');
-      return null;
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[api/mcp/enable] Gemini key verification error: ${errMsg}`);
-      return {
-        type: 'connection_failed',
-        message: errMsg.includes('abort') || errMsg.includes('timeout')
-          ? '连接 Gemini API 超时，请检查网络或 Base URL'
-          : `连接失败: ${errMsg}`,
-      };
-    }
-  },
-});
+    verifiedCacheKey = cacheKey;
+    console.log('[api/mcp/enable] Gemini API key verified successfully');
+    return null;
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[api/mcp/enable] Gemini key verification error: ${errMsg}`);
+    return {
+      type: 'connection_failed',
+      message: errMsg.includes('abort') || errMsg.includes('timeout')
+        ? '连接 Gemini API 超时，请检查网络或 Base URL'
+        : `连接失败: ${errMsg}`,
+    };
+  }
+}

@@ -510,19 +510,36 @@ export async function handleMcpTest(payload: { id: string }): Promise<AdminRespo
     return { success: false, error: `MCP server '${id}' has no URL configured` };
   }
 
-  // Built-in MCP: delegate to registry
+  // Built-in MCP: delegate to registry.
+  // getBuiltinMcpInstance() force-loads the tool module (SDK+zod+server
+  // construction) on first hit; it returns undefined only when the id isn't
+  // registered in META. META is registered via agent-session.ts's side-effect
+  // import of './tools/builtin-mcp-meta', which already ran before any admin
+  // handler can fire — no need to force-import META here.
   if (server.command === '__builtin__') {
+    const { getBuiltinMcpInstance } = await import('./tools/builtin-mcp-registry');
+    const entryPromise = getBuiltinMcpInstance(server.id);
+    if (!entryPromise) {
+      return { success: false, error: `Built-in MCP '${server.id}' not registered` };
+    }
+    // Don't swallow factory/import errors — a failing `myagents mcp test` must
+    // surface as "failure" so users/agents diagnose the actual issue instead of
+    // getting a false "validated" green light while the session keeps breaking.
     try {
-      const { getBuiltinMcp } = await import('./tools/builtin-mcp-registry');
-      const entry = getBuiltinMcp(server.id);
-      if (entry?.validate) {
+      const entry = await entryPromise;
+      if (entry.validate) {
         const validationError = await entry.validate(server.env || {});
         if (validationError) {
           const errMsg = typeof validationError === 'string' ? validationError : JSON.stringify(validationError);
           return { success: false, error: errMsg };
         }
       }
-    } catch { /* registry not loaded */ }
+    } catch (err) {
+      return {
+        success: false,
+        error: `Built-in MCP '${server.id}' load failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
     return { success: true, data: { id, type: 'builtin' }, hint: 'Built-in MCP validated.' };
   }
 

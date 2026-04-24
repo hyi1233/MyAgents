@@ -7,18 +7,23 @@ import { getScriptDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeD
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
-import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
-import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
-import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
+// Context helpers only — tool server singletons are no longer exported from
+// these modules. The actual SDK server objects are created on-demand via
+// `getBuiltinMcpInstance()` in buildSdkMcpServers() below. See
+// ./tools/builtin-mcp-meta.ts for META registrations.
+import { getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
+import { getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
+import { getImMediaContext } from './tools/im-media-tool';
 import { getImBridgeToolsContext, getImBridgeToolServer } from './tools/im-bridge-tools';
-import { getBuiltinMcp } from './tools/builtin-mcp-registry';
+import { getBuiltinMcpInstance } from './tools/builtin-mcp-registry';
+// Side-effect import — registers META (ids + lazy factories) at cold start.
+// Cheap: just function-ref storage, no SDK/zod eval, no tool module loaded.
+import './tools/builtin-mcp-meta';
 import { startSocksBridge, stopSocksBridge, isSocksBridgeRunning } from './utils/socks-bridge';
 import { startFileWatcher } from './file-watcher';
 import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from './mcp-oauth';
 // Side-effect imports: each registers itself in the builtin MCP registry
-import './tools/gemini-image-tool';
-import './tools/edge-tts-tool';
-import { generativeUiServer } from './tools/generative-ui-tool';
+// gemini-image / edge-tts / generative-ui registered in builtin-mcp-meta.ts.
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
@@ -877,8 +882,12 @@ function resetTurnUsage(): void {
 
 // ===== MCP Configuration =====
 import type { McpServerDefinition } from '../renderer/config/types';
+// SDK's in-process server instance type — what createSdkMcpServer() returns.
+// Imported as a type (no runtime cost) so we can annotate the buildSdkMcpServers
+// result map without relying on a module-level singleton.
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 
-// SDK MCP server config type (subset of what SDK accepts)
+// SDK MCP server config type (subset of what SDK accepts — external transports only)
 type SdkMcpServerConfig = {
   type?: 'stdio';
   command: string;
@@ -889,6 +898,11 @@ type SdkMcpServerConfig = {
   url: string;
   headers?: Record<string, string>;
 };
+
+// Union type for buildSdkMcpServers result — each slot is either an external
+// transport spec (SDK spawns subprocess / hits URL) or an in-process SDK
+// server object (tool handlers run in this Node process).
+type McpServerEntry = SdkMcpServerConfig | McpSdkServerConfigWithInstance;
 
 // Current MCP servers enabled for this workspace (set per-query)
 // null = never set (use config file fallback), [] = explicitly set to none
@@ -1563,11 +1577,14 @@ export function pinMcpPackageVersions(args: string[]): string[] {
  * Convert McpServerDefinition to SDK mcpServers format.
  *
  * Three MCP injection patterns:
- * 1. Context-injected (cron-tools, im-cron, im-media) — always present based on sidecar context,
- *    invisible in Settings UI, not user-toggled.
+ * 1. Context-injected (cron-tools, im-cron, im-media, generative-ui) — always present based on
+ *    sidecar context, invisible in Settings UI, not user-toggled.
  * 2. Builtin registry (command='__builtin__') — in-process servers, user-toggled via Settings,
- *    self-registered via builtin-mcp-registry.ts. Adding a new one = add registerBuiltinMcp()
- *    call in the tool file + side-effect import below.
+ *    registered as META in `./tools/builtin-mcp-meta.ts`. Adding a new one:
+ *      (a) add `registerBuiltinMcpMeta({ id, load })` block in builtin-mcp-meta.ts, and
+ *      (b) write the tool file with `createXxxServer()` async factory whose SDK + zod imports
+ *          live INSIDE the factory via `await import()` — never at the tool module's top level,
+ *          or the lazy-load win is defeated (see CLAUDE.md 禁止事项 and builtin-mcp-registry.ts).
  * 3. External (stdio/sse/http) — subprocess or remote servers, user-configured.
  *
  * Execution strategy for external stdio:
@@ -1575,7 +1592,7 @@ export function pinMcpPackageVersions(args: string[]): string[] {
  * - For other commands: Uses user-specified command directly (node/python etc.)
  * - Inherits proxy env + injects NO_PROXY to protect localhost (mirrors Rust proxy_config)
  */
-async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig | typeof cronToolsServer>> {
+async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
   // null = MCP not yet configured (e.g. Global sidecar, or Tab pre-warm before /api/mcp/set)
   // [] = explicitly no MCP (user has none enabled)
   // [...]= user's enabled MCP servers
@@ -1594,28 +1611,51 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
   });
   if (isDebugMode) console.log(`[agent] MCP servers: ${servers.map(s => s.id).join(', ') || 'none'}`);
 
-  const result: Record<string, SdkMcpServerConfig | typeof cronToolsServer> = {};
+  const result: Record<string, McpServerEntry> = {};
+
+  // Helper — lazy-load a builtin MCP's server object via the META registry.
+  // Returns null if the id isn't registered (shouldn't happen for ids we hard-code,
+  // but defensive). First call for a given id triggers SDK+zod+schema construction
+  // (~100-300ms); subsequent calls in this Sidecar's lifetime are cached no-ops.
+  const loadBuiltinServer = async (id: string) => {
+    const entryPromise = getBuiltinMcpInstance(id);
+    if (!entryPromise) {
+      console.warn(`[agent] Builtin MCP '${id}' not registered in META — skipping`);
+      return null;
+    }
+    const entry = await entryPromise;
+    return entry.server as McpSdkServerConfigWithInstance;
+  };
 
   // --- Pattern 1: Context-injected MCPs (always present based on sidecar context) ---
   const cronContext = getCronTaskContext();
   if (cronContext.taskId) {
-    result['cron-tools'] = cronToolsServer;
-    console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
+    const s = await loadBuiltinServer('cron-tools');
+    if (s) {
+      result['cron-tools'] = s;
+      console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
+    }
   }
 
   // Add cron tool for ALL sessions when management API is available
   // IM sessions use imCronContext (with delivery), regular sessions use sessionCronContext
   if (process.env.MYAGENTS_MANAGEMENT_PORT) {
-    result['im-cron'] = imCronToolServer;
-    const imCronCtx = getImCronContext();
-    console.log(`[agent] Added im-cron MCP server${imCronCtx ? ` for bot ${imCronCtx.botId}` : ' (session mode)'}`);
+    const s = await loadBuiltinServer('im-cron');
+    if (s) {
+      result['im-cron'] = s;
+      const imCronCtx = getImCronContext();
+      console.log(`[agent] Added im-cron MCP server${imCronCtx ? ` for bot ${imCronCtx.botId}` : ' (session mode)'}`);
+    }
   }
 
   // Add IM media tool if we're in an IM context with management API available
   const imMediaCtx = getImMediaContext();
   if (imMediaCtx && process.env.MYAGENTS_MANAGEMENT_PORT) {
-    result['im-media'] = imMediaToolServer;
-    console.log(`[agent] Added im-media MCP server for bot ${imMediaCtx.botId}`);
+    const s = await loadBuiltinServer('im-media');
+    if (s) {
+      result['im-media'] = s;
+      console.log(`[agent] Added im-media MCP server for bot ${imMediaCtx.botId}`);
+    }
   }
 
   // Add Bridge tools if we're in an IM context with a plugin bridge that has tools
@@ -1630,19 +1670,25 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
   // Add Generative UI tool for desktop sessions (not IM/Cron — they can't render widgets)
   // Use currentScenario (consistent with system-prompt.ts generativeUiEnabled check)
   if (currentScenario.type === 'desktop') {
-    result['generative-ui'] = generativeUiServer as typeof cronToolsServer;
-    console.log('[agent] Added generative-ui MCP server');
+    const s = await loadBuiltinServer('generative-ui');
+    if (s) {
+      result['generative-ui'] = s;
+      console.log('[agent] Added generative-ui MCP server');
+    }
   }
 
   // --- Pattern 2: Builtin registry MCPs (in-process, user-toggled) ---
   for (const server of servers) {
     if (server.command !== '__builtin__') continue;
-    const entry = getBuiltinMcp(server.id);
-    if (entry) {
-      entry.configure(server.env || {}, { sessionId: sessionId || 'default', workspace: agentDir });
-      result[server.id] = entry.server as typeof cronToolsServer;
-      console.log(`[agent] Added builtin MCP: ${server.id}`);
+    const entryPromise = getBuiltinMcpInstance(server.id);
+    if (!entryPromise) {
+      console.warn(`[agent] Builtin MCP '${server.id}' not registered — skipping`);
+      continue;
     }
+    const entry = await entryPromise;
+    entry.configure?.(server.env || {}, { sessionId: sessionId || 'default', workspace: agentDir });
+    result[server.id] = entry.server as McpSdkServerConfigWithInstance;
+    console.log(`[agent] Added builtin MCP: ${server.id}`);
   }
 
   // --- Pattern 3: External MCPs (stdio/sse/http subprocess or remote) ---

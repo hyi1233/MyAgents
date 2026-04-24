@@ -221,6 +221,7 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 | 新增 overlay/可关闭面板不调用 `useCloseLayer` | Cmd+W 跳过该面板直接关 Tab | 在组件内调用 `useCloseLayer(() => { onClose(); return true; }, zIndex)`，zIndex 取组件 CSS z-index 值 |
 | Overlay 遮罩层用裸 `<div>` + 手写 `onClick`/`onMouseDown` | 选中文字拖拽到面板外松手会误关闭 | 使用 `<OverlayBackdrop>` 组件（`@/components/OverlayBackdrop`），内置 `onMouseDown` + target guard |
 | 在 onClick 里用 `requestAnimationFrame(() => otherEl.focus())` 抢夺焦点 | macOS WebKit 触摸板 tap 事件合成在 <16ms 内完成，rAF 夺焦会插入 click 合成窗口 → WebKit 判定交互被打断 → 吞掉 click（物理按下正常、轻按首次无效，极隐蔽） | 按钮如果不该抢焦点，改用 `onMouseDown={retainFocusOnMouseDown}`（`@/utils/focusRetention`），原焦点元素天然保持聚焦，不需要再 rAF 夺回 |
+| 在 `src/server/tools/*.ts` 顶部写 `import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'` 或 `import { z } from 'zod/v4'` | 破坏 builtin MCP lazy-load —— Sidecar 冷启动每次付 ~500-1000ms zod schema 构造税，即使用户压根没启用这个 MCP | SDK/zod imports MUST 放在 `createXxxServer()` 内部通过 `await import(...)` 获取；tool 文件顶层只保留 light 依赖（sse/fs/crypto 等）。META 注册在 `src/server/tools/builtin-mcp-meta.ts`；参考 `cron-tools.ts` / `gemini-image-tool.ts` 的形状 |
 
 ---
 

@@ -1,9 +1,11 @@
 // Cron Tool — AI-driven scheduled task management for all Sidecar sessions
 // Supports both IM Bot sessions (with delivery) and regular Chat sessions
-// Uses Rust Management API (via MYAGENTS_MANAGEMENT_PORT) for cron task CRUD
-
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
+// Uses Rust Management API (via MYAGENTS_MANAGEMENT_PORT) for cron task CRUD.
+//
+// SDK + zod are imported inside createImCronToolServer() via dynamic import
+// so that modules needing only context helpers (getImCronContext /
+// setSessionCronContext / ...) don't pay the ~300-500ms SDK+zod eval cost.
+// Lazy instantiation wiring lives in builtin-mcp-meta.ts.
 import type { RuntimeConfig, RuntimeType } from '../../shared/types/runtime';
 
 // MCP Tool Result type
@@ -130,30 +132,20 @@ async function verifyTaskOwnership(taskId: string, action: string): Promise<Call
 
 // ===== Tool handler =====
 
-const scheduleSchema = z.discriminatedUnion('kind', [
-  z.object({
-    kind: z.literal('at'),
-    at: z.string().describe('ISO-8601 datetime for one-shot execution, e.g. "2024-12-01T14:30:00+08:00"'),
-  }),
-  z.object({
-    kind: z.literal('every'),
-    minutes: z.number().min(5).describe('Interval in minutes (minimum 5)'),
-  }),
-  z.object({
-    kind: z.literal('cron'),
-    expr: z.string().describe('Cron expression, e.g. "0 9 * * *" for daily 9 AM'),
-    tz: z.string().optional().describe('IANA timezone, e.g. "Asia/Shanghai"'),
-  }),
-  z.object({
-    kind: z.literal('loop'),
-  }).describe('Ralph Loop: completion-triggered infinite loop. AI finishes → 3s buffer → execute again. Always uses single_session. Stops after 10 consecutive failures.'),
-]);
+// Schedule config type — mirror of the zod schema built inside the factory.
+// Defined as a plain TS union so top-level handler/formatter code can reference
+// it without pulling in zod at module-eval time.
+type ScheduleConfig =
+  | { kind: 'at'; at: string }
+  | { kind: 'every'; minutes: number }
+  | { kind: 'cron'; expr: string; tz?: string }
+  | { kind: 'loop' };
 
 async function imCronToolHandler(args: {
   action: 'list' | 'add' | 'update' | 'remove' | 'run' | 'runs' | 'status' | 'wake' | 'channels';
   job?: {
     name?: string;
-    schedule: z.infer<typeof scheduleSchema>;
+    schedule: ScheduleConfig;
     message: string;
     sessionTarget?: 'new_session' | 'single_session';
     deliverTo?: string;
@@ -162,7 +154,7 @@ async function imCronToolHandler(args: {
   patch?: {
     name?: string;
     message?: string;
-    schedule?: z.infer<typeof scheduleSchema>;
+    schedule?: ScheduleConfig;
     intervalMinutes?: number;
   };
   limit?: number;
@@ -541,7 +533,7 @@ async function imCronToolHandler(args: {
   }
 }
 
-function formatSchedule(schedule: z.infer<typeof scheduleSchema>): string {
+function formatSchedule(schedule: ScheduleConfig): string {
   switch (schedule.kind) {
     case 'at':
       return `One-shot at ${schedule.at}`;
@@ -556,7 +548,29 @@ function formatSchedule(schedule: z.infer<typeof scheduleSchema>): string {
 
 // ===== Server creation =====
 
-export function createImCronToolServer() {
+export async function createImCronToolServer() {
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
+  // scheduleSchema must live inside the factory — it references `z` which is
+  // only in scope here after the dynamic import completes.
+  const scheduleSchema = z.discriminatedUnion('kind', [
+    z.object({
+      kind: z.literal('at'),
+      at: z.string().describe('ISO-8601 datetime for one-shot execution, e.g. "2024-12-01T14:30:00+08:00"'),
+    }),
+    z.object({
+      kind: z.literal('every'),
+      minutes: z.number().min(5).describe('Interval in minutes (minimum 5)'),
+    }),
+    z.object({
+      kind: z.literal('cron'),
+      expr: z.string().describe('Cron expression, e.g. "0 9 * * *" for daily 9 AM'),
+      tz: z.string().optional().describe('IANA timezone, e.g. "Asia/Shanghai"'),
+    }),
+    z.object({
+      kind: z.literal('loop'),
+    }).describe('Ralph Loop: completion-triggered infinite loop. AI finishes → 3s buffer → execute again. Always uses single_session. Stops after 10 consecutive failures.'),
+  ]);
   return createSdkMcpServer({
     name: 'im-cron',
     version: '1.0.0',
@@ -615,4 +629,3 @@ Each task runs independently in a new AI session (except "loop" which uses singl
   });
 }
 
-export const imCronToolServer = createImCronToolServer();

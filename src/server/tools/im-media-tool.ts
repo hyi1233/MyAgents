@@ -1,8 +1,7 @@
 // IM Bot Media Tool — AI-driven media sending for IM Bots
-// Uses Rust Management API (via MYAGENTS_MANAGEMENT_PORT) for file upload/send
-
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
+// Uses Rust Management API (via MYAGENTS_MANAGEMENT_PORT) for file upload/send.
+// SDK + zod loaded lazily inside createImMediaToolServer() — see
+// builtin-mcp-meta.ts for registration.
 import { assertSafeFilePath } from '../utils/safe-file-path';
 
 // MCP Tool Result type
@@ -136,7 +135,9 @@ async function sendMediaHandler(args: {
 
 // ===== Server creation =====
 
-export function createImMediaToolServer() {
+export async function createImMediaToolServer() {
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
   return createSdkMcpServer({
     name: 'im-media',
     version: '1.0.0',
@@ -170,4 +171,3 @@ Do NOT use this tool for intermediate work files — only for files the user exp
   });
 }
 
-export const imMediaToolServer = createImMediaToolServer();

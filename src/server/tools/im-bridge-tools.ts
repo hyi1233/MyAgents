@@ -1,9 +1,9 @@
 // IM Bot Bridge Tools — Dynamic MCP proxy for OpenClaw plugin tools
 // Fetches tool definitions from Bridge's /mcp/tools endpoint at context-set time,
 // then creates one MCP tool per plugin tool — transparent passthrough, no hardcoding.
-
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
+//
+// SDK + zod loaded lazily inside setImBridgeToolsContext() — plain IM sessions
+// never pull in this module's bulk unless a plugin bridge is actually attached.
 
 type CallToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -74,8 +74,16 @@ interface ImBridgeToolsContext {
 
 let bridgeToolsContext: ImBridgeToolsContext | null = null;
 
-/** Cached dynamic MCP server — rebuilt when context changes */
-let dynamicServer: ReturnType<typeof createSdkMcpServer> | null = null;
+/** Cached dynamic MCP server — rebuilt when context changes.
+ *  Typed as `McpSdkServerConfigWithInstance | null` via type-only import
+ *  (erased at compile time → zero runtime cost). */
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
+let dynamicServer: McpSdkServerConfigWithInstance | null = null;
+/** Generation token — incremented whenever a new context is set so stale
+ *  async completions from a previous setImBridgeToolsContext call can be
+ *  detected and discarded. Prevents a narrow race where a new context is
+ *  set while the previous call's `await fetch(...)` is still in flight. */
+let contextGeneration = 0;
 
 /**
  * Set bridge tools context and dynamically create MCP server from plugin tools.
@@ -83,7 +91,23 @@ let dynamicServer: ReturnType<typeof createSdkMcpServer> | null = null;
  */
 export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promise<void> {
   bridgeToolsContext = ctx;
-  console.log(`[im-bridge-tools] Context set: bridge=${ctx.bridgePort}, groups=${ctx.enabledToolGroups.join(',')}, plugin=${ctx.pluginId}`);
+  // Clear the stale server object BEFORE the first await — otherwise
+  // buildSdkMcpServers() could see the new context paired with an old server
+  // (whose tool closures captured old plugin tool names) during the async gap.
+  dynamicServer = null;
+  const myGeneration = ++contextGeneration;
+  console.log(`[im-bridge-tools] Context set: bridge=${ctx.bridgePort}, groups=${ctx.enabledToolGroups.join(',')}, plugin=${ctx.pluginId}, gen=${myGeneration}`);
+
+  // SDK + zod imported here (not at module top) so plain IM sessions that
+  // never attach a plugin bridge pay zero cost for this module.
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
+
+  // Bail if a newer context was set while we were awaiting imports.
+  if (myGeneration !== contextGeneration) {
+    console.log(`[im-bridge-tools] Context superseded (gen ${myGeneration} → ${contextGeneration}), discarding`);
+    return;
+  }
 
   // Fetch tools from Bridge and build dynamic MCP server
   try {
@@ -94,7 +118,7 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
     const resp = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
     if (!resp.ok) {
       console.warn(`[im-bridge-tools] Failed to fetch tools: ${resp.status}`);
-      dynamicServer = null;
+      if (myGeneration === contextGeneration) dynamicServer = null;
       return;
     }
 
@@ -108,7 +132,7 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
       // Use console.log instead of console.warn to avoid misleading [ERROR] in unified log
       // (Bun stderr capture marks all console.warn output as ERROR level).
       console.log('[im-bridge-tools] No tools available from Bridge (plugin may not provide tools, this is normal)');
-      dynamicServer = null;
+      if (myGeneration === contextGeneration) dynamicServer = null;
       return;
     }
 
@@ -198,6 +222,12 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
       ),
     );
 
+    // Final generation check — a newer context may have been set during the
+    // fetch-tools round-trip. If so, don't publish this stale server.
+    if (myGeneration !== contextGeneration) {
+      console.log(`[im-bridge-tools] Context superseded post-fetch (gen ${myGeneration} → ${contextGeneration}), discarding`);
+      return;
+    }
     dynamicServer = createSdkMcpServer({
       name: 'im-bridge-tools',
       version: '1.0.0',
@@ -207,7 +237,11 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
     console.log(`[im-bridge-tools] Dynamic MCP server created with ${data.tools.length} tools: ${data.tools.map(t => t.name).join(', ')}`);
   } catch (err) {
     console.warn(`[im-bridge-tools] Failed to create dynamic server: ${err}`);
-    dynamicServer = null;
+    // Only clear if this call is still the current generation — otherwise
+    // we'd clobber a newer setup that superseded us.
+    if (myGeneration === contextGeneration) {
+      dynamicServer = null;
+    }
   }
 }
 
@@ -223,8 +257,9 @@ export function getImBridgeToolsContext(): ImBridgeToolsContext | null {
 
 /**
  * Get the dynamically created MCP server (null if no tools available).
- * Called by buildSdkMcpServers() in agent-session.ts.
+ * Called by buildSdkMcpServers() in agent-session.ts. The type-only import
+ * at the top of this file gives us a real SDK type with no runtime cost.
  */
-export function getImBridgeToolServer(): ReturnType<typeof createSdkMcpServer> | null {
+export function getImBridgeToolServer(): McpSdkServerConfigWithInstance | null {
   return dynamicServer;
 }

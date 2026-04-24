@@ -103,9 +103,9 @@ let _adminApi: Promise<AdminApiModule> | null = null;
 const getAdminApi = (): Promise<AdminApiModule> => (_adminApi ??= import('./admin-api'));
 import { setImMediaContext } from './tools/im-media-tool';
 import { setImBridgeToolsContext } from './tools/im-bridge-tools';
-import { getBuiltinMcp } from './tools/builtin-mcp-registry';
-// NOTE: builtin MCP side-effect imports (registerBuiltinMcp calls) live in agent-session.ts,
-// which is imported by this file — no need to duplicate them here.
+import { getBuiltinMcpInstance } from './tools/builtin-mcp-registry';
+// NOTE: builtin MCP META is auto-registered when agent-session.ts side-effect-imports
+// './tools/builtin-mcp-meta'. No duplicate import needed here.
 
 // ============= CRASH DIAGNOSTICS =============
 // File-based logging to capture crashes before process dies
@@ -4761,13 +4761,18 @@ async function main() {
             : server.command === '__bundled_cuse__' ? 'cuse' : server.command;
           console.log(`[api/mcp/enable] Enabling MCP: ${server.id}, type: ${server.type}, command: ${displayCommand}`);
 
-          // Built-in MCP (in-process) — delegate validation to registry
+          // Built-in MCP (in-process) — delegate validation to registry.
+          // getBuiltinMcpInstance() force-loads the tool module (SDK+zod) on
+          // first hit; subsequent enables for the same id hit the cached entry.
           if (server.command === '__builtin__') {
-            const entry = getBuiltinMcp(server.id);
-            if (entry?.validate) {
-              const error = await entry.validate(server.env || {});
-              if (error) {
-                return jsonResponse({ success: false, error });
+            const entryPromise = getBuiltinMcpInstance(server.id);
+            if (entryPromise) {
+              const entry = await entryPromise;
+              if (entry.validate) {
+                const error = await entry.validate(server.env || {});
+                if (error) {
+                  return jsonResponse({ success: false, error });
+                }
               }
             }
             console.log(`[api/mcp/enable] Built-in MCP: ${server.id} — enabled`);
@@ -8799,7 +8804,13 @@ description: >
         const mcpList = getMcpServers();
         const mcpNames = mcpList ? Object.keys(mcpList).join(',') || 'none' : 'none';
         const bridge = getOpenAiBridgeConfig() ? 'yes' : 'no';
-        console.log(`[boot] pid=${process.pid} port=${port} node=${process.versions.node} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames}`);
+        // Health signal: confirm builtin-mcp-meta.ts's side-effect registration
+        // actually fired. An empty list here is a red flag — the META file was
+        // not imported by agent-session.ts, which means lazy MCP lookup will
+        // return undefined for every builtin.
+        const { listBuiltinMcpIds } = await import('./tools/builtin-mcp-registry');
+        const builtinMcpMeta = listBuiltinMcpIds().join(',') || 'none';
+        console.log(`[boot] pid=${process.pid} port=${port} node=${process.versions.node} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames} builtin-mcp-meta=${builtinMcpMeta}`);
       }
 
       resolveDeferredInit();
