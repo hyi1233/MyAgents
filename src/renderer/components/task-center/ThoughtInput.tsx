@@ -51,24 +51,53 @@ type ThoughtInputVariant = 'compact' | 'launcher';
 
 const VARIANTS: Record<ThoughtInputVariant, {
   pxPerLine: number;
+  /** Extra px added on top of `pxPerLine * minLines` when the padding
+   *  lives on the textarea/overlay-inner itself (compact). Set to 0
+   *  when the padding lives on an outer wrapper (launcher) — then
+   *  `minHeight` is pure content so it matches SimpleChatInput's own
+   *  `LINE_HEIGHT * effectiveMinLines` formula byte-for-byte. */
   verticalPaddingPx: number;
   textareaClass: string;
   cardClass: string;
-  wrapperPaddingClass: string;
+  /** Tailwind class for the outer card's focus state. Empty string in
+   *  `launcher` because SimpleChatInput's card doesn't change border
+   *  on focus — adding it would surface as a "mystery grey outline"
+   *  the user doesn't see on the chat input. */
+  focusClass: string;
+  /** Padding on the *outer* content wrapper (one level inside the
+   *  card, outside the textarea). Non-empty for launcher so the
+   *  textarea can have `minHeight = pxPerLine * minLines` exactly
+   *  (no padding bundled into its box), matching SimpleChatInput. */
+  outerPaddingClass: string;
+  /** Padding on the textarea + overlay-inner themselves. Non-empty
+   *  for compact (all padding lives here, outer wrapper is a no-op). */
+  innerPaddingClass: string;
+  toolbarPaddingClass: string;
+  toolbarButtonPaddingClass: string;
 }> = {
   compact: {
     pxPerLine: 22,           // 14px × 1.6 line-height ≈ 22.4
     verticalPaddingPx: 12,
     textareaClass: 'text-[14px] leading-relaxed',
     cardClass: 'rounded-[var(--radius-lg)]',
-    wrapperPaddingClass: 'px-3 pt-3',
+    focusClass: 'focus-within:border-[var(--line-strong)]',
+    outerPaddingClass: '',
+    innerPaddingClass: 'px-3 pt-3',
+    toolbarPaddingClass: 'px-2 pb-2 pt-1',
+    toolbarButtonPaddingClass: 'p-1.5',
   },
   launcher: {
-    pxPerLine: 26,           // 16px × 1.625 leading-relaxed = 26 (matches SimpleChatInput LINE_HEIGHT)
-    verticalPaddingPx: 14,
+    // Every metric here is pinned to SimpleChatInput's launcher card so
+    // the 任务 ↔ 想法 toggle is a pure content swap, no visual wobble.
+    pxPerLine: 26,           // matches LINE_HEIGHT = 26 (text-base × leading-relaxed 1.625)
+    verticalPaddingPx: 0,
     textareaClass: 'text-base leading-relaxed',
     cardClass: 'rounded-2xl shadow-md',
-    wrapperPaddingClass: 'px-4 pt-3',
+    focusClass: '',
+    outerPaddingClass: 'px-4 pt-3',
+    innerPaddingClass: '',
+    toolbarPaddingClass: 'px-3 pb-2 pt-1',
+    toolbarButtonPaddingClass: 'p-2',
   },
 };
 
@@ -335,8 +364,15 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     <div className="w-full">
       <div
         ref={cardRef}
-        className={`relative flex flex-col border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors focus-within:border-[var(--line-strong)] ${theme.cardClass}`}
+        className={`relative flex flex-col border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors ${theme.focusClass} ${theme.cardClass}`}
       >
+        {/* Outer content wrapper — carries padding in `launcher` variant
+            so the textarea's `minHeight` is pure-content (matching
+            SimpleChatInput's `LINE_HEIGHT * minLines`). In `compact`
+            variant `outerPaddingClass` is empty and the textarea owns
+            its own padding; that's the pre-split behaviour Task Center
+            relies on. */}
+        <div className={theme.outerPaddingClass}>
         {/* Mirror layer: same text as the textarea but with coloured `#tag`
             runs. Must match the textarea's font metrics so the highlighted
             spans sit under the same glyphs the user is typing.
@@ -353,7 +389,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
           >
             <div
               ref={overlayInnerRef}
-              className={`${theme.wrapperPaddingClass} ${theme.textareaClass} text-[var(--ink)]`}
+              className={`${theme.innerPaddingClass} ${theme.textareaClass} text-[var(--ink)]`}
               style={{
                 fontFamily: 'inherit',
                 whiteSpace: 'pre-wrap',
@@ -402,7 +438,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             // the `placeholder:[-webkit-text-fill-color:...]` override
             // the placeholder inherits the transparent fill and is
             // invisible. That was the silent bug in the prior rev.
-            className={`relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none ${theme.wrapperPaddingClass} ${theme.textareaClass}`}
+            className={`relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none ${theme.innerPaddingClass} ${theme.textareaClass}`}
             style={{
               fontFamily: 'inherit',
               WebkitTextFillColor: 'transparent',
@@ -411,6 +447,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
               maxHeight: `${textareaMaxHeightPx}px`,
             }}
           />
+        </div>
         </div>
 
         {/* Tag autocomplete — Escape dismissal is owned by the textarea's
@@ -453,14 +490,14 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
           ))}
         </Popover>
 
-        <div className="flex items-center justify-between px-2 pb-2 pt-1">
+        <div className={`flex items-center justify-between ${theme.toolbarPaddingClass}`}>
           <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={handleHashButton}
               disabled={busy}
               title="插入 # 标签"
-              className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)] disabled:cursor-not-allowed disabled:opacity-50"
+              className={`rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)] disabled:cursor-not-allowed disabled:opacity-50 ${theme.toolbarButtonPaddingClass}`}
             >
               <Hash className="h-4 w-4" />
             </button>
@@ -470,7 +507,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
               type="button"
               onClick={() => void handleSubmit()}
               disabled={!canSend}
-              className="rounded-lg bg-[var(--accent)] p-1.5 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
+              className={`rounded-lg bg-[var(--accent)] text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60 ${theme.toolbarButtonPaddingClass}`}
             >
               <PenLine className="h-4 w-4" />
             </button>
