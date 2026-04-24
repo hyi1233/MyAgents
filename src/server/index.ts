@@ -679,7 +679,7 @@ function cleanupStalePlaywrightProfile(): void {
  * Only cookies are migrated (from SQLite). localStorage lives in LevelDB and is
  * too complex to extract statically — ~90% of login state is cookie-based anyway.
  */
-function migrateProfileToStorageState(): void {
+async function migrateProfileToStorageState(): Promise<void> {
   try {
     const home = getHomeDirOrNull();
     if (!home) return;
@@ -699,11 +699,9 @@ function migrateProfileToStorageState(): void {
 
     // Use better-sqlite3 to read Chromium's Cookies SQLite database.
     // Chosen over node:sqlite (Node 22+ experimental) for maturity + prebuilt
-    // binaries across all target platforms. API differs from bun:sqlite:
-    //   bun:sqlite    — db.query(sql).all()
-    //   better-sqlite3 — db.prepare(sql).all()
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Database = require('better-sqlite3');
+    // binaries across all target platforms. Dynamic import — module is CJS and
+    // only loaded on migration path; tsx/esm cannot `require()` in ESM context.
+    const Database = (await import('better-sqlite3')).default;
     const db = new Database(cookiesDbPath, { readonly: true, fileMustExist: true });
 
     const sameSiteMap: Record<number, string> = { 0: 'None', 1: 'Lax', 2: 'Strict' };
@@ -1485,7 +1483,7 @@ async function main() {
 
   // One-time migration: extract cookies from old Chromium profile to storage-state JSON
   // (v0.1.51: switched from persistent profile to isolated mode for browser concurrency)
-  migrateProfileToStorageState();
+  await migrateProfileToStorageState();
 
   // Seed bundled skills to ~/.myagents/skills/ on first launch
   seedBundledSkills();
