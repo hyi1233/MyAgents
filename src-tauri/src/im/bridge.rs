@@ -916,6 +916,17 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         // Pass config via env var to avoid leaking secrets in `ps` process listing
         .env("BRIDGE_PLUGIN_CONFIG", &config_json);
 
+    // Working directory MUST be the bridge script's parent so Node's ESM
+    // resolver can walk up from there to find `node_modules/tsx` (for
+    // `--import tsx/esm` in debug mode) and any relative imports inside
+    // the bridge script. Without this, cwd inherits from the Tauri app
+    // (macOS GUI apps launch with cwd = `/`), causing
+    // `Cannot find package 'tsx' imported from /`. Mirror of sidecar.rs.
+    if let Some(script_dir) = bridge_script.parent() {
+        cmd.current_dir(script_dir);
+        ulog_info!("[bridge] Working directory set to: {:?}", script_dir);
+    }
+
     // Inject proxy env vars — reuse shared helper (pit-of-success: single source of truth)
     apply_proxy_env(&mut cmd);
 
