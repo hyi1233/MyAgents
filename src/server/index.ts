@@ -8759,10 +8759,20 @@ description: >
     console.log(`[boot] pid=${process.pid} port=${port} node=${process.versions.node} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames}`);
   }
 
-  // Verify PATH detection
-  import('./utils/shell').then(({ getShellEnv, getShellPath }) => {
-    getShellEnv(); // Ensure PATH is initialized
-    console.log('[server] Startup PATH:', getShellPath());
+  // Kick off interactive-shell PATH detection in the background.
+  // `warmupShellPath()` uses async `execFile` so it never blocks the event loop
+  // (unlike the old `execSync` path, which starved TCP accept for 3–5s while
+  // zsh -i -l sourced a heavy .zshrc — Rust's sidecar health check would retry
+  // 15× before finally connecting).
+  //
+  // Startup returns immediately; detected PATH is applied whenever the shell
+  // finishes. `getShellEnv()` keeps returning the platform fallback PATH until
+  // then — sufficient for common binary lookups (.myagents/bin, homebrew, nvm,
+  // fnm, volta, pnpm, cargo all in fallback).
+  import('./utils/shell').then(({ warmupShellPath, getShellPath }) => {
+    warmupShellPath().then(() => {
+      console.log('[server] Startup PATH:', getShellPath());
+    });
   });
 }
 

@@ -4270,8 +4270,7 @@ export async function initializeAgent(
   // Skip for Global Sidecar (no workspace-specific config).
   if (!preWarmDisabled) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { resolveWorkspaceConfig } = require('./utils/admin-config');
+      const { resolveWorkspaceConfig } = await import('./utils/admin-config');
       // v0.1.69: pass session metadata so the sidecar prefers session snapshot
       // (`meta.model`, `meta.providerId/EnvJson`, `meta.mcpEnabledServers`) over the
       // agent's current values. For IM sessions (which deliberately don't snapshot
