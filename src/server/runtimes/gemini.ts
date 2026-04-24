@@ -497,10 +497,12 @@ class GeminiProcess implements RuntimeProcess {
     return code;
   }
 
-  closeStdin(): void {
+  async closeStdin(): Promise<void> {
     const stdin = this.proc.stdin;
     if (!stdin) return;
-    void stdin.end().catch(() => { /* ignore */ });
+    try {
+      await stdin.end();
+    } catch { /* already closed / EPIPE */ }
   }
 }
 
@@ -1027,7 +1029,7 @@ export class GeminiRuntime implements AgentRuntime {
       if (geminiProc.sessionId) {
         geminiProc.rpc.notify('session/cancel', { sessionId: geminiProc.sessionId });
       }
-      geminiProc.closeStdin();
+      await geminiProc.closeStdin();
     } catch {
       /* ignore */
     }

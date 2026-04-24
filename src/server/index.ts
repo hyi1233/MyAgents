@@ -1,6 +1,21 @@
 import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
 import { copyFile as copyFileAsync, glob as nodeGlob, readdir as readdirAsync, rename, rm, stat, writeFile } from 'fs/promises';
-import { spawn as subprocessSpawn } from './utils/subprocess';
+import { spawn as subprocessSpawn, fireAndForget } from './utils/subprocess';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
+
+/**
+ * Stream an incoming Web `File` (multipart upload) directly to disk without
+ * buffering the whole body in memory. Replaces `Bun.write(dst, file)` which
+ * streamed by default; naive `Buffer.from(await file.arrayBuffer())` would
+ * OOM on large video / image uploads.
+ */
+async function streamUploadToFile(file: File, destination: string): Promise<void> {
+  const webStream = file.stream() as unknown as ReadableStream<Uint8Array>;
+  const nodeReadable = Readable.fromWeb(webStream as unknown as import('node:stream/web').ReadableStream<Uint8Array>);
+  await pipeline(nodeReadable, createWriteStream(destination));
+}
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
 import AdmZip from 'adm-zip';
@@ -638,10 +653,14 @@ function migrateProfileToStorageState(): void {
       return;
     }
 
-    // Use bun:sqlite to read Chromium's Cookies SQLite database
+    // Use better-sqlite3 to read Chromium's Cookies SQLite database.
+    // Chosen over node:sqlite (Node 22+ experimental) for maturity + prebuilt
+    // binaries across all target platforms. API differs from bun:sqlite:
+    //   bun:sqlite    — db.query(sql).all()
+    //   better-sqlite3 — db.prepare(sql).all()
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { Database } = require('bun:sqlite');
-    const db = new Database(cookiesDbPath, { readonly: true });
+    const Database = require('better-sqlite3');
+    const db = new Database(cookiesDbPath, { readonly: true, fileMustExist: true });
 
     const sameSiteMap: Record<number, string> = { 0: 'None', 1: 'Lax', 2: 'Strict' };
 
@@ -652,7 +671,7 @@ function migrateProfileToStorageState(): void {
     // Filter out cookies with empty value — on macOS/Windows, Chromium encrypts cookie
     // values (stored in encrypted_value column, decrypted via OS keychain). The plaintext
     // `value` column is empty for these. We can only migrate unencrypted cookies.
-    const rows = db.query(
+    const rows = db.prepare(
       `SELECT host_key, name, value, path, expires_utc, is_httponly, is_secure, samesite
        FROM cookies
        WHERE length(name) > 0 AND length(value) > 0`
@@ -3458,7 +3477,7 @@ async function main() {
           for (const file of files) {
             const safeName = file.name.replace(/[<>:"/\\|?*]/g, '_');
             const destination = join(resolvedTarget, safeName);
-            await writeFile(destination, Buffer.from(await file.arrayBuffer()));
+            await streamUploadToFile(file, destination);
             saved.push(relative(currentAgentDir, destination));
           }
           return jsonResponse({ success: true, files: saved });
@@ -3710,12 +3729,12 @@ async function main() {
           const isWin = process.platform === 'win32';
 
           if (isMac) {
-            subprocessSpawn(['open', '-R', resolved]);
+            fireAndForget(['open', '-R', resolved]);
           } else if (isWin) {
-            subprocessSpawn(['explorer', '/select,', resolved]);
+            fireAndForget(['explorer', '/select,', resolved]);
           } else {
             // Linux: open parent directory
-            subprocessSpawn(['xdg-open', dirname(resolved)]);
+            fireAndForget(['xdg-open', dirname(resolved)]);
           }
 
           return jsonResponse({ success: true });
@@ -3751,13 +3770,13 @@ async function main() {
           const isWin = process.platform === 'win32';
 
           if (isMac) {
-            subprocessSpawn(['open', resolved]);
+            fireAndForget(['open', resolved]);
           } else if (isWin) {
             // Use PowerShell Start-Process to avoid cmd /c shell interpretation
             // which could treat & | > in filenames as command operators
-            subprocessSpawn(['powershell', '-NoProfile', '-Command', `Start-Process -FilePath '${resolved.replace(/'/g, "''")}'`]);
+            fireAndForget(['powershell', '-NoProfile', '-Command', `Start-Process -FilePath '${resolved.replace(/'/g, "''")}'`]);
           } else {
-            subprocessSpawn(['xdg-open', resolved]);
+            fireAndForget(['xdg-open', resolved]);
           }
 
           return jsonResponse({ success: true });
@@ -3801,11 +3820,11 @@ async function main() {
           const isWin = process.platform === 'win32';
 
           if (isMac) {
-            subprocessSpawn(['open', '-R', resolvedPath]);
+            fireAndForget(['open', '-R', resolvedPath]);
           } else if (isWin) {
-            subprocessSpawn(['explorer', '/select,', resolvedPath]);
+            fireAndForget(['explorer', '/select,', resolvedPath]);
           } else {
-            subprocessSpawn(['xdg-open', dirname(resolvedPath)]);
+            fireAndForget(['xdg-open', dirname(resolvedPath)]);
           }
 
           return jsonResponse({ success: true });
@@ -3842,7 +3861,7 @@ async function main() {
           for (const file of files) {
             const safeName = file.name.replace(/[<>:"/\\|?*]/g, '_');
             const destination = join(resolvedTarget, safeName);
-            await writeFile(destination, Buffer.from(await file.arrayBuffer()));
+            await streamUploadToFile(file, destination);
             saved.push(relative(currentAgentDir, destination));
           }
 
@@ -4407,15 +4426,21 @@ async function main() {
           const isWin = process.platform === 'win32';
           const filePaths = files.map(f => joinPath(logsDir, f));
 
+          // stdout/stderr must be ignored — zip/Compress-Archive emit per-file progress
+          // that can exceed the 64KB pipe buffer on large log sets and deadlock the
+          // child waiting for us to read.
           if (isWin) {
             // PowerShell Compress-Archive
             const proc = subprocessSpawn(['powershell', '-Command',
               `Compress-Archive -Path '${filePaths.join("','")}' -DestinationPath '${zipPath}' -Force`
-            ]);
+            ], { stdout: 'ignore', stderr: 'ignore' });
             await proc.exited;
           } else {
             // macOS/Linux: zip command
-            const proc = subprocessSpawn(['zip', '-j', zipPath, ...filePaths]);
+            const proc = subprocessSpawn(['zip', '-j', zipPath, ...filePaths], {
+              stdout: 'ignore',
+              stderr: 'ignore',
+            });
             await proc.exited;
           }
 

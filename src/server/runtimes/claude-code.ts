@@ -129,12 +129,17 @@ class ClaudeCodeProcess implements RuntimeProcess {
     return code;
   }
 
-  /** Close stdin to signal the process to finish */
-  closeStdin(): void {
+  /**
+   * Close stdin to signal the process to finish.
+   * Resolves when the EOF has been flushed to the child's stdin — lets
+   * graceful-shutdown callers know the signal has actually propagated.
+   */
+  async closeStdin(): Promise<void> {
     const stdin = this.proc.stdin;
     if (!stdin) return;
-    // Fire-and-forget; errors (e.g. already closed) are benign.
-    void stdin.end().catch(() => { /* ignore */ });
+    try {
+      await stdin.end();
+    } catch { /* already closed / EPIPE */ }
   }
 }
 
@@ -444,8 +449,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   async stopSession(process: RuntimeProcess): Promise<void> {
     if (process.exited) return;
 
-    // Close stdin to let CC finish naturally
-    (process as ClaudeCodeProcess).closeStdin();
+    // Close stdin to let CC finish naturally (awaits EOF propagation)
+    await (process as ClaudeCodeProcess).closeStdin();
 
     // Wait briefly then force kill
     const timeout = setTimeout(() => {

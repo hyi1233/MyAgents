@@ -283,11 +283,13 @@ class CodexProcess implements RuntimeProcess {
     return code;
   }
 
-  /** Close stdin to signal the process to finish */
-  closeStdin(): void {
+  /** Close stdin to signal the process to finish (awaits EOF flush). */
+  async closeStdin(): Promise<void> {
     const stdin = this.proc.stdin;
     if (!stdin) return;
-    void stdin.end().catch(() => { /* ignore */ });
+    try {
+      await stdin.end();
+    } catch { /* already closed / EPIPE */ }
   }
 }
 
@@ -660,7 +662,7 @@ export class CodexRuntime implements AgentRuntime {
         }, 3_000).catch(() => {});
       }
       // 2. Close stdin — signals app-server to shut down (like CC's closeStdin)
-      codexProc.closeStdin();
+      await codexProc.closeStdin();
     } catch { /* ignore */ }
 
     // Force kill after timeout if graceful shutdown didn't work
