@@ -100,7 +100,8 @@ echo ""
 # 清理残留进程
 # ========================================
 echo -e "${BLUE}[准备] 清理残留进程...${NC}"
-pkill -f "bun run.*server" 2>/dev/null || true
+pkill -f "node.*src/server/index.ts" 2>/dev/null || true
+pkill -f "node.*server-dist.js" 2>/dev/null || true
 pkill -f "MyAgents.app" 2>/dev/null || true
 sleep 1
 echo -e "${GREEN}✓ 进程已清理${NC}"
@@ -188,7 +189,7 @@ echo ""
 # TypeScript 类型检查
 echo -e "${BLUE}[4/7] TypeScript 类型检查...${NC}"
 cd "${PROJECT_DIR}"
-if ! bun run typecheck; then
+if ! npm run typecheck; then
     echo -e "${RED}✗ TypeScript 检查失败，请修复后重试${NC}"
     exit 1
 fi
@@ -211,19 +212,36 @@ echo -e "${BLUE}[5/7] 构建前端和服务端...${NC}"
 # 打包服务端代码
 echo -e "  ${CYAN}打包服务端代码...${NC}"
 mkdir -p src-tauri/resources
-bun build ./src/server/index.ts --outfile=./src-tauri/resources/server-dist.js --target=bun
+npx esbuild ./src/server/index.ts \
+  --bundle --platform=node --format=esm --target=node20 \
+  --outfile=./src-tauri/resources/server-dist.js --sourcemap \
+  --banner:js='import { createRequire } from "module"; const require = createRequire(import.meta.url);'
 
 # 打包 Plugin Bridge 代码 (OpenClaw channel plugin 支持)
 echo -e "  ${CYAN}打包 Plugin Bridge...${NC}"
-bun build ./src/server/plugin-bridge/index.ts --outfile=./src-tauri/resources/plugin-bridge-dist.js --target=bun
+npx esbuild ./src/server/plugin-bridge/index.ts \
+  --bundle --platform=node --format=esm --target=node20 \
+  --outfile=./src-tauri/resources/plugin-bridge-dist.js --sourcemap \
+  --banner:js='import { createRequire } from "module"; const require = createRequire(import.meta.url);' \
+  --external:openclaw
+
+# 打包 myagents CLI（shebang 用 node，resources/cli/myagents.js 被 cmd_sync_cli 同步到 ~/.myagents/bin/myagents）
+echo -e "  ${CYAN}打包 myagents CLI...${NC}"
+mkdir -p ./src-tauri/resources/cli
+npx esbuild ./src/cli/myagents.ts \
+  --bundle --platform=node --format=cjs --target=node20 \
+  --outfile=./src-tauri/resources/cli/myagents.js \
+  --banner:js='#!/usr/bin/env node'
+# 复制 Windows launcher 到同目录（cmd_sync_cli 从 resources/cli/ 读取）
+cp ./src/cli/myagents.cmd ./src-tauri/resources/cli/myagents.cmd
 
 # 验证打包结果不包含开发机硬编码路径
-# bun build 会将 __dirname 硬编码为编译时路径，必须使用 import.meta.url 替代
+# esbuild 同样会将 __dirname 视为编译时符号，源码必须改用 import.meta.url 替代
 # 检查任何 "var __dirname = \"/Users/..." 模式 (覆盖所有用户名)
 if grep -qE 'var __dirname = "/Users/[^"]+' ./src-tauri/resources/server-dist.js; then
     echo -e "${RED}✗ 错误: server-dist.js 包含硬编码的 __dirname 路径!${NC}"
     echo -e "${YELLOW}  检测到: $(grep -oE 'var __dirname = "[^"]+"' ./src-tauri/resources/server-dist.js | head -1)${NC}"
-    echo -e "${YELLOW}  请检查代码中是否使用了 __dirname (会被 bun build 硬编码)${NC}"
+    echo -e "${YELLOW}  请检查代码中是否使用了 __dirname (会被打包器硬编码)${NC}"
     echo -e "${YELLOW}  应使用 import.meta.url + fileURLToPath 在运行时获取路径${NC}"
     exit 1
 fi
@@ -278,22 +296,21 @@ echo -e "${GREEN}  ✓ agent-browser CLI 预装完成 (含 native binary)${NC}"
 
 # 构建前端
 echo -e "  ${CYAN}构建前端...${NC}"
-bun run build:web
+npm run build:web
 echo -e "${GREEN}✓ 前端和服务端构建完成${NC}"
 echo ""
 
 # Node.js 运行时目录（每个构建目标在循环中按架构下载）
 NODEJS_DIR="${PROJECT_DIR}/src-tauri/resources/nodejs"
 
-# 签名 Bun 可执行文件 (重要：确保与应用使用相同签名)
+# ========================================
+# 签名 externalBin 可执行文件
 # ========================================
 echo -e "${BLUE}[6/7] 签名外部二进制文件...${NC}"
 
-# 签名 Bun 可执行文件
-# 重要：Bun 默认使用官方签名 (Jarred Sumner)，需要重签名为应用签名
-# 否则 macOS TCC 会将 Bun 视为独立应用，每次访问受保护目录都需要单独授权
-# 参考：https://developer.apple.com/forums/thread/129494
-#       https://book.hacktricks.wiki/en/macos-hardening/macos-security-and-privilege-escalation/macos-security-protections/macos-tcc/
+# 重签名：官方/下载的二进制默认用各自官方签名；macOS TCC 会把它们视为独立应用，
+# 导致每次访问受保护目录需单独授权。重签后子进程与主应用共享同一 Team ID，TCC
+# 权限（含 Screen Recording / Accessibility / AppleEvents）统一继承。
 echo -e "  ${CYAN}签名 externalBin 可执行文件 (使用应用签名替换官方签名)...${NC}"
 # Pit-of-success: signs ANY file matching src-tauri/binaries/*-apple-darwin.
 # Dropping a new externalBin under src-tauri/binaries/ with the apple-darwin
@@ -477,7 +494,7 @@ for TARGET in "${BUILD_TARGETS[@]}"; do
         exit 1
     fi
 
-    bun run tauri:build -- --target "$TARGET"
+    npm run tauri:build -- --target "$TARGET"
 
     echo -e "${GREEN}✓ $TARGET 构建完成${NC}"
 done

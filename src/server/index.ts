@@ -1,6 +1,8 @@
 import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
-import { copyFile as copyFileAsync, glob as nodeGlob, readdir as readdirAsync, rename, rm, stat, writeFile } from 'fs/promises';
+import { copyFile as copyFileAsync, glob as nodeGlob, readdir as readdirAsync, readFile, rename, rm, stat, writeFile } from 'fs/promises';
 import { spawn as subprocessSpawn, fireAndForget } from './utils/subprocess';
+import { fileResponse, sniffMime } from './utils/file-response';
+import { serve as honoServe } from '@hono/node-server';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -1315,15 +1317,12 @@ async function serveStatic(pathname: string): Promise<Response | null> {
   if (!filePath.startsWith(distRoot + sep)) {
     return null;
   }
-  const file = Bun.file(filePath);
-  if (await file.exists()) {
-    return new Response(file);
-  }
+  const fileResp = await fileResponse(filePath, { contentType: sniffMime(filePath) });
+  if (fileResp) return fileResp;
 
-  const indexFile = Bun.file(join(distRoot, 'index.html'));
-  if (await indexFile.exists()) {
-    return new Response(indexFile);
-  }
+  const indexPath = join(distRoot, 'index.html');
+  const indexResp = await fileResponse(indexPath, { contentType: sniffMime(indexPath) });
+  if (indexResp) return indexResp;
 
   return null;
 }
@@ -1517,13 +1516,13 @@ async function main() {
   });
   registerBridgeSeedFn((entries) => bridgeHandler.seedThoughtSignatures(entries));
 
-  console.log(`[startup] Bun.serve() binding to 127.0.0.1:${port}...`);
+  console.log(`[startup] HTTP server binding to 127.0.0.1:${port}...`);
 
-  Bun.serve({
+  honoServe({
+    // Explicit 127.0.0.1 for Rust proxy compatibility (IPv4).
     port,
-    hostname: '127.0.0.1', // Explicitly bind to IPv4 for Rust proxy compatibility
-    idleTimeout: 0,
-    async fetch(request) {
+    hostname: '127.0.0.1',
+    fetch: async (request) => {
       const url = new URL(request.url);
       const pathname = url.pathname;
 
@@ -1560,7 +1559,8 @@ async function main() {
       // (`src-tauri/src/attachment_protocol.rs`) which serves bytes directly
       // through WebKit without round-tripping JSON. In dev (vite + browser) the
       // custom scheme isn't registered, so this route serves the same bytes
-      // via a plain HTTP GET. `Bun.file()` is a lazy handle — no main-loop read.
+      // via a plain HTTP GET. fileResponse() streams via createReadStream to
+      // avoid buffering large attachments.
       if (pathname.startsWith('/api/attachment/') && request.method === 'GET') {
         const rel = decodeURIComponent(pathname.replace('/api/attachment/', ''));
         // Reject path traversal: no `..` segments and no absolute paths.
@@ -1568,20 +1568,14 @@ async function main() {
           return new Response('Forbidden', { status: 403 });
         }
         const absolute = getAttachmentPath(rel);
-        try {
-          const file = Bun.file(absolute);
-          if (!(await file.exists())) {
-            return new Response('Not Found', { status: 404 });
-          }
-          return new Response(file, {
-            headers: {
-              'Cache-Control': 'public, max-age=31536000, immutable',
-              'Access-Control-Allow-Origin': '*',
-            },
-          });
-        } catch {
-          return new Response('Not Found', { status: 404 });
-        }
+        const fileResp = await fileResponse(absolute, {
+          contentType: sniffMime(absolute),
+          headers: {
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+        return fileResp ?? new Response('Not Found', { status: 404 });
       }
 
       // Session state endpoint - used by Rust background completion polling
@@ -3367,20 +3361,17 @@ async function main() {
         if (!resolvedPath) {
           return jsonResponse({ error: 'Invalid path.' }, 400);
         }
-        const file = Bun.file(resolvedPath);
-        if (!(await file.exists())) {
-          return jsonResponse({ error: 'File not found.' }, 404);
-        }
         const name = basename(resolvedPath);
         // RFC 5987: use filename* with UTF-8 encoding for non-ASCII filenames
-        // Bun throws on non-ASCII characters in header values, causing 500 for Chinese filenames
+        // (HTTP header spec rejects non-ASCII in quoted-string).
         const encodedName = encodeURIComponent(name);
-        return new Response(file, {
+        const resp = await fileResponse(resolvedPath, {
+          contentType: sniffMime(resolvedPath),
           headers: {
-            'Content-Type': file.type || 'application/octet-stream',
-            'Content-Disposition': `attachment; filename="${encodedName}"; filename*=UTF-8''${encodedName}`
-          }
+            'Content-Disposition': `attachment; filename="${encodedName}"; filename*=UTF-8''${encodedName}`,
+          },
         });
+        return resp ?? jsonResponse({ error: 'File not found.' }, 404);
       }
 
       if (pathname === '/agent/file' && request.method === 'GET') {
@@ -3392,21 +3383,22 @@ async function main() {
         if (!resolvedPath) {
           return jsonResponse({ error: 'Invalid path.' }, 400);
         }
-        const file = Bun.file(resolvedPath);
-        if (!(await file.exists())) {
+        if (!existsSync(resolvedPath)) {
           return jsonResponse({ error: 'File not found.' }, 404);
         }
         const name = basename(resolvedPath);
-        if (!isPreviewableText(name, file.type)) {
+        const mimeType = sniffMime(resolvedPath);
+        if (!isPreviewableText(name, mimeType)) {
           return jsonResponse({ error: 'File type not supported.' }, 415);
         }
-        const size = file.size;
+        const statResult = await stat(resolvedPath);
+        const size = statResult.size;
         const maxSize = 512 * 1024;
         if (size > maxSize) {
           return jsonResponse({ error: 'File too large to preview.' }, 413);
         }
         try {
-          const content = await file.text();
+          const content = await readFile(resolvedPath, 'utf8');
           return jsonResponse({ content, name, size });
         } catch (error) {
           return jsonResponse(
@@ -3436,8 +3428,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
           }
 
-          const file = Bun.file(resolvedPath);
-          if (!(await file.exists())) {
+          if (!existsSync(resolvedPath)) {
             return jsonResponse({ success: false, error: 'File not found.' }, 404);
           }
 
@@ -4176,22 +4167,9 @@ async function main() {
               }
 
               // Read file
-              const file = Bun.file(filePath);
-              const arrayBuffer = await file.arrayBuffer();
-              const base64 = Buffer.from(arrayBuffer).toString('base64');
-
-              // Determine MIME type from extension
-              const mimeTypes: Record<string, string> = {
-                png: 'image/png',
-                jpg: 'image/jpeg',
-                jpeg: 'image/jpeg',
-                gif: 'image/gif',
-                webp: 'image/webp',
-                svg: 'image/svg+xml',
-                bmp: 'image/bmp',
-                ico: 'image/x-icon',
-              };
-              const mimeType = mimeTypes[ext] || file.type || 'application/octet-stream';
+              const bytes = await readFile(filePath);
+              const base64 = bytes.toString('base64');
+              const mimeType = sniffMime(filePath);
 
               results.push({
                 path: filePath,
@@ -4248,16 +4226,14 @@ async function main() {
             return jsonResponse({ success: false, error: 'Image not found' }, 404);
           }
 
-          const file = Bun.file(resolvedPath);
           const ext = resolvedPath.split('.').pop()?.toLowerCase();
           const mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
 
-          return new Response(file, {
-            headers: {
-              'Content-Type': mimeType,
-              'Cache-Control': 'public, max-age=86400',
-            },
+          const resp = await fileResponse(resolvedPath, {
+            contentType: mimeType,
+            headers: { 'Cache-Control': 'public, max-age=86400' },
           });
+          return resp ?? jsonResponse({ success: false, error: 'Image not found' }, 404);
         } catch (error) {
           console.error('[api/image] Error:', error);
           return jsonResponse(
@@ -4294,7 +4270,6 @@ async function main() {
             return jsonResponse({ success: false, error: 'Audio not found' }, 404);
           }
 
-          const file = Bun.file(resolvedPath);
           const ext = resolvedPath.split('.').pop()?.toLowerCase();
           const mimeTypes: Record<string, string> = {
             mp3: 'audio/mpeg',
@@ -4307,12 +4282,11 @@ async function main() {
           };
           const mimeType = mimeTypes[ext || ''] || 'audio/mpeg';
 
-          return new Response(file, {
-            headers: {
-              'Content-Type': mimeType,
-              'Cache-Control': 'public, max-age=86400',
-            },
+          const resp = await fileResponse(resolvedPath, {
+            contentType: mimeType,
+            headers: { 'Cache-Control': 'public, max-age=86400' },
           });
+          return resp ?? jsonResponse({ success: false, error: 'Audio not found' }, 404);
         } catch (error) {
           console.error('[api/audio] Error:', error);
           return jsonResponse(

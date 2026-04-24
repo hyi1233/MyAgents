@@ -66,7 +66,8 @@ if [ -f "$LOCK_FILE" ]; then
 fi
 # Fallback: 杀死任何漏网的 MyAgents 进程（lock file 可能不存在或 PID 已过期）
 pkill -9 -f "MyAgents.app" 2>/dev/null || true
-pkill -9 -f "bun run.*server" 2>/dev/null || true
+pkill -9 -f "node.*src/server/index.ts" 2>/dev/null || true
+pkill -9 -f "node.*server-dist.js" 2>/dev/null || true
 sleep 1  # 等待进程完全退出
 echo -e "${GREEN}✓ 进程已清理${NC}"
 echo ""
@@ -90,7 +91,7 @@ echo ""
 # TypeScript 检查
 echo -e "${BLUE}[1/3] TypeScript 类型检查...${NC}"
 cd "${PROJECT_DIR}"
-if ! bun run typecheck; then
+if ! npm run typecheck; then
     echo -e "${RED}✗ TypeScript 检查失败，请修复后重试${NC}"
     exit 1
 fi
@@ -101,7 +102,7 @@ echo ""
 echo -e "${BLUE}[2/3] 构建前端...${NC}"
 export VITE_DEBUG_MODE=true
 echo -e "${YELLOW}  VITE_DEBUG_MODE=${VITE_DEBUG_MODE}${NC}"
-bun run build:web
+npm run build:web
 echo -e "${GREEN}✓ 前端构建完成${NC}"
 echo ""
 
@@ -157,21 +158,26 @@ if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
 fi
 echo -e "  ${GREEN}✓ claude (${SDK_TRIPLE}) 已就绪${NC}"
 
-# 确保签名 Bun 可执行文件 (与 build_macos.sh 相同逻辑)
+# 打包 myagents CLI（esbuild → resources/cli/myagents.js，shebang 为 node）
+echo -e "  ${CYAN}打包 myagents CLI...${NC}"
+mkdir -p "${PROJECT_DIR}/src-tauri/resources/cli"
+npx esbuild "${PROJECT_DIR}/src/cli/myagents.ts" \
+  --bundle --platform=node --format=cjs --target=node20 \
+  --outfile="${PROJECT_DIR}/src-tauri/resources/cli/myagents.js" \
+  --banner:js='#!/usr/bin/env node'
+cp "${PROJECT_DIR}/src/cli/myagents.cmd" "${PROJECT_DIR}/src-tauri/resources/cli/myagents.cmd"
+echo -e "  ${GREEN}✓ myagents CLI 已打包${NC}"
+
+# Debug 模式签名 (optional — build_macos.sh per-TARGET loop 已处理 Node + Claude)
+# build_dev.sh 只构建 host arch 单个，本段处理该情况下的 Node + Claude 签名。
 if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
-    echo -e "  ${CYAN}签名 Bun 可执行文件...${NC}"
-    BUN_BINARIES_DIR="${PROJECT_DIR}/src-tauri/binaries"
-    for bun_binary in "${BUN_BINARIES_DIR}"/bun-*-apple-darwin; do
-        if [ -f "$bun_binary" ]; then
-            xattr -d com.apple.quarantine "$bun_binary" 2>/dev/null || true
-            codesign --force --options runtime --timestamp \
-                --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
-                --sign "$APPLE_SIGNING_IDENTITY" "$bun_binary" 2>/dev/null || true
-        fi
-    done
-    echo -e "  ${GREEN}✓ Bun 签名完成${NC}"
-else
-    echo -e "${YELLOW}⚠ 未设置 APPLE_SIGNING_IDENTITY，跳过 Bun 签名${NC}"
+    NODE_BIN_DEV="${PROJECT_DIR}/src-tauri/resources/nodejs/bin/node"
+    if [ -f "$NODE_BIN_DEV" ]; then
+        xattr -d com.apple.quarantine "$NODE_BIN_DEV" 2>/dev/null || true
+        codesign --force --options runtime --timestamp \
+            --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
+            --sign "$APPLE_SIGNING_IDENTITY" "$NODE_BIN_DEV" 2>/dev/null || true
+    fi
 fi
 
 echo -e "${YELLOW}这可能需要几分钟...${NC}"
@@ -179,9 +185,9 @@ echo -e "${YELLOW}这可能需要几分钟...${NC}"
 # (App 本身会正常构建，只是 updater 签名会失败)
 if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
     echo -e "${YELLOW}⚠ 未设置 TAURI_SIGNING_PRIVATE_KEY，更新签名将被跳过${NC}"
-    bun run tauri:build -- --debug --bundles app || true
+    npm run tauri:build -- --debug --bundles app || true
 else
-    bun run tauri:build -- --debug --bundles app
+    npm run tauri:build -- --debug --bundles app
 fi
 
 # 查找输出

@@ -19,6 +19,7 @@ import { createCompatRuntime } from './compat-runtime';
 import { FeishuStreamingSession } from './streaming-adapter';
 import { createMcpHandler } from './mcp-handler';
 import { getPendingDispatch, resolvePendingDispatch, rejectPendingDispatch, clearAllPendingDispatches } from './pending-dispatch';
+import { serve as honoServe } from '@hono/node-server';
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'util';
 
@@ -394,9 +395,9 @@ async function loadPlugin() {
 }
 
 // Start HTTP server for Rust → Bridge communication
-const server = Bun.serve({
+const server = honoServe({
   port,
-  async fetch(req) {
+  fetch: async (req) => {
     const url = new URL(req.url);
     const path = url.pathname;
 
@@ -976,7 +977,10 @@ const server = Bun.serve({
   },
 });
 
-console.log(`[plugin-bridge] HTTP server listening on port ${server.port}`);
+// honoServe returns a Node http.Server whose address() resolves after 'listening'.
+const serverAddr = server.address();
+const listenPort = typeof serverAddr === 'object' && serverAddr ? serverAddr.port : port;
+console.log(`[plugin-bridge] HTTP server listening on port ${listenPort}`);
 
 // Load the plugin
 loadPlugin().catch((err) => {

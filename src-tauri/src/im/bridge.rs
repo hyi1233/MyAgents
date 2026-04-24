@@ -845,10 +845,10 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     bot_id: &str,
     plugin_config: Option<&serde_json::Value>,
 ) -> Result<BridgeProcess, String> {
-    use crate::sidecar::find_bun_executable_pub;
+    use crate::sidecar::find_node_executable_pub;
 
-    let bun_path = find_bun_executable_pub(app_handle)
-        .ok_or_else(|| "Bun executable not found".to_string())?;
+    let node_path = find_node_executable_pub(app_handle)
+        .ok_or_else(|| "Node executable not found".to_string())?;
 
     let bridge_script = find_bridge_script(app_handle)
         .ok_or_else(|| "Plugin bridge script not found".to_string())?;
@@ -885,11 +885,11 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     }
 
     ulog_info!(
-        "[bridge] Spawning bridge: bun={:?} script={:?} plugin_dir={} port={} rust_port={}",
-        bun_path, bridge_script, plugin_dir, port, rust_port
+        "[bridge] Spawning bridge: node={:?} script={:?} plugin_dir={} port={} rust_port={}",
+        node_path, bridge_script, plugin_dir, port, rust_port
     );
 
-    let mut cmd = crate::process_cmd::new(&bun_path);
+    let mut cmd = crate::process_cmd::new(&node_path);
     cmd.arg(bridge_script.to_string_lossy().as_ref())
         // Same marker as regular sidecars — ensures cleanup_stale_sidecars()
         // can find and kill orphaned bridge processes after a crash
@@ -1299,18 +1299,18 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
 
     // --- Bun fallback: if both system and bundled npm failed ---
     if !npm_succeeded {
-        use crate::sidecar::find_bun_executable_pub;
-        // find_bun_executable_pub searches bundled bun first, then system bun (PATH, ~/.bun, etc.)
-        let bun_path = find_bun_executable_pub(app_handle)
+        use crate::sidecar::find_node_executable_pub;
+        // find_node_executable_pub searches bundled bun first, then system bun (PATH, ~/.bun, etc.)
+        let node_path = find_node_executable_pub(app_handle)
             .ok_or_else(|| format!("Plugin install failed: no npm (bundled/system) and no Bun found. Please install Node.js or Bun."))?;
 
         ulog_warn!("[bridge] Falling back to Bun for plugin install: {}", npm_spec);
 
-        let bun_for_add = bun_path;
+        let node_for_add = node_path;
         let base_for_add = base_dir.clone();
         let npm_spec_owned = install_spec.clone();
         let add_output = tokio::task::spawn_blocking(move || {
-            let mut cmd = crate::process_cmd::new(&bun_for_add);
+            let mut cmd = crate::process_cmd::new(&node_for_add);
             cmd.args(["add", npm_spec_owned.as_str()])
                 .current_dir(&base_for_add);
             apply_proxy_env(&mut cmd);
@@ -1365,11 +1365,11 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
             }
         } else {
             // Bun fallback
-            use crate::sidecar::find_bun_executable_pub;
-            if let Some(bun_path) = find_bun_executable_pub(app_handle) {
+            use crate::sidecar::find_node_executable_pub;
+            if let Some(node_path) = find_node_executable_pub(app_handle) {
                 let bun_repair_dir = base_dir.clone();
                 match tokio::task::spawn_blocking(move || {
-                    let mut cmd = crate::process_cmd::new(&bun_path);
+                    let mut cmd = crate::process_cmd::new(&node_path);
                     cmd.args(["install", "--ignore-scripts"])
                         .current_dir(&bun_repair_dir);
                     apply_proxy_env(&mut cmd);

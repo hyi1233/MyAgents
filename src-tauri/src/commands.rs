@@ -765,11 +765,12 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "10";
+const CLI_VERSION: &str = "11";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.
-/// Renames myagents.ts → myagents (strips .ts extension for shebang execution).
+/// Sources `resources/cli/myagents.js` (esbuild bundle, shebang `#!/usr/bin/env node`)
+/// and copies it to `~/.myagents/bin/myagents` with 0755 on Unix.
 #[tauri::command]
 pub fn cmd_sync_cli<R: Runtime>(
     app_handle: AppHandle<R>,
@@ -786,7 +787,7 @@ pub fn cmd_sync_cli<R: Runtime>(
         }
     }
 
-    // Source: app resources/cli/
+    // Source: app resources/cli/ (esbuild output from `npm run build:cli`)
     let res = app_handle.path().resource_dir()
         .map_err(|e| format!("Resource dir: {}", e))?;
     let cli_src = res.join("cli");
@@ -798,11 +799,12 @@ pub fn cmd_sync_cli<R: Runtime>(
     fs::create_dir_all(&bin_dir)
         .map_err(|e| format!("Failed to create bin dir: {}", e))?;
 
-    // Copy myagents.ts → myagents (strip .ts extension)
-    let src_script = cli_src.join("myagents.ts");
+    // Copy myagents.js → myagents (strip extension, shebang handles node invocation on Unix;
+    // Windows uses myagents.cmd wrapper below).
+    let src_script = cli_src.join("myagents.js");
     let dst_script = bin_dir.join("myagents");
     if !src_script.exists() {
-        return Err(format!("CLI script not found: {:?} (packaging issue?)", src_script));
+        return Err(format!("CLI script not found: {:?} (run `npm run build:cli`?)", src_script));
     }
     fs::copy(&src_script, &dst_script)
         .map_err(|e| format!("Failed to copy CLI script: {}", e))?;

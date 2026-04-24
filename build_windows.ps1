@@ -497,7 +497,10 @@ try {
         New-Item -ItemType Directory -Path $resourcesDir -Force | Out-Null
     }
 
-    & bun build ./src/server/index.ts --outfile=./src-tauri/resources/server-dist.js --target=bun
+    & npx esbuild ./src/server/index.ts `
+        --bundle --platform=node --format=esm --target=node20 `
+        --outfile=./src-tauri/resources/server-dist.js --sourcemap `
+        --banner:js='import { createRequire } from "module"; const require = createRequire(import.meta.url);'
     if ($LASTEXITCODE -ne 0) {
         throw "服务端打包失败"
     }
@@ -511,11 +514,31 @@ try {
 
     # 打包 Plugin Bridge 代码 (OpenClaw channel plugin 支持)
     Write-Host "  打包 Plugin Bridge..." -ForegroundColor Cyan
-    & bun build ./src/server/plugin-bridge/index.ts --outfile=./src-tauri/resources/plugin-bridge-dist.js --target=bun
+    & npx esbuild ./src/server/plugin-bridge/index.ts `
+        --bundle --platform=node --format=esm --target=node20 `
+        --outfile=./src-tauri/resources/plugin-bridge-dist.js --sourcemap `
+        --banner:js='import { createRequire } from "module"; const require = createRequire(import.meta.url);' `
+        --external:openclaw
     if ($LASTEXITCODE -ne 0) {
         throw "Plugin Bridge 打包失败"
     }
     Write-Host "    OK - Plugin Bridge 打包完成" -ForegroundColor Green
+
+    # 打包 myagents CLI（shebang 用 node）
+    Write-Host "  打包 myagents CLI..." -ForegroundColor Cyan
+    $cliResDir = Join-Path $ProjectDir "src-tauri\resources\cli"
+    if (-not (Test-Path $cliResDir)) {
+        New-Item -ItemType Directory -Path $cliResDir -Force | Out-Null
+    }
+    & npx esbuild ./src/cli/myagents.ts `
+        --bundle --platform=node --format=cjs --target=node20 `
+        --outfile=./src-tauri/resources/cli/myagents.js `
+        --banner:js='#!/usr/bin/env node'
+    if ($LASTEXITCODE -ne 0) {
+        throw "myagents CLI 打包失败"
+    }
+    Copy-Item "./src/cli/myagents.cmd" "./src-tauri/resources/cli/myagents.cmd" -Force
+    Write-Host "    OK - myagents CLI 打包完成" -ForegroundColor Green
 
     # 拷贝 Claude Agent SDK native binary（0.2.113+ 取代 cli.js 分发模式）
     # Windows 默认构建 x64；arm64 需另行处理（本脚本目前仅 x64）
