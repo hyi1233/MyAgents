@@ -1,7 +1,7 @@
 /**
  * Unified Logger - Intercepts console.log/error/warn and forwards to SSE
  * 
- * This module provides automatic log forwarding from Bun Sidecar to the frontend.
+ * This module provides automatic log forwarding from the Node Sidecar to the frontend.
  * All console.log/error/warn calls are intercepted and sent via SSE events.
  * 
  * Fixes applied based on ChatGPT/Gemini feedback:

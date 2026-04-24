@@ -549,7 +549,7 @@ export default function TabProvider({
         };
     }, [appendUnifiedLog]);
 
-    // Listen for Rust logs via Tauri events (unified with React/Bun logs)
+    // Listen for Rust logs via Tauri events (unified with React/Node logs)
     // Note: Rust logs are only displayed in UI, NOT persisted via frontend API
     // This avoids a log loop: Rust log → API call → Rust proxy logs the call → new Rust log → ...
     useEffect(() => {

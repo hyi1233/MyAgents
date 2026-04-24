@@ -2623,7 +2623,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             FileActionProvider.refreshTrigger intentionally excludes
             toolCompleteCount. toolCompleteCount bumps on every
             workspace:files-changed SSE event, which fires on a 500ms
-            debounce from the Bun file watcher whenever *anything* in the
+            debounce from the Node file watcher whenever *anything* in the
             workspace changes (tsc/vite output, git index, log files, …).
             Tying the path-existence cache to that signal caused a full
             wipe-and-requery storm — on an active dev workspace, a POST

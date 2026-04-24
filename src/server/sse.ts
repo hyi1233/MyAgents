@@ -304,7 +304,7 @@ const chunkBuffers = new Map<string, { merged: string; timer: ReturnType<typeof 
 // flush so the consumer's strict ordering invariants hold.
 const NON_FLUSHING_EVENTS = new Set<string>(['chat:log']);
 
-// Coalesce buffer scope: module-level Map. Each Sidecar is one Bun process
+// Coalesce buffer scope: module-level Map. Each Sidecar is one Node process
 // serving a single session under the project's Tab-scoped Sidecar isolation
 // (see specs/ARCHITECTURE.md § "Tab-scoped 隔离"), so cross-session
 // mixing cannot happen here. If that invariant ever changes, key the buffer
@@ -478,8 +478,8 @@ export function createSseClient(onClose: (client: SseClient) => void): {
   // Solves the "late joiner" problem: a Tab connecting to a mid-flight IM session
   // immediately receives the current session state (e.g., chat:status → "running")
   // instead of appearing idle until the next live event.
-  // Delay is required: the Bun SSE stream buffers correctly, but the full chain is
-  // Bun → SSE bytes → Rust proxy parse → Tauri emit → React listener.
+  // Delay is required: the SSE stream (hono/node-server) buffers correctly, but the
+  // full chain is: Node Sidecar → SSE bytes → Rust proxy parse → Tauri emit → React listener.
   // React's useEffect registers the Tauri listener AFTER first render, so a synchronous
   // replay arrives before the listener is ready and gets silently dropped.
   // 200ms matches the log replay delay and gives React enough time to mount.

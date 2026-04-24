@@ -3200,8 +3200,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                                 <span className="font-mono text-[var(--ink)]">{versions.claudeAgentSdk}</span>
                                                             </div>
                                                             <div className="flex justify-between">
-                                                                <span className="text-[var(--ink-muted)]">Bun Runtime</span>
-                                                                <span className="font-mono text-[var(--ink)]">{versions.bun}</span>
+                                                                <span className="text-[var(--ink-muted)]">Node.js Runtime</span>
+                                                                <span className="font-mono text-[var(--ink)]">{versions.node}</span>
                                                             </div>
                                                             <div className="flex justify-between">
                                                                 <span className="text-[var(--ink-muted)]">Tauri</span>

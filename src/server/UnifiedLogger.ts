@@ -1,5 +1,5 @@
 /**
- * UnifiedLogger - Persists unified logs (React/Bun/Rust) to daily files
+ * UnifiedLogger - Persists unified logs (React/Node/Rust) to daily files
  *
  * Features:
  * - Daily log files: ~/.myagents/logs/unified-{YYYY-MM-DD}.log

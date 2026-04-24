@@ -54,7 +54,7 @@ import { getExternalRuntime, isRuntimeSupported } from './runtimes/factory';
 import { queryRuntimeModels } from './runtimes/external-session';
 
 // ---------------------------------------------------------------------------
-// Management API forwarding (Bun Sidecar → Rust)
+// Management API forwarding (Node Sidecar → Rust)
 // ---------------------------------------------------------------------------
 
 const MGMT_PORT = process.env.MYAGENTS_MANAGEMENT_PORT;
@@ -65,7 +65,7 @@ async function managementApi(
   body?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   if (!MGMT_PORT) {
-    // Happens when the Bun Sidecar is up but the Rust-side Management API
+    // Happens when the Node Sidecar is up but the Rust-side Management API
     // isn't — during app cold boot, after a crashed restart, or in the
     // standalone dev sidecar used for CLI smoke tests. Returning the hint
     // alongside the error lets `wrapMgmtResponse` propagate it to the CLI
@@ -2496,7 +2496,7 @@ function hintForMissingRuntime(runtime: RuntimeType): string {
 // ---------------------------------------------------------------------------
 // Task-creation pre-flight validation (v0.1.69+)
 //
-// Reject bad runtime/model/permissionMode overrides *here* in Bun admin-api,
+// Reject bad runtime/model/permissionMode overrides *here* in Node admin-api,
 // before the payload hits Rust. Three reasons:
 //   1. We have first-class access to `RuntimeFactory.detect()` / queryModels,
 //      Rust does not.

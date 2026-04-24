@@ -904,7 +904,7 @@ let currentAgentDefinitions: Record<string, AgentDefinition> | null = null;
  * Triggers session restart (abort + resume + pre-warm) identical to MCP config changes,
  * but only when the effective proxy URL actually changed.
  *
- * SOCKS5 handling: Bun/Node.js `fetch()` doesn't support `socks5://` in HTTP_PROXY env vars.
+ * SOCKS5 handling: Node.js `fetch()` (undici) doesn't support `socks5://` in HTTP_PROXY env vars.
  * When SOCKS5 is configured, we start a local HTTP-to-SOCKS5 bridge and set HTTP_PROXY to
  * the bridge's HTTP URL. The bridge transparently tunnels traffic through SOCKS5.
  */
