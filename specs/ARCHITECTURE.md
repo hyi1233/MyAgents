@@ -622,7 +622,7 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 | **Node.js v24** | 统一 runtime — Sidecar、Plugin Bridge、MCP Server、AI Bash `node`/`npx`/`npm`、myagents CLI | `src-tauri/resources/nodejs/` |
 | **Node.js** | MCP Server（npx）、社区 npm 包、AI Bash 中的 node/npm | `src-tauri/resources/nodejs/` |
 
-**单一 runtime 原则（v0.2.0+）**：所有 MyAgents 自己的代码（Sidecar、Plugin Bridge、CLI）和所有社区生态代码（MCP Server / npm 包）都跑在 bundled Node.js v24 上。SDK 子进程内部的 Bun runtime 是 SDK team 的静态链接实现细节，我们不感知、不共享状态。v0.1.x 的 Bun + Node.js 双运行时已在 v0.2.0 合并（详见 [prd_0.2.0_node_runtime_migration.md](./prd/prd_0.2.0_node_runtime_migration.md)）。
+**单一 runtime 原则（v0.2.0+）**：所有 MyAgents 自己的代码（Sidecar、Plugin Bridge、CLI）和所有社区生态代码（MCP Server / npm 包）都跑在 bundled Node.js v24 上。SDK 子进程内部的 Bun runtime 是 SDK team 的静态链接实现细节，我们不感知、不共享状态。v0.1.x 的 Bun + Node.js 双运行时已在 v0.2.0 合并（设计文档：`specs/prd/prd_0.2.0_node_runtime_migration.md` — PRD 目录 gitignore，本地文件）。
 
 ### 预置原生二进制 MCP (v0.1.67+)
 

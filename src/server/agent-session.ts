@@ -3,7 +3,7 @@ import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlink
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
+import { getScriptDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { processImage, resizeToolImageContent } from './utils/imageResize';
@@ -1698,9 +1698,12 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
         // to find npx.cmd via filtered PATH — failed on Windows when PATH was incomplete
         // or when the SDK's env whitelist (RK_) didn't propagate Node.js directories.
         // Resolving to full path eliminates this class of issues (pit-of-success pattern).
-        // Priority: system npx → bundled Node.js npx → bun x
+        // v0.2.0+ priority: system npx → bundled Node.js npx → npx derived from runtime path.
+        // Bun fallback removed — MyAgents no longer bundles Bun, and "bun x" was an
+        // emergency escape hatch for Linux boxes with neither Node nor bundled runtime,
+        // which is no longer a supported config.
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { getBundledNodeDir: getNodeDir, getBundledRuntimePath, isBunRuntime, getSystemNpxPaths, findExistingPath } = require('./utils/runtime');
+        const { getBundledNodeDir: getNodeDir, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } = require('./utils/runtime');
         const systemNpx = findExistingPath(getSystemNpxPaths());
 
         if (systemNpx) {
@@ -1718,23 +1721,15 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
             if (!args.includes('-y')) args = ['-y', ...args];
             console.log(`[agent] MCP ${server.id}: System npx not found, using bundled Node.js npx (${command})`);
           } else {
-            // 3. Last resort: bun x or derive npx from system node
+            // 3. Last resort: derive npx from the runtime path returned by
+            //    getBundledRuntimePath() (always a Node binary in v0.2.0+).
             const runtime = getBundledRuntimePath();
-            if (isBunRuntime(runtime)) {
-              command = runtime;
-              // bun x doesn't use -y flag — strip only the leading -y (npx auto-confirm)
-              const bunArgs = args[0] === '-y' ? args.slice(1) : args;
-              args = ['x', ...bunArgs];
-              console.log(`[agent] MCP ${server.id}: No Node.js found (system or bundled), falling back to bun x`);
-            } else {
-              // getBundledRuntimePath found a system node — derive npx from same dir
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { dirname: pathDirname, resolve: pathResolve } = require('path');
-              const npxSibling = pathResolve(pathDirname(runtime), process.platform === 'win32' ? 'npx.cmd' : 'npx');
-              command = npxSibling;
-              if (!args.includes('-y')) args = ['-y', ...args];
-              console.log(`[agent] MCP ${server.id}: Derived npx from system node: ${npxSibling}`);
-            }
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { dirname: pathDirname, resolve: pathResolve } = require('path');
+            const npxSibling = pathResolve(pathDirname(runtime), process.platform === 'win32' ? 'npx.cmd' : 'npx');
+            command = npxSibling;
+            if (!args.includes('-y')) args = ['-y', ...args];
+            console.log(`[agent] MCP ${server.id}: Derived npx from runtime path: ${npxSibling}`);
           }
         }
       }
@@ -2692,9 +2687,8 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   const PATH_SEP = process.platform === 'win32' ? ';' : ':';
   const PATH_KEY = process.platform === 'win32' ? 'Path' : 'PATH';
 
-  // Detect bundled runtime directories using shared utility from runtime.ts
+  // Detect bundled Node.js directory using shared utility from runtime.ts
   const isWindows = process.platform === 'win32';
-  const bundledBunDir = getBundledBunDir();
   const bundledNodeDir = getBundledNodeDir();
 
   // Windows directory env vars — hoisted for reuse across essentialPaths + git-bash detection
@@ -2704,17 +2698,12 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
 
   if (isDebug) {
     console.log('[env] Script directory:', getScriptDir());
-    console.log(`[env] Bundled bun: ${bundledBunDir || 'NOT FOUND'}`);
     console.log(`[env] Bundled Node.js: ${bundledNodeDir || 'NOT FOUND'}`);
   }
 
-  // Build essential paths based on platform
+  // Build essential paths based on platform.
+  // v0.2.0+: bundled Bun removed; bundled Node.js is the only app-local JS runtime.
   const essentialPaths: string[] = [];
-
-  // Bundled bun directory (highest priority — Sidecar/agent-browser need it)
-  if (bundledBunDir) {
-    essentialPaths.push(bundledBunDir);
-  }
 
   // System Node.js directories — preferred over bundled for MCP/npm ecosystem reliability.
   // User-maintained Node.js is less likely to have broken npm than our bundled version.
@@ -2790,7 +2779,7 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   const finalPath = pathParts.join(PATH_SEP);
   if (isDebug) {
     console.log('[env] Final PATH (first 5 entries):', pathParts.slice(0, 5).join(PATH_SEP));
-    console.log('[env] Bundled bun will be used:', bundledBunDir ? 'YES' : 'NO (using system bun)');
+    console.log('[env] Bundled Node.js dir:', bundledNodeDir ? bundledNodeDir : 'NOT FOUND (system Node will be used)');
   }
 
   // Build base environment

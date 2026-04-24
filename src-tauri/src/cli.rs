@@ -115,7 +115,10 @@ fn find_node_binary() -> Option<PathBuf> {
     // macOS: Contents/MacOS/app → Contents/Resources/nodejs/bin/node
     #[cfg(target_os = "macos")]
     {
-        let macos_node = dir.join("..").join("Resources").join("nodejs").join("bin").join("node");
+        let macos_node = dir
+            .parent()
+            .map(|p| p.join("Resources").join("nodejs").join("bin").join("node"))
+            .unwrap_or_else(|| dir.join("Resources").join("nodejs").join("bin").join("node"));
         if macos_node.exists() {
             return Some(macos_node);
         }
@@ -134,14 +137,18 @@ fn find_node_binary() -> Option<PathBuf> {
         }
     }
 
-    // Linux and fallback
-    let linux_node = dir.join("resources").join("nodejs").join("bin").join("node");
-    if linux_node.exists() {
-        return Some(linux_node);
-    }
-    let sibling_unix = dir.join("nodejs").join("bin").join("node");
-    if sibling_unix.exists() {
-        return Some(sibling_unix);
+    // Linux + Unix fallback (skipped on macOS + Windows — each platform's branch above
+    // returns early on success; those platforms don't have this layout).
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        let linux_node = dir.join("resources").join("nodejs").join("bin").join("node");
+        if linux_node.exists() {
+            return Some(linux_node);
+        }
+        let sibling_unix = dir.join("nodejs").join("bin").join("node");
+        if sibling_unix.exists() {
+            return Some(sibling_unix);
+        }
     }
 
     None

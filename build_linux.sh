@@ -42,20 +42,43 @@ fi
 echo -e "${BLUE}[信息] 构建版本: ${PKG_VERSION}${NC}"
 echo ""
 
-# 依赖检查
+# 依赖检查（仅 Debian/Ubuntu 通过 dpkg 精确校验；其它发行版跳过 + 提示等价包名）
 echo -e "${BLUE}[1/6] 检查系统依赖...${NC}"
-missing=()
-for pkg in pkg-config libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev patchelf; do
-    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
-        missing+=("$pkg")
+if command -v dpkg >/dev/null 2>&1; then
+    # Ubuntu 版本 gate: 22.04+ 才有 libwebkit2gtk-4.1；20.04 仍停留在 4.0
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        if [ "${ID:-}" = "ubuntu" ] && [ -n "${VERSION_ID:-}" ]; then
+            major=$(echo "$VERSION_ID" | cut -d. -f1)
+            if [ "${major:-0}" -lt 22 ] 2>/dev/null; then
+                echo -e "${YELLOW}⚠ 检测到 Ubuntu ${VERSION_ID}。MyAgents 需要 Ubuntu 22.04+ (libwebkit2gtk-4.1)。${NC}"
+                echo -e "${YELLOW}  20.04 仍使用 libwebkit2gtk-4.0，Tauri 2 不支持。升级系统或使用 22.04+ 构建机。${NC}"
+                exit 1
+            fi
+        fi
     fi
-done
-if [ ${#missing[@]} -gt 0 ]; then
-    echo -e "${RED}缺少系统依赖:${NC} ${missing[*]}"
-    echo -e "${YELLOW}运行: sudo apt-get install -y ${missing[*]}${NC}"
-    exit 1
+
+    missing=()
+    for pkg in pkg-config libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev patchelf; do
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            missing+=("$pkg")
+        fi
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo -e "${RED}缺少系统依赖 (Debian/Ubuntu):${NC} ${missing[*]}"
+        echo -e "${YELLOW}运行: sudo apt-get install -y ${missing[*]}${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ 系统依赖齐全 (Debian/Ubuntu)${NC}"
+else
+    echo -e "${YELLOW}⚠ 未检测到 dpkg (非 Debian/Ubuntu 发行版)${NC}"
+    echo -e "${YELLOW}  请确保已安装: pkg-config, openssl-devel/libssl-dev, gtk3-devel/libgtk-3-dev,${NC}"
+    echo -e "${YELLOW}    libayatana-appindicator-devel/libayatana-appindicator3-dev,${NC}"
+    echo -e "${YELLOW}    librsvg2-devel/librsvg2-dev, webkit2gtk4.1-devel/libwebkit2gtk-4.1-dev,${NC}"
+    echo -e "${YELLOW}    patchelf${NC}"
+    echo -e "${YELLOW}  Tauri 构建如缺库会给出明确错误。继续...${NC}"
 fi
-echo -e "${GREEN}✓ 系统依赖齐全${NC}"
 echo ""
 
 # TypeScript 检查
@@ -136,7 +159,7 @@ cp "$CLAUDE_SRC" "$CLAUDE_DEST"
 chmod +x "$CLAUDE_DEST"
 echo -e "  ${GREEN}✓ Claude native binary (${SDK_TRIPLE}) 就绪${NC}"
 
-npm run tauri:build -- --target "$TARGET" --bundles appimage deb
+npm run tauri:build -- --target "$TARGET" --bundles appimage,deb
 
 echo ""
 BUNDLE_DIR="${PROJECT_DIR}/src-tauri/target/${TARGET}/release/bundle"

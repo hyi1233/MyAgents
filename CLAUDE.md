@@ -117,7 +117,7 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 **SDK native binary resolver**：`src/server/agent-session.ts::resolveClaudeCodeCli()` 按 platform triple 定位 `claude[.exe]`，支持 glibc/musl Linux 检测（via `process.report.getReport().header.glibcVersionRuntime`）。生产优先用 `<resources>/claude-agent-sdk/claude`，开发 fallback 到 `node_modules/@anthropic-ai/claude-agent-sdk-<triple>/claude`。
 
-**历史背景**：v0.1.x 采用 Bun + Node.js 双运行时（详见 [prd_0.1.44_dual_runtime.md](./specs/prd/prd_0.1.44_dual_runtime.md)，已 superseded）。v0.2.0 统一到 Node.js — 动因：SDK 0.2.113+ 放弃 cli.js 改用 native binary 后，"Bun 跑 cli.js" 职能消失，剩下的 Sidecar/Bridge 用 Node 等价替代可消除双 runtime 复杂度 + Plugin Bridge 的 Bun-on-Node-http 兼容性坑。详见 [prd_0.2.0_node_runtime_migration.md](./specs/prd/prd_0.2.0_node_runtime_migration.md)（本 PRD 在 gitignore 中，只在本地）。
+**历史背景**：v0.1.x 采用 Bun + Node.js 双运行时策略（Bun 跑 Sidecar、Node.js 跑 MCP 生态）。v0.2.0 统一到 Node.js — 动因：SDK 0.2.113+ 放弃 cli.js 改用 native binary 后，"Bun 跑 cli.js" 职能消失，剩下的 Sidecar/Bridge 用 Node 等价替代可消除双 runtime 复杂度 + Plugin Bridge 的 Bun-on-Node-http 兼容性坑。完整迁移设计见 `specs/prd/prd_0.2.0_node_runtime_migration.md`（`specs/prd/` 在 gitignore，PRD 以本地文档形式保留）。
 
 ### 持久 Session 架构
 

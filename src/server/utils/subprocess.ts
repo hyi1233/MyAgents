@@ -224,7 +224,18 @@ export function fireAndForget(argv: string[]): void {
       detached: true,
     });
     handle.unref();
-  } catch {
-    /* ignore — child never started, caller can't do anything about it */
+    // If the underlying spawn failed asynchronously (ENOENT, bad arch, etc.),
+    // Node emits 'error' before our handle settles. Surface a one-line warn
+    // so users clicking "Reveal in Finder" / "Open in system editor" don't
+    // silently fail — they'll at least see a log entry in the unified log.
+    handle.exited.then((code) => {
+      if (handle.error) {
+        console.warn(`[fireAndForget] ${argv[0]} spawn failed: ${handle.error.message}`);
+      } else if (code !== 0) {
+        console.warn(`[fireAndForget] ${argv[0]} exited with code ${code}`);
+      }
+    }).catch(() => { /* settled via catch — error already logged via handle.error */ });
+  } catch (err) {
+    console.warn(`[fireAndForget] synchronous spawn error for ${argv[0]}:`, err instanceof Error ? err.message : err);
   }
 }

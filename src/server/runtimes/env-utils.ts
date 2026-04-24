@@ -6,10 +6,11 @@ import { delimiter, join } from 'node:path';
 import { getShellEnv, getShellPath } from '../utils/shell';
 
 /**
- * Lightweight PATH-based command lookup. Replaces Bun's built-in which().
+ * Lightweight PATH-based command lookup, used by external-runtime adapters.
  *
  * On Windows, honours PATHEXT (.EXE, .CMD, .BAT, etc.) so .cmd shims from
- * npm-global installs are found — matches Bun.which() behaviour via libuv.
+ * npm-global installs are found. Absolute paths bypass PATH and are verified
+ * via `statSync` directly.
  */
 function which(command: string, opts?: { PATH?: string }): string | null {
   const pathStr = opts?.PATH ?? process.env.PATH ?? '';
@@ -60,12 +61,13 @@ export function augmentedProcessEnv(): Record<string, string | undefined> {
 /**
  * Resolve an external CLI command to its full executable path.
  *
- * Uses Bun.which() with the augmented PATH (from getShellPath()) on ALL platforms.
+ * Uses our local `which()` with the augmented PATH (from `getShellPath()`)
+ * on ALL platforms.
  *
  * Why this is needed everywhere (not just Windows):
- * - Windows: npm global installs create `.cmd` wrappers; Bun.spawn() via libuv
+ * - Windows: npm global installs create `.cmd` wrappers; `spawn()` via libuv
  *   doesn't resolve PATH extensions (.CMD/.BAT) → ENOENT. See: #70
- * - macOS/Linux: Bun.spawn() uses posix_spawnp which searches the CALLER's PATH,
+ * - macOS/Linux: `spawn()` uses posix_spawnp which searches the CALLER's PATH,
  *   not the env passed to the child. GUI apps (Tauri/Finder) have minimal PATH
  *   that lacks NVM/fnm/volta/asdf paths. Even though augmentedProcessEnv() builds
  *   a correct PATH, the bare command name won't be found by posix_spawnp.

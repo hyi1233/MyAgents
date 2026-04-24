@@ -8,15 +8,57 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 
 /**
- * Stream an incoming Web `File` (multipart upload) directly to disk without
- * buffering the whole body in memory. Replaces `Bun.write(dst, file)` which
- * streamed by default; naive `Buffer.from(await file.arrayBuffer())` would
- * OOM on large video / image uploads.
+ * Hard upper bound on a single multipart request body (aggregate of all files
+ * + text fields). Sidecar lives on 127.0.0.1 so the threat model is mostly
+ * local WebView / same-machine callers, but we still gate to prevent runaway
+ * uploads from OOM-ing the Node.js heap. Node's standard `Request.formData()`
+ * buffers the entire body before resolving — there is no streaming multipart
+ * parser in the Web API — so this cap must be enforced via Content-Length
+ * BEFORE calling `.formData()`.
+ */
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB
+
+/**
+ * Check request Content-Length against MAX_UPLOAD_BYTES.
+ * Returns a 413 Response to hand back, or null when within budget.
+ * Missing Content-Length is treated as unknown — we still allow `.formData()`
+ * to run, but callers should prefer Content-Length-aware clients.
+ */
+function rejectIfOversizedUpload(request: Request): Response | null {
+  const lenHeader = request.headers.get('content-length');
+  if (!lenHeader) return null;
+  const len = Number(lenHeader);
+  if (Number.isFinite(len) && len > MAX_UPLOAD_BYTES) {
+    return jsonResponse(
+      { error: `Upload too large (${len} bytes > ${MAX_UPLOAD_BYTES} limit).` },
+      413,
+    );
+  }
+  return null;
+}
+
+/**
+ * Write an incoming Web `File` (multipart upload) to disk via streaming.
+ *
+ * NOTE: Node's `Request.formData()` already buffers the full body before
+ * resolving the FormData — `file.stream()` here is reading from an
+ * in-memory Blob, not from the live socket. The pipeline-to-disk still
+ * helps by avoiding an extra `arrayBuffer() + Buffer.from()` copy, but
+ * it does NOT bound memory during the parse itself. That bound is
+ * enforced by `rejectIfOversizedUpload()` at the route edge.
+ *
+ * On error mid-pipeline, the partially-written destination is removed so
+ * callers don't observe half-files on disk.
  */
 async function streamUploadToFile(file: File, destination: string): Promise<void> {
   const webStream = file.stream() as unknown as ReadableStream<Uint8Array>;
   const nodeReadable = Readable.fromWeb(webStream as unknown as import('node:stream/web').ReadableStream<Uint8Array>);
-  await pipeline(nodeReadable, createWriteStream(destination));
+  try {
+    await pipeline(nodeReadable, createWriteStream(destination));
+  } catch (err) {
+    await rm(destination, { force: true }).catch(() => { /* best-effort cleanup */ });
+    throw err;
+  }
 }
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -3456,6 +3498,8 @@ async function main() {
           return jsonResponse({ error: 'Invalid path.' }, 400);
         }
         try {
+          const oversized = rejectIfOversizedUpload(request);
+          if (oversized) return oversized;
           const formData = await request.formData();
           const files = Array.from(formData.values()).filter(
             (value) => typeof value !== 'string'
@@ -3837,6 +3881,8 @@ async function main() {
         }
 
         try {
+          const oversized = rejectIfOversizedUpload(request);
+          if (oversized) return oversized;
           const formData = await request.formData();
           const files = Array.from(formData.values()).filter(
             (value) => typeof value !== 'string'
@@ -4985,7 +5031,7 @@ async function main() {
 
             // Preset MCP (isBuiltin: true) with npx → warmup to download and cache package
             if (server.isBuiltin && command === 'npx') {
-              const { getBundledNodeDir, getBundledRuntimePath, isBunRuntime, getSystemNpxPaths, findExistingPath } = await import('./utils/runtime');
+              const { getBundledNodeDir, getSystemNpxPaths, findExistingPath } = await import('./utils/runtime');
               const { pinMcpPackageVersions } = await import('./agent-session');
               const args = pinMcpPackageVersions(server.args || []);
 
@@ -4993,7 +5039,9 @@ async function main() {
               const { getShellEnv } = await import('./utils/shell');
               const baseEnv = getShellEnv();
 
-              // Priority: system npx → bundled Node.js npx → bun x
+              // Priority: system npx → bundled Node.js npx → hard fail.
+              // v0.2.0+ removed the "bun x" emergency branch — bundled Node is always present
+              // in release builds, and dev builds fall back to system node via runtime.ts.
               const systemNpx = findExistingPath(getSystemNpxPaths());
               const nodeDir = getBundledNodeDir();
               let warmupCmd: string;
@@ -5029,20 +5077,14 @@ async function main() {
 
                 console.log(`[api/mcp/enable] Warming up with bundled npx: ${warmupArgs.join(' ')}`);
               } else {
-                // 3. Last resort: bun x
-                const runtime = getBundledRuntimePath();
-                if (!isBunRuntime(runtime)) {
-                  return jsonResponse({
-                    success: false,
-                    error: {
-                      type: 'runtime_error',
-                      message: '运行时不可用（系统/内置 Node.js 和 Bun 均未找到）',
-                    }
-                  });
-                }
-                warmupCmd = runtime;
-                warmupArgs = ['x', ...args, '--help'];
-                console.log(`[api/mcp/enable] Warming up with bun x: ${warmupArgs.join(' ')}`);
+                // 3. Neither system nor bundled Node.js found — hard fail.
+                return jsonResponse({
+                  success: false,
+                  error: {
+                    type: 'runtime_error',
+                    message: '运行时不可用（系统/内置 Node.js 均未找到）',
+                  }
+                });
               }
 
               return new Promise<Response>((resolve) => {

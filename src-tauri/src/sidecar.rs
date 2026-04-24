@@ -111,21 +111,23 @@ const SIDECAR_MARKER: &str = "--myagents-sidecar";
 // read by `cli.rs` to know which port to connect to.
 const PORT_FILE_NAME: &str = "sidecar.port";
 
-// ===== Crashed Bun Tracking =====
-// When a bundled bun crashes with STATUS_ACCESS_VIOLATION (0xC0000005, typically AVX2
-// incompatibility in VMs), mark it as crashed so subsequent attempts fall through to system bun.
-static CRASHED_BUN_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+// ===== Crashed Node Tracking =====
+// When a bundled Node.js crashes with STATUS_ACCESS_VIOLATION (0xC0000005) on Windows —
+// usually a missing VC++ runtime DLL or some AV-injection incompatibility — mark it as
+// crashed so subsequent spawn attempts fall through to system Node.
+// v0.1.x tracked Bun crashes here (AVX2 baseline issue); Node has its own failure modes.
+static CRASHED_NODE_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[allow(dead_code)] // Only called from #[cfg(windows)] blocks; harmless on other platforms
 fn mark_node_as_crashed(path: &std::path::Path) {
     let normalized = normalize_external_path(path.to_path_buf());
     // unwrap_or_else recovers from Mutex poisoning — the body is trivial (Vec::push),
     // so the data is still consistent even if a previous holder panicked.
-    let mut paths = CRASHED_BUN_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut paths = CRASHED_NODE_PATHS.lock().unwrap_or_else(|e| e.into_inner());
     if !paths.iter().any(|p| p == &normalized) {
         paths.push(normalized.clone());
         ulog_warn!(
-            "[sidecar] Marked bun as crashed (will try system fallback on next attempt): {:?}",
+            "[sidecar] Marked node as crashed (will try system fallback on next attempt): {:?}",
             normalized
         );
     }
@@ -133,12 +135,12 @@ fn mark_node_as_crashed(path: &std::path::Path) {
 
 fn is_node_crashed(path: &std::path::Path) -> bool {
     let normalized = normalize_external_path(path.to_path_buf());
-    let paths = CRASHED_BUN_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+    let paths = CRASHED_NODE_PATHS.lock().unwrap_or_else(|e| e.into_inner());
     paths.iter().any(|x| x == &normalized)
 }
 
 /// On Windows, check if the process exited with STATUS_ACCESS_VIOLATION (0xC0000005)
-/// and mark the bun binary as crashed for fallback to system bun.
+/// and mark the node binary as crashed for fallback to system node.
 #[cfg(target_os = "windows")]
 fn maybe_mark_crashed_node(status: &std::process::ExitStatus, node_path: &std::path::Path) {
     let code = status.code().unwrap_or(0) as u32;
@@ -547,7 +549,7 @@ impl SidecarInstance {
     }
 }
 
-/// Ensure Bun process is killed when SidecarInstance is dropped
+/// Ensure Node.js process is killed when SidecarInstance is dropped
 impl Drop for SidecarInstance {
     fn drop(&mut self) {
         ulog_info!("[sidecar] Drop: killing process on port {}", self.port);
@@ -1282,7 +1284,7 @@ fn diagnose_immediate_exit(status: &std::process::ExitStatus, node_path: &std::p
                  Check Windows Security > Protection History, or add the install directory to exclusions."
             }
             1 => {
-                "Bun exited with code 1. Check if Git for Windows is installed \
+                "Node exited with code 1. Check if Git for Windows is installed \
                  (required by Claude Agent SDK): https://git-scm.com/downloads/win"
             }
             _ => "",
@@ -1290,12 +1292,12 @@ fn diagnose_immediate_exit(status: &std::process::ExitStatus, node_path: &std::p
 
         let msg = if hint.is_empty() {
             format!(
-                "Bun process exited immediately (status: {}, code: 0x{:08x}). node_path: {:?}",
+                "Node process exited immediately (status: {}, code: 0x{:08x}). node_path: {:?}",
                 status_str, code, node_path
             )
         } else {
             format!(
-                "Bun process exited immediately (status: {}, code: 0x{:08x}). {} | node_path: {:?}",
+                "Node process exited immediately (status: {}, code: 0x{:08x}). {} | node_path: {:?}",
                 status_str, code, hint, node_path
             )
         };
@@ -1306,7 +1308,7 @@ fn diagnose_immediate_exit(status: &std::process::ExitStatus, node_path: &std::p
     #[cfg(not(target_os = "windows"))]
     {
         let msg = format!(
-            "Bun process exited immediately with status: {}. node_path: {:?}",
+            "Node process exited immediately with status: {}. node_path: {:?}",
             status_str, node_path
         );
         ulog_error!("[sidecar] {}", msg);
@@ -1371,7 +1373,8 @@ fn find_node_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<P
             #[cfg(target_os = "macos")]
             let layouts: [PathBuf; 2] = [
                 // Inside the .app bundle: Contents/Resources/nodejs/bin/node
-                exe_dir.join("..").join("Resources").join("nodejs").join("bin").join("node"),
+                exe_dir.parent().map(|p| p.join("Resources").join("nodejs").join("bin").join("node"))
+                    .unwrap_or_else(|| exe_dir.join("Resources").join("nodejs").join("bin").join("node")),
                 exe_dir.join("nodejs").join("bin").join("node"),
             ];
             #[cfg(target_os = "windows")]
