@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`myagents mcp show <id>`**：查看单个 MCP 服务器的完整配置、全局 / 工作区两级启用状态、传输层信息（env / headers 自动脱敏）。和 `agent show` / `runtime describe` 形态对等。
 - **`myagents cron --schedule` 支持 JSON 形式**：除了原有的 cron 表达式（`"*/30 * * * *"`），现在也直接接受与内部结构一致的 JSON —— `{"kind":"at","at":"..."}` / `{"kind":"every","minutes":30}` / `{"kind":"cron","expr":"...","tz":"..."}` / `{"kind":"loop"}`。字段校验在 CLI 边界立即报错，不再出现莫名的 "Failed to parse JSON"。`--message` 是 `--prompt` 的正式别名。
 - **SiliconFlow 预设刷新**：Kimi K2.6、GLM 5.1、MiniMax M2.5 开箱即用。
+- **DeepSeek 预设刷新**：DeepSeek V4 Pro / V4 Flash 两个新模型已进入预设，Pro 为默认首选；子 Agent 别名对齐（sonnet/opus → Pro、haiku → Flash）。旧 `deepseek-chat` / `deepseek-reasoner` 保留在列表中，升级后老工作区的选择不会消失。
 
 ### Improved
 - **Agent 设置的「模型」下拉只显示可用供应商**：和 AI 对话框的模型切换器完全一致 —— 只显示已配置 API Key 或完成订阅登录的供应商。如果之前保存的供应商后来失去了凭据，会显示「⚠ 暂不可用」提示你重新选择。
