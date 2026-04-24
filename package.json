@@ -35,7 +35,8 @@
     "tauri:build": "tauri build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --cache --cache-location .eslintcache --max-warnings=0",
-    "test": "bun test",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "format": "prettier --experimental-cli --write .",
     "format:check": "prettier --experimental-cli --check --log-level warn .",
     "generate:sdk-shims": "bun scripts/generate-sdk-shims.ts",
@@ -112,6 +113,7 @@
     "tailwindcss": "^4.1.16",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.48.0",
-    "vite": "^7.1.12"
+    "vite": "^7.1.12",
+    "vitest": "^3.2.4"
   }
 }
