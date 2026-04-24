@@ -297,6 +297,8 @@ export async function verifyProviderViaSdk(
   upstreamFormat?: 'chat_completions' | 'responses',
 ): Promise<{ success: boolean; error?: string; detail?: string }> {
   console.log(`[provider/verify] Starting SDK verification for ${baseUrl}, model=${model ?? 'default'}, authType=${authType}, apiProtocol=${apiProtocol ?? 'anthropic'}, maxOutputTokens=${maxOutputTokens ?? 'none'}`);
+  // Pass `model` as the override so CLAUDE_CODE_AUTO_COMPACT_WINDOW is
+  // computed for the model being verified, not the Tab's active session model.
   const env = buildClaudeSessionEnv({
     baseUrl,
     apiKey,
@@ -305,7 +307,7 @@ export async function verifyProviderViaSdk(
     maxOutputTokens,
     maxOutputTokensParamName,
     upstreamFormat,
-  });
+  }, model);
   return verifyViaSdk(env, {
     model,
     sessionId: randomUUID(),

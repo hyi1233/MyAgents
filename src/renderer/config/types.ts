@@ -407,12 +407,14 @@ export interface ProjectSettings {
 }
 
 // Preset providers with ModelEntity structure
-/** Anthropic 官方预设模型（订阅和 API 共用） */
+/** Anthropic 官方预设模型（订阅和 API 共用）
+ *  contextLength / maxOutputTokens：来源 LiteLLM model_prices_and_context_window.json (2026-04)
+ *  Sonnet/Opus 4.x 系列支持 1M 上下文（带 [1m] suffix / context-1m beta header 时启用） */
 const ANTHROPIC_MODELS: ModelEntity[] = [
-  { model: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude' },
-  { model: 'claude-opus-4-7', modelName: 'Claude Opus 4.7', modelSeries: 'claude' },
-  { model: 'claude-opus-4-6', modelName: 'Claude Opus 4.6', modelSeries: 'claude' },
-  { model: 'claude-haiku-4-5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
+  { model: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 64_000 },
+  { model: 'claude-opus-4-7', modelName: 'Claude Opus 4.7', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000 },
+  { model: 'claude-opus-4-6', modelName: 'Claude Opus 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000 },
+  { model: 'claude-haiku-4-5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude', contextLength: 200_000, maxOutputTokens: 64_000 },
 ];
 
 /** Anthropic 官方默认别名（对齐 SDK 0.2.111 内置默认：opus47/sonnet46/haiku45）。
@@ -469,10 +471,10 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'deepseek-v4-pro', opus: 'deepseek-v4-pro', haiku: 'deepseek-v4-flash' },
     models: [
-      { model: 'deepseek-v4-pro', modelName: 'DeepSeek V4 Pro', modelSeries: 'deepseek' },
-      { model: 'deepseek-v4-flash', modelName: 'DeepSeek V4 Flash', modelSeries: 'deepseek' },
-      { model: 'deepseek-chat', modelName: 'DeepSeek Chat', modelSeries: 'deepseek' },
-      { model: 'deepseek-reasoner', modelName: 'DeepSeek Reasoner', modelSeries: 'deepseek' },
+      { model: 'deepseek-v4-pro', modelName: 'DeepSeek V4 Pro', modelSeries: 'deepseek', contextLength: 1_000_000, maxOutputTokens: 384_000 },
+      { model: 'deepseek-v4-flash', modelName: 'DeepSeek V4 Flash', modelSeries: 'deepseek', contextLength: 1_000_000, maxOutputTokens: 384_000 },
+      { model: 'deepseek-chat', modelName: 'DeepSeek Chat', modelSeries: 'deepseek', contextLength: 131_072, maxOutputTokens: 8_192 },
+      { model: 'deepseek-reasoner', modelName: 'DeepSeek Reasoner', modelSeries: 'deepseek', contextLength: 131_072, maxOutputTokens: 65_536 },
     ],
   },
   {
@@ -491,10 +493,10 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'kimi-k2.6', opus: 'kimi-k2.6', haiku: 'kimi-k2-thinking-turbo' },
     models: [
-      { model: 'kimi-k2.6', modelName: 'Kimi K2.6', modelSeries: 'moonshot' },
-      { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'moonshot' },
-      { model: 'kimi-k2-thinking-turbo', modelName: 'Kimi K2 Thinking', modelSeries: 'moonshot' },
-      { model: 'kimi-k2-0711', modelName: 'Kimi K2', modelSeries: 'moonshot' },
+      { model: 'kimi-k2.6', modelName: 'Kimi K2.6', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144 },
+      { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144 },
+      { model: 'kimi-k2-thinking-turbo', modelName: 'Kimi K2 Thinking', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144 },
+      { model: 'kimi-k2-0711', modelName: 'Kimi K2', modelSeries: 'moonshot', contextLength: 131_072, maxOutputTokens: 16_384 },
     ],
   },
   {
@@ -512,7 +514,8 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'kimi-for-coding', opus: 'kimi-for-coding', haiku: 'kimi-for-coding' },
     models: [
-      { model: 'kimi-for-coding', modelName: 'Kimi for Coding', modelSeries: 'moonshot' },
+      // Kimi Code 由 K2.5 驱动，256K 上下文（https://www.kimi.com/resources/kimi-code-introduction）
+      { model: 'kimi-for-coding', modelName: 'Kimi for Coding', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 65_536 },
     ],
   },
   {
@@ -533,11 +536,12 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.1', haiku: 'glm-5.1' },
     models: [
-      { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu' },
-      { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu' },
-      { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu' },
-      { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'zhipu' },
-      { model: 'glm-4.5-air', modelName: 'GLM 4.5 Air', modelSeries: 'zhipu' },
+      // GLM-5.1 / 5-Turbo 官方公布 200K 上下文（docs.bigmodel.cn / z.ai），其余系列以 LiteLLM 数据为准
+      { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu', contextLength: 204_800, maxOutputTokens: 131_072 },
+      { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu', contextLength: 202_752, maxOutputTokens: 131_072 },
+      { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu', contextLength: 200_000, maxOutputTokens: 128_000 },
+      { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'zhipu', contextLength: 200_000, maxOutputTokens: 128_000 },
+      { model: 'glm-4.5-air', modelName: 'GLM 4.5 Air', modelSeries: 'zhipu', contextLength: 128_000, maxOutputTokens: 32_000 },
     ],
   },
   {
@@ -563,11 +567,12 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.1', haiku: 'glm-5.1' },
     models: [
-      { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu' },
-      { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu' },
-      { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu' },
-      { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'zhipu' },
-      { model: 'glm-4.5-air', modelName: 'GLM 4.5 Air', modelSeries: 'zhipu' },
+      // GLM-5.1 / 5-Turbo 官方公布 200K 上下文（docs.bigmodel.cn / z.ai），其余系列以 LiteLLM 数据为准
+      { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu', contextLength: 204_800, maxOutputTokens: 131_072 },
+      { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu', contextLength: 202_752, maxOutputTokens: 131_072 },
+      { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu', contextLength: 200_000, maxOutputTokens: 128_000 },
+      { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'zhipu', contextLength: 200_000, maxOutputTokens: 128_000 },
+      { model: 'glm-4.5-air', modelName: 'GLM 4.5 Air', modelSeries: 'zhipu', contextLength: 128_000, maxOutputTokens: 32_000 },
     ],
   },
   {
@@ -585,12 +590,14 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'MiniMax-M2.7', opus: 'MiniMax-M2.7', haiku: 'MiniMax-M2.7' },
     models: [
-      { model: 'MiniMax-M2.7', modelName: 'MiniMax M2.7', modelSeries: 'minimax' },
-      { model: 'MiniMax-M2.7-highspeed', modelName: 'MiniMax M2.7 Highspeed', modelSeries: 'minimax' },
-      { model: 'MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'minimax' },
-      { model: 'MiniMax-M2.5-lightning', modelName: 'MiniMax M2.5 Lightning', modelSeries: 'minimax' },
-      { model: 'MiniMax-M2.1', modelName: 'MiniMax M2.1', modelSeries: 'minimax' },
-      { model: 'MiniMax-M2.1-lightning', modelName: 'MiniMax M2.1 Lightning', modelSeries: 'minimax' },
+      // MiniMax M2.x 系列全系 ~200K 上下文（196,608 tokens，官方 platform.minimax.io + OpenRouter 一致）
+      // 注：LiteLLM 对 M2.x 记录的 1M 为错误数据，MiniMax 官方多处声明 200K
+      { model: 'MiniMax-M2.7', modelName: 'MiniMax M2.7', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 131_072 },
+      { model: 'MiniMax-M2.7-highspeed', modelName: 'MiniMax M2.7 Highspeed', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 131_072 },
+      { model: 'MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192 },
+      { model: 'MiniMax-M2.5-lightning', modelName: 'MiniMax M2.5 Lightning', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192 },
+      { model: 'MiniMax-M2.1', modelName: 'MiniMax M2.1', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192 },
+      { model: 'MiniMax-M2.1-lightning', modelName: 'MiniMax M2.1 Lightning', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192 },
     ],
   },
   {
@@ -610,11 +617,11 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'gemini-3.1-pro-preview', opus: 'gemini-3.1-pro-preview', haiku: 'gemini-3-flash-preview' },
     models: [
-      { model: 'gemini-2.5-pro', modelName: 'Gemini 2.5 Pro', modelSeries: 'google' },
-      { model: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash', modelSeries: 'google' },
-      { model: 'gemini-2.5-flash-lite', modelName: 'Gemini 2.5 Flash-Lite', modelSeries: 'google' },
-      { model: 'gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro Preview', modelSeries: 'google' },
-      { model: 'gemini-3-flash-preview', modelName: 'Gemini 3 Flash Preview', modelSeries: 'google' },
+      { model: 'gemini-2.5-pro', modelName: 'Gemini 2.5 Pro', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_535 },
+      { model: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_535 },
+      { model: 'gemini-2.5-flash-lite', modelName: 'Gemini 2.5 Flash-Lite', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_535 },
+      { model: 'gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro Preview', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_536 },
+      { model: 'gemini-3-flash-preview', modelName: 'Gemini 3 Flash Preview', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_535 },
     ],
   },
   {
@@ -633,10 +640,11 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'doubao-seed-2.0-code', opus: 'doubao-seed-2.0-code', haiku: 'doubao-seed-2.0-code' },
     models: [
-      { model: 'doubao-seed-2.0-code', modelName: 'Doubao Seed 2.0 Code', modelSeries: 'volcengine' },
-      { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'volcengine' },
-      { model: 'deepseek-v3.2', modelName: 'DeepSeek V3.2', modelSeries: 'volcengine' },
-      { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'volcengine' },
+      // doubao-seed-2.0-code: 256K (seed.bytedance.com); 其余为 Volcengine 转发上游模型，取上游原生窗口
+      { model: 'doubao-seed-2.0-code', modelName: 'Doubao Seed 2.0 Code', modelSeries: 'volcengine', contextLength: 262_144, maxOutputTokens: 128_000 },
+      { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'volcengine', contextLength: 200_000, maxOutputTokens: 128_000 },
+      { model: 'deepseek-v3.2', modelName: 'DeepSeek V3.2', modelSeries: 'volcengine', contextLength: 163_840, maxOutputTokens: 163_840 },
+      { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'volcengine', contextLength: 262_144, maxOutputTokens: 262_144 },
     ],
   },
   {
@@ -655,9 +663,9 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'doubao-seed-2-0-pro-260215', opus: 'doubao-seed-2-0-pro-260215', haiku: 'doubao-seed-2-0-lite-260215' },
     models: [
-      { model: 'doubao-seed-2-0-pro-260215', modelName: 'Doubao Seed 2.0 Pro', modelSeries: 'volcengine' },
-      { model: 'doubao-seed-2-0-code-preview-260215', modelName: 'Doubao Seed 2.0 Code Preview', modelSeries: 'volcengine' },
-      { model: 'doubao-seed-2-0-lite-260215', modelName: 'Doubao Seed 2.0 Lite', modelSeries: 'volcengine' },
+      { model: 'doubao-seed-2-0-pro-260215', modelName: 'Doubao Seed 2.0 Pro', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000 },
+      { model: 'doubao-seed-2-0-code-preview-260215', modelName: 'Doubao Seed 2.0 Code Preview', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000 },
+      { model: 'doubao-seed-2-0-lite-260215', modelName: 'Doubao Seed 2.0 Lite', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000 },
     ],
   },
   {
@@ -676,12 +684,13 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'Pro/zai-org/GLM-5.1', opus: 'Pro/moonshotai/Kimi-K2.6', haiku: 'stepfun-ai/Step-3.5-Flash' },
     models: [
-      { model: 'Pro/moonshotai/Kimi-K2.6', modelName: 'Kimi K2.6', modelSeries: 'siliconflow' },
-      { model: 'Pro/moonshotai/Kimi-K2.5', modelName: 'Kimi K2.5', modelSeries: 'siliconflow' },
-      { model: 'Pro/zai-org/GLM-5.1', modelName: 'GLM 5.1', modelSeries: 'siliconflow' },
-      { model: 'Pro/deepseek-ai/DeepSeek-V3.2', modelName: 'DeepSeek V3.2', modelSeries: 'siliconflow' },
-      { model: 'Pro/MiniMaxAI/MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'siliconflow' },
-      { model: 'stepfun-ai/Step-3.5-Flash', modelName: 'Step 3.5 Flash', modelSeries: 'siliconflow' },
+      // SiliconFlow 转发上游，上下文取各上游模型原生窗口
+      { model: 'Pro/moonshotai/Kimi-K2.6', modelName: 'Kimi K2.6', modelSeries: 'siliconflow', contextLength: 262_144, maxOutputTokens: 262_144 },
+      { model: 'Pro/moonshotai/Kimi-K2.5', modelName: 'Kimi K2.5', modelSeries: 'siliconflow', contextLength: 262_144, maxOutputTokens: 262_144 },
+      { model: 'Pro/zai-org/GLM-5.1', modelName: 'GLM 5.1', modelSeries: 'siliconflow', contextLength: 204_800, maxOutputTokens: 131_072 },
+      { model: 'Pro/deepseek-ai/DeepSeek-V3.2', modelName: 'DeepSeek V3.2', modelSeries: 'siliconflow', contextLength: 163_840, maxOutputTokens: 163_840 },
+      { model: 'Pro/MiniMaxAI/MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'siliconflow', contextLength: 196_608, maxOutputTokens: 8_192 },
+      { model: 'stepfun-ai/Step-3.5-Flash', modelName: 'Step 3.5 Flash', modelSeries: 'siliconflow', contextLength: 262_144, maxOutputTokens: 65_536 },
     ],
   },
   {
@@ -700,14 +709,15 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'anthropic/claude-sonnet-4.6', opus: 'anthropic/claude-opus-4.6', haiku: 'volcengine/doubao-seed-2.0-lite' },
     models: [
-      { model: 'google/gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro', modelSeries: 'google' },
-      { model: 'anthropic/claude-sonnet-4.6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude' },
-      { model: 'anthropic/claude-opus-4.6', modelName: 'Claude Opus 4.6', modelSeries: 'claude' },
-      { model: 'volcengine/doubao-seed-2.0-pro', modelName: 'Doubao Seed 2.0 Pro', modelSeries: 'volcengine' },
-      { model: 'volcengine/doubao-seed-2.0-lite', modelName: 'Doubao Seed 2.0 Lite', modelSeries: 'volcengine' },
-      { model: 'minimax/minimax-m2.5', modelName: 'MiniMax M2.5', modelSeries: 'minimax' },
-      { model: 'moonshotai/kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'moonshot' },
-      { model: 'z-ai/glm-5', modelName: 'GLM 5', modelSeries: 'zhipu' },
+      // ZenMux 聚合路由，上下文取各上游原生窗口
+      { model: 'google/gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_536 },
+      { model: 'anthropic/claude-sonnet-4.6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 64_000 },
+      { model: 'anthropic/claude-opus-4.6', modelName: 'Claude Opus 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000 },
+      { model: 'volcengine/doubao-seed-2.0-pro', modelName: 'Doubao Seed 2.0 Pro', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000 },
+      { model: 'volcengine/doubao-seed-2.0-lite', modelName: 'Doubao Seed 2.0 Lite', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000 },
+      { model: 'minimax/minimax-m2.5', modelName: 'MiniMax M2.5', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192 },
+      { model: 'moonshotai/kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144 },
+      { model: 'z-ai/glm-5', modelName: 'GLM 5', modelSeries: 'zhipu', contextLength: 200_000, maxOutputTokens: 128_000 },
     ],
   },
   {
@@ -726,10 +736,10 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'qwen3.5-plus', opus: 'qwen3.5-plus', haiku: 'qwen3.5-plus' },
     models: [
-      { model: 'qwen3.5-plus', modelName: 'Qwen 3.5 Plus', modelSeries: 'aliyun' },
-      { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'aliyun' },
-      { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'aliyun' },
-      { model: 'MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'aliyun' },
+      { model: 'qwen3.5-plus', modelName: 'Qwen 3.5 Plus', modelSeries: 'aliyun', contextLength: 991_808, maxOutputTokens: 65_536 },
+      { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'aliyun', contextLength: 262_144, maxOutputTokens: 262_144 },
+      { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'aliyun', contextLength: 200_000, maxOutputTokens: 128_000 },
+      { model: 'MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'aliyun', contextLength: 196_608, maxOutputTokens: 8_192 },
     ],
   },
   {
@@ -747,16 +757,16 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'google/gemini-3.1-pro-preview', opus: 'google/gemini-3.1-pro-preview', haiku: 'google/gemini-3-flash-preview' },
     models: [
-      { model: 'google/gemini-3.1-flash-lite-preview', modelName: 'Gemini 3.1 Flash Lite', modelSeries: 'google' },
-      { model: 'google/gemini-3-flash-preview', modelName: 'Gemini 3 Flash', modelSeries: 'google' },
-      { model: 'google/gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro', modelSeries: 'google' },
-      { model: 'anthropic/claude-sonnet-4.6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude' },
-      { model: 'anthropic/claude-opus-4.6', modelName: 'Claude Opus 4.6', modelSeries: 'claude' },
-      { model: 'anthropic/claude-haiku-4.5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
-      { model: 'openai/gpt-5.4', modelName: 'GPT-5.4', modelSeries: 'openai' },
-      { model: 'openai/gpt-5.4-pro', modelName: 'GPT-5.4 Pro', modelSeries: 'openai' },
-      { model: 'openai/gpt-5.3-codex', modelName: 'GPT-5.3 Codex', modelSeries: 'openai' },
-      { model: 'openai/gpt-5.3-chat', modelName: 'GPT-5.3 Chat', modelSeries: 'openai' },
+      { model: 'google/gemini-3.1-flash-lite-preview', modelName: 'Gemini 3.1 Flash Lite', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_536 },
+      { model: 'google/gemini-3-flash-preview', modelName: 'Gemini 3 Flash', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_535 },
+      { model: 'google/gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_536 },
+      { model: 'anthropic/claude-sonnet-4.6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 64_000 },
+      { model: 'anthropic/claude-opus-4.6', modelName: 'Claude Opus 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000 },
+      { model: 'anthropic/claude-haiku-4.5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude', contextLength: 200_000, maxOutputTokens: 64_000 },
+      { model: 'openai/gpt-5.4', modelName: 'GPT-5.4', modelSeries: 'openai', contextLength: 1_050_000, maxOutputTokens: 128_000 },
+      { model: 'openai/gpt-5.4-pro', modelName: 'GPT-5.4 Pro', modelSeries: 'openai', contextLength: 1_050_000, maxOutputTokens: 128_000 },
+      { model: 'openai/gpt-5.3-codex', modelName: 'GPT-5.3 Codex', modelSeries: 'openai', contextLength: 272_000, maxOutputTokens: 128_000 },
+      { model: 'openai/gpt-5.3-chat', modelName: 'GPT-5.3 Chat', modelSeries: 'openai', contextLength: 128_000, maxOutputTokens: 16_384 },
     ],
   },
 ];

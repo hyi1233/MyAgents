@@ -6,6 +6,7 @@ import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SD
 import { getScriptDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
+import { lookupModelContextLength } from './utils/model-capabilities';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 // Context helpers only — tool server singletons are no longer exported from
 // these modules. The actual SDK server objects are created on-demand via
@@ -403,7 +404,8 @@ type RestartReason =
   | 'agents'       // setAgents — sub-agent definitions changed
   | 'provider'     // setSessionProviderEnv — provider env (baseUrl, apiKey, etc.) changed
   | 'proxy'        // triggerProxyRestart — HTTP proxy changed via Settings
-  | 'oauth';       // MCP OAuth token acquired/refreshed
+  | 'oauth'        // MCP OAuth token acquired/refreshed
+  | 'model-window'; // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
 
 // Deferred config restart: config changes during an active turn / pre-warm
 // stage set a reason in this set instead of aborting immediately. Two consumers
@@ -1260,6 +1262,23 @@ export function setSessionModel(model: string): void {
     querySession.setModel(model).catch(err => {
       console.error('[agent] failed to apply model to running session:', err);
     });
+  }
+
+  // CLAUDE_CODE_AUTO_COMPACT_WINDOW is baked into the subprocess env at spawn
+  // time and cannot be updated on a live process — `querySession.setModel()`
+  // above only switches the model ID the SDK sends to the provider. So if the
+  // old and new models have different `contextLength`, the autocompact
+  // threshold stays frozen at the old model's cap until the next subprocess
+  // respawn. Schedule a deferred restart so the fresh env reflects the new
+  // model's real window. Same rationale as the `provider` reason in
+  // `setSessionProviderEnv` — env-baked knobs need a respawn.
+  const oldCtx = lookupModelContextLength(oldModel);
+  const newCtx = lookupModelContextLength(model);
+  if (oldCtx !== newCtx) {
+    if (querySession) {
+      console.log(`[agent] model window changed (${oldCtx ?? 'SDK-default'} → ${newCtx ?? 'SDK-default'}) → schedule deferred restart to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW`);
+      scheduleDeferredRestart('model-window');
+    }
   }
 }
 
@@ -2723,7 +2742,23 @@ function sealCcAuthEnv(env: NodeJS.ProcessEnv): void {
   }
 }
 
-export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.ProcessEnv {
+/**
+ * Build the env map passed to the Claude Agent SDK subprocess.
+ *
+ * @param providerEnv  Override the active session's provider. Used by
+ *   one-shot callers (provider-verify, title-generator) that spawn an SDK
+ *   subprocess against a DIFFERENT provider than the Tab's active session.
+ * @param modelOverride  Override `currentModel` for the autocompact-window
+ *   lookup. MUST be provided whenever `providerEnv` overrides the session
+ *   provider; otherwise `currentModel` (which reflects the Tab's active
+ *   session, not the one we're building env for) would inject the wrong
+ *   cap into the verify/title subprocess. Safe to omit when this is a
+ *   regular session spawn where `currentModel` is already correct.
+ */
+export function buildClaudeSessionEnv(
+  providerEnv?: ProviderEnv,
+  modelOverride?: string,
+): NodeJS.ProcessEnv {
   // Ensure essential paths are always present, even when launched from Finder
   // (Finder launches via launchd which doesn't inherit shell environment variables)
   const { home } = getCrossPlatformEnv();
@@ -2932,6 +2967,50 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
       env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME = aliases.haiku;
     }
     console.log(`[env] Model aliases set: sonnet=${aliases.sonnet ?? '(none)'}, opus=${aliases.opus ?? '(none)'}, haiku=${aliases.haiku ?? '(none)'}`);
+  }
+
+  // ── Auto-compact effective window ──
+  // Claude Agent SDK's `getContextWindowForModel()` returns 200_000 as fallback
+  // for any non-Anthropic model (MODEL_CONTEXT_WINDOW_DEFAULT; see
+  // claude-code/src/utils/context.ts:97). For third-party models with smaller
+  // native windows (DeepSeek-chat 128K, GLM-4.5-Air 128K, …) this puts the
+  // autoCompactThreshold (~effectiveWindow − 13K) above the model's real limit
+  // → upstream API errors with "context_length_exceeded" before SDK fires
+  // compaction. SDK exposes `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env which caps
+  // the window via `Math.min(contextWindow, envCap)` (autoCompact.ts:40-46).
+  //
+  // We look the resolved model up in the flat custom+discovered+preset
+  // registry (see utils/model-capabilities.ts). The resolution order prefers
+  // `modelOverride` (one-shot callers that spawn against a different
+  // provider/model) over `currentModel` (active Tab session state) — see the
+  // function JSDoc for the rationale.
+  //
+  // `env` starts from `{ ...process.env }`, so any CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  // inherited from the user's shell / launch environment is already there. We
+  // MUST either override it with our computed value OR explicitly delete it;
+  // leaving the inherited value in place would silently cap subprocesses by
+  // whatever the user had in their shell rc, with no visibility.
+  //
+  // Scope: the cap is subprocess-env-wide, so sub-agents invoked via the
+  // model-alias map (`sonnet`/`opus`/`haiku` → different provider IDs) share
+  // the same cap as the primary model. Acceptable for V1 since the failing
+  // case (primary model hits its own 128K ceiling) is what this fixes;
+  // sub-agents on a smaller window would be further over-capped, not
+  // under-capped.
+  const resolvedModel = modelOverride ?? currentModel;
+  const modelContextLength = lookupModelContextLength(resolvedModel);
+  if (modelContextLength && modelContextLength > 0) {
+    env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(modelContextLength);
+    console.log(`[env] CLAUDE_CODE_AUTO_COMPACT_WINDOW=${modelContextLength} (model=${resolvedModel ?? '(unknown)'})`);
+  } else {
+    // Unknown / custom / missing-contextLength: clear any inherited value so
+    // SDK's built-in default (MODEL_CONTEXT_WINDOW_DEFAULT=200K) applies,
+    // exactly per product requirement #4. Logging only when a model is
+    // actually set — empty currentModel at pre-warm is a normal startup state.
+    delete env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+    if (resolvedModel) {
+      console.log(`[env] No contextLength found for model=${resolvedModel} — SDK default 200K applies`);
+    }
   }
 
   // OpenAI Bridge: if provider uses OpenAI protocol, loopback to sidecar

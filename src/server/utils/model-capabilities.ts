@@ -1,0 +1,218 @@
+/**
+ * Model capability lookup — read-side for CLAUDE_CODE_AUTO_COMPACT_WINDOW injection.
+ *
+ * Problem: Claude Agent SDK's autoCompact threshold derives from
+ * `getContextWindowForModel(model)` which only recognizes Claude-family models
+ * natively; everything else falls back to MODEL_CONTEXT_WINDOW_DEFAULT = 200_000.
+ * For third-party providers with smaller windows (e.g. DeepSeek V3 = 128K),
+ * the threshold sits above the upstream limit → upstream returns a raw 400
+ * "context_length_exceeded" before SDK fires compaction.
+ *
+ * Fix: inject env `CLAUDE_CODE_AUTO_COMPACT_WINDOW=<N>` so SDK caps its
+ * effective window estimate via `Math.min(contextWindow, N)` (autoCompact.ts:40-46).
+ *
+ * Data sources (in **disk-first override order** — first wins):
+ *   1. `~/.myagents/providers/*.json` — user-defined custom providers.
+ *   2. `~/.myagents/config.json::presetCustomModels[providerId][]` — models
+ *      discovered/added by the user via the UI on preset providers.
+ *   3. `PRESET_PROVIDERS` (bundled in `renderer/config/types.ts`) — fallback.
+ *
+ * Rationale for the order: it mirrors the `findProvider`-style disk-first
+ * precedence elsewhere in admin-config. If a user pins a corrected
+ * `contextLength` for `deepseek-chat` in their own providers file (e.g.
+ * because a proxy in front enforces a tighter cap), their value must win
+ * over the preset default — otherwise their override is silently ignored.
+ *
+ * Design:
+ *   - Flat Map<modelId, capability>. First-wins across sources.
+ *   - Rebuilt every call. Called at session-env build boundaries (Tab /
+ *     CronTask / Agent / BackgroundCompletion session spawn, pre-warm,
+ *     provider-verify, title-gen). Each call: ≤1 `readdirSync` + bounded
+ *     `readFileSync` (capped at 256 files / 1 MB each) + one `config.json`
+ *     read. Cache is deliberately skipped so mid-session provider edits take
+ *     effect without an invalidate-hook.
+ *   - Returns undefined if the model isn't in any registry — callers MUST
+ *     treat undefined as "leave SDK's built-in default alone".
+ *
+ * Scope:
+ *   - Covers the builtin Claude Agent SDK path in `agent-session.ts`. External
+ *     runtimes (Claude Code CLI / Codex / Gemini — `src/server/runtimes/`)
+ *     spawn via their own env-build (`runtimes/env-utils.ts`) and currently
+ *     do NOT receive `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. That's acceptable
+ *     for V1 because Codex/Gemini manage compaction differently and the CC
+ *     CLI's `-p` mode respawns per turn. See runtimes/claude-code.ts if the
+ *     coverage gap needs closing.
+ */
+
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
+import { resolve } from 'path';
+import { getHomeDirOrNull } from './platform';
+import { stripBom } from '../../shared/utils';
+// Static import over `require()` / dynamic import(): `types.ts` has zero
+// transitive imports (verified 2026-04) so this doesn't pull in React or any
+// renderer-only code at Sidecar load time. The alternative — native
+// `createRequire()(...)` — cannot resolve `.ts` extensions in dev mode
+// (`node --import tsx/esm` only shims the ESM loader, not require), which
+// would make PRESET_PROVIDERS silently empty and defeat the whole mechanism.
+import { PRESET_PROVIDERS } from '../../renderer/config/types';
+
+export interface ModelCapability {
+  contextLength?: number;
+  maxOutputTokens?: number;
+  source: 'preset' | 'custom' | 'discovered';
+}
+
+// Safety caps for malicious / runaway inputs. A rogue ~/.myagents/providers/
+// directory with thousands of files would otherwise freeze the event loop
+// on every session-env build.
+const MAX_PROVIDER_FILES = 256;
+const MAX_PROVIDER_FILE_BYTES = 1 * 1024 * 1024;      // 1 MB
+const MAX_CONFIG_FILE_BYTES = 10 * 1024 * 1024;       // 10 MB
+// Values above this are almost certainly bogus. Largest known public model is
+// ~10M context (Gemini 2M, Llama 3.1 10M); 20M is generous headroom.
+const MAX_PLAUSIBLE_TOKENS = 20_000_000;
+
+/** Coerce a JSON-ish numeric field to a finite positive integer, or null. */
+function coercePositiveFinite(v: unknown): number | undefined {
+  // LiteLLM and some discovery APIs return numbers as strings; accept both.
+  const n = typeof v === 'string' ? Number(v) : typeof v === 'number' ? v : NaN;
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_PLAUSIBLE_TOKENS) return undefined;
+  return Math.floor(n);
+}
+
+/** Best-effort extract {contextLength, maxOutputTokens} from a JSON-ish model entry. */
+function readCapability(entry: unknown, source: ModelCapability['source']): ModelCapability | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const e = entry as Record<string, unknown>;
+  const ctx = coercePositiveFinite(e.contextLength);
+  const out = coercePositiveFinite(e.maxOutputTokens);
+  if (!ctx && !out) return null;
+  return { contextLength: ctx, maxOutputTokens: out, source };
+}
+
+function ingestProviderList(
+  providers: unknown,
+  map: Map<string, ModelCapability>,
+  source: ModelCapability['source'],
+): void {
+  if (!Array.isArray(providers)) return;
+  for (const p of providers) {
+    if (!p || typeof p !== 'object') continue;
+    const models = (p as Record<string, unknown>).models;
+    if (!Array.isArray(models)) continue;
+    for (const m of models) {
+      if (!m || typeof m !== 'object') continue;
+      const mid = (m as Record<string, unknown>).model;
+      if (typeof mid !== 'string' || !mid) continue;
+      // First-wins. Load order (disk-first) determines priority; see module
+      // header for the rationale.
+      if (map.has(mid)) continue;
+      const cap = readCapability(m, source);
+      if (cap) map.set(mid, cap);
+    }
+  }
+}
+
+function loadCustomProvidersFromDisk(home: string): Array<Record<string, unknown>> {
+  const dir = resolve(home, '.myagents', 'providers');
+  if (!existsSync(dir)) return [];
+  const out: Array<Record<string, unknown>> = [];
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter(f => f.endsWith('.json'));
+  } catch (err) {
+    console.warn('[model-caps] readdir failed for ~/.myagents/providers/:', (err as Error)?.message ?? err);
+    return [];
+  }
+  if (files.length > MAX_PROVIDER_FILES) {
+    console.warn(`[model-caps] ~/.myagents/providers/ has ${files.length} files; processing first ${MAX_PROVIDER_FILES}`);
+    files = files.slice(0, MAX_PROVIDER_FILES);
+  }
+  for (const f of files) {
+    const filePath = resolve(dir, f);
+    try {
+      const stat = statSync(filePath);
+      if (stat.size > MAX_PROVIDER_FILE_BYTES) {
+        console.warn(`[model-caps] skip oversize provider file ${f} (${stat.size} bytes > ${MAX_PROVIDER_FILE_BYTES})`);
+        continue;
+      }
+      const raw = readFileSync(filePath, 'utf-8');
+      const p = JSON.parse(stripBom(raw)) as Record<string, unknown>;
+      if (p && typeof p === 'object' && typeof p.id === 'string') out.push(p);
+    } catch (err) {
+      console.warn(`[model-caps] skip malformed provider file ${f}:`, (err as Error)?.message ?? err);
+    }
+  }
+  return out;
+}
+
+function loadPresetCustomModels(home: string): Record<string, unknown> | null {
+  const configPath = resolve(home, '.myagents', 'config.json');
+  if (!existsSync(configPath)) return null;
+  try {
+    const stat = statSync(configPath);
+    if (stat.size > MAX_CONFIG_FILE_BYTES) {
+      console.warn(`[model-caps] skip oversize config.json (${stat.size} bytes > ${MAX_CONFIG_FILE_BYTES})`);
+      return null;
+    }
+    const raw = readFileSync(configPath, 'utf-8');
+    const cfg = JSON.parse(stripBom(raw)) as { presetCustomModels?: Record<string, unknown> };
+    return cfg.presetCustomModels ?? null;
+  } catch (err) {
+    console.warn('[model-caps] failed to read ~/.myagents/config.json:', (err as Error)?.message ?? err);
+    return null;
+  }
+}
+
+function buildRegistry(): Map<string, ModelCapability> {
+  const map = new Map<string, ModelCapability>();
+  const home = getHomeDirOrNull();
+
+  // 1) Custom providers from ~/.myagents/providers/*.json — disk-first override.
+  if (home) {
+    ingestProviderList(loadCustomProvidersFromDisk(home), map, 'custom');
+  }
+
+  // 2) Discovered models stored on preset providers (config.presetCustomModels).
+  //    Shape: { [providerId]: ModelEntity[] }. Populated by the "Discover
+  //    models" flow in ModelManagementPanel.tsx.
+  if (home) {
+    const pcm = loadPresetCustomModels(home);
+    if (pcm && typeof pcm === 'object') {
+      for (const models of Object.values(pcm)) {
+        if (!Array.isArray(models)) continue;
+        for (const m of models) {
+          if (!m || typeof m !== 'object') continue;
+          const mid = (m as Record<string, unknown>).model;
+          if (typeof mid !== 'string' || !mid) continue;
+          if (map.has(mid)) continue;
+          const cap = readCapability(m, 'discovered');
+          if (cap) map.set(mid, cap);
+        }
+      }
+    }
+  }
+
+  // 3) Bundled PRESET_PROVIDERS — fallback when neither user override nor
+  //    discovery has filled the same modelId.
+  ingestProviderList(PRESET_PROVIDERS, map, 'preset');
+
+  return map;
+}
+
+/**
+ * Look up the context window for a model.
+ * Returns undefined if the model isn't registered OR has no contextLength —
+ * callers MUST treat undefined as "don't touch the env var" so SDK's
+ * MODEL_CONTEXT_WINDOW_DEFAULT (200_000) remains in effect.
+ */
+export function lookupModelContextLength(modelId: string | undefined | null): number | undefined {
+  if (!modelId) return undefined;
+  return buildRegistry().get(modelId)?.contextLength;
+}
+
+/** Full capability record (contextLength + maxOutputTokens). Exported for future use. */
+export function lookupModelCapability(modelId: string | undefined | null): ModelCapability | undefined {
+  if (!modelId) return undefined;
+  return buildRegistry().get(modelId);
+}

@@ -101,7 +101,9 @@ export async function generateTitle(
     const cwd = join(homedir(), '.myagents', 'projects');
     ensureDirSync(cwd);
 
-    const env = buildClaudeSessionEnv(providerEnv);
+    // Pass `model` as the override so CLAUDE_CODE_AUTO_COMPACT_WINDOW is
+    // computed for the title-gen model, not the active Tab session's model.
+    const env = buildClaudeSessionEnv(providerEnv, model);
     const prompt = buildUserPrompt(rounds);
 
     async function* titlePrompt() {
