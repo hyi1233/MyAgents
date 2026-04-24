@@ -801,7 +801,6 @@ fn find_bridge_script<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Op
         if let Ok(resource_dir) = app_handle.path().resource_dir() {
             let bundled: PathBuf = resource_dir.join("plugin-bridge-dist.js");
             if bundled.exists() {
-                // Normalize \\?\ prefix — Bun hangs on extended-length paths
                 let bundled = normalize_external_path(bundled);
                 ulog_info!("[bridge] Using bundled bridge script: {:?}", bundled);
                 return Some(bundled);
@@ -809,29 +808,18 @@ fn find_bridge_script<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Op
         }
     }
 
-    // Development: source TS
-    let dev_candidates = [
-        // Relative to project root
-        "src/server/plugin-bridge/index.ts",
-    ];
-
-    // Find project root from Cargo.toml location
+    // Development: source TS (tsx/esm injected at spawn; see spawn_bridge)
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let project_root = std::path::Path::new(manifest_dir)
         .parent()
         .unwrap_or(std::path::Path::new("."));
-
-    for candidate in dev_candidates {
-        let path = project_root.join(candidate);
-        if path.exists() {
-            ulog_info!("[bridge] Using dev bridge script: {:?}", path);
-            return Some(path);
-        }
+    let ts_source = project_root.join("src/server/plugin-bridge/index.ts");
+    if ts_source.exists() {
+        ulog_info!("[bridge] Using dev bridge script: {:?}", ts_source);
+        return Some(ts_source);
     }
 
-    // Suppress unused variable warning in release builds
     let _ = app_handle;
-
     ulog_error!("[bridge] Bridge script not found");
     None
 }
@@ -890,17 +878,17 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     );
 
     let mut cmd = crate::process_cmd::new(&node_path);
-    // In debug mode bridge_script points at the TS source file; inject tsx's
-    // ESM loader so Node can transpile + resolve extensionless relative imports
-    // (e.g. `./compat-api` → `./compat-api.ts`). Release builds load the
-    // esbuild-bundled `.js` and skip the loader. Mirror of sidecar.rs's spawn.
-    if bridge_script
-        .extension()
-        .and_then(|s| s.to_str())
-        == Some("ts")
-    {
-        cmd.arg("--import").arg("tsx/esm");
-    }
+    // Always inject tsx/esm. Needed in two cases:
+    //   1. Dev: bridge_script is the TS source — tsx compiles it + resolves
+    //      extensionless relative imports (e.g. `./compat-api` → `./compat-api.ts`)
+    //   2. Prod: bridge_script is pre-bundled JS, but community OpenClaw plugins
+    //      often ship `.ts` source as their entry (per `openclaw.extensions`
+    //      protocol in package.json). Without tsx, Node refuses to load .ts
+    //      under node_modules for security ("Stripping types is currently
+    //      unsupported for files under node_modules").
+    // tsx leaves already-transpiled .js files alone, so loading it in JS-bundle
+    // mode has no functional side effect on bridge's own code.
+    cmd.arg("--import").arg("tsx/esm");
     cmd.arg(bridge_script.to_string_lossy().as_ref())
         // Same marker as regular sidecars — ensures cleanup_stale_sidecars()
         // can find and kill orphaned bridge processes after a crash
@@ -1458,7 +1446,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
 }
 
 /// Our shim's OpenClaw compat version. Must match sdk-shim/package.json and compat-runtime.ts.
-const SHIM_COMPAT_VERSION: &str = "2026.4.9";
+const SHIM_COMPAT_VERSION: &str = "2026.4.24";
 
 /// Check if installed plugin's peerDependencies.openclaw is compatible with our shim.
 /// Returns a warning message if incompatible, None if OK.
