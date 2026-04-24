@@ -263,13 +263,17 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
   useLayoutEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
+    if (isExpanded === true) {
+      ta.style.height = `${textareaMaxHeightPx}px`;
+      return;
+    }
     // Reset to 0 before reading scrollHeight so a shrinking value also
     // triggers a recompute (otherwise the textarea is stuck at its tallest
     // historical height).
     ta.style.height = '0px';
     const next = Math.min(ta.scrollHeight, textareaMaxHeightPx);
     ta.style.height = `${Math.max(next, textareaMinHeightPx)}px`;
-  }, [value, textareaMinHeightPx, textareaMaxHeightPx]);
+  }, [value, textareaMinHeightPx, textareaMaxHeightPx, isExpanded]);
 
   // Consume any pending caret position after React flushes `setValue` to
   // the DOM — safer than `requestAnimationFrame`, which can run before
@@ -402,18 +406,11 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
         ref={cardRef}
         className={`relative flex flex-col border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors ${theme.focusClass} ${theme.cardClass}`}
       >
-        {/* Outer content wrapper — carries padding in `launcher` variant
-            so the textarea's `minHeight` is pure-content (matching
-            SimpleChatInput's `LINE_HEIGHT * minLines`). In `compact`
-            variant `outerPaddingClass` is empty and the textarea owns
-            its own padding; that's the pre-split behaviour Task Center
-            relies on. */}
-        <div className={theme.outerPaddingClass}>
         {/* Mirror layer: same text as the textarea but with coloured `#tag`
             runs. Must match the textarea's font metrics so the highlighted
             spans sit under the same glyphs the user is typing.
             `pointer-events: none` keeps clicks reaching the textarea. */}
-        <div className="relative">
+        <div className={`relative ${theme.outerPaddingClass}`}>
           {/* Overlay clip box — matches textarea bounds (absolute inset-0)
               and hides anything past its edges. The actual text lives in
               an inner `overlayInnerRef` div that gets `translateY(-scrollTop)`
@@ -425,7 +422,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
           >
             <div
               ref={overlayInnerRef}
-              className={`${theme.innerPaddingClass} ${theme.textareaClass} text-[var(--ink)]`}
+              className={`${theme.outerPaddingClass} ${theme.innerPaddingClass} ${theme.textareaClass} text-[var(--ink)]`}
               style={{
                 fontFamily: 'inherit',
                 whiteSpace: 'pre-wrap',
@@ -489,7 +486,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             // click area so content can't overlap the toggle button
             // (matches SimpleChatInput's `pr-8` but one size larger to
             // accommodate the toggle's larger hit box).
-            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none ${theme.innerPaddingClass} ${theme.textareaClass} ${showExpandToggle ? 'pr-10' : ''}`}
+            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-muted)] placeholder:[-webkit-text-fill-color:var(--ink-muted)] focus:outline-none ${theme.innerPaddingClass} ${theme.textareaClass} ${showExpandToggle ? 'pr-10' : ''}`}
             style={{
               fontFamily: 'inherit',
               WebkitTextFillColor: 'transparent',
@@ -513,7 +510,6 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
               {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
             </button>
           )}
-        </div>
         </div>
 
         {/* Tag autocomplete — Escape dismissal is owned by the textarea's
