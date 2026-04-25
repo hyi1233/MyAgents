@@ -1,7 +1,5 @@
 # 全文搜索架构
 
-> 最后更新：v0.1.65 (2026-04-14)
-
 ## 概述
 
 MyAgents 的全文搜索由一个 Rust 层单例 `SearchEngine` 提供，构建在 [Tantivy](https://github.com/quickwit-oss/tantivy)（Rust 原生全文搜索引擎，BM25 评分）+ [tantivy-jieba](https://github.com/jiegec/tantivy-jieba)（中文分词，~37 万词词典）之上。对外暴露两类能力：

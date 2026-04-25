@@ -1,7 +1,5 @@
 # Multi-Agent Runtime 架构
 
-> 最后更新：v0.1.66 (2026-04-14)
-
 ## 概述
 
 Multi-Agent Runtime 允许用户选择不同的 AI Runtime 驱动 Agent 会话。除内置 Claude Agent SDK（builtin）外，支持 Claude Code CLI、OpenAI Codex CLI、Google Gemini CLI 作为外部 Runtime。
@@ -347,7 +345,7 @@ interface PersistContentBlock {
 | Codex | 无等价 RPC → fallback 到停进程 resume |
 | Claude Code | `-p` 模式每轮都重启,无意义 → fallback 到停进程 resume |
 
-### 预热 Pre-warm (v0.1.68)
+### 预热 Pre-warm
 
 Gemini / Codex 冷启动(spawn CLI + `initialize` + `session/new`)约 10–15 秒,用户在此期间打字无反馈。`prewarmExternalSession()` 把这段时间挪到 Tab 打开的瞬间:
 

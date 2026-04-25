@@ -1,11 +1,6 @@
 # 代理配置说明
 
-**更新日期**: 2026-03-27
-**版本**: v0.1.54
-
----
-
-## 📋 概述
+## 概述
 
 MyAgents 支持统一的代理配置，用于访问外部服务（Anthropic API、CDN 等）。代理配置存储在 `~/.myagents/config.json` 中，由应用的「设置 - 通用 - 网络代理」管理。
 
@@ -243,37 +238,7 @@ let client = reqwest::Client::builder()
     .build()?;
 ```
 
----
-
-## 🔄 历史问题
-
-### v0.1.7 之前的问题
-
-**问题**: Windows 上 Rust reqwest 默认使用系统代理，导致访问 localhost 失败。
-
-**错误日志**:
-```
-[proxy] Request failed: error sending request for url (http://127.0.0.1:31415/...)
-```
-
-**根本原因**:
-- reqwest 默认使用系统代理（如 Clash: 127.0.0.1:7890）
-- Windows 系统代理未正确处理 localhost 排除
-- 导致 localhost 请求被发送到代理，连接失败
-
-**修复**:
-- v0.1.7: 所有 localhost 请求强制 `.no_proxy()`
-- v0.1.7: 外部请求统一使用应用内代理配置
-
----
-
-**最后更新**: 2026-01-31
-**相关 PR**: dev/prd-0.1.7
-**相关文件**:
-- `src-tauri/src/proxy_config.rs` - 共享代理配置
-- `src-tauri/src/sidecar.rs` - Node.js Sidecar 代理注入
-- `src-tauri/src/updater.rs` - Updater 代理配置
-- `src-tauri/src/sse_proxy.rs` - SSE 代理禁用
+> 实践中 MUST 用 `crate::local_http::*` 连 localhost，自动注入 `.no_proxy()`。详见 `pit_of_success.md` 的「local_http」节。
 
 ---
 

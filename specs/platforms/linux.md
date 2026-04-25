@@ -1,6 +1,6 @@
 # Linux 平台构建与运行指南
 
-> v0.2.0+ 新增。MyAgents 在 Linux 上通过 AppImage（便携）+ deb（apt 源）分发。
+MyAgents 在 Linux 上通过 AppImage（便携）+ deb（apt 源）分发。
 
 ## 支持矩阵
 

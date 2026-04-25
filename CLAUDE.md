@@ -55,15 +55,15 @@
 | IM Bot / Telegram / Dingtalk / 飞书 | `tech_docs/im_integration_architecture.md` |
 | Plugin Bridge / OpenClaw / SDK shim | `tech_docs/plugin_bridge_architecture.md` |
 | Claude Code / Codex / Gemini Runtime | `tech_docs/multi_agent_runtime.md` |
-| Session ID / 存储 / 状态同步 | `tech_docs/session_id_architecture.md` |
+| Session ID / 存储 / 状态同步 | `tech_docs/session_architecture.md` |
 | 全文搜索（Tantivy / jieba） | `tech_docs/search_architecture.md` |
 | 内置 Node.js / SDK native binary / PATH 注入 | `tech_docs/bundled_node.md` |
 | `myagents` CLI / Admin API | `tech_docs/cli_architecture.md` |
 | 三方供应商 / OpenAI Bridge | `tech_docs/third_party_providers.md` |
 | 系统代理 / SOCKS5 桥接 | `tech_docs/proxy_config.md` |
 | 统一日志 | `tech_docs/unified_logging.md` |
-| Windows / Linux 平台 | `tech_docs/windows_platform_guide.md` / `linux_platform_guide.md` |
-| 构建问题排查 | `tech_docs/build_troubleshooting.md` |
+| Windows / Linux 平台 | `platforms/windows.md` / `platforms/linux.md` |
+| 构建问题排查 | `platforms/build_troubleshooting.md` |
 | 自动更新机制 | `tech_docs/auto_update.md` |
 | SDK `canUseTool` / 工具权限回调 | `tech_docs/sdk_canUseTool_guide.md` |
 | SDK 自定义 Tool / `createSdkMcpServer` | `tech_docs/sdk_custom_tools_guide.md` |

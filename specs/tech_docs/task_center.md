@@ -1,6 +1,6 @@
 # 任务中心架构
 
-> v0.1.69 主线特性。把"想法速记 → 对齐 → 派发 → 执行 → 验收 → 审计"的完整工作流提升为一等公民。
+> 把"想法速记 → 对齐 → 派发 → 执行 → 验收 → 审计"的完整工作流一等公民化。
 > 数据层全部在 Rust，前端按卡片 / 列表双视图呈现，AI 和用户共享同一套 CLI 操作闭环。
 
 ## 数据层 (Rust)
@@ -80,7 +80,7 @@ Todo → Running → Verifying ↔ Done
 
 ## Legacy Cron 升级 (`legacy_upgrade.rs`)
 
-v0.1.69 之前的独立 CronTask 在首次加载时被检测为 "legacy"，自动升级成带 Task 的结构：
+早期版本的独立 CronTask 在首次加载时被检测为 "legacy"，自动升级成带 Task 的结构：
 
 - **幂等：** `set_task_id(cron_id, new_task_id, require_null=true)` CAS，已升级过的 cron 会被 short-circuit 跳过
 - **Rollback：**

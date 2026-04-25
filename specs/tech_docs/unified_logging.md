@@ -228,7 +228,7 @@ for (const entry of entries) {
 2026-03-26 10:30:46.234 {"type":"assistant","message":{"role":"assistant","content":[...]},...}
 ```
 
-## Boot Banner (v0.1.53)
+## Boot Banner
 
 应用启动和每个 Sidecar 创建时输出 `[boot]` 单行自检信息：
 
@@ -239,7 +239,7 @@ for (const entry of entries) {
 
 **排查第一步**：`grep '[boot]' ./logs/unified-*.log`
 
-## 日志降噪策略 (v0.1.53)
+## 日志降噪策略
 
 五层过滤将信噪比从 36% 提升到 ~85%：
 

@@ -1,11 +1,6 @@
 # Windows 平台适配指南
 
-**最后更新**: 2026-01-31
-**适用版本**: v0.1.7+
-
----
-
-## 📋 概述
+## 概述
 
 本文档总结了 MyAgents Windows 平台适配的关键技术点和最佳实践，包含路径处理、进程管理、环境变量、CSP 配置等方面的经验。
 
@@ -66,7 +61,7 @@ export function getPlatformPaths() {
 
 ## 🔧 进程管理
 
-### Node.js 运行时路径（v0.2.0+）
+### Node.js 运行时路径
 
 **Windows 查找顺序**（`src/server/utils/runtime.ts::getBundledNodePath()`）：
 1. Bundled Node.js（`Contents\resources\nodejs\node.exe`，构建时从 nodejs.org 下载）
@@ -165,7 +160,7 @@ let builder = reqwest::Client::builder()
 let client = proxy_config::build_client_with_proxy(builder)?;
 ```
 
-**详见**：[proxy_config.md](./proxy_config.md)
+**详见**：[proxy_config.md](../tech_docs/proxy_config.md)
 
 ---
 
@@ -185,7 +180,7 @@ let client = proxy_config::build_client_with_proxy(builder)?;
 
 **正确的清理脚本**（`build_windows.ps1`）：
 ```powershell
-# 杀死残留 MyAgents 进程（v0.2.0+ Bun 已移除，不再需要杀 bun.exe）
+# 杀死残留 MyAgents 进程
 Get-Process | Where-Object { $_.ProcessName -eq "MyAgents" } | Stop-Process -Force
 
 # 清理构建产物
@@ -255,7 +250,7 @@ Tauri GUI 应用从 Finder/Explorer 启动时不继承 shell PATH（无 homebrew
    └─ NODE_OPTIONS=--no-experimental-require-module（Windows Node.js v24 CJS/ESM 修复）
 ```
 
-v0.2.0+ 已移除 Bun fallback —— 生产构建与 setup 脚本统一依赖 bundled Node.js + npm。
+生产构建与 setup 脚本统一依赖 bundled Node.js + npm。
 
 安装后流程：
 1. `npm install` → 安装插件及其依赖
@@ -288,7 +283,7 @@ $env:CLAUDE_CODE_GIT_BASH_PATH="C:\Program Files\Git\bin\bash.exe"
 2. **常见原因**：`requires git-bash` 表示缺少 Git
 3. **解决方案**：安装 Git for Windows 或设置 `CLAUDE_CODE_GIT_BASH_PATH`
 
-**详见**：[bundled_node.md](./bundled_node.md) 中的 Windows Git 依赖说明
+**详见**：[bundled_node.md](../tech_docs/bundled_node.md) 中的 Windows Git 依赖说明
 
 ---
 
@@ -296,5 +291,5 @@ $env:CLAUDE_CODE_GIT_BASH_PATH="C:\Program Files\Git\bin\bash.exe"
 
 - [Windows 构建指南](../guides/windows_build_guide.md)
 - [构建问题排查](./build_troubleshooting.md)
-- [代理配置](./proxy_config.md)
-- [自动更新](./auto_update.md)
+- [代理配置](../tech_docs/proxy_config.md)
+- [自动更新](../tech_docs/auto_update.md)

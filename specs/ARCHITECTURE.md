@@ -560,7 +560,7 @@ installer.ts         — 扫描 SKILL.md / marketplace.json → InstallAnalysis
 | 用户名 | `USER` | `USERNAME` |
 | 临时目录 | `TMPDIR` | `TEMP` / `TMP` |
 
-详见 `tech_docs/windows_platform_guide.md` / `tech_docs/linux_platform_guide.md`。
+详见 `platforms/windows.md` / `platforms/linux.md`。
 
 ---
 
@@ -667,12 +667,10 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 - [自动更新系统](./tech_docs/auto_update.md) — Chrome/VSCode 风格静默更新机制
 
 ### 通信与会话
-- [Session ID 架构](./tech_docs/session_id_architecture.md) — Session 生命周期、ID 格式（**首选**）
+- [Session 架构](./tech_docs/session_architecture.md) — ID 格式、JSONL 存储、SDK 双重存储、状态同步
 - [代理配置](./tech_docs/proxy_config.md) — 系统代理 + SOCKS5 桥接
 - [统一日志](./tech_docs/unified_logging.md) — 日志格式、来源、排查指南
 - [三方供应商](./tech_docs/third_party_providers.md) — 环境变量、认证模式、Bridge 原理
-
-> 历史 / 重叠文档（保留供参考，不再首选）：`session_singleton_architecture.md`、`session_storage.md`、`session_state_sync.md` —— 这三份与 `session_id_architecture.md` 内容部分重叠，新会话/AI 应优先读 `session_id_architecture.md`。
 
 ### Multi-Agent Runtime / Agent / IM
 - [Multi-Agent Runtime](./tech_docs/multi_agent_runtime.md) — CC / Codex / Gemini 协议、会话管理、门控链路
@@ -688,9 +686,9 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 - [自定义 Tools 指南](./tech_docs/sdk_custom_tools_guide.md) — `createSdkMcpServer` + `tool` 用法、当前 SDK 工具清单
 
 ### 平台
-- [Windows 平台适配](./tech_docs/windows_platform_guide.md)
-- [Linux 平台适配](./tech_docs/linux_platform_guide.md)
-- [构建问题排查](./tech_docs/build_troubleshooting.md) — Windows 构建 / CSP / Resources 缓存 / 代理
+- [Windows 平台适配](./platforms/windows.md)
+- [Linux 平台适配](./platforms/linux.md)
+- [构建问题排查](./platforms/build_troubleshooting.md) — Windows 构建 / CSP / Resources 缓存 / 代理
 
 ### 前端
 - [设计系统](./DESIGN.md) — Token / 组件 / 页面规范
@@ -699,6 +697,5 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 ### CLI
 - [CLI 架构](./tech_docs/cli_architecture.md) — 自配置 CLI 设计、版本门控、Admin API、PATH 注入
 
-### 决策与历史
-- [Logger 选型 ADR](./tech_docs/decision_logger_library.md) — 不替换为 pino / tracing 的决策依据
-- [v0.1.41 Agent 架构升级技术债清单](./tech_docs/agent_architecture_tech_debt.md) — 历史 TD（多数已 RESOLVED）
+### 决策记录（ADR）
+- [Logger 选型](./decisions/logger_library.md) — 不替换为 pino / tracing 的决策依据

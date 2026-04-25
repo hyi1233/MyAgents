@@ -71,7 +71,7 @@ getScriptDir(): string
 getBundledNodePath(): string | null
 getBundledNodeDir(): string | null   // 含 node / npm / npx 的目录
 
-// 包管理器 — v0.2.0+ 一律返回 npm
+// 包管理器 — 一律返回 npm
 getPackageManagerPath(): { command, installArgs, type: 'npm' }
 
 // 系统 Node.js 目录（用户安装的 node/npm，优先级高于 bundled）
@@ -97,7 +97,7 @@ SDK 子进程（AI Bash 工具）看到的 PATH 优先级：
 - 通过 `process_cmd::new()` spawn（Windows 自动 `CREATE_NO_WINDOW`）
 - 环境变量通过 `proxy_config::apply_to_subprocess` 注入 `NO_PROXY` 保护 localhost
 
-### 内置 in-process MCP（v0.2.0+ 懒加载）
+### 内置 in-process MCP（懒加载）
 
 6 个内置 MCP（cron-tools / im-cron / im-media / generative-ui / gemini-image / edge-tts）通过 `src/server/tools/builtin-mcp-meta.ts` 的 META 登记 + `createXxxServer()` 工厂懒加载，**不在** Sidecar 冷启动时创建。见 `ARCHITECTURE.md §Builtin MCP 懒加载架构`。
 
@@ -148,7 +148,7 @@ v0.2.0 之前这些步骤用 `bun build` + `bun install` — 完全切到 Node.j
 | `ERR_DLOPEN_FAILED` (better-sqlite3) | native addon 按不同 Node ABI 编译 | `setup.sh` / `build_dev.sh` 用 bundled Node 的 PATH 跑 `npm rebuild`（已自动做） |
 | Sidecar 立即退出 (exit code 1) | 依赖解析失败 | 检查 `server-dist.js` 打包是否成功 |
 | 120s 超时 | health check 失败 | 查看 `[NODE]` 日志定位根因 |
-| MCP 安装失败 | 包管理器未找到 | 确认 `getPackageManagerPath()` 返回 npm（v0.2.0+ 固定是 npm） |
+| MCP 安装失败 | 包管理器未找到 | 确认 `getPackageManagerPath()` 返回 npm（固定 npm） |
 | `Claude Code process exited with code 1` (Windows) | 缺少 Git for Windows | NSIS 安装程序内置 Git；或设 `CLAUDE_CODE_GIT_BASH_PATH` 环境变量 |
 | npm v11.9.0 minizlib CJS bug (Windows) | bundled npm 与 Windows 某些文件锁冲突 | `setup_windows.ps1` / `build_windows.ps1` 自动升级到 latest npm |
 

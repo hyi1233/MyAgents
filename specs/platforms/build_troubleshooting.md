@@ -1,11 +1,6 @@
 # 构建问题排查指南
 
-**最后更新**: 2026-01-31
-**适用版本**: v0.1.7+
-
----
-
-## 📋 目录
+## 目录
 
 1. [Windows 构建脚本常见问题](#windows-构建脚本常见问题)
 2. [CSP 配置错误](#csp-配置错误)
@@ -26,7 +21,7 @@ Refused to connect because it violates the document's Content Security Policy
 
 **根本原因**：
 
-构建脚本存在两个严重 BUG（已在 v0.1.7 修复）：
+早期构建脚本存在两个严重 BUG（修复后保留为已知陷阱说明）：
 
 #### Bug 1: 缺少 resources 目录清理
 
@@ -138,7 +133,7 @@ Remove-Item src-tauri/target/x86_64-pc-windows-msvc/debug/resources -Recurse -Fo
 Remove-Item src-tauri/target/x86_64-pc-windows-msvc/release/resources -Recurse -Force
 ```
 
-或使用构建脚本（v0.1.7+ 自动处理）：
+或使用构建脚本（已自动处理）：
 ```powershell
 .\build_windows.ps1  # 自动清理 release/resources
 .\build_dev_win.ps1  # 自动清理 debug/resources
@@ -160,16 +155,16 @@ Remove-Item src-tauri/target/x86_64-pc-windows-msvc/release/resources -Recurse -
 - Windows 系统代理未正确处理 localhost 排除
 - localhost 请求被发送到代理，连接失败
 
-**解决方案**（已在 v0.1.7 修复）：
+**解决方案**：
 
-所有 localhost 请求强制禁用代理：
+所有 localhost 请求强制禁用代理（详见 `pit_of_success.md` 的 `local_http` 节）：
 ```rust
 let client = reqwest::Client::builder()
     .no_proxy()  // 禁用所有代理（包括系统代理）
     .build()?;
 ```
 
-**详见**：[proxy_config.md](./proxy_config.md)
+**详见**：[proxy_config.md](../tech_docs/proxy_config.md)
 
 ---
 
@@ -196,5 +191,5 @@ let client = reqwest::Client::builder()
 ## 相关文档
 
 - [Windows 构建指南](../guides/windows_build_guide.md)
-- [代理配置](./proxy_config.md)
-- [Windows 平台指南](./windows_platform_guide.md)
+- [代理配置](../tech_docs/proxy_config.md)
+- [Windows 平台指南](./windows.md)
