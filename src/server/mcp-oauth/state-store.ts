@@ -10,6 +10,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { McpOAuthState, McpOAuthStateStore, LegacyOAuthToken } from './types';
 import { ensureDirSync } from '../utils/fs-utils';
 import { withFileLock } from '../utils/file-lock';
@@ -42,24 +43,24 @@ function getStateLockPath(): string {
   return join(locksDir, 'state-store.lock');
 }
 
+// Per-async-chain reentrancy flag. Two concurrent callers each have their own
+// ALS frame, so they don't bypass each other. A genuine recursive call from
+// inside the lock's `op` (same async chain) sees the flag and skips re-locking.
+const insideWriteLock = new AsyncLocalStorage<true>();
+
 async function withWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
-  if (writeLockDepth > 0) {
+  if (insideWriteLock.getStore()) {
     return await fn();
   }
 
-  writeLockDepth++;
-  try {
-    return await withFileLock(
-      {
-        lockPath: getStateLockPath(),
-        timeoutMs: WRITE_LOCK_TIMEOUT_MS,
-        staleMs: WRITE_LOCK_STALE_MS,
-      },
-      async () => fn(),
-    );
-  } finally {
-    writeLockDepth--;
-  }
+  return await withFileLock(
+    {
+      lockPath: getStateLockPath(),
+      timeoutMs: WRITE_LOCK_TIMEOUT_MS,
+      staleMs: WRITE_LOCK_STALE_MS,
+    },
+    async () => insideWriteLock.run(true, async () => fn()),
+  );
 }
 
 /** Migrate legacy mcp_oauth_tokens.json to new state format */
@@ -105,7 +106,6 @@ function migrateFromLegacy(): McpOAuthStateStore {
 // because OAuth state is shared by multiple sidecar processes.
 let memoryCache: McpOAuthStateStore | null = null;
 let memoryCacheFile: string | null = null;
-let writeLockDepth = 0;
 
 /** Load the full OAuth state store from disk */
 export function loadStateStore(_forceReload = false): McpOAuthStateStore {
@@ -209,5 +209,4 @@ export function isDiscoveryCacheValid(discovery: McpOAuthState['discovery']): bo
 export function resetStateStoreCacheForTests(): void {
   memoryCache = null;
   memoryCacheFile = null;
-  writeLockDepth = 0;
 }

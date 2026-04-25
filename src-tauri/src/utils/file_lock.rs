@@ -1,21 +1,26 @@
 //! Generic cross-process file lock helper (Pattern 5 — single-writer invariant).
 //!
 //! Mirrors `src/server/utils/file-lock.ts`. The lock primitive is atomic
-//! `create_dir`; an `owner` file inside the lockdir holds `<runtime>:<pid>`
-//! (`rust:<pid>` here) so other processes (Node sidecar, renderer) can probe
-//! liveness for stale-recovery. We delegate the actual blocking work to
-//! `tokio::task::spawn_blocking` so the async runtime worker stays free.
+//! `create_dir`; an `owner` file inside the lockdir holds the 3-tuple
+//! `<runtime>:<pid>:<startMs>` (`rust:<pid>:<startMs>` here, `node:<pid>:<startMs>`
+//! from Node) so other processes can probe both liveness and pid-reuse for
+//! stale-recovery. The 2-tuple `<runtime>:<pid>` shape is still understood for
+//! backwards compatibility with locks written by older binaries. We delegate
+//! the actual blocking work to `tokio::task::spawn_blocking` so the async
+//! runtime worker stays free.
 //!
 //! Stale-recovery rules (matching the Node helper):
 //! - lockdir age > `stale_ms` AND owner pid is no longer alive (unix:
 //!   `nix::sys::signal::kill(pid, None)` returns ESRCH) → forcibly remove.
+//! - 3-tuple owner with start_time mismatching the live pid's actual start
+//!   time → pid was recycled by an unrelated process → break.
 //! - Owner format `renderer:<ts>` has no observable pid; we fall through to
 //!   age-only break.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::ulog_warn;
 
@@ -92,6 +97,121 @@ fn is_pid_alive(_pid: i32) -> Option<bool> {
     None
 }
 
+/// Best-effort: return the start time (epoch ms) of `pid`, or None if we
+/// can't determine it on this platform. Used to detect pid-reuse: if the
+/// owner file declared a start_time but the live pid's start_time differs,
+/// the original holder is gone and a different process now owns that pid.
+///
+/// - macOS:  `ps -p <pid> -o lstart=` (string date), parse as system time.
+/// - Linux:  `/proc/<pid>/stat` field 22 (starttime in clock ticks) +
+///           `/proc/uptime` to convert to absolute ms (assume HZ=100, the
+///           same approximation the Node helper uses).
+/// - Windows / other: not supported — return None and the caller falls back
+///   to age-only stale detection.
+#[cfg(target_os = "macos")]
+fn get_pid_start_time_ms(pid: i32) -> Option<u64> {
+    use std::process::Command;
+    let out = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        return None;
+    }
+    // Format: "Thu Apr 25 10:23:45 2026". Use chrono if available; otherwise
+    // fall back to a manual parse. We avoid adding chrono — manually parse
+    // the canonical macOS format.
+    parse_lstart_to_epoch_ms(&s)
+}
+
+#[cfg(target_os = "linux")]
+fn get_pid_start_time_ms(pid: i32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    // Field 2 is `(comm)` which can contain spaces — split after the closing paren.
+    let close_paren = stat.rfind(')')?;
+    let after = &stat[close_paren + 2..];
+    let fields: Vec<&str> = after.split_whitespace().collect();
+    // After the comm field: state=fields[0], ppid=fields[1], …
+    // starttime is original index 22 → fields[19].
+    let startticks: u64 = fields.get(19)?.parse().ok()?;
+    let uptime_str = fs::read_to_string("/proc/uptime").ok()?;
+    let uptime_sec: f64 = uptime_str.split_whitespace().next()?.parse().ok()?;
+    // HZ assumed 100 — matches Node helper.
+    const HZ: f64 = 100.0;
+    let start_sec_ago = uptime_sec - (startticks as f64) / HZ;
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+    let offset_ms = (start_sec_ago * 1000.0).round() as i128;
+    let result = now_ms as i128 - offset_ms;
+    if result < 0 { None } else { Some(result as u64) }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn get_pid_start_time_ms(_pid: i32) -> Option<u64> {
+    // Windows / other: not supported. Fall back to age-only stale detection.
+    None
+}
+
+/// Parse a macOS `ps -o lstart=` string (e.g. "Thu Apr 25 10:23:45 2026")
+/// to epoch ms. Avoids pulling in chrono.
+#[cfg(target_os = "macos")]
+fn parse_lstart_to_epoch_ms(s: &str) -> Option<u64> {
+    // Format pieces split by whitespace: [Day, Mon, Day, HH:MM:SS, Year]
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() < 5 { return None; }
+    let mon = parts[1];
+    let day: u32 = parts[2].parse().ok()?;
+    let time_parts: Vec<&str> = parts[3].split(':').collect();
+    if time_parts.len() != 3 { return None; }
+    let hour: u32 = time_parts[0].parse().ok()?;
+    let min: u32 = time_parts[1].parse().ok()?;
+    let sec: u32 = time_parts[2].parse().ok()?;
+    let year: i32 = parts[4].parse().ok()?;
+    let month: u32 = match mon {
+        "Jan" => 1, "Feb" => 2, "Mar" => 3, "Apr" => 4, "May" => 5, "Jun" => 6,
+        "Jul" => 7, "Aug" => 8, "Sep" => 9, "Oct" => 10, "Nov" => 11, "Dec" => 12,
+        _ => return None,
+    };
+    // Compute days since Unix epoch using a Howard Hinnant-style civil_from_days
+    // inverse. Avoids chrono.
+    let y = if month <= 2 { year - 1 } else { year } as i64;
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let m = month as i64;
+    let d = day as i64;
+    let doy: u64 = ((153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1) as u64;
+    let doe: u64 = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days_since_epoch: i64 = era * 146097 + doe as i64 - 719468;
+    let secs_since_epoch: i64 = days_since_epoch * 86400
+        + hour as i64 * 3600
+        + min as i64 * 60
+        + sec as i64;
+    if secs_since_epoch < 0 { return None; }
+    Some(secs_since_epoch as u64 * 1000)
+}
+
+/// Our own start time, computed once on first call. Used to write the
+/// 3-tuple owner file `rust:<pid>:<startMs>` so peer processes can detect
+/// pid reuse against us.
+fn our_start_time_ms() -> u64 {
+    use std::sync::OnceLock;
+    static OUR_START: OnceLock<u64> = OnceLock::new();
+    *OUR_START.get_or_init(|| {
+        get_pid_start_time_ms(std::process::id() as i32)
+            .unwrap_or_else(|| {
+                // Fall back to "now" — better than 0; means the first writer
+                // in a process gets a start_time stamp roughly equal to its
+                // first lock acquisition. Peer pid-reuse detection still
+                // works (a different recycled pid will have a different
+                // observed start_time).
+                SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+            })
+    })
+}
+
 /// Try to break a stale lockdir if its owner pid is dead and age > `stale`.
 /// Returns `true` if we removed it (caller should retry mkdir immediately).
 fn try_break_stale_lock(lock_path: &Path, stale: Duration) -> bool {
@@ -113,13 +233,53 @@ fn try_break_stale_lock(lock_path: &Path, stale: Duration) -> bool {
         .trim()
         .to_string();
 
-    // node:<pid> / rust:<pid> — probe pid liveness.
+    // Owner shapes:
+    //   node:<pid>           (legacy 2-tuple)
+    //   node:<pid>:<startMs> (current 3-tuple, written by Node fix #4)
+    //   rust:<pid>           (legacy)
+    //   rust:<pid>:<startMs> (current — Rust now also writes this)
+    //   renderer:<ts>        (no observable pid; falls through to age-only break)
+    //
+    // For node:/rust: owners we probe pid liveness; if the owner declared a
+    // start_time, we additionally verify the live pid actually has that
+    // start_time. A live pid with a mismatched start_time means the pid was
+    // recycled by an unrelated process — the original holder is gone.
     if let Some(rest) = owner.strip_prefix("node:").or_else(|| owner.strip_prefix("rust:")) {
-        if let Ok(pid) = rest.parse::<i32>() {
-            match is_pid_alive(pid) {
-                Some(true) => return false, // owner alive — don't break
-                Some(false) => { /* dead — proceed */ }
-                None => return false, // unknown — be conservative
+        let parts: Vec<&str> = rest.split(':').collect();
+        if let Some(pid_str) = parts.first() {
+            if let Ok(pid) = pid_str.parse::<i32>() {
+                let declared_start: Option<u64> = parts.get(1).and_then(|s| s.parse().ok());
+
+                match is_pid_alive(pid) {
+                    Some(true) => {
+                        // Pid alive — verify start_time if declared.
+                        if let Some(declared) = declared_start {
+                            if let Some(live) = get_pid_start_time_ms(pid) {
+                                let skew = if live >= declared { live - declared } else { declared - live };
+                                // Allow ~2s skew (mirrors Node helper).
+                                if skew > 2000 {
+                                    ulog_warn!(
+                                        "[file-lock] pid {} reused (declaredStart={} liveStart={} skew={}ms); breaking lock {}",
+                                        pid, declared, live, skew, lock_path.display()
+                                    );
+                                    // Fall through to remove_dir_all below.
+                                } else {
+                                    // start_time matches → owner genuinely alive.
+                                    return false;
+                                }
+                            } else {
+                                // Live start_time unknown on this platform → fall through to age-only.
+                                if age <= Duration::from_secs(60) { return false; }
+                                // Age >60s: break despite live pid (cross-platform parity with Node).
+                            }
+                        } else {
+                            // No declared start_time (legacy 2-tuple) → age-only override.
+                            if age <= Duration::from_secs(60) { return false; }
+                        }
+                    }
+                    Some(false) => { /* dead — proceed to break */ }
+                    None => return false, // unknown — be conservative
+                }
             }
         }
     }
@@ -154,12 +314,13 @@ where
         match fs::create_dir(lock_path) {
             Ok(()) => {
                 let owner_path = lock_path.join("owner");
+                let start_ms = our_start_time_ms();
                 let _ = fs::OpenOptions::new()
                     .create(true)
                     .write(true)
                     .truncate(true)
                     .open(&owner_path)
-                    .and_then(|mut f| writeln!(f, "rust:{}", std::process::id()));
+                    .and_then(|mut f| writeln!(f, "rust:{}:{}", std::process::id(), start_ms));
                 break;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {

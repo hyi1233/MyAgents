@@ -282,4 +282,28 @@ describe('mcp oauth', () => {
     expect(token?.refreshToken).toBe('fresh-refresh');
     expect(refreshCalled).toBe(false);
   });
+
+  test('concurrent saveStateStore calls serialize without losing entries', async () => {
+    // Two separate async chains both writing to the same store. Without proper
+    // per-chain reentrancy isolation, both could bypass the file lock and one
+    // write could clobber the other (read-modify-write race).
+    await saveStateStore({});
+
+    const writeA = (async () => {
+      await updateServerState('serverA', {
+        registration: { clientId: 'client-a', registeredAt: 1 },
+      });
+    })();
+    const writeB = (async () => {
+      await updateServerState('serverB', {
+        registration: { clientId: 'client-b', registeredAt: 2 },
+      });
+    })();
+
+    await Promise.all([writeA, writeB]);
+
+    const persisted = JSON.parse(readFileSync(stateFile(), 'utf-8'));
+    expect(persisted.serverA?.registration?.clientId).toBe('client-a');
+    expect(persisted.serverB?.registration?.clientId).toBe('client-b');
+  });
 });

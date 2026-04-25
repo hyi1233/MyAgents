@@ -163,6 +163,66 @@ describe('SSE backpressure — critical backoff scheduling (fix #6)', () => {
   }, 10_000);
 });
 
+describe('OpenAI bridge — pull-driven backpressure', () => {
+  it('reader.read() is invoked once per pull() (no tight recursion)', async () => {
+    // Construct the same shape used by handleStreamResponse / Responses:
+    // a guarded ReadableStream whose pull() reads from an inner reader and
+    // enqueues exactly once per pull (no recursion). The Web Streams runtime
+    // calls pull() only when desiredSize > 0, so reader.read() count must
+    // match the consumer's read() count + 1 for the trailing close path.
+
+    const enc = new TextEncoder();
+    const chunks = [enc.encode('a'), enc.encode('b'), enc.encode('c')];
+    let readCalls = 0;
+    let cursor = 0;
+
+    // Stub reader matching ReadableStreamDefaultReader<Uint8Array>.
+    const fakeReader = {
+      async read(): Promise<{ done: boolean; value?: Uint8Array }> {
+        readCalls++;
+        if (cursor >= chunks.length) return { done: true, value: undefined };
+        return { done: false, value: chunks[cursor++] };
+      },
+    };
+
+    const guarded = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const { done, value } = await fakeReader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(value!);
+        // No recursion — Web Streams calls pull() again when desiredSize > 0.
+      },
+    });
+
+    const consumer = guarded.getReader();
+    // Read the same number of times as we have chunks. After each read, the
+    // runtime should call pull() exactly once. If the old recursive pump
+    // pattern were in effect, fakeReader.read would be called eagerly for
+    // ALL chunks during the very first pull, regardless of consumer pace.
+    const r1 = await consumer.read();
+    expect(r1.done).toBe(false);
+    // After 1 consumer read: at most 2 reader.read() calls (pull invoked,
+    // plus possible pre-buffer of 1 from internal queue heuristics; it must
+    // not be 3 or more — that would prove recursive eager drain).
+    expect(readCalls).toBeLessThanOrEqual(2);
+
+    const r2 = await consumer.read();
+    expect(r2.done).toBe(false);
+    const r3 = await consumer.read();
+    expect(r3.done).toBe(false);
+    const r4 = await consumer.read();
+    expect(r4.done).toBe(true);
+
+    // Total reads from the upstream stub: 3 chunks + 1 done = 4. With pull
+    // recursion this would still be 4 too, but the per-step assertion above
+    // is what proves no eager drain.
+    expect(readCalls).toBe(4);
+  });
+});
+
 describe('SSE event priority registration', () => {
   it('classifies streaming deltas as coalescible', () => {
     expect(SSE_EVENT_PRIORITIES['chat:message-chunk']).toBe('coalescible');

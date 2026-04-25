@@ -7,6 +7,7 @@ import {
     writeTextFile,
     remove,
     rename,
+    stat,
 } from '@tauri-apps/plugin-fs';
 import { homeDir, join, dirname } from '@tauri-apps/api/path';
 import { invoke } from '@tauri-apps/api/core';
@@ -204,6 +205,34 @@ async function acquireFileLock(lockDir: string): Promise<void> {
     }
 }
 
+/**
+ * Decide whether a lock with the given age (ms) and owner string should be
+ * forcibly broken.
+ *
+ * The renderer can't probe Node/Rust pid liveness directly (it's sandboxed in
+ * Tauri's WebView), so for non-renderer owners the best it can do is age-only
+ * break. We use a more conservative threshold (4× staleMs) for those owners
+ * to avoid breaking a slow-but-live writer — Node/Rust recover their own stale
+ * locks much faster on the next acquire, and at worst we race with their
+ * recovery and the loser just retries.
+ *
+ * Trade-off: if a sidecar / Rust process truly crashes mid-write, the renderer
+ * will block for ~4× staleMs before recovering. That's acceptable because (a)
+ * sidecar crashes are rare, and (b) on next sidecar restart the Node-side
+ * helper observes its own dead pid and breaks the lock immediately.
+ */
+function shouldBreakStaleLock(ageMs: number, owner: string, staleMs: number): boolean {
+    if (owner.startsWith('renderer:')) {
+        return ageMs > staleMs; // we trust mtime for our own runtime.
+    }
+    if (owner.startsWith('node:') || owner.startsWith('rust:')) {
+        // Node/Rust owners: pid-liveness probe not available from the renderer.
+        // Use a 4× threshold to be conservative.
+        return ageMs > staleMs * 4;
+    }
+    return false; // unknown owner format — never break, surface as timeout.
+}
+
 async function tryBreakStaleLock(lockDir: string): Promise<boolean> {
     let owner = '';
     try {
@@ -213,24 +242,30 @@ async function tryBreakStaleLock(lockDir: string): Promise<boolean> {
         return false;
     }
 
-    // renderer:<ts> — compare the embedded ts to wall clock.
-    const m = /^renderer:(\d+)$/.exec(owner);
+    // Compute age. For renderer:<ts> owners we have an embedded timestamp
+    // (used as a fast path). For node:/rust: owners we read mtime from the
+    // lockdir itself. In all cases the owner string also gates whether we're
+    // willing to break this kind of owner at all.
     let ageMs: number | null = null;
-    if (m) {
-        const ts = Number(m[1]);
+    const rendererMatch = /^renderer:(\d+)$/.exec(owner);
+    if (rendererMatch) {
+        const ts = Number(rendererMatch[1]);
         if (Number.isFinite(ts)) ageMs = Date.now() - ts;
-    } else if (/^(node|rust):\d+$/.test(owner)) {
-        // We can't probe pid liveness from the renderer; assume staleness purely
-        // by age. This is safe because the Node/Rust helpers also break their
-        // own stale locks on the next acquire — at worst we race with their
-        // recovery, and the loser just retries.
-        // No reliable timestamp from the owner string alone; skip in this branch.
-        return false;
-    } else {
-        return false;
     }
+    if (ageMs === null) {
+        try {
+            const info = await stat(lockDir);
+            if (info.mtime instanceof Date) {
+                ageMs = Date.now() - info.mtime.getTime();
+            }
+        } catch {
+            // Lock dir disappeared between EEXIST and stat — caller will retry mkdir.
+            return true;
+        }
+    }
+    if (ageMs === null) return false;
 
-    if (ageMs === null || ageMs <= CONFIG_LOCK_STALE_MS) return false;
+    if (!shouldBreakStaleLock(ageMs, owner, CONFIG_LOCK_STALE_MS)) return false;
 
     console.warn(`[configStore] Breaking stale lock ${lockDir} (age=${ageMs}ms owner=${owner})`);
     try {

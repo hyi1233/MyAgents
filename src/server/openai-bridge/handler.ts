@@ -483,36 +483,37 @@ function handleStreamResponse(
   // upstream AbortController. pipeThrough() forwards cancel() through each
   // stage, but our Pattern 1 contract demands we ALSO abort the upstream
   // fetch, which neither TransformStream knows about.
+  //
+  // Backpressure: drive the read loop from `pull()` rather than recursing
+  // unconditionally after each enqueue. Web Streams calls `pull` once per
+  // "queue has room"; if we recurse after enqueue we drain the upstream as
+  // fast as it produces and the pipeline's natural backpressure is silently
+  // broken (the queue grows unbounded).
+  const reader = finalReadable.getReader();
   const guarded = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const reader = finalReadable.getReader();
-      const pump = (): void => {
-        reader.read().then(
-          ({ done, value }) => {
-            if (done) {
-              try { controller.close(); } catch { /* ignore */ }
-              cleanupIdleTimer();
-              // Fix #8: detach the downstream-abort listener on the done
-              // path too. Without this, request.signal kept a strong ref to
-              // onDownstreamAbort until GC, leaking listeners across
-              // streamed sessions. Also covers the "upstream errored before
-              // any chunk" case — pump() sees done:true immediately and the
-              // listener would otherwise survive until process exit.
-              detachDownstream();
-              return;
-            }
-            controller.enqueue(value);
-            pump();
-          },
-          (err) => {
-            log(`[bridge] Stream error: ${err}`);
-            try { controller.error(err); } catch { /* ignore */ }
-            cleanupIdleTimer();
-            detachDownstream();
-          },
-        );
-      };
-      pump();
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          try { controller.close(); } catch { /* ignore */ }
+          cleanupIdleTimer();
+          // Fix #8: detach the downstream-abort listener on the done path
+          // too. Without this, request.signal kept a strong ref to
+          // onDownstreamAbort until GC, leaking listeners across streamed
+          // sessions. Also covers the "upstream errored before any chunk"
+          // case — pull sees done:true immediately and the listener would
+          // otherwise survive until process exit.
+          detachDownstream();
+          return;
+        }
+        controller.enqueue(value);
+        // Don't recurse — Web Streams will call pull() again when desiredSize > 0.
+      } catch (err) {
+        log(`[bridge] Stream error: ${err}`);
+        try { controller.error(err); } catch { /* ignore */ }
+        cleanupIdleTimer();
+        detachDownstream();
+      }
     },
     cancel(reason): void {
       const reasonStr = reason instanceof Error ? reason.message : String(reason ?? 'unknown');
@@ -655,33 +656,29 @@ function handleResponsesStreamResponse(
     .pipeThrough(sseParseTransform)
     .pipeThrough(translateTransform);
 
+  // Backpressure: pull-driven, see notes in handleStreamResponse.
+  const reader = finalReadable.getReader();
   const guarded = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const reader = finalReadable.getReader();
-      const pump = (): void => {
-        reader.read().then(
-          ({ done, value }) => {
-            if (done) {
-              try { controller.close(); } catch { /* ignore */ }
-              cleanupIdleTimer();
-              // Fix #8: detach downstream listener on done too — covers
-              // both normal completion and "upstream errored before any
-              // chunk" path (immediate done:true without a flush).
-              detachDownstream();
-              return;
-            }
-            controller.enqueue(value);
-            pump();
-          },
-          (err) => {
-            log(`[bridge] Responses stream error: ${err}`);
-            try { controller.error(err); } catch { /* ignore */ }
-            cleanupIdleTimer();
-            detachDownstream();
-          },
-        );
-      };
-      pump();
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          try { controller.close(); } catch { /* ignore */ }
+          cleanupIdleTimer();
+          // Fix #8: detach downstream listener on done too — covers both
+          // normal completion and "upstream errored before any chunk" path
+          // (immediate done:true without a flush).
+          detachDownstream();
+          return;
+        }
+        controller.enqueue(value);
+        // Don't recurse — Web Streams will call pull() again when desiredSize > 0.
+      } catch (err) {
+        log(`[bridge] Responses stream error: ${err}`);
+        try { controller.error(err); } catch { /* ignore */ }
+        cleanupIdleTimer();
+        detachDownstream();
+      }
     },
     cancel(reason): void {
       const reasonStr = reason instanceof Error ? reason.message : String(reason ?? 'unknown');
