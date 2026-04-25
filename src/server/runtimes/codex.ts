@@ -15,6 +15,7 @@ import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, U
 import { StaleRuntimeSessionError } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
+import { killWithEscalation } from './utils/kill-with-escalation';
 
 // ─── Temp image directory for Codex (which requires file paths, not base64) ───
 const TEMP_IMG_DIR = join(
@@ -270,7 +271,7 @@ class CodexProcess implements RuntimeProcess {
     throw new Error('Codex uses JSON-RPC, not raw stdin. Use rpc.call() instead.');
   }
 
-  kill(signal?: number): void {
+  kill(signal?: NodeJS.Signals | number): void {
     if (this.exited) return;
     try {
       this.proc.kill(signal ?? 15);
@@ -665,15 +666,17 @@ export class CodexRuntime implements AgentRuntime {
       await codexProc.closeStdin();
     } catch { /* ignore */ }
 
-    // Force kill after timeout if graceful shutdown didn't work
-    const killTimer = setTimeout(() => {
-      codexProc.kill();
-    }, 3_000);
-
     try {
-      await codexProc.waitForExit();
+      await killWithEscalation(codexProc, {
+        gracefulMs: 3_000,
+        hardMs: 2_000,
+        onStep: (step, info) => {
+          if (step === 'orphan') {
+            console.warn(`[codex] Process pid=${info.pid} did not exit after SIGKILL; continuing with orphan risk`);
+          }
+        },
+      });
     } catch { /* ignore */ } finally {
-      clearTimeout(killTimer);
       codexProc.rpc.destroy();
     }
   }

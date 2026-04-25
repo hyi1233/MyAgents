@@ -38,6 +38,7 @@ import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { resolveGeminiWorkspaceInstructions } from './workspace-instructions';
 import { broadcast } from '../sse';
 import { ensureDirSync } from '../utils/fs-utils';
+import { killWithEscalation } from './utils/kill-with-escalation';
 
 // ─── Tmp directory layout for system prompt files ───
 
@@ -482,7 +483,7 @@ class GeminiProcess implements RuntimeProcess {
     throw new Error('Gemini uses JSON-RPC, not raw stdin. Use rpc.call() instead.');
   }
 
-  kill(signal?: number): void {
+  kill(signal?: NodeJS.Signals | number): void {
     if (this.exited) return;
     try {
       this.proc.kill(signal ?? 15);
@@ -1034,13 +1035,19 @@ export class GeminiRuntime implements AgentRuntime {
       /* ignore */
     }
 
-    const killTimer = setTimeout(() => geminiProc.kill(), 3_000);
     try {
-      await geminiProc.waitForExit();
+      await killWithEscalation(geminiProc, {
+        gracefulMs: 3_000,
+        hardMs: 2_000,
+        onStep: (step, info) => {
+          if (step === 'orphan') {
+            console.warn(`[gemini] Process pid=${info.pid} did not exit after SIGKILL; continuing with orphan risk`);
+          }
+        },
+      });
     } catch {
       /* ignore */
     } finally {
-      clearTimeout(killTimer);
       geminiProc.rpc.destroy();
     }
   }

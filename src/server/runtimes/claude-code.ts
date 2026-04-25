@@ -14,6 +14,7 @@ import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
+import { killWithEscalation } from './utils/kill-with-escalation';
 
 /**
  * Build CC CLI message content — string for text-only, array of content blocks for images+text.
@@ -116,7 +117,7 @@ class ClaudeCodeProcess implements RuntimeProcess {
     await stdin.write(this.encoder.encode(line + '\n'));
   }
 
-  kill(signal?: number): void {
+  kill(signal?: NodeJS.Signals | number): void {
     if (this.exited) return;
     try {
       this.proc.kill(signal ?? 15); // SIGTERM
@@ -452,15 +453,15 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // Close stdin to let CC finish naturally (awaits EOF propagation)
     await (process as ClaudeCodeProcess).closeStdin();
 
-    // Wait briefly then force kill
-    const timeout = setTimeout(() => {
-      if (!process.exited) {
-        process.kill(15); // SIGTERM
-      }
-    }, 5000);
-
-    await process.waitForExit().catch(() => { });
-    clearTimeout(timeout);
+    await killWithEscalation(process as ClaudeCodeProcess, {
+      gracefulMs: 5000,
+      hardMs: 2000,
+      onStep: (step, info) => {
+        if (step === 'orphan') {
+          console.warn(`[claude-code] Process pid=${info.pid} did not exit after SIGKILL; continuing with orphan risk`);
+        }
+      },
+    });
 
     // Clean up per-process hook settings file
     try {
