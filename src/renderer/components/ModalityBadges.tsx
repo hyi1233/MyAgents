@@ -10,11 +10,31 @@ import Tip from '@/components/Tip';
  * was an explicit product call (see PRD note: "只展示图片吧，就是图片音频
  * 这种有这种额外模态的时候，你给他就打上标签").
  *
- * Mirrors OpenRouter / OpenAI modality naming so the same `inputModalities`
- * array drives both client + Sidecar filters and these badges. Extra
- * modality strings (e.g. OpenRouter's `file`) are intentionally ignored —
- * not a real input modality, just an upload affordance.
+ * **Modality rendering scope (V1):** only `image` is rendered. The
+ * `video` and `audio` cases are wired to lucide icons + tooltips and live
+ * behind `RENDER_VIDEO_AUDIO_BADGES = false` — flip when supported.
+ *
+ * Why audio/video aren't rendered today, even when the model claims to
+ * support them:
+ *   - Claude Agent SDK's `ContentBlockParam` union (see
+ *     `@anthropic-ai/sdk/resources/messages/messages.d.ts:439`) is
+ *     `TextBlockParam | ImageBlockParam | DocumentBlockParam | …` — no
+ *     audio or video block types exist.
+ *   - claude-code itself only handles `audio` on the MCP tool-RESULT path
+ *     (it's persisted to a blob + replaced with a text reference), never on
+ *     the user-INPUT path. Image is the only non-text input modality the
+ *     entire stack can carry today.
+ *   - The OpenAI bridge translates SDK content blocks → OpenAI format; if
+ *     the SDK can't emit an audio block, the bridge has nothing to forward,
+ *     so even Gemini / Doubao models that natively accept video can't
+ *     receive it through our chain.
+ * Showing badges for capabilities the chain can't deliver is a false
+ * promise. The data is intentionally still populated on each preset model
+ * (see `PRESET_PROVIDERS`) so flipping `RENDER_VIDEO_AUDIO_BADGES = true`
+ * once SDK gains the block types lights everything up without re-research.
  */
+const RENDER_VIDEO_AUDIO_BADGES = false;
+
 export function ModalityBadges({
   modalities,
   className = '',
@@ -29,8 +49,10 @@ export function ModalityBadges({
   if (!modalities || modalities.length === 0) return null;
   const items: Array<{ key: string; label: string; Icon: typeof ImageIcon }> = [];
   if (modalities.includes('image')) items.push({ key: 'image', label: '图片', Icon: ImageIcon });
-  if (modalities.includes('video')) items.push({ key: 'video', label: '视频', Icon: Video });
-  if (modalities.includes('audio')) items.push({ key: 'audio', label: '音频', Icon: AudioLines });
+  if (RENDER_VIDEO_AUDIO_BADGES) {
+    if (modalities.includes('video')) items.push({ key: 'video', label: '视频', Icon: Video });
+    if (modalities.includes('audio')) items.push({ key: 'audio', label: '音频', Icon: AudioLines });
+  }
   if (items.length === 0) return null;
   return (
     <span className={`inline-flex items-center gap-1 text-[var(--ink-muted)]/70 ${className}`}>
