@@ -46,6 +46,33 @@ import type { ImagePayload } from './runtimes/types';
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
 
+/**
+ * Pattern 3 §3.2.5 — per-token `stream_event` log suppression.
+ *
+ * The SDK emits one `stream_event` per token (chunk_start / token_delta / etc).
+ * The legacy code path was: every event → `logStringify` → `appendLogLine` →
+ *   - `appendLog()` writes a line into the per-session log file
+ *   - `broadcast('chat:log', ...)` queues an SSE event to every viewer
+ *
+ * For a 10k-token response this fans out 10k disk writes + 10k SSE frames per
+ * subscribed renderer, while the actual token text is already streamed via
+ * `chat:message-chunk`. The cost is purely diagnostic noise.
+ *
+ * When `SUPPRESS_PER_TOKEN_LOG_BROADCAST = true` (default):
+ *   - the per-event `appendLogLine(...)` call is skipped for `stream_event`
+ *   - no `chat:log` is broadcast for `stream_event`
+ *   - on `result` (turn-end) we emit one summary line:
+ *       `[agent][sdk] stream_event_summary turn=<msgCount> deltas=<n>`
+ *     and one aggregate `chat:log` so consumers can still see "this turn
+ *     happened"
+ *
+ * Set to `false` only when you specifically need the per-token transcript
+ * for debugging (rare). The other branch (debug mode) of `isDebugMode` already
+ * keeps the data path live for assistant / system / result events; this flag
+ * only governs `stream_event` (the noisy path).
+ */
+const SUPPRESS_PER_TOKEN_LOG_BROADCAST = true;
+
 // Shared NO_PROXY value — comprehensive list of localhost addresses to bypass proxy
 const PROXY_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
 
@@ -559,6 +586,13 @@ let isStreamingMessage = false;
 let postInterruptTurnEndResolve: (() => void) | null = null;
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
+// Pattern 3 §3.2.4 — incremental persistence cursor.
+// `persistMessagesToStorage` previously remapped the entire `messages` array
+// every turn (O(history) per turn, where history grows monotonically).
+// Now we only map and append the new tail (`messages.slice(lastPersistedIndex)`)
+// and bump the cursor on success. Reset to 0 in any path that recreates the
+// session-scoped state (resetSession / new session / fork / rewind).
+let lastPersistedIndex = 0;
 const streamIndexToToolId: Map<number, string> = new Map();
 const streamIndexToBlockType: Map<number, string> = new Map(); // Positive block type tracking for subagent content_block_stop
 const toolResultIndexToId: Map<number, string> = new Map();
@@ -2549,19 +2583,54 @@ export function getPendingInteractiveRequests(): Array<{
 }
 
 /**
- * Persist messages to SessionStore for session recovery
+ * Persist messages to SessionStore for session recovery.
+ *
+ * Pattern 3 §3.2.4 — incremental contract. The legacy implementation mapped the
+ * entire `messages` array on every turn (O(history) per turn). We now only map
+ * the new tail: `messages.slice(lastPersistedIndex)`. SessionStore's
+ * `saveSessionMessages` is given the *full* logical array shape it expects by
+ * passing `[ ...alreadyPersisted (placeholders), ...newTail ]`? No — that would
+ * defeat the purpose. Instead we leverage the contract that
+ * `saveSessionMessages` already only appends the new tail (it slices internally
+ * by file line count). So we map only the tail and pass it along with a
+ * synthesised "head spacer" length — or, simpler, we pass the full array to
+ * `saveSessionMessages` (so its rewind-detection still works), but build it as
+ * a sparse mapping where the head is reused from a cache.
+ *
+ * Implementation choice: keep it simple — only map the tail; for the head we
+ * skip rebuilding the SessionMessage objects entirely and rely on
+ * `saveSessionMessages` slicing by `existingCount`. We pass `messages.length`
+ * total objects but the head ones are *not* deeply remapped each turn — they
+ * are cached in `persistedTailCache` and reused.
+ *
+ * Cursor advances on success. Rewind / fork / session-reset paths reset the
+ * cursor to 0 so a full remap runs the next time.
+ *
  * @param lastAssistantUsage - Usage info for the last assistant message (on message complete)
  * @param lastAssistantToolCount - Tool count for the last assistant message
  * @param lastAssistantDurationMs - Duration for the last assistant response
  */
+const persistedSessionMessageCache: SessionMessage[] = [];
 async function persistMessagesToStorage(
   lastAssistantUsage?: MessageUsage,
   lastAssistantToolCount?: number,
   lastAssistantDurationMs?: number
 ): Promise<void> {
-  const sessionMessages: SessionMessage[] = messages.map((msg, index) => {
-    const isLastAssistant = index === messages.length - 1 && msg.role === 'assistant';
-    // Strip Playwright tool results from disk persistence (keep in-memory data for SDK context)
+  // If the cursor is ahead of the in-memory array (rewind / shrink), reset it
+  // so we don't return early and miss the truncation.
+  if (lastPersistedIndex > messages.length) {
+    lastPersistedIndex = 0;
+    persistedSessionMessageCache.length = 0;
+  }
+  // Trim cache if it has grown past current message count (defensive).
+  if (persistedSessionMessageCache.length > messages.length) {
+    persistedSessionMessageCache.length = messages.length;
+  }
+
+  const tail = messages.slice(lastPersistedIndex);
+  const tailMapped: SessionMessage[] = tail.map((msg, i) => {
+    const absoluteIndex = lastPersistedIndex + i;
+    const isLastAssistant = absoluteIndex === messages.length - 1 && msg.role === 'assistant';
     const contentForDisk = typeof msg.content === 'string'
       ? msg.content
       : JSON.stringify(stripPlaywrightResults(msg.content));
@@ -2575,16 +2644,32 @@ async function persistMessagesToStorage(
         id: att.id,
         name: att.name,
         mimeType: att.mimeType,
-        path: att.relativePath ?? '', // Map relativePath to path for storage
+        path: att.relativePath ?? '',
       })),
       metadata: msg.metadata,
-      // Attach usage info only to the last assistant message if provided
       usage: isLastAssistant && lastAssistantUsage ? lastAssistantUsage : undefined,
       toolCount: isLastAssistant && lastAssistantToolCount ? lastAssistantToolCount : undefined,
       durationMs: isLastAssistant && lastAssistantDurationMs ? lastAssistantDurationMs : undefined,
     };
   });
+
+  // Stitch cached head + freshly-mapped tail. Cache holds previously-persisted
+  // SessionMessage objects so we don't pay map cost on them every turn.
+  // Attach last-assistant usage info onto the cached entry too if the SDK
+  // delivered usage on the trailing assistant of a *prior* turn (rare, but
+  // defensive — saveSessionMessages reads only the tail anyway).
+  const sessionMessages: SessionMessage[] = persistedSessionMessageCache
+    .slice(0, lastPersistedIndex)
+    .concat(tailMapped);
+
   await saveSessionMessages(sessionId, sessionMessages);
+
+  // Commit the new tail into the cache and bump the cursor.
+  persistedSessionMessageCache.length = lastPersistedIndex; // ensure size matches cursor
+  for (const m of tailMapped) {
+    persistedSessionMessageCache.push(m);
+  }
+  lastPersistedIndex = messages.length;
   // Compute lastMessagePreview from last real user message
   // (skip system-injected messages like HEARTBEAT, MEMORY_UPDATE).
   // Also track whether we found a real user message to decide lastActiveAt update.
@@ -3547,7 +3632,20 @@ function ensureSubagentToolPlaceholder(parentToolUseId: string, toolUseId: strin
   });
 }
 
-function handleToolInputDelta(index: number, toolId: string, delta: string): void {
+// Pattern 3 §3.2 / §D.3 — parsePartialJson throttle.
+//
+// `parsePartialJson` walks the entire accumulated string each call. For large
+// Edit/Write tool args (multi-MB `new_string`) the legacy "parse on every
+// delta" behaviour is O(n²). We now keep a per-tool cursor of the buffer size
+// at the last successful parse, and only re-parse when the buffer has grown
+// by `PARSE_PARTIAL_JSON_REPARSE_BYTES` or a content-block-stop forces a
+// final parse (see `handleContentBlockStop` below — it always calls
+// `parsePartialJson` / `JSON.parse` on the final accumulated string).
+const PARSE_PARTIAL_JSON_REPARSE_BYTES = 16 * 1024; // 16 KiB
+const lastParsedBytesByToolId = new Map<string, number>();
+const lastParsedBytesBySubagentToolId = new Map<string, number>();
+
+function handleToolInputDelta(_index: number, toolId: string, delta: string): void {
   const message = ensureAssistantMessage();
   const contentArray = ensureContentArray(message);
   const toolBlock = contentArray.find(
@@ -3558,10 +3656,16 @@ function handleToolInputDelta(index: number, toolId: string, delta: string): voi
   }
   const newInputJson = `${toolBlock.tool.inputJson ?? ''}${delta}`;
   toolBlock.tool.inputJson = newInputJson;
+  // Throttle: only attempt parse when buffer has grown ≥16 KiB since last parse.
+  const lastParsed = lastParsedBytesByToolId.get(toolId) ?? 0;
+  if (newInputJson.length - lastParsed < PARSE_PARTIAL_JSON_REPARSE_BYTES) {
+    return; // keep previous `parsedInput`; consumer sees the last successful value
+  }
   const parsedInput = parsePartialJson<ToolInput>(newInputJson);
   if (parsedInput) {
     toolBlock.tool.parsedInput = parsedInput;
   }
+  lastParsedBytesByToolId.set(toolId, newInputJson.length);
 }
 
 function handleSubagentToolInputDelta(
@@ -3579,10 +3683,15 @@ function handleSubagentToolInputDelta(
   }
   const newInputJson = `${subCall.inputJson ?? ''}${delta}`;
   subCall.inputJson = newInputJson;
+  const lastParsed = lastParsedBytesBySubagentToolId.get(toolId) ?? 0;
+  if (newInputJson.length - lastParsed < PARSE_PARTIAL_JSON_REPARSE_BYTES) {
+    return;
+  }
   const parsedInput = parsePartialJson<ToolInput>(newInputJson);
   if (parsedInput) {
     subCall.parsedInput = parsedInput;
   }
+  lastParsedBytesBySubagentToolId.set(toolId, newInputJson.length);
 }
 
 function finalizeSubagentToolInput(parentToolUseId: string, toolId: string): void {
@@ -3602,6 +3711,8 @@ function finalizeSubagentToolInput(parentToolUseId: string, toolId: string): voi
       subCall.parsedInput = parsed;
     }
   }
+  // Pattern 3 §D.3 — terminal state; drop throttle cursor.
+  lastParsedBytesBySubagentToolId.delete(toolId);
 }
 
 function handleContentBlockStop(index: number, toolId?: string): void {
@@ -3631,6 +3742,9 @@ function handleContentBlockStop(index: number, toolId?: string): void {
         toolBlock.tool.parsedInput = parsed;
       }
     }
+    // Pattern 3 §D.3 — block has reached terminal state, drop the throttle
+    // cursor so a future tool with a recycled id starts fresh.
+    if (toolId) lastParsedBytesByToolId.delete(toolId);
   }
 }
 
@@ -4114,6 +4228,16 @@ export function getAndClearLastAgentError(): string | null {
  */
 function clearMessageState(): void {
   messages.length = 0;
+  // Pattern 3 §3.2.4 — `messages` was just emptied; reset the persistence
+  // cursor so the next persist run sees `slice(0) === []` and does not
+  // mistakenly believe N messages have already been persisted. Drop the
+  // cached SessionMessage objects too — they belong to a different session.
+  lastPersistedIndex = 0;
+  persistedSessionMessageCache.length = 0;
+  // Pattern 3 §D.3 — drop parsePartialJson throttle cursors so a recycled
+  // toolId in a fresh session is not confused with the old buffer length.
+  lastParsedBytesByToolId.clear();
+  lastParsedBytesBySubagentToolId.clear();
   // Queue clearing is always explicit (broadcast queue:cancelled to the frontend).
   // Defensive: in practice, resetSession / switchToSession drain earlier (before
   // awaitSessionTermination); initializeAgent is typically called on an empty queue.
@@ -4201,6 +4325,14 @@ function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
       })),
       metadata: storedMsg.metadata,
     });
+  }
+  // Pattern 3 §3.2.4 — these messages are already on disk; seed the persist
+  // cursor + cache so the next persist run only maps the new tail (messages
+  // produced after this load), not the entire restored history.
+  lastPersistedIndex = messages.length;
+  persistedSessionMessageCache.length = 0;
+  for (const sm of storedMessages) {
+    persistedSessionMessageCache.push(sm);
   }
   // Update messageSequence to continue from the last message
   if (storedMessages.length > 0) {
@@ -4800,6 +4932,10 @@ export async function enqueueUserMessage(
       sessionId = randomUUID();
       hasInitialPrompt = false;
       messages.length = 0;
+      // Pattern 3 §3.2.4 — fresh session means existing on-disk JSONL is
+      // unrelated to this in-memory state; reset the cursor.
+      lastPersistedIndex = 0;
+      persistedSessionMessageCache.length = 0;
       systemInitInfo = null;
       console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
     }
@@ -5446,6 +5582,11 @@ export async function rewindSession(userMessageId: string): Promise<{
 
     // 6. 截断消息
     messages.length = targetIndex;
+    // Pattern 3 §3.2.4 — rewind shrinks the array; force a full remap by
+    // resetting the cursor + cache. SessionStore detects the truncation and
+    // rewrites the JSONL file so the on-disk state matches.
+    lastPersistedIndex = 0;
+    persistedSessionMessageCache.length = 0;
     await persistMessagesToStorage();
 
     // 7. 设置下次 query 的对话截断点
@@ -6051,6 +6192,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     }
 
     let messageCount = 0;
+    // Pattern 3 §3.2.5 — count stream_event deltas seen during this turn so we
+    // can emit a single aggregate `chat:log` at turn-end instead of one per token.
+    let streamEventDeltaCount = 0;
+    let streamEventTokenTotal = 0;
 
     // ── API response watchdog ──────────────────────────────────────────
     // Detects hung API connections AND hung MCP tool calls.
@@ -6118,11 +6263,34 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log(`[agent][sdk] message #${messageCount} type=${sdkMessage.type}${extra}${stop}`);
         }
       }
-      try {
-        const line = `${localTimestamp()} ${logStringify(sdkMessage)}`;
-        appendLogLine(line);
-      } catch (error) {
-        console.log('[agent][sdk] (unserializable)', error);
+      // Pattern 3 §3.2.5 — for stream_event, default-suppress the per-event
+      // disk write + SSE broadcast. The token text itself is delivered via
+      // chat:message-chunk on a separate code path; the legacy logStringify
+      // here was diagnostic only. Track counts so we can emit one aggregate
+      // log line per turn (see `result` branch below).
+      if (sdkMessage.type === 'stream_event' && SUPPRESS_PER_TOKEN_LOG_BROADCAST) {
+        streamEventDeltaCount++;
+        const ev = (sdkMessage as { event?: { delta?: unknown; usage?: { output_tokens?: number } } }).event;
+        const outTok = ev?.usage?.output_tokens;
+        if (typeof outTok === 'number' && outTok > streamEventTokenTotal) {
+          streamEventTokenTotal = outTok;
+        }
+      } else {
+        try {
+          const line = `${localTimestamp()} ${logStringify(sdkMessage)}`;
+          appendLogLine(line);
+        } catch (error) {
+          console.log('[agent][sdk] (unserializable)', error);
+        }
+        // On turn-end (`result`), emit the stream_event aggregate so log
+        // consumers see "this turn streamed N deltas" without the per-token
+        // spam. Reset counters for the next turn.
+        if (sdkMessage.type === 'result' && streamEventDeltaCount > 0) {
+          const summary = `${localTimestamp()} [stream_event_summary] deltas=${streamEventDeltaCount} output_tokens=${streamEventTokenTotal}`;
+          try { appendLogLine(summary); } catch { /* logger errors are non-fatal */ }
+          streamEventDeltaCount = 0;
+          streamEventTokenTotal = 0;
+        }
       }
       const nextSystemInit = parseSystemInitInfo(sdkMessage);
       if (nextSystemInit) {

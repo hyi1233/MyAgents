@@ -505,7 +505,8 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                             return (
                               <div key={`t-${si}`} className="flex justify-start w-full px-1 py-1 select-none">
                                 <div className="w-full max-w-none text-[var(--ink)] select-text">
-                                  <Markdown>{seg.content}</Markdown>
+                                  {/* Pattern 3 §3.2.1 — streaming mode skips Prism/KaTeX/Mermaid until message completes. */}
+                                  <Markdown mode={isAssistantStreaming ? 'streaming' : 'final'}>{seg.content}</Markdown>
                                 </div>
                               </div>
                             );
@@ -531,7 +532,8 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                       className="flex justify-start w-full px-1 py-1 select-none"
                     >
                       <div className="w-full max-w-none text-[var(--ink)] select-text">
-                        <Markdown>{item.text}</Markdown>
+                        {/* Pattern 3 §3.2.1 — streaming mode skips Prism/KaTeX/Mermaid until message completes. */}
+                        <Markdown mode={isAssistantStreaming ? 'streaming' : 'final'}>{item.text}</Markdown>
                       </div>
                     </div>
                   );
