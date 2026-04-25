@@ -62,6 +62,7 @@ async function streamUploadToFile(file: File, destination: string): Promise<void
 }
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
+import { randomUUID } from 'crypto';
 // adm-zip lazy-loaded at its one call site below (/api/skill/upload with zip
 // content) — saves ~30ms of module-init cost when users never upload skills.
 import {
@@ -108,8 +109,48 @@ import { getBuiltinMcpInstance } from './tools/builtin-mcp-registry';
 // './tools/builtin-mcp-meta'. No duplicate import needed here.
 
 // ============= CRASH DIAGNOSTICS =============
-// File-based logging to capture crashes before process dies
-const CRASH_LOG = join(tmpdir(), 'myagents-crash.log');
+// Pattern 6 §6.3.6: crash logs live under ~/.myagents/logs/crash/ (NOT tmpdir,
+// so they're inside the unified log export bundle). Each crash gets its own
+// file; we keep the most recent CRASH_LOG_MAX_FILES and evict oldest.
+const CRASH_LOG_DIR = join(homedir(), '.myagents', 'logs', 'crash');
+const CRASH_LOG_MAX_FILES = 20;
+// Per-process crash log path: a single file per sidecar lifetime, holding all
+// the lifecycle/error events for THIS process. The filename uses the start
+// time so we can sort/evict by name. We append throughout the process.
+const CRASH_LOG_FILE = (() => {
+  try {
+    if (!existsSync(CRASH_LOG_DIR)) {
+      // Best-effort directory creation. recursive:true handles parent dirs.
+      // (We can't import ensureDirSync here because this block runs *during*
+      // module init, before that helper's transitive deps are available.)
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('fs').mkdirSync(CRASH_LOG_DIR, { recursive: true });
+    }
+  } catch { /* fall through; later writes will retry */ }
+  const ts = new Date().toISOString().replace(/[:]/g, '-');
+  return join(CRASH_LOG_DIR, `${ts}.log`);
+})();
+
+function evictOldCrashLogs(): void {
+  try {
+    if (!existsSync(CRASH_LOG_DIR)) return;
+    const entries = readdirSync(CRASH_LOG_DIR)
+      .filter(f => f.endsWith('.log'))
+      .map(f => {
+        const p = join(CRASH_LOG_DIR, f);
+        try {
+          return { path: p, mtimeMs: statSync(p).mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter((x): x is { path: string; mtimeMs: number } => x !== null)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
+    for (const e of entries.slice(CRASH_LOG_MAX_FILES)) {
+      try { unlinkSync(e.path); } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
 
 function crashLog(prefix: string, ...args: unknown[]) {
   try {
@@ -118,7 +159,22 @@ function crashLog(prefix: string, ...args: unknown[]) {
       if (typeof a === 'object') return JSON.stringify(a);
       return String(a);
     }).join(' ');
-    appendFileSync(CRASH_LOG, `[${new Date().toISOString()}] ${prefix} ${msg}\n`);
+    appendFileSync(CRASH_LOG_FILE, `[${new Date().toISOString()}] ${prefix} ${msg}\n`);
+  } catch { /* ignore */ }
+}
+
+/**
+ * On a hard crash (uncaughtException / unhandledRejection / fatal signal),
+ * snapshot the last ~200 unified log lines into the crash file so post-mortem
+ * has cross-process context, not just the bare error.
+ */
+function dumpCrashContext(reason: string): void {
+  try {
+    const lines = getRecentLogLines(200);
+    if (lines.length === 0) return;
+    const banner = `\n--- crash context (${reason}, last ${lines.length} unified lines) ---\n`;
+    appendFileSync(CRASH_LOG_FILE, banner + lines.join('') + '--- end crash context ---\n');
+    evictOldCrashLogs();
   } catch { /* ignore */ }
 }
 
@@ -135,11 +191,13 @@ process.on('beforeExit', (code) => {
 
 process.on('uncaughtException', (err) => {
   crashLog('UNCAUGHT_EXCEPTION', err);
+  dumpCrashContext('uncaughtException');
   console.error('[process] uncaughtException:', err);
 });
 
 process.on('unhandledRejection', (reason) => {
   crashLog('UNHANDLED_REJECTION', reason);
+  dumpCrashContext('unhandledRejection');
   console.error('[process] unhandledRejection:', reason);
 });
 
@@ -215,9 +273,9 @@ import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
-import { initLogger, getLoggerDiagnostics } from './logger';
+import { initLogger, getLoggerDiagnostics, withLogContext } from './logger';
 import { cleanupOldLogs } from './AgentLogger';
-import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
+import { cleanupOldUnifiedLogs, appendUnifiedLogBatch, getRecentLogLines } from './UnifiedLogger';
 import { broadcast, createSseClient, getClients } from './sse';
 import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifySubscription } from './provider-verify';
 // openai-bridge is lazy-loaded via ensureBridgeHandler() below — only users on
@@ -1553,6 +1611,35 @@ async function main() {
     port,
     hostname: '127.0.0.1',
     fetch: async (request) => {
+      // Pattern 6 (HTTP request boundary): each request runs inside an ALS
+      // frame so any nested console.* call automatically gets correlation
+      // fields injected. Renderer-side code (`tauriClient.ts`) attaches
+      // X-MyAgents-Session-Id / X-MyAgents-Tab-Id; the server generates a
+      // fresh requestId (or honours an inbound `X-MyAgents-Request-Id` from
+      // the Rust proxy if it pre-populated one).
+      const incomingRequestId = request.headers.get('x-myagents-request-id') ?? undefined;
+      const requestId = incomingRequestId ?? randomUUIDv4Short();
+      const sessionId = request.headers.get('x-myagents-session-id') ?? undefined;
+      const tabId = request.headers.get('x-myagents-tab-id') ?? undefined;
+      return withLogContext({ requestId, sessionId, tabId }, () => handleRequest(request));
+    },
+  } as Parameters<typeof honoServe>[0]);
+
+  /**
+   * Pattern 6 helper: short stable id for HTTP request correlation.
+   * crypto.randomUUID is ~36 chars; we collapse to 8 hex for grep-ability.
+   */
+  function randomUUIDv4Short(): string {
+    // randomUUID is imported above; we re-derive from the same 16-byte source.
+    return randomUUID().replace(/-/g, '').slice(0, 8);
+  }
+
+  /**
+   * Original Hono fetch body, unchanged except for being moved into a named
+   * function so the outer wrapper can run inside `withLogContext`.
+   */
+  async function handleRequest(request: Request): Promise<Response> {
+    {
       const url = new URL(request.url);
       const pathname = url.pathname;
 
@@ -8775,7 +8862,7 @@ description: >
 
       return new Response('Not Found', { status: 404 });
     }
-  });
+  }
 
   console.log(`Web UI server listening on http://localhost:${port}`);
 

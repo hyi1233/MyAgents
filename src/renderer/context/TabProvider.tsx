@@ -29,8 +29,8 @@ import type { SystemInitInfo } from '../../shared/types/system';
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
-import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
-import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache } from '@/api/tauriClient';
+import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
+import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache, setActiveCorrelation } from '@/api/tauriClient';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { refreshWorkspaceFileIndex } from '@/api/searchClient';
 import type { PermissionMode } from '@/config/types';
@@ -536,18 +536,33 @@ export default function TabProvider({
         setLogs([]);
     }, []);
 
-    // Listen for React frontend logs
+    // Pattern 6: subscribe to the global FrontendLogStore with a tab-id
+    // filter. Replaces the legacy "every TabProvider keeps its own copy of
+    // every React log" model — entries with no tabId pass through (global)
+    // and entries stamped for THIS tab are surfaced to its UI panel.
     useEffect(() => {
-        const handleReactLog = (event: Event) => {
-            const customEvent = event as CustomEvent<LogEntry>;
-            appendUnifiedLog(customEvent.detail);
-        };
+        const unsubscribe = subscribeFrontendLogs((entry) => {
+            appendUnifiedLog(entry);
+        }, tabId);
+        return () => { unsubscribe(); };
+    }, [appendUnifiedLog, tabId]);
 
-        window.addEventListener(REACT_LOG_EVENT, handleReactLog);
+    // Pattern 6: keep the renderer's "active tab" pointers in sync. The
+    // frontendLogger stamps `tabId` on captured console.* entries and
+    // tauriClient stamps `X-MyAgents-Tab-Id` / `X-MyAgents-Session-Id` on
+    // sidecar HTTP requests. Multiple tabs may mount concurrently, so we
+    // only claim "active" when the active context flag is set elsewhere —
+    // a cheap proxy is "last mounted wins", which works for the common
+    // single-active-tab case and is a no-op for log correlation in others.
+    useEffect(() => {
+        setCurrentTabId(tabId);
+        setActiveCorrelation({ tabId });
         return () => {
-            window.removeEventListener(REACT_LOG_EVENT, handleReactLog);
+            // Don't unset on unmount — another tab may have already claimed.
+            // Setting back to undefined here would race with the new tab's
+            // mount effect. Leave the last value in place.
         };
-    }, [appendUnifiedLog]);
+    }, [tabId]);
 
     // Listen for Rust logs via Tauri events (unified with React/Node logs)
     // Note: Rust logs are only displayed in UI, NOT persisted via frontend API

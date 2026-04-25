@@ -15,6 +15,7 @@ import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, U
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
 import { killWithEscalation } from './utils/kill-with-escalation';
+import { withLogContext } from '../logger-context';
 
 /**
  * Build CC CLI message content — string for text-only, array of content blocks for images+text.
@@ -357,8 +358,13 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     if (!proc.stdout || !proc.stderr) {
       throw new Error('Claude Code process: stdout/stderr pipes unavailable');
     }
+    // Pattern 6: every console.* and onEvent invocation triggered by the
+    // event-pump runs inside an ALS frame stamped with `runtime` so the
+    // unified log can be filtered by runtime. We wrap the read loops, NOT
+    // the kill()/stopExternalSession path (P0-1 territory — must not
+    // change behaviour there).
     // Read stderr for logging
-    this.readStderr(proc.stderr);
+    void withLogContext({ runtime: 'claude-code' }, () => this.readStderr(proc.stderr!));
 
     // Track process exit — only emit session_complete if NDJSON parser didn't already
     let sessionCompleteEmitted = false;
@@ -370,7 +376,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // Start reading stdout NDJSON in background (uses wrappedOnEvent).
     // Capture the promise so the exit handler can wait for the reader to drain
     // all buffered data before deciding whether to emit a fallback session_complete.
-    const readerDone = this.readEvents(proc.stdout, wrappedOnEvent, handle);
+    const readerDone = withLogContext(
+      { runtime: 'claude-code' },
+      () => this.readEvents(proc.stdout!, wrappedOnEvent, handle),
+    );
 
     proc.exited.then(async (code) => {
       handle.exited = true;

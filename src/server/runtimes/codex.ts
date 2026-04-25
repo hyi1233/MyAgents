@@ -16,6 +16,7 @@ import { StaleRuntimeSessionError } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
 import { killWithEscalation } from './utils/kill-with-escalation';
+import { withLogContext } from '../logger-context';
 
 // ─── Temp image directory for Codex (which requires file paths, not base64) ───
 const TEMP_IMG_DIR = join(
@@ -431,12 +432,16 @@ export class CodexRuntime implements AgentRuntime {
 
     // Dedup guard: prevent double session_complete from notification + process exit
     let sessionCompleteEmitted = false;
+    // Pattern 6: every event delivery is wrapped in an ALS frame stamped
+    // with `runtime: 'codex'` so any nested console.* (in onEvent or its
+    // downstream handlers) is correlated. Frames are short-lived (one per
+    // event) which keeps ALS overhead bounded.
     const wrappedOnEvent: UnifiedEventCallback = (event) => {
       if (event.kind === 'session_complete') {
         if (sessionCompleteEmitted) return; // Already emitted, skip duplicate
         sessionCompleteEmitted = true;
       }
-      onEvent(event);
+      withLogContext({ runtime: 'codex' }, () => onEvent(event));
     };
 
     // Wire up notification handler to emit UnifiedEvents

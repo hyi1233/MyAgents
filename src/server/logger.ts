@@ -15,9 +15,22 @@ import { SSE_INSTANCE_ID } from './sse';
 import { appendUnifiedLog } from './UnifiedLogger';
 import type { LogEntry, LogLevel } from '../renderer/types/log';
 import { localTimestamp } from '../shared/logTime';
+import { getLogContext } from './logger-context';
 
 // Re-export types for backward compatibility
 export type { LogEntry, LogLevel };
+
+// Re-export Pattern 6 correlation helpers for callers that already import
+// from './logger'. The implementation lives in `./logger-context` to avoid
+// a circular import with `./UnifiedLogger`.
+export {
+    withLogContext,
+    getLogContext,
+    logContextStorage,
+    setAmbientLogContext,
+    clearAmbientLogContextField,
+} from './logger-context';
+export type { LogContext } from './logger-context';
 
 // ==================== Ring Buffer for Log History ====================
 // (Per Gemini's suggestion: cache logs before any SSE client connects)
@@ -76,6 +89,19 @@ function createAndBroadcast(level: LogLevel, args: unknown[]): void {
         message,
         timestamp: localTimestamp(),
     };
+
+    // Pattern 6: merge correlation fields from the surrounding ALS frame.
+    // Outside any `withLogContext(...)` wrapper, getLogContext() returns
+    // undefined and the entry stays correlation-free (current behaviour).
+    const ctx = getLogContext();
+    if (ctx) {
+        if (ctx.sessionId) entry.sessionId = ctx.sessionId;
+        if (ctx.tabId) entry.tabId = ctx.tabId;
+        if (ctx.ownerId) entry.ownerId = ctx.ownerId;
+        if (ctx.requestId) entry.requestId = ctx.requestId;
+        if (ctx.turnId) entry.turnId = ctx.turnId;
+        if (ctx.runtime) entry.runtime = ctx.runtime;
+    }
 
     // Store in history buffer (Ring Buffer)
     logHistory.push(entry);
@@ -162,6 +188,19 @@ export function sendLog(level: LogLevel, message: string, meta?: Record<string, 
         timestamp: localTimestamp(),
         meta,
     };
+
+    // Pattern 6: same correlation merge as createAndBroadcast() — `sendLog`
+    // is a back-channel for tooling that doesn't go through console.* (e.g.
+    // structured emit from background workers). It still benefits from ALS.
+    const ctx = getLogContext();
+    if (ctx) {
+        if (ctx.sessionId) entry.sessionId = ctx.sessionId;
+        if (ctx.tabId) entry.tabId = ctx.tabId;
+        if (ctx.ownerId) entry.ownerId = ctx.ownerId;
+        if (ctx.requestId) entry.requestId = ctx.requestId;
+        if (ctx.turnId) entry.turnId = ctx.turnId;
+        if (ctx.runtime) entry.runtime = ctx.runtime;
+    }
 
     originalConsole[level === 'info' ? 'log' : level](message);
 

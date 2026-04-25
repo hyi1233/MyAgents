@@ -237,6 +237,23 @@ interface ProxyHttpResponse {
     is_base64: boolean;
 }
 
+// ── Pattern 6 (Renderer correlation headers) ─────────────────────────────
+// TabProvider keeps the active tabId in sync via setActiveCorrelation().
+// Every proxyFetch call stamps these as `X-MyAgents-Session-Id` /
+// `X-MyAgents-Tab-Id` so the sidecar (Hono fetch handler at index.ts) can
+// run inside `withLogContext({ requestId, sessionId, tabId })`.
+let activeTabId: string | undefined;
+let activeSessionId: string | undefined;
+
+export function setActiveCorrelation(opts: { tabId?: string; sessionId?: string }): void {
+    if ('tabId' in opts) activeTabId = opts.tabId;
+    if ('sessionId' in opts) activeSessionId = opts.sessionId;
+}
+
+export function getActiveTabId(): string | undefined {
+    return activeTabId;
+}
+
 /**
  * Proxy HTTP request through Rust to bypass WebView CORS
  * Falls back to native fetch in browser mode
@@ -282,6 +299,15 @@ export async function proxyFetch(
         } else {
             Object.assign(headers, options.headers);
         }
+    }
+
+    // Pattern 6: stamp correlation headers (renderer → sidecar). Don't
+    // overwrite explicit ones the caller already set.
+    if (activeTabId && !headers['X-MyAgents-Tab-Id'] && !headers['x-myagents-tab-id']) {
+        headers['X-MyAgents-Tab-Id'] = activeTabId;
+    }
+    if (activeSessionId && !headers['X-MyAgents-Session-Id'] && !headers['x-myagents-session-id']) {
+        headers['X-MyAgents-Session-Id'] = activeSessionId;
     }
 
     try {

@@ -39,6 +39,7 @@ import { resolveGeminiWorkspaceInstructions } from './workspace-instructions';
 import { broadcast } from '../sse';
 import { ensureDirSync } from '../utils/fs-utils';
 import { killWithEscalation } from './utils/kill-with-escalation';
+import { withLogContext } from '../logger-context';
 
 // ─── Tmp directory layout for system prompt files ───
 
@@ -688,12 +689,14 @@ export class GeminiRuntime implements AgentRuntime {
     // 4. Wire up the event callback closure. sendMessage() reads this back through the
     //    process instance so it can emit turn_complete / usage from the RPC response.
     let sessionCompleteEmitted = false;
+    // Pattern 6: stamp `runtime: 'gemini'` ambient on every event delivery
+    // so nested console.* in onEvent / downstream handlers correlate.
     const wrappedOnEvent: UnifiedEventCallback = (event) => {
       if (event.kind === 'session_complete') {
         if (sessionCompleteEmitted) return;
         sessionCompleteEmitted = true;
       }
-      onEvent(event);
+      withLogContext({ runtime: 'gemini' }, () => onEvent(event));
     };
     geminiProc.wrappedOnEvent = wrappedOnEvent;
 

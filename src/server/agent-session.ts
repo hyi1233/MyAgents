@@ -37,6 +37,7 @@ import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
 import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
+import { setAmbientLogContext, clearAmbientLogContextField } from './logger-context';
 import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
@@ -3614,6 +3615,9 @@ function handleMessageComplete(): void {
   // Flush pending mid-turn messages BEFORE marking streaming as done.
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
+  // Pattern 6: turn finished — drop the ambient turnId so subsequent logs
+  // (idle / pre-warm / next turn) don't inherit the stale id.
+  clearAmbientLogContextField('turnId');
   // Notify IM stream: turn complete — only if callback was NOT nulled/replaced during this turn.
   // A nulled callback means the SSE stream timed out and a new one may have been set for a
   // subsequent queued message; firing 'complete' here would consume the wrong stream.
@@ -3687,6 +3691,8 @@ function handleMessageStopped(): void {
   // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
+  // Pattern 6: clear turnId on stop (mirror of handleMessageComplete).
+  clearAmbientLogContextField('turnId');
   // Notify IM stream: turn complete (stopped) — cross-turn guard prevents misfire
   if (imStreamCallback && !imCallbackNulledDuringTurn) {
     imStreamCallback('complete', '');
@@ -3730,6 +3736,8 @@ function handleMessageError(error: string): void {
   // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
+  // Pattern 6: clear turnId on error too — turn is over either way.
+  clearAmbientLogContextField('turnId');
   // Notify IM stream: localized error
   if (imStreamCallback) {
     imStreamCallback('error', localizeImError(error));
@@ -7273,6 +7281,15 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
         await persistMessagesToStorage();
         resetTurnUsage();
         currentTurnStartTime = Date.now();
+        // Pattern 6 (SDK turn boundary): stamp `turnId` ambient so all
+        // logs emitted between now and handleMessageComplete()/Stopped/
+        // handleAbort carry it. Ambient (not ALS) because the persistent
+        // messageGenerator yields back into SDK code outside our wrapper
+        // function, so call-stack ALS would lose the frame on resume.
+        // Cleared in handleMessageComplete()/handleMessageStopped()/
+        // handleAbort() below.
+        const turnId = randomUUID().replace(/-/g, '').slice(0, 8);
+        setAmbientLogContext({ turnId, sessionId });
         broadcast('queue:started', {
           queueId: item.id,
           userMessage: {

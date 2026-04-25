@@ -344,6 +344,13 @@ pub fn run() {
             // Initialize global AppHandle for unified logging (IM module etc.)
             logger::init_app_handle(app.handle().clone());
 
+            // Pattern 6: spawn the buffered writer task so subsequent
+            // ulog_*! calls go through the bounded mpsc → BufWriter path
+            // instead of opening/appending/closing per line. Pre-init
+            // calls (extremely early startup) fall back to a synchronous
+            // append protected by a mutex.
+            logger::init_buffered_writer();
+
             // Acquire PID lock — kills any stale instance that macOS auto-restarted
             // (e.g., after build_dev.sh pkill). Must run before cleanup_stale_sidecars
             // so we don't kill sidecars belonging to an instance we're about to replace.
