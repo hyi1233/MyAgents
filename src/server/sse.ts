@@ -97,13 +97,18 @@ const MAX_QUEUE_PER_CLIENT = 1000;
 /** Highwater for coalesce trigger — once queue depth exceeds this, coalescible
  *  events start replacing same-type tails instead of appending. */
 const COALESCE_HIGH_WATER = 256;
+/** OOM defense — beyond this, even critical events get the slow client
+ *  force-closed rather than enqueued. PRD §2.3.2 contract: critical never
+ *  drops on the normal path, but a wedged renderer + buggy plugin emitting
+ *  many `chat:status` / `config:changed` (both critical) must not be allowed
+ *  to grow Node memory unboundedly. 10x MAX_QUEUE_PER_CLIENT gives plenty of
+ *  headroom for a recoverable burst while bounding the worst case. */
+const MAX_QUEUE_HARD_LIMIT = 10 * MAX_QUEUE_PER_CLIENT;
 /** How long a 'critical' enqueue waits for desiredSize to recover before
- *  forcing through with a slow-client warning. (Reserved — current dispatch
- *  path enqueues critical events synchronously on top of the queue rather
- *  than sleeping; this constant documents the contract spelled out in the
- *  PRD §2.3.2.) */
+ *  forcing through with a slow-client warning. PRD §2.3.2: "wait briefly,
+ *  then enqueue anyway". Used by the dispatch path to give downstream a
+ *  chance to drain before we bypass the soft cap. */
 const _CRITICAL_BACKOFF_MS = 100;
-void _CRITICAL_BACKOFF_MS;
 
 interface SseMetrics {
   /** Total dropped events broken down by event type. */
@@ -622,9 +627,25 @@ export function createSseClient(onClose: (client: SseClient) => void): {
       // No prior same-type entry — fall through to normal append.
     }
 
-    // Hard ceiling check. Critical events bypass the ceiling (we'd rather
-    // OOM-warn than drop a completion event); droppable events get dropped;
-    // coalescible events get dropped as a last resort.
+    // Hard ceiling check.
+    //
+    // Fix #6 (review-by-cc + review-by-codex): critical events used to bypass
+    // MAX_QUEUE_PER_CLIENT *unboundedly* — a wedged renderer + buggy plugin
+    // emitting many critical events (e.g. chat:status / config:changed) could
+    // grow the queue forever, OOMing the sidecar. We now apply a secondary
+    // hard cap MAX_QUEUE_HARD_LIMIT (10x the soft cap). Beyond that, even
+    // critical events trigger a force-close on the slow client — better to
+    // evict than to OOM.
+    if (queue.length >= MAX_QUEUE_HARD_LIMIT) {
+      console.warn(
+        `[sse] hard cap exceeded, force-closing slow client ${client?.id ?? 'unknown'} (reason=oom-defense queue=${queue.length} event=${event})`,
+      );
+      // Evict immediately so subsequent broadcasts don't try to enqueue.
+      bumpDropped(event);
+      try { client?.close?.(); } catch { /* ignore */ }
+      return false;
+    }
+
     if (queue.length >= MAX_QUEUE_PER_CLIENT) {
       if (priority === 'critical') {
         sseMetrics.slowConsumerEnqueue += 1;
@@ -654,10 +675,19 @@ export function createSseClient(onClose: (client: SseClient) => void): {
     }
 
     if (priority === 'critical') {
-      // Schedule a backoff: if downstream is still wedged after CRITICAL_BACKOFF_MS,
-      // the next pull() will drain when ready. We don't sleep here — that
-      // would block other broadcasts. The slow-client log fires above when
-      // the queue actually fills.
+      // Fix #6: PRD §2.3.2 contract — when a critical event sees
+      // desiredSize<=0, "wait briefly" before forcing through. We can't
+      // synchronously await here (would block other broadcasts), but we
+      // schedule a deferred drainQueue() for ~CRITICAL_BACKOFF_MS in case
+      // downstream recovers. The event is already enqueued so it'll be
+      // delivered as soon as the controller has room (either via this
+      // timer's drain attempt, or via pull() if downstream consumes
+      // sooner). The slow-client log fires above when the queue actually
+      // fills.
+      const backoffTimer = setTimeout(() => {
+        try { drainQueue(); } catch { /* ignore */ }
+      }, _CRITICAL_BACKOFF_MS);
+      backoffTimer.unref?.();
       drainQueue();
       return true;
     }

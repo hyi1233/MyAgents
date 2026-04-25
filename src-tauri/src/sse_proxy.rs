@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
+use crate::{ulog_info, ulog_error, ulog_debug};
+
 /// Monotonically increasing connection id used to distinguish a "stale" task
 /// (one whose entry has already been replaced by a newer connection) from
 /// the live one. Pattern 1, audit A: SSE proxy task exits without clearing
@@ -110,10 +112,10 @@ pub async fn start_sse_proxy(
     // cleanup, and we must replace it (otherwise the tab stays muted forever).
     if let Some(conn) = connections.get(&tab_id) {
         if conn.is_alive() {
-            log::debug!("[sse-proxy] Tab {} already has an active connection", tab_id);
+            ulog_debug!("[sse-proxy] Tab {} already has an active connection", tab_id);
             return Ok(());
         }
-        log::debug!(
+        ulog_debug!(
             "[sse-proxy] Tab {} prior task ended (gen={}); replacing",
             tab_id, conn.generation
         );
@@ -122,6 +124,20 @@ pub async fn start_sse_proxy(
     // Stop existing connection if any (covers the "still alive but being
     // replaced" path; the is_alive() short-circuit above already returned
     // for the truly-running case).
+    //
+    // Pattern 1 fix #7C — TOCTOU note (load-bearing intentional design):
+    // A's task may be cleaning up its entry concurrently. There are two
+    // outcomes:
+    //   (1) A's cleanup ran first and we observe `None` here → fine, we
+    //       allocate a fresh generation below and insert.
+    //   (2) A's cleanup hasn't run yet and we observe `Some(conn)` → we
+    //       call conn.stop() and then insert OUR fresh generation. When A's
+    //       cleanup eventually fires, its generation-match guard (in the
+    //       spawned task's `match connections.get_mut(...)` block) won't
+    //       match our newly-inserted entry → A becomes a no-op cleanup.
+    // Both branches resolve correctly because A's cleanup is gated on
+    // generation match. Keep this comment in place — removing it makes the
+    // race look like a bug.
     if let Some(mut conn) = connections.remove(&tab_id) {
         conn.stop();
     }
@@ -142,10 +158,10 @@ pub async fn start_sse_proxy(
         let outcome = connect_sse(&app_handle, &url, &running, &tab_id_clone).await;
         match outcome {
             Ok(_) => {
-                log::debug!("[sse-proxy] Tab {} connection closed normally", tab_id_clone);
+                ulog_debug!("[sse-proxy] Tab {} connection closed normally", tab_id_clone);
             }
             Err(e) => {
-                log::error!("[sse-proxy] Tab {} connection error: {}", tab_id_clone, e);
+                ulog_error!("[sse-proxy] Tab {} connection error: {}", tab_id_clone, e);
                 // Emit error with tab_id prefix so frontend can filter
                 let _ = app_handle.emit(&format!("sse:{}:error", tab_id_clone), e.to_string());
             }
@@ -162,13 +178,13 @@ pub async fn start_sse_proxy(
                 entry.running.store(false, Ordering::SeqCst);
                 entry.abort_handle = None;
                 connections.remove(&tab_id_clone);
-                log::debug!(
+                ulog_debug!(
                     "[sse-proxy] Tab {} cleaned own entry (gen={})",
                     tab_id_clone, my_gen
                 );
             }
             Some(entry) => {
-                log::debug!(
+                ulog_debug!(
                     "[sse-proxy] Tab {} task exit (gen={}) superseded by gen={}; not clearing",
                     tab_id_clone, my_gen, entry.generation
                 );
@@ -180,7 +196,7 @@ pub async fn start_sse_proxy(
     conn.abort_handle = Some(handle);
     connections.insert(tab_id.clone(), conn);
 
-    log::info!("[sse-proxy] Started connection for tab {} (gen={})", tab_id, my_gen);
+    ulog_info!("[sse-proxy] Started connection for tab {} (gen={})", tab_id, my_gen);
 
     Ok(())
 }
@@ -192,12 +208,12 @@ pub async fn stop_sse_proxy(
     tab_id: Option<String>,
 ) -> Result<(), String> {
     let tab_id = tab_id.unwrap_or_else(|| "__default__".to_string());
-    
+
     let mut connections = state.connections.lock().await;
-    
+
     if let Some(mut conn) = connections.remove(&tab_id) {
         conn.stop();
-        log::info!("[sse-proxy] Stopped connection for tab {}", tab_id);
+        ulog_info!("[sse-proxy] Stopped connection for tab {}", tab_id);
     }
 
     Ok(())
@@ -209,10 +225,10 @@ pub async fn stop_all_sse_proxies(
     state: tauri::State<'_, Arc<SseProxyState>>,
 ) -> Result<(), String> {
     let mut connections = state.connections.lock().await;
-    
+
     for (tab_id, mut conn) in connections.drain() {
         conn.stop();
-        log::info!("[sse-proxy] Stopped connection for tab {}", tab_id);
+        ulog_info!("[sse-proxy] Stopped connection for tab {}", tab_id);
     }
 
     Ok(())
@@ -265,20 +281,50 @@ async fn connect_sse(
     ));
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    // Pattern 1 fix #7A: byte-level buffer + CRLF-aware split.
+    //
+    // The legacy String-based path called `String::from_utf8_lossy(&chunk)`
+    // per chunk, which corrupts multi-byte UTF-8 sequences split across
+    // chunk boundaries (replaced with U+FFFD). Worse, `find("\n\n")` only
+    // matched LF-LF, missing CRLF event boundaries that some upstreams emit;
+    // and `buffer = buffer[pos+2..].to_string()` was O(n) per drain.
+    //
+    // Fix: hold raw bytes in a `Vec<u8>`, search for either b"\n\n" or
+    // b"\r\n\r\n" (whichever is closer to the head), `drain(..)` for O(1)
+    // amortised consumption, and decode UTF-8 only on the complete event
+    // slice — so partial multi-byte sequences at chunk tails stay buffered
+    // until their final byte arrives.
+    let mut buffer: Vec<u8> = Vec::with_capacity(4096);
     let mut chunk_count: u64 = 0;
+
+    fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
+        // Returns (position_of_event_end, separator_length).
+        // Prefer the EARLIEST boundary so we don't accidentally swallow
+        // another event into the current one if both kinds appear.
+        let lf = buf.windows(2).position(|w| w == b"\n\n");
+        let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
+        match (lf, crlf) {
+            (Some(l), Some(c)) => if l <= c { Some((l, 2)) } else { Some((c, 4)) },
+            (Some(l), None) => Some((l, 2)),
+            (None, Some(c)) => Some((c, 4)),
+            (None, None) => None,
+        }
+    }
 
     while running.load(Ordering::SeqCst) {
         match stream.next().await {
             Some(Ok(chunk)) => {
                 chunk_count += 1;
-                let text = String::from_utf8_lossy(&chunk);
-                buffer.push_str(&text);
+                buffer.extend_from_slice(&chunk);
 
-                // Process complete SSE events (end with \n\n)
-                while let Some(pos) = buffer.find("\n\n") {
-                    let event_str = buffer[..pos].to_string();
-                    buffer = buffer[pos + 2..].to_string();
+                // Process complete SSE events (end with \n\n or \r\n\r\n)
+                while let Some((pos, sep_len)) = find_event_boundary(&buffer) {
+                    // Decode the complete event region as UTF-8 (lossy is
+                    // fine HERE — by the time we have a full event boundary,
+                    // any multi-byte sequence has its final byte present).
+                    let event_str = String::from_utf8_lossy(&buffer[..pos]).to_string();
+                    // O(1) amortised drain.
+                    buffer.drain(..pos + sep_len);
 
                     // Parse and emit SSE event with Tab prefix
                     if let Some((event_name, data)) = parse_sse_event(&event_str) {
@@ -304,9 +350,13 @@ async fn connect_sse(
                 // Log detailed error information for debugging
                 let err_detail = format!("{:?}", e); // Debug format shows more details
                 let buffer_preview = if buffer.len() > 200 {
-                    format!("{}...(truncated, total {} bytes)", &buffer[..200], buffer.len())
+                    format!(
+                        "{}...(truncated, total {} bytes)",
+                        String::from_utf8_lossy(&buffer[..200]),
+                        buffer.len(),
+                    )
                 } else {
-                    buffer.clone()
+                    String::from_utf8_lossy(&buffer).to_string()
                 };
 
                 logger::error(app, format!(

@@ -84,6 +84,13 @@ function createAndBroadcast(level: LogLevel, args: unknown[]): void {
     // making it impossible to verify whether events were actually sent to SSE clients.
 
     const entry: LogEntry = {
+        // NOTE (fix #15): kept as 'bun' for backward compatibility with
+        // historical log files and the renderer's `LogSource` discriminant
+        // (`src/renderer/types/log.ts` + UnifiedLogsPanel SOURCE_LABELS still
+        // expect 'bun' — labelled "NODE" in the UI). v0.2.0 migrated to
+        // Node.js but the wire-level token stays so old logs are still
+        // queryable. Don't rename without coordinated migration of every
+        // historical log file.
         source: 'bun',
         level,
         message,

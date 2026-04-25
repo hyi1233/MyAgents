@@ -11,6 +11,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use crate::utils::file_lock::{with_file_lock_blocking, FileLockError, FileLockOptions};
 
@@ -26,6 +28,20 @@ fn read_config_json(config_path: &Path) -> Result<serde_json::Value, String> {
 }
 
 fn write_all_synced(path: &Path, content: &str) -> Result<(), String> {
+    // Pattern 5 fix #12: explicitly request 0o600 on Unix so cross-process
+    // writers (Node sidecar / Rust commands / renderer) all produce config.json
+    // files with the same user-private permissions. Without this, Rust
+    // inherited the default umask (often 0o644) while Node enforced 0o600
+    // directly — leaving the file readable to other users.
+    #[cfg(unix)]
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("[config-io] Cannot open tmp config: {}", e))?;
+    #[cfg(not(unix))]
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)

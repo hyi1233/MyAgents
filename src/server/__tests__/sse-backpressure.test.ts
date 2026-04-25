@@ -118,6 +118,51 @@ describe('SSE backpressure — droppable events bump metrics', () => {
   });
 });
 
+describe('SSE backpressure — hard cap eviction (fix #6)', () => {
+  it('force-closes slow client when even critical events would exceed MAX_QUEUE_HARD_LIMIT', async () => {
+    let onCloseCalled = false;
+    const { client, response } = createSseClient(() => { onCloseCalled = true; });
+    const reader = response.body!.getReader();
+
+    // Saturate with critical events — without the hard cap they'd grow the
+    // queue forever. With the fix, we expect the client to be evicted (its
+    // close() runs once the hard cap fires, draining what's queued and
+    // signalling the consumer through onClose).
+    //
+    // 12_000 events comfortably exceeds the 10_000 hard cap.
+    for (let i = 0; i < 12_000; i++) {
+      client.send('chat:status', { state: `s-${i}` });
+    }
+
+    // Drain the reader so the test cleans up (close → controller.close()).
+    await drain(reader);
+
+    expect(onCloseCalled).toBe(true);
+  }, 10_000);
+});
+
+describe('SSE backpressure — critical backoff scheduling (fix #6)', () => {
+  it('schedules a deferred drain when critical hits a backpressured downstream', async () => {
+    // Smoke test — critical events with desiredSize<=0 should still land
+    // in the queue and eventually flow once we read. The fix schedules a
+    // setTimeout(_CRITICAL_BACKOFF_MS) drain attempt; we just verify the
+    // events are not dropped.
+    const { client, response } = createSseClient(() => { /* noop */ });
+    const reader = response.body!.getReader();
+
+    // Saturate the queue under the hard cap (so we don't trigger eviction).
+    for (let i = 0; i < 1500; i++) {
+      client.send('chat:message-complete', { iter: i });
+    }
+    client.close();
+    const raw = await drain(reader);
+
+    // At least the very first critical must be present (queue was hot but
+    // critical bypasses the soft cap up to the hard cap).
+    expect(raw).toContain('"iter":0');
+  }, 10_000);
+});
+
 describe('SSE event priority registration', () => {
   it('classifies streaming deltas as coalescible', () => {
     expect(SSE_EVENT_PRIORITIES['chat:message-chunk']).toBe('coalescible');

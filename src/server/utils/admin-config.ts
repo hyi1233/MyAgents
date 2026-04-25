@@ -16,6 +16,7 @@ import {
   openSync,
   fsyncSync,
   closeSync,
+  unlinkSync,
 } from 'fs';
 import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
@@ -239,7 +240,15 @@ export function saveProjects(projects: ProjectSlim[]): void {
   const path = getProjectsPath();
   const tmpPath = path + '.tmp';
   writeFileSync(tmpPath, JSON.stringify(projects, null, 2), 'utf-8');
-  renameSync(tmpPath, path);
+  // Pattern 5 fix #13: if rename fails (e.g. permission denied, target on a
+  // different filesystem), the .tmp file used to persist forever. Wrap so a
+  // failure cleans up the artifact before rethrowing.
+  try {
+    renameSync(tmpPath, path);
+  } catch (err) {
+    try { unlinkSync(tmpPath); } catch { /* ignore — tmp may not exist */ }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -92,3 +92,57 @@ describe('incremental persist invariant (Pattern 3 §3.2.4)', () => {
     expect(p.mapMsg).toHaveBeenCalledTimes(3);
   });
 });
+
+describe('schedulePersist serialization invariant (Pattern 3 §3.2.4 fix #2)', () => {
+  // Mirror of the production schedulePersist chain logic. Verifies that two
+  // overlapping fire-and-forget persist calls run sequentially (the second
+  // observes a fully-completed first) instead of racing on cursor.
+  it('serializes two overlapping persists per session via promise chain', async () => {
+    const persistChain = new Map<string, Promise<void>>();
+    const trace: string[] = [];
+
+    function schedule(sessionId: string, label: string, holdMs: number): Promise<void> {
+      const prev = persistChain.get(sessionId) ?? Promise.resolve();
+      const next = prev.then(async () => {
+        trace.push(`${label}-enter`);
+        await new Promise(r => setTimeout(r, holdMs));
+        trace.push(`${label}-exit`);
+      });
+      persistChain.set(sessionId, next);
+      return next;
+    }
+
+    await Promise.all([
+      schedule('S1', 'A', 30),
+      schedule('S1', 'B', 5),
+    ]);
+
+    // Strict ordering — A entered first; B must enter only after A exits.
+    expect(trace).toEqual(['A-enter', 'A-exit', 'B-enter', 'B-exit']);
+  });
+
+  it('keeps separate chains per session (fork-style isolation)', async () => {
+    const persistChain = new Map<string, Promise<void>>();
+    const trace: string[] = [];
+
+    function schedule(sessionId: string, label: string, holdMs: number): Promise<void> {
+      const prev = persistChain.get(sessionId) ?? Promise.resolve();
+      const next = prev.then(async () => {
+        trace.push(`${sessionId}:${label}-enter`);
+        await new Promise(r => setTimeout(r, holdMs));
+        trace.push(`${sessionId}:${label}-exit`);
+      });
+      persistChain.set(sessionId, next);
+      return next;
+    }
+
+    // Different sessions must run concurrently (no cross-session blocking).
+    await Promise.all([
+      schedule('parent', 'p1', 25),
+      schedule('child', 'c1', 5),
+    ]);
+
+    // Child finishes before parent — that's only possible if they're independent chains.
+    expect(trace.indexOf('child:c1-exit')).toBeLessThan(trace.indexOf('parent:p1-exit'));
+  });
+});

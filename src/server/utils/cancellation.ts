@@ -196,6 +196,12 @@ export function withBoundedTimeout<T>(
   onTimeout: () => void,
 ): Promise<T | undefined> {
   let settled = false;
+  // Fix #16: `p.then(success, failure)` already consumes p's outcome — both
+  // arms exist, so a late rejection after timeout doesn't surface as
+  // unhandledRejection. We attach an extra `.catch(() => {})` here as a
+  // defense-in-depth so any future refactor (e.g. someone removing the
+  // failure arm) doesn't silently regress the "never rejects" contract.
+  void p.catch(() => undefined);
   return new Promise<T | undefined>((resolve) => {
     const timer = setTimeout(() => {
       if (settled) return;

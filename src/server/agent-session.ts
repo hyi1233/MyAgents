@@ -2611,14 +2611,62 @@ export function getPendingInteractiveRequests(): Array<{
  * @param lastAssistantDurationMs - Duration for the last assistant response
  */
 const persistedSessionMessageCache: SessionMessage[] = [];
+
+// Pattern 3 §3.2.4 — fix #2 (reentrance). The four fire-and-forget callsites
+// in handleMessageComplete / handleMessageStopped / handleMessageError used to
+// fire `void persistMessagesToStorage()` independently. Two overlapping
+// invocations would each snapshot `lastPersistedIndex`, both await
+// `saveSessionMessages` serially, and the second would write a stale cursor —
+// double-counting head or losing tail. We serialize per-session via an
+// in-flight chain map (keyed by sessionId at call time so that a forkSession
+// or fresh-session swap doesn't replay onto the wrong key).
+const persistChainBySession = new Map<string, Promise<void>>();
+
+function schedulePersist(
+  lastAssistantUsage?: MessageUsage,
+  lastAssistantToolCount?: number,
+  lastAssistantDurationMs?: number
+): Promise<void> {
+  const key = sessionId;
+  const prev = persistChainBySession.get(key) ?? Promise.resolve();
+  const next = prev.then(() => doPersistMessagesToStorage(
+    lastAssistantUsage,
+    lastAssistantToolCount,
+    lastAssistantDurationMs,
+  )).catch(err => {
+    console.warn('[agent-session] persist failed:', err);
+  });
+  persistChainBySession.set(key, next);
+  // Best-effort cleanup once the tail settles — only delete if we are still
+  // the tail (another schedulePersist may have pushed onto the chain since).
+  void next.then(() => {
+    if (persistChainBySession.get(key) === next) {
+      persistChainBySession.delete(key);
+    }
+  });
+  return next;
+}
+
 async function persistMessagesToStorage(
   lastAssistantUsage?: MessageUsage,
   lastAssistantToolCount?: number,
   lastAssistantDurationMs?: number
 ): Promise<void> {
-  // If the cursor is ahead of the in-memory array (rewind / shrink), reset it
-  // so we don't return early and miss the truncation.
+  // Top-level entry — go through the per-session serializer so concurrent
+  // callers don't interleave their cursor writes.
+  return schedulePersist(lastAssistantUsage, lastAssistantToolCount, lastAssistantDurationMs);
+}
+
+async function doPersistMessagesToStorage(
+  lastAssistantUsage?: MessageUsage,
+  lastAssistantToolCount?: number,
+  lastAssistantDurationMs?: number
+): Promise<void> {
+  // Defensive: if the cursor is somehow > messages.length on entry (rewind
+  // race, fork side-effect), log a warning and reset rather than silently
+  // skipping the rest of the work.
   if (lastPersistedIndex > messages.length) {
+    console.warn(`[agent-session] persist cursor (${lastPersistedIndex}) exceeds messages.length (${messages.length}); resetting`);
     lastPersistedIndex = 0;
     persistedSessionMessageCache.length = 0;
   }
@@ -3768,7 +3816,8 @@ function handleMessageComplete(): void {
   isStreamingMessage = false;
   // Pattern 6: turn finished — drop the ambient turnId so subsequent logs
   // (idle / pre-warm / next turn) don't inherit the stale id.
-  clearAmbientLogContextField('turnId');
+  // Cross-owner fix: scope by sessionId so we only clear OUR slot.
+  clearAmbientLogContextField(sessionId, 'turnId');
   // Notify IM stream: turn complete — only if callback was NOT nulled/replaced during this turn.
   // A nulled callback means the SSE stream timed out and a new one may have been set for a
   // subsequent queued message; firing 'complete' here would consume the wrong stream.
@@ -3843,7 +3892,8 @@ function handleMessageStopped(): void {
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
   // Pattern 6: clear turnId on stop (mirror of handleMessageComplete).
-  clearAmbientLogContextField('turnId');
+  // Cross-owner fix: scope by sessionId so we only clear OUR slot.
+  clearAmbientLogContextField(sessionId, 'turnId');
   // Notify IM stream: turn complete (stopped) — cross-turn guard prevents misfire
   if (imStreamCallback && !imCallbackNulledDuringTurn) {
     imStreamCallback('complete', '');
@@ -3888,7 +3938,8 @@ function handleMessageError(error: string): void {
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
   // Pattern 6: clear turnId on error too — turn is over either way.
-  clearAmbientLogContextField('turnId');
+  // Cross-owner fix: scope by sessionId so we only clear OUR slot.
+  clearAmbientLogContextField(sessionId, 'turnId');
   // Notify IM stream: localized error
   if (imStreamCallback) {
     imStreamCallback('error', localizeImError(error));
@@ -4234,6 +4285,10 @@ function clearMessageState(): void {
   // cached SessionMessage objects too — they belong to a different session.
   lastPersistedIndex = 0;
   persistedSessionMessageCache.length = 0;
+  // Pattern 3 §3.2.4 — fix #2 (reentrance). Drop the per-session persist
+  // chain so a fresh session starts with no in-flight tail awaiting writes
+  // that no longer match the cleared in-memory state.
+  persistChainBySession.delete(sessionId);
   // Pattern 3 §D.3 — drop parsePartialJson throttle cursors so a recycled
   // toolId in a fresh session is not confused with the old buffer length.
   lastParsedBytesByToolId.clear();
@@ -5737,9 +5792,30 @@ export async function forkSession(assistantMessageId: string): Promise<{
       metadata: m.metadata,
     }));
 
-    // 5. Persist new session
+    // 5. Persist new session.
+    // Pattern 3 §3.2.4 — fix #2 (forkSession parent cursor). Snapshot the
+    // parent's persist cursor + cache before invoking SessionStore writers
+    // for the FORKED session; restore them afterwards so a subsequent persist
+    // on the parent doesn't accidentally observe stale state from any code
+    // path that might mutate this module's locals during the fork. fork's
+    // saveSessionMessages writes to a different file under a different lock,
+    // so this is defensive — but cheap insurance against future regressions.
+    const parentPersistCursorSnapshot = lastPersistedIndex;
+    const parentPersistCacheSnapshot = persistedSessionMessageCache.slice();
+
     await saveSessionMetadata(newSession);
     await saveSessionMessages(newSession.id, forkedMessages);
+
+    // Restore parent persistence state (no-op in normal flow; defends against
+    // future cross-talk if forkSession ever needs to run a parent write too).
+    if (lastPersistedIndex !== parentPersistCursorSnapshot) {
+      console.warn(`[agent] forkSession: parent persist cursor drifted (${parentPersistCursorSnapshot} → ${lastPersistedIndex}); restoring`);
+      lastPersistedIndex = parentPersistCursorSnapshot;
+    }
+    if (persistedSessionMessageCache.length !== parentPersistCacheSnapshot.length) {
+      persistedSessionMessageCache.length = 0;
+      for (const m of parentPersistCacheSnapshot) persistedSessionMessageCache.push(m);
+    }
 
     console.log(`[agent] forked session ${sourceSessionId} → ${newSession.id} at message ${assistantMessageId} (sdkUuid: ${targetMsg.sdkUuid}), ${forkedMessages.length} messages copied`);
 
@@ -7503,7 +7579,10 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
         // Cleared in handleMessageComplete()/handleMessageStopped()/
         // handleAbort() below.
         const turnId = randomUUID().replace(/-/g, '').slice(0, 8);
-        setAmbientLogContext({ turnId, sessionId });
+        // Pattern 6 (cross-owner contamination fix): key the ambient slot by
+        // sessionId so two concurrent turns on different owners (Tab/IM/Cron)
+        // can each carry their own turnId without clobbering each other.
+        setAmbientLogContext(sessionId, { turnId, sessionId });
         broadcast('queue:started', {
           queueId: item.id,
           userMessage: {

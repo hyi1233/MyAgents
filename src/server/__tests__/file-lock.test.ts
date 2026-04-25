@@ -7,7 +7,7 @@
  *  (c) timeout returns FileBusyError when owner is alive past timeoutMs
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -63,6 +63,66 @@ describe('withFileLock', () => {
     );
     expect(ran).toBe(true);
     expect(existsSync(lockPath)).toBe(false);
+  });
+
+  // Pid-reuse detection requires a working getPidStartTimeMs (Linux /proc or
+  // macOS `ps`). On Windows we fall back to age-only stale detection — skip
+  // the precise reuse assertion there.
+  const startTimeSupported = process.platform === 'linux' || process.platform === 'darwin';
+  (startTimeSupported ? it : it.skip)('breaks a stale lock whose pid was reused (3-tuple owner with bogus start_time)', async () => {
+    // Owner advertises a live pid (this very test process) but with a
+    // start_time we know is wrong (epoch 1). The lock is past staleMs.
+    // Our pid IS alive but the start time mismatches by years → the
+    // recycled-pid detector should break it.
+    const lockPath = join(scratch, 'reused.lock');
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, 'owner'), `node:${process.pid}:1\n`, 'utf-8');
+
+    let ran = false;
+    await withFileLock(
+      { lockPath, timeoutMs: 2000, staleMs: 0, pollMs: 10 },
+      async () => {
+        ran = true;
+      }
+    );
+    expect(ran).toBe(true);
+  });
+
+  it('release does NOT delete a different holder when our lock was broken as stale', async () => {
+    // Simulates: A acquires lock → A is paused past staleMs → B detects
+    // stale + breaks + acquires its own lock → A resumes and releases. The
+    // release path must NOT remove B's lock (different owner sentinel).
+    const lockPath = join(scratch, 'broken.lock');
+
+    let releaseFromA: () => void = () => { /* noop */ };
+    const aReleased = new Promise<void>(r => { releaseFromA = r; });
+
+    // A: acquire and hold.
+    const aRun = withFileLock(
+      { lockPath, timeoutMs: 2000, staleMs: 60_000, pollMs: 10 },
+      async () => {
+        // Simulate "broken-as-stale": overwrite the owner file to a
+        // different token mid-flight, then wait for the test to release.
+        writeFileSync(join(lockPath, 'owner'), 'node:1:9999999999\n', 'utf-8');
+        await aReleased;
+      },
+    );
+
+    // Yield to let A acquire + tamper.
+    await new Promise(r => setTimeout(r, 30));
+    expect(existsSync(lockPath)).toBe(true);
+    // Sanity: owner is the different token now.
+    expect(readFileSync(join(lockPath, 'owner'), 'utf-8').trim()).toBe('node:1:9999999999');
+
+    // Release A — its release should detect the owner mismatch and skip the rm.
+    releaseFromA();
+    await aRun;
+
+    // Lock dir is still present (held by the imaginary different owner).
+    expect(existsSync(lockPath)).toBe(true);
+
+    // Cleanup so afterEach can rm the scratch dir.
+    rmSync(lockPath, { recursive: true, force: true });
   });
 
   it('throws FileBusyError when lock is held by an alive owner past timeoutMs', async () => {

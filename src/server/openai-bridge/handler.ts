@@ -492,6 +492,13 @@ function handleStreamResponse(
             if (done) {
               try { controller.close(); } catch { /* ignore */ }
               cleanupIdleTimer();
+              // Fix #8: detach the downstream-abort listener on the done
+              // path too. Without this, request.signal kept a strong ref to
+              // onDownstreamAbort until GC, leaking listeners across
+              // streamed sessions. Also covers the "upstream errored before
+              // any chunk" case — pump() sees done:true immediately and the
+              // listener would otherwise survive until process exit.
+              detachDownstream();
               return;
             }
             controller.enqueue(value);
@@ -516,7 +523,13 @@ function handleStreamResponse(
       try {
         // Cancel the composed pipe — this propagates to the SSE parse
         // transform's source (the upstream body reader) automatically.
-        finalReadable.cancel(reason).catch(() => { /* ignore */ });
+        finalReadable.cancel(reason).catch((e) => {
+          // Fix #8: surface (debug) the "stream is locked" path that the
+          // legacy code silently swallowed — we still don't want it as a
+          // warning (cancel after pipeThrough often hits this), but
+          // observable for diagnostics.
+          console.debug(`[bridge] cancel() on finalReadable failed: ${e instanceof Error ? e.message : String(e)}`);
+        });
       } catch { /* ignore */ }
     },
   });
@@ -651,6 +664,10 @@ function handleResponsesStreamResponse(
             if (done) {
               try { controller.close(); } catch { /* ignore */ }
               cleanupIdleTimer();
+              // Fix #8: detach downstream listener on done too — covers
+              // both normal completion and "upstream errored before any
+              // chunk" path (immediate done:true without a flush).
+              detachDownstream();
               return;
             }
             controller.enqueue(value);
@@ -672,7 +689,11 @@ function handleResponsesStreamResponse(
       cleanupIdleTimer();
       detachDownstream();
       try { upstreamController.abort(new Error('Downstream cancel')); } catch { /* ignore */ }
-      try { finalReadable.cancel(reason).catch(() => { /* ignore */ }); } catch { /* ignore */ }
+      try {
+        finalReadable.cancel(reason).catch((e) => {
+          console.debug(`[bridge] cancel() on Responses finalReadable failed: ${e instanceof Error ? e.message : String(e)}`);
+        });
+      } catch { /* ignore */ }
     },
   });
 

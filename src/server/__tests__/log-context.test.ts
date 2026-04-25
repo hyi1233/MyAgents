@@ -19,6 +19,11 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { initLogger, restoreConsole, withLogContext } from '../logger';
+import {
+  setAmbientLogContext,
+  clearAmbientLogContextField,
+  __resetAmbientForTests,
+} from '../logger-context';
 import type { LogEntry } from '../../renderer/types/log';
 
 let captured: LogEntry[] = [];
@@ -42,6 +47,7 @@ beforeEach(() => {
 afterEach(() => {
   restoreConsole();
   captured = [];
+  __resetAmbientForTests();
 });
 
 describe('Pattern 6 — withLogContext correlation injection', () => {
@@ -81,6 +87,46 @@ describe('Pattern 6 — withLogContext correlation injection', () => {
     expect(e!.requestId).toBeUndefined();
     expect(e!.runtime).toBeUndefined();
     expect(e!.ownerId).toBeUndefined();
+  });
+
+  it('(e) cross-owner ambient slots do not contaminate each other', async () => {
+    // Two concurrent owners (A, B) each stamp their own ambient turnId. The
+    // ALS frame for each owner carries its sessionId, which getLogContext()
+    // uses to look up the right ambient slot. Without the per-owner Map fix,
+    // the second setAmbientLogContext would clobber the first's turnId, and
+    // both logs would be mis-tagged.
+    setAmbientLogContext('A', { turnId: 'a1', sessionId: 'A' });
+    setAmbientLogContext('B', { turnId: 'b1', sessionId: 'B' });
+
+    await Promise.all([
+      withLogContext({ sessionId: 'A' }, async () => {
+        await Promise.resolve();
+        console.warn('[test] from-A');
+      }),
+      withLogContext({ sessionId: 'B' }, async () => {
+        await Promise.resolve();
+        console.warn('[test] from-B');
+      }),
+    ]);
+
+    const a = captured.find(c => c.message === '[test] from-A');
+    const b = captured.find(c => c.message === '[test] from-B');
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+    expect(a!.sessionId).toBe('A');
+    expect(a!.turnId).toBe('a1');
+    expect(b!.sessionId).toBe('B');
+    expect(b!.turnId).toBe('b1');
+
+    // Clearing A's turnId leaves B's intact.
+    clearAmbientLogContextField('A', 'turnId');
+    captured = [];
+    await withLogContext({ sessionId: 'B' }, async () => {
+      console.warn('[test] still-B');
+    });
+    const stillB = captured.find(c => c.message === '[test] still-B');
+    expect(stillB).toBeDefined();
+    expect(stillB!.turnId).toBe('b1');
   });
 
   it('(d) async work inside withLogContext keeps the frame across awaits', async () => {

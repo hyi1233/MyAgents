@@ -13,6 +13,7 @@ import { homedir } from 'os';
 import { ensureGitignorePattern } from '../utils/gitignore';
 import { randomUUID } from 'crypto';
 import { ensureDirSync } from '../utils/fs-utils';
+import { cancellableFetch } from '../utils/cancellation';
 
 // MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
 type CallToolResult = {
@@ -355,17 +356,16 @@ async function callGeminiApi(
   // Retry loop with exponential backoff
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const controller = new AbortController();
-    const timeoutHandle = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
     try {
-      const response = await fetch(url, {
+      // Pattern 1 fix #10: migrated to cancellableFetch — same parent-signal
+      // semantics as the four already-migrated tools. SDK doesn't surface a
+      // tool-call-scoped signal here, so we rely on cancellableFetch's
+      // bounded timeout for graceful abandonment.
+      const response = await cancellableFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutHandle);
+      }, { timeoutMs: API_TIMEOUT_MS });
 
       if (!response.ok) {
         const errorBody = await response.text();
@@ -392,7 +392,6 @@ async function callGeminiApi(
 
       return await response.json() as GeminiResponse;
     } catch (err) {
-      clearTimeout(timeoutHandle);
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error('Gemini API request timed out (300s)');
       }
@@ -819,8 +818,9 @@ export async function validateGeminiImage(
   if (cacheKey === verifiedCacheKey) return null;
   try {
     console.log('[api/mcp/enable] Verifying Gemini API key...');
-    const resp = await fetch(`${baseUrl}/models?key=${apiKey}`, {
-      signal: AbortSignal.timeout(15_000),
+    // Pattern 1 fix #10: migrated to cancellableFetch — bounded 15s timeout.
+    const resp = await cancellableFetch(`${baseUrl}/models?key=${apiKey}`, undefined, {
+      timeoutMs: 15_000,
     });
     if (!resp.ok) {
       const body = await resp.text().catch(() => '');

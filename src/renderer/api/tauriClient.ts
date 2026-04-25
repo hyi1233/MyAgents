@@ -244,21 +244,85 @@ interface ProxyHttpResponse {
     ref_size_bytes?: number;
 }
 
-// ── Pattern 6 (Renderer correlation headers) ─────────────────────────────
-// TabProvider keeps the active tabId in sync via setActiveCorrelation().
-// Every proxyFetch call stamps these as `X-MyAgents-Session-Id` /
-// `X-MyAgents-Tab-Id` so the sidecar (Hono fetch handler at index.ts) can
-// run inside `withLogContext({ requestId, sessionId, tabId })`.
-let activeTabId: string | undefined;
-let activeSessionId: string | undefined;
+// ── Pattern 6 (Renderer correlation headers) — FIXED resolver model ──
+// TabProvider used to overwrite a single `activeTabId` on mount, so the
+// last-mounted tab won regardless of where the user actually was. With N
+// concurrent tabs, requests fired from tab A would carry tab B's id in
+// `X-MyAgents-Tab-Id` whenever B mounted later — breaking PRD §6.4
+// "any error log can be filtered by tabId".
+//
+// New model: a registry of mounted tabs + a "focused" pointer + a callback
+// resolver. `proxyFetch` calls `resolveCorrelation()`, which prefers the
+// caller-supplied context (set per-request via the optional argument), then
+// the focused tab, then the last-mounted as a last resort. Multiple
+// TabProviders coexist without clobbering.
+const mountedTabs = new Map<string, { sessionId?: string }>();
+let focusedTabId: string | undefined;
+let lastMountedTabId: string | undefined;
 
-export function setActiveCorrelation(opts: { tabId?: string; sessionId?: string }): void {
-    if ('tabId' in opts) activeTabId = opts.tabId;
-    if ('sessionId' in opts) activeSessionId = opts.sessionId;
+interface CorrelationContext { tabId?: string; sessionId?: string }
+
+/**
+ * TabProvider calls this on mount with `mounted: true` and on unmount with
+ * `mounted: false`. The first mounted tab also claims focus until a focus
+ * event explicitly moves it.
+ */
+export function setActiveCorrelation(opts: { tabId?: string; sessionId?: string; mounted?: boolean }): void {
+    const mounted = opts.mounted !== false; // default: mounted=true (legacy callers without `mounted` field expect mount semantics)
+    if (!opts.tabId) {
+        // Legacy callsite passed only sessionId — apply to whichever tab is
+        // currently focused. (Existing behaviour preserved.)
+        if (focusedTabId && opts.sessionId !== undefined) {
+            const slot = mountedTabs.get(focusedTabId) ?? {};
+            slot.sessionId = opts.sessionId;
+            mountedTabs.set(focusedTabId, slot);
+        }
+        return;
+    }
+
+    if (mounted) {
+        const slot = mountedTabs.get(opts.tabId) ?? {};
+        if (opts.sessionId !== undefined) slot.sessionId = opts.sessionId;
+        mountedTabs.set(opts.tabId, slot);
+        lastMountedTabId = opts.tabId;
+        if (!focusedTabId || !mountedTabs.has(focusedTabId)) {
+            focusedTabId = opts.tabId;
+        }
+    } else {
+        mountedTabs.delete(opts.tabId);
+        if (focusedTabId === opts.tabId) {
+            focusedTabId = lastMountedTabId && mountedTabs.has(lastMountedTabId)
+                ? lastMountedTabId
+                : (mountedTabs.keys().next().value as string | undefined);
+        }
+        if (lastMountedTabId === opts.tabId) {
+            lastMountedTabId = mountedTabs.keys().next().value as string | undefined;
+        }
+    }
+}
+
+/** Mark `tabId` as currently focused (TabProvider focus event). */
+export function setFocusedCorrelationTabId(tabId: string | undefined): void {
+    if (tabId === undefined) return; // don't clobber on blur — keep the last-focused
+    focusedTabId = tabId;
+    if (!mountedTabs.has(tabId)) {
+        mountedTabs.set(tabId, {});
+        lastMountedTabId = tabId;
+    }
+}
+
+function resolveCorrelation(): CorrelationContext {
+    let tabId: string | undefined;
+    if (focusedTabId && mountedTabs.has(focusedTabId)) tabId = focusedTabId;
+    else if (lastMountedTabId && mountedTabs.has(lastMountedTabId)) tabId = lastMountedTabId;
+    else tabId = mountedTabs.keys().next().value as string | undefined;
+
+    const sessionId = tabId ? mountedTabs.get(tabId)?.sessionId : undefined;
+    return { tabId, sessionId };
 }
 
 export function getActiveTabId(): string | undefined {
-    return activeTabId;
+    return resolveCorrelation().tabId;
 }
 
 /**
@@ -309,12 +373,14 @@ export async function proxyFetch(
     }
 
     // Pattern 6: stamp correlation headers (renderer → sidecar). Don't
-    // overwrite explicit ones the caller already set.
-    if (activeTabId && !headers['X-MyAgents-Tab-Id'] && !headers['x-myagents-tab-id']) {
-        headers['X-MyAgents-Tab-Id'] = activeTabId;
+    // overwrite explicit ones the caller already set. Resolver prefers
+    // focused-tab > last-mounted-tab > any-mounted-tab.
+    const correlation = resolveCorrelation();
+    if (correlation.tabId && !headers['X-MyAgents-Tab-Id'] && !headers['x-myagents-tab-id']) {
+        headers['X-MyAgents-Tab-Id'] = correlation.tabId;
     }
-    if (activeSessionId && !headers['X-MyAgents-Session-Id'] && !headers['x-myagents-session-id']) {
-        headers['X-MyAgents-Session-Id'] = activeSessionId;
+    if (correlation.sessionId && !headers['X-MyAgents-Session-Id'] && !headers['x-myagents-session-id']) {
+        headers['X-MyAgents-Session-Id'] = correlation.sessionId;
     }
 
     try {

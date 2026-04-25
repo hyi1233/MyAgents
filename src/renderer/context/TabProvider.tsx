@@ -560,20 +560,43 @@ export default function TabProvider({
         return () => { unsubscribe(); };
     }, [appendUnifiedLog, tabId]);
 
-    // Pattern 6: keep the renderer's "active tab" pointers in sync. The
-    // frontendLogger stamps `tabId` on captured console.* entries and
-    // tauriClient stamps `X-MyAgents-Tab-Id` / `X-MyAgents-Session-Id` on
-    // sidecar HTTP requests. Multiple tabs may mount concurrently, so we
-    // only claim "active" when the active context flag is set elsewhere —
-    // a cheap proxy is "last mounted wins", which works for the common
-    // single-active-tab case and is a no-op for log correlation in others.
+    // Pattern 6 (FIXED): focus-aware tab registry. The previous "last mounted
+    // wins" model mis-tagged logs and `X-MyAgents-Tab-Id` headers in multi-tab
+    // sessions. Now each TabProvider mounts its tabId into the registry on
+    // mount and removes it on unmount; document-visibility transitions move
+    // the "focused" pointer so the active tab claims correlation.
     useEffect(() => {
-        setCurrentTabId(tabId);
-        setActiveCorrelation({ tabId });
+        setCurrentTabId(tabId, true);
+        setActiveCorrelation({ tabId, mounted: true });
+
+        const handleVisibility = (): void => {
+            if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+                // The browser/Tauri webview only has one "visible" state per
+                // window; the active tab is whichever TabProvider is currently
+                // mounted with focus. Promote ourselves on each visibility-on.
+                import('@/utils/frontendLogger').then(({ setFocusedTabId }) => {
+                    setFocusedTabId(tabId);
+                }).catch(() => { /* ignore */ });
+                import('@/api/tauriClient').then(({ setFocusedCorrelationTabId }) => {
+                    setFocusedCorrelationTabId(tabId);
+                }).catch(() => { /* ignore */ });
+            }
+        };
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', handleVisibility);
+            // Run once at mount to claim focus if we're the visible tab.
+            handleVisibility();
+        }
+
         return () => {
-            // Don't unset on unmount — another tab may have already claimed.
-            // Setting back to undefined here would race with the new tab's
-            // mount effect. Leave the last value in place.
+            if (typeof document !== 'undefined') {
+                document.removeEventListener('visibilitychange', handleVisibility);
+            }
+            // Pattern 6 fix: unmount cleanly. Without this, a closed tab's id
+            // would linger in the registry and could be picked as "fallback"
+            // for global logs, mis-tagging them with a dead tab.
+            setCurrentTabId(tabId, false);
+            setActiveCorrelation({ tabId, mounted: false });
         };
     }, [tabId]);
 

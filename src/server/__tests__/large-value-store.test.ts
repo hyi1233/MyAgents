@@ -9,7 +9,7 @@
  *  (e) clearSessionRefs removes only that session's refs
  */
 
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync, unlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -95,6 +95,73 @@ describe('fetchRef', () => {
   it('rejects ids with path-traversal patterns', async () => {
     const fetched = await fetchRef('../etc/passwd');
     expect(fetched).toBeNull();
+  });
+
+  it('rejects uppercase ids (tightened path-traversal guard, fix #5C)', async () => {
+    // Generator emits lowercase hex; uppercase variants must be rejected so
+    // case-mixing probes can't slip past the regex.
+    const fetched = await fetchRef('DEADBEEF');
+    expect(fetched).toBeNull();
+  });
+
+  it('rejects too-short ids (< 8 chars) and too-long ids (> 32 chars)', async () => {
+    expect(await fetchRef('abc')).toBeNull();
+    expect(await fetchRef('a'.repeat(64))).toBeNull();
+  });
+});
+
+describe('expiresAt validity (fix #5B)', () => {
+  it('treats expiresAt=0 (corrupt sentinel) as expired and returns null', async () => {
+    const value = 'X'.repeat(2048);
+    const out = await maybeSpill(value, {
+      inlineMaxBytes: 256,
+      mimetype: 'text/plain',
+    });
+    const ref = out as LargeValueRef;
+
+    // Corrupt the meta file: rewrite expiresAt=0 (legacy "non-expiring" via
+    // truthiness check). The fixed isExpired() must reject this.
+    const metaPath = join(scratch, `${ref.id}.meta.json`);
+    const raw = readFileSync(metaPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    parsed.expiresAt = 0;
+    writeFileSync(metaPath, JSON.stringify(parsed), 'utf-8');
+
+    expect(await fetchRef(ref.id)).toBeNull();
+  });
+});
+
+describe('orphan body sweep (fix #5D)', () => {
+  it('removes body files older than 1h without a paired meta.json', async () => {
+    // Simulate: a body file that lost its meta (meta-write failed mid-spill).
+    // Use a valid id shape so the sweep regex accepts it.
+    const orphanId = 'aabbccdd';
+    const orphanPath = join(scratch, orphanId);
+    writeFileSync(orphanPath, Buffer.from('orphaned-data'));
+
+    // Backdate mtime to 2h ago so the sweep picks it up.
+    const twoHoursAgo = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
+    utimesSync(orphanPath, twoHoursAgo, twoHoursAgo);
+
+    expect(existsSync(orphanPath)).toBe(true);
+    await clearExpiredRefs();
+    expect(existsSync(orphanPath)).toBe(false);
+  });
+
+  it('does NOT remove body files younger than 1h (race-safe)', async () => {
+    const value = 'Y'.repeat(4096);
+    const out = await maybeSpill(value, {
+      inlineMaxBytes: 256,
+      mimetype: 'text/plain',
+    });
+    const ref = out as LargeValueRef;
+    // Delete the meta file to simulate a partial write — body is now an
+    // "orphan" but very young; the sweep must NOT remove it.
+    const metaPath = join(scratch, `${ref.id}.meta.json`);
+    unlinkSync(metaPath);
+
+    await clearExpiredRefs();
+    expect(existsSync(join(scratch, ref.id))).toBe(true); // young orphan survives
   });
 });
 

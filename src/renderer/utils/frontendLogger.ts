@@ -34,14 +34,77 @@ let initialized = false;
 // forward).
 export const REACT_LOG_EVENT = 'myagents:react-log';
 
-// ── Pattern 6: active tab tracking ─────────────────────────────────────
-// TabProvider calls `setCurrentTabId(tabId)` on mount/focus. Captured logs
-// inherit this tabId. Outside any tab (e.g. App-level setup) the field is
-// left undefined.
-let currentTabId: string | undefined;
+// ── Pattern 6: active tab tracking (FIXED — focus-aware registry) ─────
+// Previously this was a single `currentTabId` overwritten by whichever tab
+// mounted last. With multiple tabs mounted concurrently, captured console.*
+// logs were stamped with the wrong tabId. We now keep a registry of mounted
+// tabs + a "focused" pointer; capture reads from the focused entry. Each
+// tab mounts via setCurrentTabId(tabId) which adds it to the registry, and
+// unmounts via setCurrentTabId(undefined) (called from the same tab's
+// cleanup) which removes the matching entry.
+const mountedTabIds = new Set<string>();
+let focusedTabId: string | undefined;
+// Last-resort fallback for legacy callers — preserves old "last mounted
+// wins" behavior when no focus event has fired yet (cold start before any
+// focus listener attaches).
+let lastMountedTabId: string | undefined;
 
-export function setCurrentTabId(tabId: string | undefined): void {
-    currentTabId = tabId;
+/**
+ * Mount or unmount a tab in the active-tab registry. Pass `undefined` to
+ * unmount the most recently mounted tab (legacy 1-arg shape; rarely needed —
+ * the focus-aware variant `setCurrentTabId(tabId, mounted=true|false)` is
+ * preferred). The "currently active tab" is the one with focus, or the
+ * last-mounted as fallback.
+ */
+export function setCurrentTabId(tabId: string | undefined, mounted: boolean = true): void {
+    if (tabId === undefined) {
+        // Legacy unmount-all path: shouldn't be hit in current code, but kept
+        // for safety — clearing without a specific id is never the right thing.
+        return;
+    }
+    if (mounted) {
+        mountedTabIds.add(tabId);
+        lastMountedTabId = tabId;
+        // First mount → claim focus until something else explicitly does.
+        if (!focusedTabId || !mountedTabIds.has(focusedTabId)) {
+            focusedTabId = tabId;
+        }
+    } else {
+        mountedTabIds.delete(tabId);
+        if (focusedTabId === tabId) {
+            focusedTabId = lastMountedTabId && mountedTabIds.has(lastMountedTabId)
+                ? lastMountedTabId
+                : (mountedTabIds.values().next().value as string | undefined);
+        }
+        if (lastMountedTabId === tabId) {
+            // Pick any remaining mounted tab as the new "last".
+            lastMountedTabId = mountedTabIds.values().next().value as string | undefined;
+        }
+    }
+}
+
+/** Mark `tabId` as currently focused — called by TabProvider when its tab gains focus. */
+export function setFocusedTabId(tabId: string | undefined): void {
+    if (tabId === undefined) {
+        // Don't clobber focusedTabId on blur — keep the last-focused as the
+        // best guess. App-level captures still work via the fallback chain.
+        return;
+    }
+    focusedTabId = tabId;
+    if (!mountedTabIds.has(tabId)) {
+        // Belt-and-suspenders: a tab that focuses without first mounting
+        // should be added so capture still works.
+        mountedTabIds.add(tabId);
+        lastMountedTabId = tabId;
+    }
+}
+
+function resolveActiveTabId(): string | undefined {
+    if (focusedTabId && mountedTabIds.has(focusedTabId)) return focusedTabId;
+    if (lastMountedTabId && mountedTabIds.has(lastMountedTabId)) return lastMountedTabId;
+    // Last resort — any mounted tab. Avoids "no tab id at all" when something
+    // logs before any focus/mount sequence stabilises.
+    return mountedTabIds.values().next().value as string | undefined;
 }
 
 // ── Pattern 6: global log store (bounded ring buffer + listeners) ─────
@@ -247,10 +310,11 @@ function createAndDispatch(level: LogLevel, args: unknown[]): void {
     level,
     message,
     timestamp: localTimestamp(),
-    // Pattern 6: stamp tabId from the module-level "current tab" set by
-    // TabProvider. Outside any tab, leave undefined → entries appear as
-    // global (every tab's filtered subscription includes them).
-    tabId: currentTabId,
+    // Pattern 6: stamp tabId from the focus-aware registry. Outside any
+    // tab, leave undefined → entries appear as global (every tab's
+    // filtered subscription includes them). Replaces the old "last mounted
+    // wins" singleton which mis-tagged logs in multi-tab sessions.
+    tabId: resolveActiveTabId(),
   };
 
   // Push to global store (bounded ring + listeners). Replaces the old

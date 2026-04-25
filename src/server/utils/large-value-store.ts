@@ -186,13 +186,32 @@ export async function maybeSpill(
 
   // Write body first, then meta — readers gate on meta.json existing, so a
   // partial write looks like "no such ref" rather than "incomplete ref".
+  // Pattern 2 fix #5A: if meta-write fails, the body file is otherwise
+  // orphaned forever (GC filters by `.meta.json`). Catch + clean up.
   try {
-    if (typeof value === 'string') {
-      await fsp.writeFile(bodyPath(dir, id), value, 'utf-8');
-    } else {
-      await fsp.writeFile(bodyPath(dir, id), value);
+    // Open + write + fdatasync + close so a crash between body and meta can't
+    // leave a partially-written body that the eventual GC sweeps miss.
+    const handle = typeof value === 'string'
+      ? await fsp.open(bodyPath(dir, id), 'w')
+      : await fsp.open(bodyPath(dir, id), 'w');
+    try {
+      if (typeof value === 'string') {
+        await handle.writeFile(value, 'utf-8');
+      } else {
+        await handle.writeFile(value);
+      }
+      // fdatasync — flush data, skip metadata (faster than sync()).
+      await handle.datasync().catch(() => undefined);
+    } finally {
+      await handle.close().catch(() => undefined);
     }
-    await fsp.writeFile(metaPath(dir, id), JSON.stringify(meta), 'utf-8');
+    try {
+      await fsp.writeFile(metaPath(dir, id), JSON.stringify(meta), 'utf-8');
+    } catch (metaErr) {
+      // Meta failed → body is now orphaned. Remove it before surfacing.
+      await fsp.rm(bodyPath(dir, id), { force: true }).catch(() => undefined);
+      throw metaErr;
+    }
   } catch (err) {
     console.warn(`[refs] spill failed id=${id}: ${err instanceof Error ? err.message : String(err)}`);
     // On failure, fall back to inline so the caller still has data — better
@@ -204,6 +223,24 @@ export async function maybeSpill(
 }
 
 /**
+ * `expiresAt` validity check — rejects 0/NaN/non-number values and treats
+ * past timestamps as expired. The legacy `expiresAt && expiresAt < Date.now()`
+ * check accepted `0` as a "non-expiring" sentinel (because `0` is falsy),
+ * which corrupted meta could exploit to keep refs alive forever.
+ */
+function isExpired(expiresAt: unknown): boolean {
+  if (typeof expiresAt !== 'number') return true; // corrupt → treat as expired
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) return true;
+  return expiresAt < Date.now();
+}
+
+/** Tightened path-traversal guard. Generator emits 8 lowercase hex chars
+ *  (uuid first segment is always lowercase); cap at 32 to bound input
+ *  length and reject upper-case to prevent path-traversal probes that
+ *  vary case to bypass the original `/^[a-f0-9]+$/i` regex. */
+const REF_ID_RE = /^[a-f0-9]{8,32}$/;
+
+/**
  * Fetch a previously-spilled ref. Returns `null` if the ref doesn't exist or
  * has expired (TTL).
  *
@@ -211,7 +248,7 @@ export async function maybeSpill(
  * seen pre-spill. For very large bodies, prefer streaming via the HTTP route.
  */
 export async function fetchRef(id: string): Promise<{ data: Uint8Array; mimetype: string } | null> {
-  if (!/^[a-f0-9]+$/i.test(id)) return null; // path-traversal guard
+  if (!REF_ID_RE.test(id)) return null; // path-traversal guard (lowercase hex 8–32)
   const dir = getRefsDir();
   let meta: RefMeta;
   try {
@@ -220,8 +257,8 @@ export async function fetchRef(id: string): Promise<{ data: Uint8Array; mimetype
   } catch {
     return null;
   }
-  if (meta.expiresAt && meta.expiresAt < Date.now()) {
-    // Expired — best-effort cleanup.
+  if (isExpired(meta.expiresAt)) {
+    // Expired or corrupt expiresAt — best-effort cleanup.
     void deleteRef(dir, id);
     return null;
   }
@@ -240,7 +277,7 @@ export async function fetchRef(id: string): Promise<{ data: Uint8Array; mimetype
  * Returns `null` if missing or expired (TTL).
  */
 export async function getRefStreamPath(id: string): Promise<{ path: string; mimetype: string; sizeBytes: number } | null> {
-  if (!/^[a-f0-9]+$/i.test(id)) return null;
+  if (!REF_ID_RE.test(id)) return null;
   const dir = getRefsDir();
   let meta: RefMeta;
   try {
@@ -249,7 +286,7 @@ export async function getRefStreamPath(id: string): Promise<{ path: string; mime
   } catch {
     return null;
   }
-  if (meta.expiresAt && meta.expiresAt < Date.now()) {
+  if (isExpired(meta.expiresAt)) {
     void deleteRef(dir, id);
     return null;
   }
@@ -274,20 +311,45 @@ export async function clearExpiredRefs(): Promise<void> {
   } catch {
     return;
   }
-  const now = Date.now();
+  const metaNames = new Set<string>();
   await Promise.all(entries
     .filter((name) => name.endsWith('.meta.json'))
     .map(async (name) => {
+      metaNames.add(name);
       const id = name.slice(0, -'.meta.json'.length);
       try {
         const raw = await fsp.readFile(join(dir, name), 'utf-8');
         const meta = JSON.parse(raw) as RefMeta;
-        if (meta.expiresAt && meta.expiresAt < now) {
+        if (isExpired(meta.expiresAt)) {
           await deleteRef(dir, id);
         }
       } catch {
         // Corrupt meta — drop it.
         await deleteRef(dir, id);
+      }
+    }));
+
+  // Pattern 2 fix #5D — orphan body sweep. A meta-write failure (or crash
+  // between body write and meta write) used to leave the body file forever
+  // (the legacy GC only iterated `.meta.json` files). Sweep any non-meta
+  // file with no matching `<name>.meta.json` companion AND mtime > 1h.
+  await Promise.all(entries
+    .filter((name) => !name.endsWith('.meta.json'))
+    .map(async (name) => {
+      // Skip if a paired meta exists.
+      if (metaNames.has(`${name}.meta.json`)) return;
+      // Only sweep ids that match the new shape — protects renamed files /
+      // unrelated artifacts that may share the directory.
+      if (!REF_ID_RE.test(name)) return;
+      const fullPath = join(dir, name);
+      try {
+        const st = await fsp.stat(fullPath);
+        const ageMs = Date.now() - st.mtimeMs;
+        if (ageMs > 60 * 60 * 1000) {
+          await fsp.rm(fullPath, { force: true }).catch(() => undefined);
+        }
+      } catch {
+        /* ignore */
       }
     }));
 }

@@ -6,6 +6,7 @@
 // We only need to: spawn process, relay events, and handle permission delegation.
 
 import { broadcast } from '../sse';
+import { killWithEscalation } from './utils/kill-with-escalation';
 import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
@@ -1219,7 +1220,31 @@ export async function stopExternalSession(): Promise<boolean> {
     return true;
   } catch (err) {
     console.error('[external-session] Error stopping session:', err);
-    activeProcess.kill();
+    // Pattern 1 P0-1 fix #11: previously fell through to a single
+    // SIGTERM-default kill that could hang indefinitely. Now bound the
+    // shutdown via killWithEscalation: 2s graceful → 1s hard → orphan log.
+    const proc = activeProcess;
+    void killWithEscalation(
+      {
+        pid: proc.pid,
+        exited: proc.exited,
+        kill: (signal) => {
+          // RuntimeProcess.kill accepts number; map signal names to SIGTERM/SIGKILL ints.
+          const num = typeof signal === 'string'
+            ? (signal === 'SIGKILL' ? 9 : 15)
+            : (signal ?? 15);
+          proc.kill(num);
+        },
+        waitForExit: () => proc.waitForExit(),
+      },
+      {
+        gracefulMs: 2000,
+        hardMs: 1000,
+        onStep: (step, info) => {
+          if (step === 'orphan') console.warn(`[external-session] catch fallback orphan pid=${info.pid}`);
+        },
+      },
+    );
     return true;
   } finally {
     activeProcess = null;
