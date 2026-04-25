@@ -61,6 +61,39 @@ pub fn run_cli(args: &[String]) -> i32 {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ── DIAGNOSTIC PANIC HOOK (April 2026 crash investigation) ─────────────
+    // Install BEFORE any other init so we capture every panic, including
+    // setup-time / did_finish_launching ones that don't reach the unified
+    // logger. Writes to ~/.myagents/logs/panic-{pid}-{timestamp}.log so a
+    // post-mortem has the actual panic message even when the app aborts
+    // before normal log flush.
+    {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let log_dir = app_dirs::myagents_data_dir()
+                .map(|d| d.join("logs"))
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let _ = std::fs::create_dir_all(&log_dir);
+            let pid = std::process::id();
+            let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%.3f");
+            let path = log_dir.join(format!("panic-{}-{}.log", pid, ts));
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let payload = format!(
+                "TIME: {}\nPID: {}\nINFO: {}\nLOCATION: {:?}\n\nBACKTRACE:\n{}\n",
+                chrono::Local::now().to_rfc3339(),
+                pid,
+                info,
+                info.location(),
+                backtrace,
+            );
+            let _ = std::fs::write(&path, &payload);
+            // Also try to print to stderr as a fallback
+            eprintln!("[PANIC-HOOK] wrote {}", path.display());
+            eprintln!("{}", payload);
+            prev(info);
+        }));
+    }
+
     // NOTE: cleanup_stale_sidecars() was moved into .setup() callback below.
     // This ensures it only runs for the PRIMARY app instance, not when a second
     // instance is launched (which would kill the running app's sidecar processes).

@@ -217,8 +217,14 @@ fn now_ms() -> u64 {
 }
 
 /// Initialize the buffered writer task. Idempotent — safe to call multiple
-/// times; only the first call actually spawns. Must be called from inside a
-/// tokio runtime; before init, calls fall back to synchronous writes.
+/// times; only the first call actually spawns.
+///
+/// MUST use `tauri::async_runtime::spawn` — this is called from Tauri's
+/// `.setup()` callback which runs on the main thread without a Tokio reactor.
+/// `tokio::spawn` would panic and, because `.setup()` is invoked through an
+/// ObjC callback on macOS, the panic cannot unwind across the FFI boundary
+/// and aborts the process (`panic_cannot_unwind` in `did_finish_launching`).
+/// (Same pattern as `search/mod.rs::start_background_indexing`.)
 pub fn init_buffered_writer() {
     if WRITER_SENDER.get().is_some() {
         return;
@@ -227,7 +233,7 @@ pub fn init_buffered_writer() {
     if WRITER_SENDER.set(tx).is_err() {
         return;
     }
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         // Open the current day's file. Re-open on day rollover.
         let mut current_path = get_log_file_path();
         let mut writer: Option<BufWriter<std::fs::File>> = None;
