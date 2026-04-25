@@ -32,6 +32,7 @@ import {
   restoreRuntimeUsageTotals,
 } from './usage-utils';
 import { imEventBus, type ImEventType } from '../utils/im-event-bus';
+import { imRequestRegistry } from '../utils/im-request-registry';
 
 // ─── Module state ───
 
@@ -1212,6 +1213,25 @@ export async function respondExternalAskUserQuestion(
 }
 
 /**
+ * Pattern D — IM trace-id-targeted cancellation for external runtimes.
+ * For CC/Codex/Gemini we don't have a per-request granularity (the runtime
+ * processes turns sequentially), so cancellation degenerates to "stop the
+ * active session if `requestId` matches `activeRequestId`". Returns
+ * { aborted, mode } same shape as the builtin `cancelImRequest`.
+ */
+export async function cancelExternalImRequest(
+  requestId: string,
+  _reason: string = 'user',
+): Promise<{ aborted: boolean; mode: 'running' | 'queued' | 'unknown' }> {
+  if (activeRequestId === requestId && isExternalSessionActive()) {
+    console.log(`[external-session] cancelExternalImRequest requestId=${requestId} mode=running`);
+    await stopExternalSession();
+    return { aborted: true, mode: 'running' };
+  }
+  return { aborted: false, mode: 'unknown' };
+}
+
+/**
  * Stop the active external session
  */
 export async function stopExternalSession(): Promise<boolean> {
@@ -1264,7 +1284,12 @@ export async function stopExternalSession(): Promise<boolean> {
     pendingExternalInteractiveRequests.clear();
     externalSystemInitPayload = null;
     // Pattern B: notify IM bus subscribers (prevents orphaned SSE streams on user-stop) + clear active ID.
+    // Pattern C: also unregister from request registry.
     fireImCallback('error', 'Session stopped');
+    if (activeRequestId) {
+      imRequestRegistry.setStatus(activeRequestId, 'failed');
+      imRequestRegistry.unregister(activeRequestId);
+    }
     activeRequestId = null;
     setExternalSessionState('idle');
   }
@@ -1455,8 +1480,11 @@ async function persistTurnResult(): Promise<void> {
   });
   setExternalSessionState('idle');
   fireImCallback('complete', '');
-  // Pattern B: turn complete — clear active trace ID so subsequent SDK output
-  // (between turns or from a new session) won't leak to this turn's subscribers.
+  // Pattern B/C: turn complete — clear active trace ID + unregister from registry.
+  if (activeRequestId) {
+    imRequestRegistry.setStatus(activeRequestId, 'completed');
+    imRequestRegistry.unregister(activeRequestId);
+  }
   activeRequestId = null;
 }
 

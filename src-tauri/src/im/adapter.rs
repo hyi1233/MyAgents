@@ -213,6 +213,16 @@ pub trait ImStreamAdapter: ImAdapter {
     ) -> impl std::future::Future<Output = AdapterResult<()>> + Send {
         async { Ok(()) }
     }
+
+    /// Hook called after a turn's events have been fully dispatched (terminal
+    /// 'complete' / 'error'). DingTalk overrides this to finalize AI Card
+    /// state. Default: no-op.
+    fn post_stream_cleanup(
+        &self,
+        _chat_id: &str,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async { /* default no-op */ }
+    }
 }
 
 /// Split a message into chunks at natural break points (paragraph, line, sentence, word).

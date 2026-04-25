@@ -51,34 +51,34 @@ class ImEventBusImpl {
   private buffer: ImEvent[] = [];
   private nextSeq = 1;
   private subscribers = new Set<ImEventSubscriber>();
+  /** Singleton "you missed events" marker. Held outside the buffer so it
+   *  never competes for ring-buffer slots; emit-side eviction extends this
+   *  gap's range, subscribe-side replay synthesizes it before live events. */
+  private gap: ImEvent | null = null;
 
-  /** Emit an event. Stamps it with the next sequence number, appends to ring
-   *  buffer (FIFO eviction), then fans out to all live subscribers.
+  /** Emit an event. Stamps it with the next sequence number, appends to the
+   *  buffer (capped at MAX_BUFFER, oldest-first eviction). Eviction extends
+   *  the singleton `gap` marker so resuming subscribers see the data loss.
    *  Subscriber exceptions are logged but do not block other subscribers. */
   emit(requestId: string | null, type: ImEventType, data?: unknown): void {
     const seq = this.nextSeq++;
     const event: ImEvent = { seq, requestId, type, data, ts: Date.now() };
 
     this.buffer.push(event);
-    if (this.buffer.length > MAX_BUFFER) {
-      // Ring eviction. Pattern C surfaces this as a 'gap' event so the Rust
-      // ImEventConsumer knows to warn the user. For Pattern B (single SSE
-      // per /api/im/chat), eviction during a single turn would mean SDK is
-      // pumping >1000 events — unlikely without Pattern C scale; still
-      // safer to drop oldest than blow memory.
-      const dropped = this.buffer.shift();
-      if (dropped) {
-        const gap: ImEvent = {
-          seq: this.nextSeq++,
+    while (this.buffer.length > MAX_BUFFER) {
+      const dropped = this.buffer.shift()!;
+      if (this.gap) {
+        // Extend existing gap to cover the new dropped seq.
+        const range = (this.gap.data as { droppedSeqs: [number, number] }).droppedSeqs;
+        range[1] = Math.max(range[1], dropped.seq);
+      } else {
+        this.gap = {
+          seq: dropped.seq,
           requestId: null,
           type: 'gap',
-          data: { droppedSeqs: [dropped.seq, dropped.seq] },
+          data: { droppedSeqs: [dropped.seq, dropped.seq] as [number, number] },
           ts: Date.now(),
         };
-        this.buffer.push(gap);
-        for (const sub of this.subscribers) {
-          try { sub(gap); } catch (e) { console.error('[im-bus] subscriber threw on gap', e); }
-        }
       }
     }
 
@@ -87,12 +87,42 @@ class ImEventBusImpl {
     }
   }
 
+  /** Seq at which the current generation started (post-`clear()` reset).
+   *  Subscribers resuming with sinceSeq < generationStartSeq belong to a prior
+   *  generation and need a full re-sync. */
+  private generationStartSeq = 1;
+
   /** Subscribe to events with seq > sinceSeq.
    *  - To get only future events: pass `bus.currentSeq()` as sinceSeq.
    *  - To replay from start (e.g. crash recovery): pass 0.
-   *  - Returns an unsubscribe function — caller MUST call it to avoid leaks. */
+   *  - Returns an unsubscribe function — caller MUST call it to avoid leaks.
+   *
+   *  Gap synthesis: if events were evicted (this.gap is set) and the requested
+   *  sinceSeq is below the dropped range, synthesize a gap event before live
+   *  replay so the subscriber knows data was lost. Cross-generation resume
+   *  (sinceSeq predating a `clear()`) also triggers a synthetic gap so the
+   *  Rust consumer knows to re-sync rather than silently miss new events
+   *  (Codex W3 fix). */
   subscribe(sinceSeq: number, cb: ImEventSubscriber): () => void {
-    // Replay buffered events newer than sinceSeq before adding to live set.
+    // Cross-generation: subscriber's `since` is older than our last reset.
+    if (sinceSeq > 0 && sinceSeq < this.generationStartSeq) {
+      try {
+        cb({
+          seq: this.generationStartSeq - 1,
+          requestId: null,
+          type: 'gap',
+          data: {
+            droppedSeqs: [sinceSeq + 1, this.generationStartSeq - 1] as [number, number],
+            reason: 'session-reset',
+          },
+          ts: Date.now(),
+        });
+      } catch (e) { console.error('[im-bus] subscriber threw on generation-gap', e); }
+    } else if (this.gap && sinceSeq < this.gap.seq) {
+      // In-generation eviction gap.
+      try { cb(this.gap); } catch (e) { console.error('[im-bus] subscriber threw on gap', e); }
+    }
+
     for (const event of this.buffer) {
       if (event.seq > sinceSeq) {
         try { cb(event); } catch (e) { console.error('[im-bus] subscriber threw on replay', e); }
@@ -121,10 +151,19 @@ class ImEventBusImpl {
   /** Reset bus state. Called on session reset / sidecar shutdown.
    *  Subscribers are NOT removed automatically — they can still receive
    *  fresh events; the unsubscribe handle remains the canonical lifecycle
-   *  controller (caller-owned). */
+   *  controller (caller-owned).
+   *
+   *  We do NOT reset `nextSeq` (Codex W3): a Rust consumer that reconnects
+   *  with `since=<old high seq>` against a freshly-reset bus would otherwise
+   *  ask "give me events newer than 999" while we've reset to seq=1, missing
+   *  hundreds of new events. Keeping nextSeq monotonic + bumping
+   *  generationStartSeq lets `subscribe()` detect cross-generation requests
+   *  and synthesize a session-reset gap. */
   clear(): void {
     this.buffer.length = 0;
-    this.nextSeq = 1;
+    this.gap = null;
+    this.generationStartSeq = this.nextSeq; // future events live in new generation
+    // nextSeq is intentionally NOT reset.
   }
 }
 

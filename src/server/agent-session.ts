@@ -45,6 +45,7 @@ import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import type { ImagePayload } from './runtimes/types';
 import { imEventBus, type ImEventType } from './utils/im-event-bus';
+import { imRequestRegistry } from './utils/im-request-registry';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -600,31 +601,54 @@ const streamIndexToToolId: Map<number, string> = new Map();
 const streamIndexToBlockType: Map<number, string> = new Map(); // Positive block type tracking for subagent content_block_stop
 const toolResultIndexToId: Map<number, string> = new Map();
 
-// IM Pipeline v2 — Pattern B: ImEventBus replaces the legacy single-callback model.
+// IM Pipeline v2 — Pattern B + G: per-request attribution via FIFO queue.
 //
-// `activeRequestId` is the trace ID of the user message currently being processed
-// by the SDK. SDK events (delta / block-end / complete / etc.) are tagged with
-// this ID and published to the bus; subscribers (one per /api/im/chat SSE) filter
-// by their target requestId so events route to the right reply slot.
+// `pendingRequestIds` holds the requestIds of user messages YIELDED to SDK
+// stdin but not yet finalized (no `result` boundary observed). The HEAD is
+// the request currently owning SDK output; SDK events tagged with head get
+// published to ImEventBus where /api/im/events subscribers filter by id.
+//
+// Why a queue, not a single `activeRequestId` (Codex C4 / Pattern G fix):
+// mid-turn injection lets us yield message B while SDK is still processing
+// A. The legacy "single `activeRequestId` overwritten on each yield" model
+// misattributed A's continuation events to B. Pattern G fix: advance the
+// queue only on SDK `result` boundary (handleMessageComplete / Stopped /
+// Error), not on yield. So head stays "A" until A's turn ends, then "B".
 //
 // Replaces the legacy `imStreamCallback` singleton + `imCallbackNulledDuringTurn`
-// flag. The flag was needed to prevent stale events from a finished turn leaking
-// to a fresh callback (same global ref). With per-event requestId tagging, leakage
-// is structurally impossible — old events carry the old ID, new subscribers filter
-// them out. No flag, no race window.
-//
-// Set in messageGenerator on yield (= SDK starts processing this user message).
-// Cleared in handleMessageComplete / Stopped / Error / abortPersistentSession.
-let activeRequestId: string | null = null;
+// flag (Pattern B already removed those). Cross-event leakage is structurally
+// impossible — old events carry the old requestId, new subscribers filter.
+const pendingRequestIds: string[] = [];
 
-/** Emit a per-request IM event. No-op when there's no active IM request
- *  (mirrors legacy `imStreamCallback?.(...)` behaviour: events without an
- *  active IM trace are dropped). System-level events (e.g. session-init in
- *  Pattern C) call `imEventBus.emit(null, ...)` directly. */
+/** Emit a per-request IM event tagged with the queue head. No-op when the
+ *  queue is empty (desktop / cron path, no IM trace). System-level events
+ *  (e.g. session-init in Pattern C) call `imEventBus.emit(null, ...)` directly. */
 function emitImEvent(type: ImEventType, data?: unknown): void {
-  if (activeRequestId !== null) {
-    imEventBus.emit(activeRequestId, type, data);
+  const head = pendingRequestIds[0];
+  if (head !== undefined) {
+    imEventBus.emit(head, type, data);
   }
+}
+
+/** Push a yielded user message's requestId onto the FIFO queue. Called from
+ *  messageGenerator when yielding to SDK stdin. No-op for desktop / cron
+ *  (no IM trace ID). */
+function pushPendingRequest(requestId: string | null | undefined): void {
+  if (requestId) pendingRequestIds.push(requestId);
+}
+
+/** Pop the queue head — called from handleMessageComplete / Stopped / Error
+ *  on SDK `result` boundary (one yield → one result). Returns popped id. */
+function popPendingRequest(): string | null {
+  return pendingRequestIds.shift() ?? null;
+}
+
+/** Clear the entire queue — called from abortPersistentSession /
+ *  clearMessageState (whole-session abort or reset). Returns drained ids. */
+function clearPendingRequests(): string[] {
+  const drained = pendingRequestIds.slice();
+  pendingRequestIds.length = 0;
+  return drained;
 }
 // Group chat tool deny list (v0.1.28): set per IM message, cleared on next non-group request
 let currentGroupToolsDeny: string[] = [];
@@ -905,9 +929,16 @@ function abortPersistentSession(): void {
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
   rescuePendingToQueue();
-  // Pattern B: notify IM event bus subscribers (per-requestId) before abort.
-  emitImEvent('error', '会话已中断，请重新发送');
-  activeRequestId = null;
+  // Pattern B/C/G: notify IM bus subscribers + tear down ALL pending registry
+  // entries (whole-session abort affects every in-flight request, not just head).
+  // Emit an 'error' for each pending requestId so each subscriber's reply slot
+  // closes — emitImEvent only tags head, so iterate manually.
+  for (const reqId of pendingRequestIds) {
+    imEventBus.emit(reqId, 'error', '会话已中断，请重新发送');
+    imRequestRegistry.setStatus(reqId, 'failed');
+    imRequestRegistry.unregister(reqId);
+  }
+  clearPendingRequests();
   // 唤醒被阻塞的 generator（waitForMessage）
   if (messageResolver) {
     const resolve = messageResolver;
@@ -3825,12 +3856,14 @@ function handleMessageComplete(): void {
   // (idle / pre-warm / next turn) don't inherit the stale id.
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
-  // Pattern B: turn complete → notify per-request bus subscribers and clear active ID.
-  // Stale-event leakage that the legacy `imCallbackNulledDuringTurn` flag guarded against
-  // is now structurally impossible — events carry the requestId of their originating
-  // user message; subscribers filter strictly. No flag, no race.
+  // Pattern B/C/G: turn complete → emit 'complete' for the head request, then
+  // pop it. Subsequent turns (mid-turn injected) advance to the next head.
   emitImEvent('complete', '');
-  activeRequestId = null;
+  const completedReq = popPendingRequest();
+  if (completedReq) {
+    imRequestRegistry.setStatus(completedReq, 'completed');
+    imRequestRegistry.unregister(completedReq);
+  }
   // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
   // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
   streamIndexToToolId.clear();
@@ -3904,10 +3937,13 @@ function handleMessageStopped(): void {
   // Pattern 6: clear turnId on stop (mirror of handleMessageComplete).
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
-  // Pattern B: turn stopped → notify bus, clear active ID. Same rationale as
-  // handleMessageComplete (no flag needed, attribution via requestId).
+  // Pattern B/C/G: turn stopped → emit 'complete' for head + pop queue.
   emitImEvent('complete', '');
-  activeRequestId = null;
+  const stoppedReq = popPendingRequest();
+  if (stoppedReq) {
+    imRequestRegistry.setStatus(stoppedReq, 'completed');
+    imRequestRegistry.unregister(stoppedReq);
+  }
   // 跨回合状态清理（与 handleMessageComplete 保持一致）
   streamIndexToToolId.clear();
   streamIndexToBlockType.clear();
@@ -3953,9 +3989,13 @@ function handleMessageError(error: string): void {
   // Pattern 6: clear turnId on error too — turn is over either way.
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
-  // Pattern B: error → notify per-request bus subscribers, clear active ID.
+  // Pattern B/C/G: error → emit 'error' for head + pop queue.
   emitImEvent('error', localizeImError(error));
-  activeRequestId = null;
+  const failedReq = popPendingRequest();
+  if (failedReq) {
+    imRequestRegistry.setStatus(failedReq, 'failed');
+    imRequestRegistry.unregister(failedReq);
+  }
   setSessionState('idle');
 
   // Don't persist expected termination signals as errors
@@ -4324,11 +4364,13 @@ function clearMessageState(): void {
   // Reset browser tool tracking for new session
   sessionBrowserToolUsed = false;
   sessionStorageStateSaved = false;
-  // Pattern B: clear active IM trace ID — any in-flight bus subscribers for the
-  // old session belong to closed SSE streams; new SDK output for a new session
-  // should not be tagged with the old trace ID.
-  activeRequestId = null;
+  // Pattern B/G: drain the pending requestId queue — any in-flight bus
+  // subscribers for the old session belong to closed SSE streams; new SDK
+  // output for a new session should not be tagged with old trace IDs.
+  clearPendingRequests();
   imEventBus.clear();
+  // Pattern C: drop all registry entries (aborts in-flight controllers via clear()).
+  imRequestRegistry.clear();
 }
 
 /**
@@ -5518,6 +5560,53 @@ export async function interruptCurrentResponse(reason: CancelReason = 'user'): P
   } finally {
     isInterruptingResponse = false;
   }
+}
+
+/**
+ * Pattern D — IM trace-id-targeted cancellation. Resolves whether the request
+ * is currently running or queued, then takes the appropriate action:
+ *   - queued (in messageQueue / pendingMidTurnQueue) → splice out, broadcast
+ *     queue:cancelled, no SDK interrupt needed
+ *   - running (activeRequestId matches + turn in flight) → interruptCurrentResponse
+ *     which already wires `abortTurnAbort` → cancellableFetch unblock + SDK interrupt
+ *   - unknown → no-op (caller can still emit a 'cancelled' event for UI)
+ *
+ * Returns the resolved mode so the caller (`/api/im/cancel`) can shape the response.
+ */
+export async function cancelImRequest(
+  requestId: string,
+  reason: CancelReason = 'user',
+): Promise<{ aborted: boolean; mode: 'running' | 'queued' | 'unknown' }> {
+  // Try messageQueue first
+  const qIdx = messageQueue.findIndex(item => item.requestId === requestId);
+  if (qIdx >= 0) {
+    const [item] = messageQueue.splice(qIdx, 1);
+    item.resolve();
+    broadcast('queue:cancelled', { queueId: item.id });
+    console.log(`[agent] cancelImRequest requestId=${requestId} mode=queued`);
+    return { aborted: true, mode: 'queued' };
+  }
+  // Try pendingMidTurnQueue (already yielded to SDK stdin, but unconsumed)
+  const pmIdx = pendingMidTurnQueue.findIndex(p => p.sourceItem.requestId === requestId);
+  if (pmIdx >= 0) {
+    const [removed] = pendingMidTurnQueue.splice(pmIdx, 1);
+    broadcast('queue:cancelled', { queueId: removed.queueId });
+    console.log(`[agent] cancelImRequest requestId=${requestId} mode=pending-mid-turn`);
+    // Note: SDK has already received the message via stdin; we can't unsend it.
+    // The pending-queue removal prevents `queue:started` and messages[] insertion.
+    // If this was the active turn driver, also issue interrupt.
+    if (pendingRequestIds[0] === requestId && isTurnInFlight()) {
+      await interruptCurrentResponse(reason);
+    }
+    return { aborted: true, mode: 'queued' };
+  }
+  // Active turn? (queue head matches)
+  if (pendingRequestIds[0] === requestId && isTurnInFlight()) {
+    console.log(`[agent] cancelImRequest requestId=${requestId} mode=running`);
+    await interruptCurrentResponse(reason);
+    return { aborted: true, mode: 'running' };
+  }
+  return { aborted: false, mode: 'unknown' };
 }
 
 /**
@@ -7137,11 +7226,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             shouldResetSessionAfterError = true;
             shouldResetReason = 'stale';
           }
-          if (activeRequestId) {
+          if (pendingRequestIds.length > 0) {
             const errorText = localizeImError(rawError);
             console.warn('[agent] SDK result is_error, forwarding to IM bus:', errorText);
             emitImEvent('error', errorText);
-            activeRequestId = null;
+            // W2 fix: also unregister the registry entry that the legacy code skipped.
+            const failedReq = popPendingRequest();
+            if (failedReq) {
+              imRequestRegistry.setStatus(failedReq, 'failed');
+              imRequestRegistry.unregister(failedReq);
+            }
           }
         }
 
@@ -7164,10 +7258,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             broadcast('chat:message-chunk', resultText);
           }
           // Forward to IM event bus (prevents "(No Response)" for SDK failures).
-          // Pattern B: subscribers filter by requestId — stale-event leakage from a
-          // finished turn to a fresh subscriber is structurally impossible.
+          // Pattern B+G: pop the head request — the upcoming handleMessageComplete
+          // for this turn will find the head already cleared and skip duplicate
+          // emission. Defensive against handleMessageComplete not running for
+          // is_error / no-output results.
           emitImEvent('complete', resultText);
-          activeRequestId = null;
+          const completedReq = popPendingRequest();
+          if (completedReq) {
+            imRequestRegistry.setStatus(completedReq, 'completed');
+            imRequestRegistry.unregister(completedReq);
+          }
         }
 
         // Prefer modelUsage (per-model breakdown), fallback to aggregate usage
@@ -7655,12 +7755,13 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     if (!isMidTurnInjection) {
       isStreamingMessage = true;
     }
-    // Pattern B: tag SDK output with this user message's requestId. Mirrors the
-    // legacy `setImStreamCallback(cb_X)` semantics: the most recently-yielded
-    // user message owns subsequent SDK events until handleMessageComplete clears
-    // (or another yield overrides via mid-turn injection). Pattern G will refine
-    // attribution to advance per SDK `result` boundary instead of per yield.
-    activeRequestId = item.requestId ?? null;
+    // Pattern B+G: push this user message's requestId onto the FIFO queue.
+    // SDK output continues to be tagged with the queue HEAD until the SDK
+    // emits a `result` boundary, at which point handleMessageComplete pops
+    // the head and the next pending request becomes head. This preserves
+    // attribution under mid-turn injection: yielding B mid-A-turn doesn't
+    // misattribute A's continuation to B.
+    pushPendingRequest(item.requestId);
 
     // Modality re-check at dequeue. The earlier filter in enqueueUserMessage
     // ran against the model active at enqueue time. If the user switched to a
