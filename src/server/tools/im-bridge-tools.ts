@@ -6,6 +6,7 @@
 // never pull in this module's bulk unless a plugin bridge is actually attached.
 
 import { cancellableFetch } from '../utils/cancellation';
+import { maybeSpill } from '../utils/large-value-store';
 
 type CallToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -233,7 +234,28 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
               return await triggerAutoAuth(bridgeToolsContext);
             }
 
-            return { content: [{ type: 'text', text: resultText }] };
+            // Pattern 2 §F — Cap large tool results. Anything over 256KB is
+            // spilled to ~/.myagents/refs/<id> and we return a preview-only
+            // tool result with a `@ref:<id>` marker pointing to the full body.
+            // Keeps a 10MB plugin response from blasting through SSE / IPC /
+            // disk in one go.
+            const spilled = await maybeSpill(resultText, {
+              mimetype: 'text/plain; charset=utf-8',
+              sessionId: bridgeToolsContext?.pluginId,
+            });
+            if ('inline' in spilled) {
+              return { content: [{ type: 'text', text: resultText }] };
+            }
+            // Returned a ref — show the preview to the SDK with an explicit
+            // pointer to the full body. The SDK can request the full ref
+            // through the proxyFetch path (renderer) or a future bridge
+            // helper if it needs the rest.
+            const previewText =
+              `${spilled.preview}\n\n…(truncated; ${spilled.sizeBytes} bytes total) ` +
+              `@ref:${spilled.id} (mimetype=${spilled.mimetype})`;
+            return {
+              content: [{ type: 'text', text: previewText }],
+            };
           } catch (err) {
             return {
               content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }],

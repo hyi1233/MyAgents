@@ -364,12 +364,26 @@ function handleStreamResponse(
   downstreamSignal: AbortSignal | undefined,
   onDownstreamAbort: () => void,
 ): Response {
+  // Pattern 2 §2.3.3 — TransformStream pipeline replaces the manual
+  // ReadableStream { start } loop. The pipeline is:
+  //
+  //   upstream body  ── pipeThrough ──> sseParseTransform ──> translateTransform ──> response.body
+  //
+  // Backpressure: when the downstream (Hono response → Rust proxy → renderer)
+  // is slow, `pipeThrough` automatically applies pull pressure on the upstream
+  // reader through the chain. We don't need to manually check desiredSize —
+  // the readable side of each TransformStream stops calling transform() once
+  // its internal queue fills up, which in turn stops the upstream reader.
+  //
+  // Cancellation: downstream cancel propagates via the readable's cancel(),
+  // which we wire to abort the upstream fetch (Pattern 1's protocol).
   const translator = new StreamTranslator(requestModel, translateReasoning);
   const sseParser = new SSEParser();
+  if (!upstreamResp.body) {
+    return new Response('', { status: 200, headers: streamHeaders() });
+  }
 
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
-
   const armIdleTimer = (): void => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
@@ -384,117 +398,141 @@ function handleStreamResponse(
       idleTimer = null;
     }
   };
-
   const detachDownstream = (): void => {
     if (downstreamSignal) {
       try { downstreamSignal.removeEventListener('abort', onDownstreamAbort); } catch { /* ignore */ }
     }
   };
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      reader = upstreamResp.body?.getReader();
-      if (!reader) {
-        controller.close();
-        cleanupIdleTimer();
-        detachDownstream();
-        return;
-      }
-
-      const encoder = new TextEncoder();
-      const decoder = new TextDecoder();
-
+  // Stage 1: bytes → SSE events (parse via SSEParser).
+  const decoder = new TextDecoder();
+  const sseParseTransform = new TransformStream<Uint8Array, OpenAIStreamChunk>({
+    start() {
       armIdleTimer();
+    },
+    transform(chunk, controller) {
+      armIdleTimer();
+      const text = decoder.decode(chunk, { stream: true });
+      const sseEvents = sseParser.feed(text);
+      for (const sseEvent of sseEvents) {
+        if (sseEvent.data === '[DONE]') continue;
+        try {
+          controller.enqueue(JSON.parse(sseEvent.data) as OpenAIStreamChunk);
+        } catch {
+          // Skip malformed chunks
+        }
+      }
+    },
+    flush() {
+      cleanupIdleTimer();
+    },
+  });
 
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          armIdleTimer(); // reset on every chunk
-
-          const text = decoder.decode(value, { stream: true });
-          const sseEvents = sseParser.feed(text);
-
-          for (const sseEvent of sseEvents) {
-            if (sseEvent.data === '[DONE]') continue;
-            let chunk: OpenAIStreamChunk;
-            try {
-              chunk = JSON.parse(sseEvent.data) as OpenAIStreamChunk;
-            } catch {
-              continue; // Skip malformed chunks
-            }
-
-            // Cache thought_signatures from streaming tool call chunks (Gemini thinking models).
-            // Gemini OpenAI-compat format puts it at: extra_content.google.thought_signature
-            // Also check direct thought_signature field for forward compatibility.
-            if (thoughtSignatureCache) {
-              const delta = chunk.choices?.[0]?.delta;
-              if (delta?.tool_calls) {
-                for (const tc of delta.tool_calls) {
-                  if (tc.id) {
-                    const sig = tc.thought_signature
-                      || tc.extra_content?.google?.thought_signature;
-                    if (sig) {
-                      thoughtSignatureCache.set(tc.id, sig);
-                      log(`[bridge] Cached thought_signature for ${tc.id} (len=${sig.length})`);
-                    }
-                  }
-                }
-                // Evict oldest if over cap
-                if (thoughtSignatureCache.size > THOUGHT_SIG_CACHE_MAX) {
-                  const excess = thoughtSignatureCache.size - THOUGHT_SIG_CACHE_MAX;
-                  const iter = thoughtSignatureCache.keys();
-                  for (let i = 0; i < excess; i++) {
-                    thoughtSignatureCache.delete(iter.next().value!);
-                  }
-                }
+  // Stage 2: OpenAI chunks → Anthropic events.
+  const encoder = new TextEncoder();
+  const translateTransform = new TransformStream<OpenAIStreamChunk, Uint8Array>({
+    transform(chunk, controller) {
+      // Cache thought_signatures from streaming tool call chunks (Gemini thinking models).
+      if (thoughtSignatureCache) {
+        const delta = chunk.choices?.[0]?.delta;
+        if (delta?.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            if (tc.id) {
+              const sig = tc.thought_signature
+                || tc.extra_content?.google?.thought_signature;
+              if (sig) {
+                thoughtSignatureCache.set(tc.id, sig);
+                log(`[bridge] Cached thought_signature for ${tc.id} (len=${sig.length})`);
               }
             }
-
-            const anthropicEvents = translator.feed(chunk);
-            for (const event of anthropicEvents) {
-              controller.enqueue(encoder.encode(formatSSE(event)));
+          }
+          // Evict oldest if over cap
+          if (thoughtSignatureCache.size > THOUGHT_SIG_CACHE_MAX) {
+            const excess = thoughtSignatureCache.size - THOUGHT_SIG_CACHE_MAX;
+            const iter = thoughtSignatureCache.keys();
+            for (let i = 0; i < excess; i++) {
+              thoughtSignatureCache.delete(iter.next().value!);
             }
           }
         }
-      } catch (err) {
-        log(`[bridge] Stream error: ${err}`);
-      } finally {
-        cleanupIdleTimer();
-        detachDownstream();
-        // Emit closing events for incomplete streams (no-op if already finished)
-        const finalEvents = translator.finalize();
-        for (const event of finalEvents) {
-          controller.enqueue(encoder.encode(formatSSE(event)));
-        }
-        controller.close();
+      }
+      const anthropicEvents = translator.feed(chunk);
+      for (const event of anthropicEvents) {
+        controller.enqueue(encoder.encode(formatSSE(event)));
       }
     },
-    /**
-     * Pattern 1: downstream consumer cancelled (renderer disconnected, Hono
-     * request aborted, etc). Forward to the upstream fetch via the persisted
-     * AbortController, cancel the reader, and clean up.
-     *
-     * NEVER throws — cancel is "best effort" per the protocol.
-     */
+    flush(controller) {
+      // Emit closing events for incomplete streams (no-op if already finished).
+      const finalEvents = translator.finalize();
+      for (const event of finalEvents) {
+        controller.enqueue(encoder.encode(formatSSE(event)));
+      }
+      detachDownstream();
+    },
+  });
+
+  // Compose the pipeline. piped through cancels propagate up through
+  // pipeThrough; failures in either transform are caught when the consumer
+  // reads the response body, which Hono surfaces as a 500.
+  const upstreamReadable = upstreamResp.body;
+  const finalReadable = upstreamReadable
+    .pipeThrough(sseParseTransform)
+    .pipeThrough(translateTransform);
+
+  // Wrap once more to catch downstream cancellation and route it back to the
+  // upstream AbortController. pipeThrough() forwards cancel() through each
+  // stage, but our Pattern 1 contract demands we ALSO abort the upstream
+  // fetch, which neither TransformStream knows about.
+  const guarded = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const reader = finalReadable.getReader();
+      const pump = (): void => {
+        reader.read().then(
+          ({ done, value }) => {
+            if (done) {
+              try { controller.close(); } catch { /* ignore */ }
+              cleanupIdleTimer();
+              return;
+            }
+            controller.enqueue(value);
+            pump();
+          },
+          (err) => {
+            log(`[bridge] Stream error: ${err}`);
+            try { controller.error(err); } catch { /* ignore */ }
+            cleanupIdleTimer();
+            detachDownstream();
+          },
+        );
+      };
+      pump();
+    },
     cancel(reason): void {
       const reasonStr = reason instanceof Error ? reason.message : String(reason ?? 'unknown');
       log(`[bridge] Downstream cancelled stream: ${reasonStr.slice(0, 200)}`);
       cleanupIdleTimer();
       detachDownstream();
       try { upstreamController.abort(new Error('Downstream cancel')); } catch { /* ignore */ }
-      try { reader?.cancel().catch(() => { /* ignore */ }); } catch { /* ignore */ }
+      try {
+        // Cancel the composed pipe — this propagates to the SSE parse
+        // transform's source (the upstream body reader) automatically.
+        finalReadable.cancel(reason).catch(() => { /* ignore */ });
+      } catch { /* ignore */ }
     },
   });
 
-  return new Response(stream, {
+  return new Response(guarded, {
     status: 200,
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    },
+    headers: streamHeaders(),
   });
+}
+
+function streamHeaders(): Record<string, string> {
+  return {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  };
 }
 
 // ==================== Responses API handlers ====================
@@ -536,12 +574,14 @@ function handleResponsesStreamResponse(
   downstreamSignal: AbortSignal | undefined,
   onDownstreamAbort: () => void,
 ): Response {
+  // Pattern 2 §2.3.3 — TransformStream pipeline (mirror of handleStreamResponse).
   const translator = new ResponsesStreamTranslator(requestModel);
   const sseParser = new SSEParser();
+  if (!upstreamResp.body) {
+    return new Response('', { status: 200, headers: streamHeaders() });
+  }
 
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
-
   const armIdleTimer = (): void => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
@@ -562,56 +602,69 @@ function handleResponsesStreamResponse(
     }
   };
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      reader = upstreamResp.body?.getReader();
-      if (!reader) {
-        controller.close();
-        cleanupIdleTimer();
-        detachDownstream();
-        return;
-      }
-
-      const encoder = new TextEncoder();
-      const decoder = new TextDecoder();
-
+  const decoder = new TextDecoder();
+  const sseParseTransform = new TransformStream<Uint8Array, ResponsesStreamEvent>({
+    start() { armIdleTimer(); },
+    transform(chunk, controller) {
       armIdleTimer();
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          armIdleTimer();
-
-          const text = decoder.decode(value, { stream: true });
-          const sseEvents = sseParser.feed(text);
-
-          for (const sseEvent of sseEvents) {
-            if (sseEvent.data === '[DONE]') continue;
-            let event: ResponsesStreamEvent;
-            try {
-              event = JSON.parse(sseEvent.data) as ResponsesStreamEvent;
-            } catch {
-              continue;
-            }
-
-            const anthropicEvents = translator.feed(event);
-            for (const ae of anthropicEvents) {
-              controller.enqueue(encoder.encode(formatSSE(ae)));
-            }
-          }
+      const text = decoder.decode(chunk, { stream: true });
+      const sseEvents = sseParser.feed(text);
+      for (const sseEvent of sseEvents) {
+        if (sseEvent.data === '[DONE]') continue;
+        try {
+          controller.enqueue(JSON.parse(sseEvent.data) as ResponsesStreamEvent);
+        } catch {
+          /* skip malformed */
         }
-      } catch (err) {
-        log(`[bridge] Responses stream error: ${err}`);
-      } finally {
-        cleanupIdleTimer();
-        detachDownstream();
-        const finalEvents = translator.finalize();
-        for (const event of finalEvents) {
-          controller.enqueue(encoder.encode(formatSSE(event)));
-        }
-        controller.close();
       }
+    },
+    flush() { cleanupIdleTimer(); },
+  });
+
+  const encoder = new TextEncoder();
+  const translateTransform = new TransformStream<ResponsesStreamEvent, Uint8Array>({
+    transform(event, controller) {
+      const anthropicEvents = translator.feed(event);
+      for (const ae of anthropicEvents) {
+        controller.enqueue(encoder.encode(formatSSE(ae)));
+      }
+    },
+    flush(controller) {
+      const finalEvents = translator.finalize();
+      for (const event of finalEvents) {
+        controller.enqueue(encoder.encode(formatSSE(event)));
+      }
+      detachDownstream();
+    },
+  });
+
+  const finalReadable = upstreamResp.body
+    .pipeThrough(sseParseTransform)
+    .pipeThrough(translateTransform);
+
+  const guarded = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const reader = finalReadable.getReader();
+      const pump = (): void => {
+        reader.read().then(
+          ({ done, value }) => {
+            if (done) {
+              try { controller.close(); } catch { /* ignore */ }
+              cleanupIdleTimer();
+              return;
+            }
+            controller.enqueue(value);
+            pump();
+          },
+          (err) => {
+            log(`[bridge] Responses stream error: ${err}`);
+            try { controller.error(err); } catch { /* ignore */ }
+            cleanupIdleTimer();
+            detachDownstream();
+          },
+        );
+      };
+      pump();
     },
     cancel(reason): void {
       const reasonStr = reason instanceof Error ? reason.message : String(reason ?? 'unknown');
@@ -619,17 +672,13 @@ function handleResponsesStreamResponse(
       cleanupIdleTimer();
       detachDownstream();
       try { upstreamController.abort(new Error('Downstream cancel')); } catch { /* ignore */ }
-      try { reader?.cancel().catch(() => { /* ignore */ }); } catch { /* ignore */ }
+      try { finalReadable.cancel(reason).catch(() => { /* ignore */ }); } catch { /* ignore */ }
     },
   });
 
-  return new Response(stream, {
+  return new Response(guarded, {
     status: 200,
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    },
+    headers: streamHeaders(),
   });
 }
 

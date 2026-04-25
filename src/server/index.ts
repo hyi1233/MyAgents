@@ -1782,6 +1782,32 @@ async function main() {
         }, 202);
       }
 
+      // 📦 Pattern 2 §2.3.1 — Large-value ref retrieval. SSE / IPC payloads
+      // over the spill threshold leave a `{kind:'ref', id, ...}` placeholder
+      // here; consumers fetch the full body via this endpoint. Streamed via
+      // createReadStream so multi-MB bodies don't get loaded into memory.
+      // Bypasses the deferred-init gate — refs are independent of agent
+      // state, and the /chat/* SSE consumer may be mid-replay during init.
+      if (pathname.startsWith('/refs/') && request.method === 'GET') {
+        const id = decodeURIComponent(pathname.slice('/refs/'.length));
+        if (!id || !/^[a-f0-9]+$/i.test(id)) {
+          return jsonResponse({ error: 'invalid ref id' }, 400);
+        }
+        const { getRefStreamPath } = await import('./utils/large-value-store');
+        const refInfo = await getRefStreamPath(id);
+        if (!refInfo) {
+          return jsonResponse({ error: 'ref not found or expired' }, 404);
+        }
+        // Stream from disk so multi-MB bodies don't buffer into memory.
+        const fr = await fileResponse(refInfo.path, {
+          contentType: refInfo.mimetype,
+        });
+        if (!fr) {
+          return jsonResponse({ error: 'ref body missing' }, 404);
+        }
+        return fr;
+      }
+
       // ── Deferred init gate ────────────────────────────────────────────────
       // All other routes depend on agent state (currentAgentDir, MCP servers,
       // session metadata, bridge handler). Pattern 4: instead of awaiting
@@ -8984,6 +9010,15 @@ description: >
   }
 
   console.log(`Web UI server listening on http://localhost:${port}`);
+
+  // Pattern 2 §2.3.1 — Start the periodic GC for spilled large-value refs.
+  // Runs every 60s; reaps any ref past its TTL (default 1h). The timer is
+  // unref'd inside startRefsGc, so it doesn't keep the event loop alive.
+  void import('./utils/large-value-store').then(({ startRefsGc }) => {
+    startRefsGc(60_000);
+  }).catch((err) => {
+    console.warn(`[refs] failed to start GC: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   // ── Deferred heavy init ─────────────────────────────────────────────────
   // Runs AFTER honoServe has bound the port. Rust's TCP health check now

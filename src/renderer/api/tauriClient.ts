@@ -235,6 +235,13 @@ interface ProxyHttpResponse {
     headers: Record<string, string>;
     /** True if body is base64 encoded (for binary responses like images) */
     is_base64: boolean;
+    // Pattern 2 §2.3.4: when the upstream body exceeded ~1 MiB the Rust proxy
+    // streamed it to a sidecar-side ref file instead of returning bytes
+    // through IPC. The renderer fetches the body from `ref_url` (a
+    // `/refs/<id>` URL on the same sidecar) and re-emits a Response.
+    ref_url?: string;
+    ref_mimetype?: string;
+    ref_size_bytes?: number;
 }
 
 // ── Pattern 6 (Renderer correlation headers) ─────────────────────────────
@@ -320,14 +327,32 @@ export async function proxyFetch(
             }
         });
 
-        // Handle base64 encoded binary responses
-        if (result.is_base64) {
-            // Decode base64 to binary
-            const binaryString = atob(result.body);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
+        // Pattern 2 §2.3.4 / §E — Large body via sidecar ref. Rust streamed
+        // the upstream straight to disk; we fetch it back via plain HTTP
+        // (Tauri's `connect-src` allows 127.0.0.1 already; the sidecar's
+        // /refs/:id route is keep-alive and streams from disk). This path
+        // skips the atob-byte-loop completely — the browser's native Response
+        // does the binary decode on its own thread.
+        if (result.ref_url) {
+            const refResp = await fetch(result.ref_url);
+            // Re-stamp headers from the original upstream so callers that
+            // sniff content-type / etag continue to work, but the freshly
+            // fetched response carries Content-Length itself.
+            const headers = new Headers(refResp.headers);
+            for (const [k, v] of Object.entries(result.headers)) {
+                if (!headers.has(k)) headers.set(k, v);
             }
+            return new Response(refResp.body, {
+                status: result.status,
+                headers,
+            });
+        }
+
+        // Handle base64 encoded binary responses (small bodies only — the
+        // Rust proxy now streams >1 MiB into refs above).
+        if (result.is_base64) {
+            // Single-line base64 → bytes; faster than the manual byte loop.
+            const bytes = Uint8Array.from(atob(result.body), c => c.charCodeAt(0));
             return new Response(bytes, {
                 status: result.status,
                 headers: result.headers,

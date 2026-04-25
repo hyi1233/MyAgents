@@ -4274,6 +4274,15 @@ export async function resetSession(): Promise<void> {
     await persistMessagesToStorage();
   }
 
+  // 1c. Pattern 2 §2.3.1 — release any spilled large-value refs tagged with
+  // the old sessionId. Best-effort; fired-and-forget so resetSession isn't
+  // delayed by ref I/O. The periodic GC also catches anything left behind.
+  if (sessionId) {
+    void import('./utils/large-value-store').then(({ clearSessionRefs }) =>
+      clearSessionRefs(sessionId)
+    ).catch(() => { /* swallow — best-effort cleanup */ });
+  }
+
   // 2. Clear all message state (shared with initializeAgent)
   clearMessageState();
 
