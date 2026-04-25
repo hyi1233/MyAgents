@@ -38,6 +38,8 @@ import { broadcast } from './sse';
 import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 import { setAmbientLogContext, clearAmbientLogContextField } from './logger-context';
+import { beginTurn as beginTurnAbort, endTurn as endTurnAbort, abortTurn as abortTurnAbort } from './utils/turn-abort';
+import type { CancelReason } from './utils/cancellation';
 import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
@@ -3814,6 +3816,9 @@ function handleMessageComplete(): void {
   // Flush pending mid-turn messages BEFORE marking streaming as done.
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
+  // Pattern 1 follow-up: turn finished cleanly — drop the registration
+  // without aborting. The next turn will register a fresh controller.
+  if (sessionId) endTurnAbort(sessionId);
   // Pattern 6: turn finished — drop the ambient turnId so subsequent logs
   // (idle / pre-warm / next turn) don't inherit the stale id.
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
@@ -3891,6 +3896,10 @@ function handleMessageStopped(): void {
   // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
+  // Pattern 1 follow-up: turn ended (interrupted). Drop the registration.
+  // If interruptCurrentResponse drove the stop it already abort()ed the
+  // controller; this endTurn is the idempotent cleanup of the slot.
+  if (sessionId) endTurnAbort(sessionId);
   // Pattern 6: clear turnId on stop (mirror of handleMessageComplete).
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
@@ -3937,6 +3946,10 @@ function handleMessageError(error: string): void {
   // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
+  // Pattern 1 follow-up: turn ended due to error. Abort the turn signal so
+  // any in-flight tool fetches release immediately rather than waiting on
+  // their own per-call timeouts. Ignored if no turn is registered.
+  if (sessionId) abortTurnAbort(sessionId, 'error');
   // Pattern 6: clear turnId on error too — turn is over either way.
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
@@ -5397,7 +5410,7 @@ export async function waitForSessionIdle(
   return false;
 }
 
-export async function interruptCurrentResponse(): Promise<boolean> {
+export async function interruptCurrentResponse(reason: CancelReason = 'user'): Promise<boolean> {
   if (!isTurnInFlight()) {
     // No active turn, but there might be orphaned queued messages.
     // Drain them and notify the frontend so the UI can recover.
@@ -5411,6 +5424,13 @@ export async function interruptCurrentResponse(): Promise<boolean> {
   if (isInterruptingResponse) {
     return true;
   }
+
+  // Pattern 1 follow-up: abort the turn-scoped controller FIRST so any
+  // in-flight tool fetches / streams in our Node process see the cancel
+  // immediately, in parallel with the cooperative SDK interrupt below.
+  // Both are fire-and-forget; we don't await this — withAbortSignal /
+  // cancellableFetch wake their op via the AbortSignal listener.
+  if (sessionId) abortTurnAbort(sessionId, reason);
 
   if (!querySession) {
     console.log('[agent] No querySession but turn is still marked active, resetting state');
@@ -7571,6 +7591,12 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
         await persistMessagesToStorage();
         resetTurnUsage();
         currentTurnStartTime = Date.now();
+        // Pattern 1 follow-up: register a fresh turn-scoped AbortController.
+        // Tool fetches and other in-flight async work in our Node process pull
+        // this signal as their parent via `getCurrentTurnSignal()`. On stop
+        // (interruptCurrentResponse) we abort it; on success we drop it via
+        // endTurn() inside handleMessageComplete/Stopped/Error.
+        if (sessionId) beginTurnAbort(sessionId);
         // Pattern 6 (SDK turn boundary): stamp `turnId` ambient so all
         // logs emitted between now and handleMessageComplete()/Stopped/
         // handleAbort carry it. Ambient (not ALS) because the persistent

@@ -14,6 +14,7 @@ import { ensureGitignorePattern } from '../utils/gitignore';
 import { randomUUID } from 'crypto';
 import { ensureDirSync } from '../utils/fs-utils';
 import { cancellableFetch } from '../utils/cancellation';
+import { getCurrentTurnSignal } from '../utils/turn-abort';
 
 // MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
 type CallToolResult = {
@@ -358,14 +359,15 @@ async function callGeminiApi(
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       // Pattern 1 fix #10: migrated to cancellableFetch — same parent-signal
-      // semantics as the four already-migrated tools. SDK doesn't surface a
-      // tool-call-scoped signal here, so we rely on cancellableFetch's
-      // bounded timeout for graceful abandonment.
+      // semantics as the four already-migrated tools.
+      // Pattern 1 follow-up: parent signal = active turn so a renderer stop
+      // releases the in-flight Gemini API call immediately rather than
+      // waiting on API_TIMEOUT_MS.
       const response = await cancellableFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      }, { timeoutMs: API_TIMEOUT_MS });
+      }, { timeoutMs: API_TIMEOUT_MS, parentSignal: getCurrentTurnSignal() });
 
       if (!response.ok) {
         const errorBody = await response.text();

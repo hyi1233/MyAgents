@@ -8,6 +8,7 @@
 // Lazy instantiation wiring lives in builtin-mcp-meta.ts.
 import type { RuntimeConfig, RuntimeType } from '../../shared/types/runtime';
 import { cancellableFetch } from '../utils/cancellation';
+import { getCurrentTurnSignal } from '../utils/turn-abort';
 
 // MCP Tool Result type
 type CallToolResult = {
@@ -93,7 +94,12 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
 
   // Pattern 1: 15s cap on local management API calls. The Rust management
   // server is co-resident; >15s means it's wedged.
-  const resp = await cancellableFetch(url, options, { timeoutMs: 15_000 });
+  // Pattern 1 follow-up: parent signal = active turn so stop releases this
+  // even before the 15s ceiling.
+  const resp = await cancellableFetch(url, options, {
+    timeoutMs: 15_000,
+    parentSignal: getCurrentTurnSignal(),
+  });
   return resp.json();
 }
 

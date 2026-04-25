@@ -1698,7 +1698,7 @@ async function main() {
         return;
       }
       console.warn('[chat-stream] grace expired; interrupting SDK turn (reason=shutdown)');
-      interruptCurrentResponse().catch((err) => {
+      interruptCurrentResponse('shutdown').catch((err) => {
         console.warn(`[chat-stream] interrupt after grace failed: ${err instanceof Error ? err.message : String(err)}`);
       });
     }, LAST_CONSUMER_GRACE_MS);

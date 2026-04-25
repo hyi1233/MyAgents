@@ -6,6 +6,7 @@
 // never pull in this module's bulk unless a plugin bridge is actually attached.
 
 import { cancellableFetch } from '../utils/cancellation';
+import { getCurrentTurnSignal } from '../utils/turn-abort';
 import { maybeSpill } from '../utils/large-value-store';
 
 type CallToolResult = {
@@ -20,6 +21,9 @@ async function triggerAutoAuth(ctx: ImBridgeToolsContext): Promise<CallToolResul
   console.log('[im-bridge-tools] need_user_authorization detected, triggering auto-auth via feishu_auth command');
   try {
     // Pattern 1: 15s cap on local 127.0.0.1 Bridge command call.
+    // Pattern 1 follow-up: derive parent signal from the active turn so a
+    // user stop releases this fetch immediately rather than waiting on the
+    // 15s ceiling.
     const resp = await cancellableFetch(
       `http://127.0.0.1:${ctx.bridgePort}/execute-command`,
       {
@@ -32,7 +36,7 @@ async function triggerAutoAuth(ctx: ImBridgeToolsContext): Promise<CallToolResul
           chatId: ctx.chatId || '',
         }),
       },
-      { timeoutMs: 15_000 },
+      { timeoutMs: 15_000, parentSignal: getCurrentTurnSignal() },
     );
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
@@ -174,6 +178,8 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
             // (Feishu, Lark, …) but should never hang indefinitely. The plugin
             // itself is responsible for finer-grained timeouts; this is the
             // outer guard.
+            // Pattern 1 follow-up: parent signal = active turn, so stop button
+            // releases this immediately even before the 30s ceiling.
             const callResp = await cancellableFetch(
               callUrl,
               {
@@ -191,7 +197,7 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
                   accountId: bridgeToolsContext.accountId,
                 }),
               },
-              { timeoutMs: 30_000 },
+              { timeoutMs: 30_000, parentSignal: getCurrentTurnSignal() },
             );
 
             if (!callResp.ok) {

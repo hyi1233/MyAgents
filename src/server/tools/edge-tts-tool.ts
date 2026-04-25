@@ -13,6 +13,7 @@ import { createHash, randomBytes, randomUUID } from 'crypto';
 import * as tls from 'tls';
 import { ensureDirSync } from '../utils/fs-utils';
 import { cancellableFetch } from '../utils/cancellation';
+import { getCurrentTurnSignal } from '../utils/turn-abort';
 
 // MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
 type CallToolResult = {
@@ -574,7 +575,12 @@ async function fetchVoices(): Promise<Voice[]> {
   // Pattern 1: 30s cap on remote Edge TTS voices API. Cached for 10 min so
   // this only fires on cold cache; without a bound we'd hang the tool turn
   // indefinitely if Microsoft's endpoint stalls.
-  const res = await cancellableFetch(url, undefined, { timeoutMs: 30_000 });
+  // Pattern 1 follow-up: parent signal = active turn so stop releases this
+  // even before the 30s ceiling.
+  const res = await cancellableFetch(url, undefined, {
+    timeoutMs: 30_000,
+    parentSignal: getCurrentTurnSignal(),
+  });
   if (!res.ok) {
     throw new Error(`Voices API returned ${res.status}: ${await res.text().catch(() => '')}`);
   }

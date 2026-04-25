@@ -4,6 +4,7 @@
 // builtin-mcp-meta.ts for registration.
 import { assertSafeFilePath } from '../utils/safe-file-path';
 import { cancellableFetch } from '../utils/cancellation';
+import { getCurrentTurnSignal } from '../utils/turn-abort';
 
 // MCP Tool Result type
 type CallToolResult = {
@@ -63,7 +64,12 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
 
   // Pattern 1: 30s cap. Media send may transit larger payloads (file upload
   // → IM platform → confirm), so a longer ceiling than the plain CRUD case.
-  const resp = await cancellableFetch(url, options, { timeoutMs: 30_000 });
+  // Pattern 1 follow-up: parent signal = active turn so stop releases this
+  // even before the 30s ceiling.
+  const resp = await cancellableFetch(url, options, {
+    timeoutMs: 30_000,
+    parentSignal: getCurrentTurnSignal(),
+  });
   return resp.json();
 }
 
