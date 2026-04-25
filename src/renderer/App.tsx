@@ -899,7 +899,15 @@ export default function App() {
       // The actual session ID will be created by the backend when the session starts
       const effectiveSessionId = sessionId ?? createPendingSessionId(targetTabId);
 
-      // Ensure Sidecar is running for this Session, Tab as owner
+      // Ensure Sidecar is running for this Session, Tab as owner.
+      //
+      // Pattern 4: this call resolves only after the sidecar's /health/ready
+      // returns 200 — i.e. deferred init (migration / skill-seed / sdk-init)
+      // has finished. If readiness times out or reports `failed`, the Rust
+      // call throws with the last-observed phase embedded in the error
+      // string, which we surface via `setTabErrors` → Launcher.startError.
+      // For finer-grained UX (inline phase banner during the brief
+      // pending → ready window) callers can use `useSessionReady`.
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
       console.log(`[App] Session Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
 

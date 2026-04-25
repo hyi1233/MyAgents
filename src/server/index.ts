@@ -274,6 +274,15 @@ import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
 import { initLogger, getLoggerDiagnostics, withLogContext } from './logger';
+import {
+  buildGateResponseBody,
+  buildReadyResponseBody,
+  getDeferredInitState,
+  markDeferredInitFailed,
+  markDeferredInitReady,
+  resetDeferredInitForRetry,
+  setDeferredInitPhase,
+} from './readiness-state';
 import { cleanupOldLogs } from './AgentLogger';
 import { cleanupOldUnifiedLogs, appendUnifiedLogBatch, getRecentLogLines } from './UnifiedLogger';
 import { broadcast, createSseClient, getClients } from './sse';
@@ -1665,23 +1674,67 @@ async function main() {
         });
       }
 
-      // 🩺 Health check endpoint - used by Rust sidecar manager
-      // Must be as simple as possible to verify HTTP handler is responsive.
-      // Deliberately BEFORE awaitDeferredInit(): Rust needs to flip the sidecar
-      // to "healthy" while we're still doing deferred init in the background.
-      if (pathname === '/health' && request.method === 'GET') {
+      // 🩺 Health check endpoints - used by Rust sidecar manager and renderer.
+      //
+      // Pattern 4 splits the historical "/health = healthy" signal into three:
+      //   - /health         → liveness (TCP bind succeeded; legacy alias kept
+      //                       so existing Rust watchdogs keep working)
+      //   - /health/live    → same as /health, explicit name
+      //   - /health/ready   → deferred init complete; structured 503 + phase
+      //                       while pending or failed
+      //   - /health/functional → core feature can serve (sidecar mirrors live;
+      //                       Plugin Bridge implements the real check)
+      //
+      // All four bypass the deferred-init gate below — they MUST respond
+      // immediately, otherwise probes can't distinguish "still warming up"
+      // from "wedged".
+      if ((pathname === '/health' || pathname === '/health/live') && request.method === 'GET') {
         return jsonResponse({ status: 'ok', timestamp: Date.now() });
+      }
+      if (pathname === '/health/ready' && request.method === 'GET') {
+        const { status, body } = buildReadyResponseBody();
+        return jsonResponse(body, status);
+      }
+      if (pathname === '/health/functional' && request.method === 'GET') {
+        // Sidecar's "functional" mirrors readiness for now — once ready, the
+        // Hono handler is serving requests. Plugin Bridge has a more
+        // meaningful gateway-forwarding check.
+        const { status, body } = buildReadyResponseBody();
+        return jsonResponse(body, status);
+      }
+      if (pathname === '/health/ready/retry' && request.method === 'POST') {
+        // Optional retry endpoint. We can re-arm the state machine; the
+        // caller (renderer / external script) is responsible for asking the
+        // process to restart deferred init. Today we don't have an in-process
+        // re-runner — surface that honestly with a 501-ish 503 message.
+        // TODO(pattern-4): wire to a real re-run of the deferred init block
+        // once it's extracted into a re-callable function.
+        const s = getDeferredInitState();
+        if (s.kind !== 'failed') {
+          return jsonResponse({ ok: false, reason: 'no failed state to retry', state: s.kind }, 409);
+        }
+        resetDeferredInitForRetry();
+        return jsonResponse({
+          ok: true,
+          message: 'state reset to pending; restart sidecar process to re-run deferred init',
+        }, 202);
       }
 
       // ── Deferred init gate ────────────────────────────────────────────────
       // All other routes depend on agent state (currentAgentDir, MCP servers,
-      // session metadata, bridge handler). Wait for deferred init to complete
-      // before processing. This is fast once init is done (resolved Promise
-      // awaits are sub-µs); only the very first request-while-initializing
-      // pays any cost. In steady state the await is a no-op.
-      const init = (globalThis as { __myagentsDeferredInit?: Promise<void> })
-        .__myagentsDeferredInit;
-      if (init) await init;
+      // session metadata, bridge handler). Pattern 4: instead of awaiting
+      // the bare promise (which either blocks indefinitely or rethrows as a
+      // 500 on failure), consult the state machine and return a structured
+      // 503 if init is pending/phase/failed. Once `kind === 'ready'`, the
+      // gate is a no-op (sub-µs) for steady-state requests.
+      const gate = buildGateResponseBody();
+      if (gate) {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (gate.body.state === 'pending' || gate.body.state === 'phase') {
+          headers['Retry-After'] = '1';
+        }
+        return new Response(JSON.stringify(gate.body), { status: gate.status, headers });
+      }
 
       // Browser dev-mode fallback for attachment files.
       // Production uses the Tauri `myagents://attachment/<path>` custom protocol
@@ -8880,28 +8933,47 @@ description: >
   //   3. initializeAgent — the big one
   //   4. external runtime restore
   //   5. boot banner — prints with fully resolved state
+  // Pattern 4: track which phase is running so /health/ready can report
+  // {phase: 'migration' | 'skill-seed' | 'sdk-init' | ...} on failure.
+  let currentInitPhase = 'startup';
   (async () => {
     try {
+      currentInitPhase = 'cleanup';
+      setDeferredInitPhase(currentInitPhase);
       cleanupOldLogs();
       cleanupOldUnifiedLogs();
       cleanupStalePlaywrightProfile();
+
+      currentInitPhase = 'migration';
+      setDeferredInitPhase(currentInitPhase);
       await migrateProfileToStorageState();
+
+      currentInitPhase = 'skill-seed';
+      setDeferredInitPhase(currentInitPhase);
       seedBundledSkills();
       console.log('[startup] seedBundledSkills done');
 
       if (!isSkillBlockedOnPlatform('agent-browser')) {
+        currentInitPhase = 'agent-browser-setup';
+        setDeferredInitPhase(currentInitPhase);
         setupAgentBrowserWrapper();
         console.log('[startup] setupAgentBrowserWrapper done');
       } else {
         console.log('[startup] Skipping agent-browser on this platform (blocked)');
       }
 
+      currentInitPhase = 'socks-bridge';
+      setDeferredInitPhase(currentInitPhase);
       await initSocksBridgeFromEnv();
 
+      currentInitPhase = 'sdk-init';
+      setDeferredInitPhase(currentInitPhase);
       await initializeAgent(currentAgentDir, initialPrompt, initialSessionId, { preWarmDisabled: noPreWarm });
       console.log('[startup] initializeAgent done');
 
       if (shouldUseExternalRuntime() && initialSessionId) {
+        currentInitPhase = 'external-runtime-restore';
+        setDeferredInitPhase(currentInitPhase);
         restoreExternalSessionState(initialSessionId, currentAgentDir, { type: 'desktop' });
       }
 
@@ -8920,12 +8992,17 @@ description: >
         console.log(`[boot] pid=${process.pid} port=${port} node=${process.versions.node} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames} builtin-mcp-meta=${builtinMcpMeta}`);
       }
 
+      markDeferredInitReady();
       resolveDeferredInit();
     } catch (err) {
       console.error('[startup] Deferred init failed:', err);
+      console.warn(`[health-state] Deferred init failed in phase=${currentInitPhase}: ${err instanceof Error ? err.message : String(err)}`);
+      // Pattern 4: capture the phase for /health/ready's structured 503.
+      // retryable=false until we have a real re-runner (TODO above).
+      markDeferredInitFailed(currentInitPhase, err, false);
       rejectDeferredInit(err);
-      // Don't re-throw — the server stays up. Routes awaiting deferredInit
-      // will see the rejection and can return a 503.
+      // Don't re-throw — the server stays up so /health/* keeps responding
+      // and the renderer can render the failure state instead of timing out.
     }
   })();
 

@@ -290,22 +290,49 @@ impl ImAdapter for BridgeAdapter {
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                    // Periodic health check
-                    match self.client.get(self.url("/health")).send().await {
-                        Ok(resp) if resp.status().is_success() => {
-                            if consecutive_failures > 0 {
-                                ulog_info!("[bridge:{}] Health check recovered after {} failures", self.plugin_id, consecutive_failures);
-                                consecutive_failures = 0;
+                    // Pattern 4: poll /health/ready (gateway loaded + registered),
+                    // not /health (TCP only). A bridge whose gateway has crashed
+                    // post-startup keeps /health 200 but /health/ready 503.
+                    //
+                    // Backward-compat: if /health/ready 404s (older bridge build
+                    // shipped without the new endpoint), fall back to /health for
+                    // one rollout cycle so a stale bundled bridge doesn't trip
+                    // the watchdog.
+                    let ready_url = self.url("/health/ready");
+                    let mut probed_status: Option<reqwest::StatusCode> = None;
+                    let mut probe_err: Option<String> = None;
+                    match self.client.get(&ready_url).send().await {
+                        Ok(resp) => {
+                            let status = resp.status();
+                            probed_status = Some(status);
+                            if status == reqwest::StatusCode::NOT_FOUND {
+                                // Older bridge — fall back to /health. Remove
+                                // this branch one release after rollout.
+                                match self.client.get(self.url("/health")).send().await {
+                                    Ok(fb) => probed_status = Some(fb.status()),
+                                    Err(e) => probe_err = Some(e.to_string()),
+                                }
                             }
                         }
-                        Ok(resp) => {
-                            consecutive_failures += 1;
-                            ulog_error!("[bridge:{}] Health check returned {}, failure {}/{}", self.plugin_id, resp.status(), consecutive_failures, MAX_FAILURES);
+                        Err(e) => probe_err = Some(e.to_string()),
+                    }
+                    let success = probed_status.map(|s| s.is_success()).unwrap_or(false);
+                    if success {
+                        if consecutive_failures > 0 {
+                            ulog_info!("[bridge:{}] Health check recovered after {} failures", self.plugin_id, consecutive_failures);
+                            consecutive_failures = 0;
                         }
-                        Err(e) => {
-                            consecutive_failures += 1;
-                            ulog_error!("[bridge:{}] Health check failed: {}, failure {}/{}", self.plugin_id, e, consecutive_failures, MAX_FAILURES);
-                        }
+                    } else if let Some(status) = probed_status {
+                        consecutive_failures += 1;
+                        // Pull /status for a more useful error reason before deciding.
+                        let detail = match self.client.get(self.url("/status")).send().await {
+                            Ok(r) => r.text().await.unwrap_or_default(),
+                            Err(_) => String::new(),
+                        };
+                        ulog_error!("[bridge:{}] /health/ready returned {}, failure {}/{}, status={}", self.plugin_id, status, consecutive_failures, MAX_FAILURES, detail);
+                    } else if let Some(err) = probe_err {
+                        consecutive_failures += 1;
+                        ulog_error!("[bridge:{}] Health check failed: {}, failure {}/{}", self.plugin_id, err, consecutive_failures, MAX_FAILURES);
                     }
                     if consecutive_failures >= MAX_FAILURES {
                         ulog_error!("[bridge:{}] Bridge process appears dead ({} consecutive health check failures), exiting listen loop", self.plugin_id, MAX_FAILURES);

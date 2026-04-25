@@ -398,6 +398,8 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
               const body = await resp.text();
               throw new Error(`Rust returned ${resp.status}: ${body}`);
             }
+            // Pattern 4: record a successful forward for /health/functional.
+            (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt = Date.now();
           } catch (err) {
             console.error(`[compat-timing] Rust POST FAILED in protocol path (+${Date.now() - t0}ms):`, err);
             throw err;
@@ -526,6 +528,9 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
             if (!resp.ok) {
               const body = await resp.text();
               console.error(`[compat-runtime] Rust returned ${resp.status}: ${body}`);
+            } else {
+              // Pattern 4: record a successful forward for /health/functional.
+              (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt = Date.now();
             }
           } catch (err) {
             console.error(`[compat-timing] Rust POST FAILED (+${Date.now() - t0}ms):`, err);

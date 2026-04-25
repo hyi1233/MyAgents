@@ -508,8 +508,77 @@ const server = honoServe({
     const url = new URL(req.url);
     const path = url.pathname;
 
-    if (path === '/health') {
+    // Pattern 4: three orthogonal health probes.
+    //   /health             — legacy alias for /health/live (Rust watchdog
+    //                         pre-rollout still polls this; keep compatible).
+    //   /health/live        — bridge process is alive + listening.
+    //   /health/ready       — plugin loaded AND gateway registered/started
+    //                         (or waiting-for-QR-login). Failure ⇒ structured 503.
+    //   /health/functional  — gateway has had a successful forward to Rust
+    //                         in the last 60s. Failure ⇒ "alive but not
+    //                         actually serving" (watchdog should restart).
+    if (path === '/health' || path === '/health/live') {
       return Response.json({ ok: true, pluginName });
+    }
+
+    if (path === '/health/ready') {
+      // Loaded plugin + gateway started (or waiting on QR) + no fatal error.
+      const pluginLoaded = !!capturedPlugin;
+      const gatewayOk = pluginLoaded && !gatewayError && (gatewayStarted || waitingForQrLogin);
+      if (gatewayOk) {
+        return Response.json({ state: 'ready', pluginName, waitingForQrLogin });
+      }
+      const reason: string =
+        !pluginLoaded ? 'plugin-not-loaded'
+        : gatewayError ? 'gateway-error'
+        : 'gateway-not-started';
+      return Response.json({
+        state: 'pending',
+        reason,
+        pluginName,
+        error: gatewayError || undefined,
+        waitingForQrLogin,
+      }, { status: 503 });
+    }
+
+    if (path === '/health/functional') {
+      // Functional = readiness + recent forward (or, if the plugin has no
+      // gateway at all because it's send-only, we accept readiness alone).
+      const pluginLoaded = !!capturedPlugin;
+      const gatewayOk = pluginLoaded && !gatewayError && (gatewayStarted || waitingForQrLogin);
+      if (!gatewayOk) {
+        return Response.json({
+          state: 'unready',
+          reason: !pluginLoaded ? 'plugin-not-loaded' : gatewayError ? 'gateway-error' : 'gateway-not-started',
+          error: gatewayError || undefined,
+        }, { status: 503 });
+      }
+      const lastForward = (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt;
+      const hasGateway = typeof capturedPlugin?.gateway?.startAccount === 'function';
+      // Send-only channels never forward inbound messages; consider them
+      // functional whenever they're ready.
+      if (!hasGateway) {
+        return Response.json({ state: 'functional', reason: 'send-only' });
+      }
+      // Just-started bridges may not have seen any traffic yet — give a
+      // grace period equal to the staleness window before we judge.
+      const STALENESS_MS = 60_000;
+      const ageMs = lastForward ? Date.now() - lastForward : Infinity;
+      if (waitingForQrLogin) {
+        // Waiting on user to scan a QR code — no traffic expected yet.
+        return Response.json({ state: 'functional', reason: 'awaiting-qr-login' });
+      }
+      if (ageMs <= STALENESS_MS) {
+        return Response.json({ state: 'functional', lastForwardMsAgo: ageMs });
+      }
+      // Either no forward ever, or last forward >60s ago. We can't easily
+      // ping the gateway from here without plugin-specific code, so report
+      // staleness as "unknown" rather than "broken" for ready-but-quiet bots.
+      return Response.json({
+        state: lastForward ? 'stale' : 'unknown',
+        lastForwardMsAgo: lastForward ? ageMs : null,
+        message: 'no successful forward in the last 60s',
+      });
     }
 
     if (path === '/status') {

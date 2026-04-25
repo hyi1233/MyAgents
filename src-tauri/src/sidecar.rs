@@ -1551,6 +1551,60 @@ fn wait_for_health(port: u16, alive_check: Option<Box<dyn Fn() -> bool>>) -> Res
     ))
 }
 
+/// Pattern 4: wait for /health/ready (deferred init complete) after /health/live
+/// passes. Returns Ok if the sidecar reports ready within `timeout_secs`,
+/// Err with the structured failure phase + error if it reports `failed`, or
+/// Err with a timeout message otherwise.
+///
+/// Tolerates older sidecar builds (no /health/ready) by treating a 404 as
+/// "ready" (best-effort backward compat — older sidecars used the bare /health
+/// as both signals).
+fn wait_for_readiness(port: u16, timeout_secs: u64) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{}/health/ready", port);
+    let client = match crate::local_http::blocking_builder()
+        .timeout(Duration::from_millis(2000))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(format!("readiness client build failed: {}", e)),
+    };
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut last_phase: Option<String> = None;
+    while std::time::Instant::now() < deadline {
+        match client.get(&url).send() {
+            Ok(resp) => {
+                let status = resp.status();
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    // Older sidecar; treat as ready.
+                    return Ok(());
+                }
+                if status.is_success() {
+                    return Ok(());
+                }
+                // 503 — try to surface phase / error from the structured body.
+                let body = resp.text().unwrap_or_default();
+                if body.contains("\"state\":\"failed\"") {
+                    return Err(format!("sidecar deferred init failed: {}", body));
+                }
+                // Track the most recent phase for the timeout error message.
+                if let Some(start) = body.find("\"phase\":\"") {
+                    let rest = &body[start + 9..];
+                    if let Some(end) = rest.find('"') {
+                        last_phase = Some(rest[..end].to_string());
+                    }
+                }
+            }
+            Err(_) => {
+                // Sidecar not yet listening, or transient error — try again.
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let phase_part = last_phase.map(|p| format!(" (last phase: {})", p)).unwrap_or_default();
+    Err(format!("sidecar /health/ready timed out after {}s{}", timeout_secs, phase_part))
+}
+
 /// Quick HTTP health check for existing sidecar (non-blocking style with short timeout)
 /// Returns true if the sidecar HTTP server is responsive
 fn check_sidecar_http_health(port: u16) -> bool {
@@ -2730,9 +2784,26 @@ fn create_new_session_sidecar<R: Runtime>(
         }
     });
 
-    // Wait for health
+    // Wait for health (TCP up). Then wait for /health/ready (deferred init
+    // complete) so renderer-driven session startup gates on actual readiness,
+    // not just liveness. Other startup paths (cron / IM bot) keep the looser
+    // liveness-only contract — they don't surface a "still warming up" UI.
     match wait_for_health(port, Some(alive_check)) {
         Ok(()) => {
+            // Pattern 4: tighten the renderer-driven session sidecar startup
+            // to wait for /health/ready as well. 30s timeout matches existing
+            // long-running migration / SDK init budgets.
+            if let Err(e) = wait_for_readiness(port, 30) {
+                ulog_error!("[sidecar] Session {} /health/ready failed: {}", session_id, e);
+                let mut manager_guard = manager.lock().map_err(|_| e.clone())?;
+                let port_matches = manager_guard.sidecars.get(session_id)
+                    .map(|s| s.port == port)
+                    .unwrap_or(false);
+                if port_matches {
+                    manager_guard.remove_sidecar(session_id);
+                }
+                return Err(e);
+            }
             // Mark as healthy — verify port to avoid mutating a replacement sidecar
             // that was created by another thread (e.g., health monitor) during the wait.
             let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
