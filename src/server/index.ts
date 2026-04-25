@@ -8724,7 +8724,12 @@ description: >
     }
   }
 
-  console.log(`Web UI server listening on http://localhost:${port}`);
+  // The same HTTP server serves both purposes — Tauri client proxies all
+  // /api/* + /sessions/* + /chat/stream traffic here via Rust local_http;
+  // browser dev mode (`start_dev.sh`) additionally hits the `serveStatic`
+  // fallback to load the React `dist/` bundle. Naming reflects the
+  // production primary role.
+  console.log(`[startup] Sidecar HTTP server ready on http://127.0.0.1:${port}`);
 
   // Pattern 2 §2.3.1 — Start the periodic GC for spilled large-value refs.
   // Runs every 60s; reaps any ref past its TTL (default 1h). The timer is
