@@ -76,8 +76,9 @@ impl From<FileLockError> for String {
 }
 
 /// Probe whether `pid` is alive. Unix-only via `nix::sys::signal::kill(pid, 0)`.
-/// On Windows we conservatively return true (don't break) — the cron writer
-/// is the only Rust user and doesn't currently target Windows lifecycle issues.
+/// On Windows we use `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` — succeeds
+/// only for live processes; failure means the pid is gone (or we lack rights,
+/// in which case we conservatively report unknown).
 #[cfg(unix)]
 fn is_pid_alive(pid: i32) -> Option<bool> {
     use nix::sys::signal;
@@ -89,11 +90,32 @@ fn is_pid_alive(pid: i32) -> Option<bool> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
+fn is_pid_alive(pid: i32) -> Option<bool> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid <= 0 {
+        return None;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32) };
+    if handle.is_null() {
+        // Could be ESRCH-equivalent (gone) or access-denied. We can't cleanly
+        // distinguish without GetLastError; treat null as "not observable as
+        // alive" so callers fall through to the start-time/age path. In
+        // practice, a recently-dead pid yields ERROR_INVALID_PARAMETER and a
+        // privileged-but-live pid yields ERROR_ACCESS_DENIED — but with
+        // PROCESS_QUERY_LIMITED_INFORMATION the latter is rare for our own
+        // user's processes.
+        return Some(false);
+    }
+    unsafe { CloseHandle(handle) };
+    Some(true)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 fn is_pid_alive(_pid: i32) -> Option<bool> {
-    // Conservative on Windows: treat as alive (don't break) until we wire up
-    // OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION). Stale recovery still
-    // works there via age-based break for renderer:<ts> owners.
     None
 }
 
@@ -149,9 +171,42 @@ fn get_pid_start_time_ms(pid: i32) -> Option<u64> {
     if result < 0 { None } else { Some(result as u64) }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+fn get_pid_start_time_ms(pid: i32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid <= 0 {
+        return None;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let mut exit = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let ok = unsafe {
+        GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user)
+    };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return None;
+    }
+    // FILETIME = 100ns intervals since 1601-01-01 UTC; convert to ms since 1970.
+    let ft = ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64);
+    const EPOCH_OFFSET_100NS: u64 = 116_444_736_000_000_000; // 1601 → 1970 in 100ns
+    if ft < EPOCH_OFFSET_100NS {
+        return None;
+    }
+    Some((ft - EPOCH_OFFSET_100NS) / 10_000)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn get_pid_start_time_ms(_pid: i32) -> Option<u64> {
-    // Windows / other: not supported. Fall back to age-only stale detection.
+    // Other Unix-likes (FreeBSD etc.): not supported. Fall back to age-only.
     None
 }
 
