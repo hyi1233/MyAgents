@@ -155,7 +155,7 @@ pub async fn check_and_spawn<R: Runtime>(
     let provider_env = Arc::clone(current_provider_env);
     let mcp_json = Arc::clone(mcp_servers_json);
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let count = run_batch(
             &qualifying,
             &agent_id_owned,

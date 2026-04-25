@@ -45,7 +45,7 @@ struct SseConnection {
     /// Shared running flag - used to gracefully stop the SSE stream
     running: Arc<AtomicBool>,
     /// Task handle for aborting if graceful stop fails
-    abort_handle: Option<tokio::task::JoinHandle<()>>,
+    abort_handle: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 impl SseConnection {
@@ -65,7 +65,7 @@ impl SseConnection {
             return false;
         }
         match &self.abort_handle {
-            Some(h) => !h.is_finished(),
+            Some(h) => !h.inner().is_finished(),
             None => false,
         }
     }
@@ -154,7 +154,7 @@ pub async fn start_sse_proxy(
     let state_for_task = (*state).clone();
 
     // Spawn async task to handle SSE stream
-    let handle = tokio::spawn(async move {
+    let handle = tauri::async_runtime::spawn(async move {
         let outcome = connect_sse(&app_handle, &url, &running, &tab_id_clone).await;
         match outcome {
             Ok(_) => {

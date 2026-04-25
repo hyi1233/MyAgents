@@ -682,7 +682,7 @@ pub struct CronTaskManager {
     /// Track which tasks have active schedulers (prevents duplicate scheduler spawns)
     active_schedulers: Arc<RwLock<HashSet<String>>>,
     /// JoinHandles for scheduler tasks — enables graceful shutdown
-    scheduler_handles: Arc<RwLock<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    scheduler_handles: Arc<RwLock<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
     /// Tauri app handle for emitting events (set after initialization)
     app_handle: Arc<RwLock<Option<AppHandle>>>,
 }
@@ -834,7 +834,10 @@ impl CronTaskManager {
         // critical section.
         let mut handles_guard = self.scheduler_handles.write().await;
         if let Some(existing) = handles_guard.get(task_id) {
-            if !existing.is_finished() {
+            // `tauri::async_runtime::JoinHandle` wraps `tokio::task::JoinHandle`;
+            // `is_finished` lives on the inner one (the wrapper exposes Future +
+            // `abort()` only).
+            if !existing.inner().is_finished() {
                 ulog_info!("[CronTask] Scheduler already running for task {}, skipping", task_id);
                 return Ok(());
             }
@@ -870,7 +873,7 @@ impl CronTaskManager {
         let task_id_for_handle = task_id.to_string();
 
         // Spawn the scheduler loop and store the JoinHandle for graceful shutdown
-        let handle = tokio::spawn(async move {
+        let handle = tauri::async_runtime::spawn(async move {
             ulog_info!("[CronTask] Scheduler started for task {} (interval: {} min, executions: {})", task_id_owned, interval_mins, execution_count);
 
             // Wait for app_handle to be available (with timeout)
@@ -2002,7 +2005,7 @@ impl CronTaskManager {
         ulog_info!("[CronTask] Manager shutdown initiated, awaiting scheduler handles...");
 
         // Drain and await all scheduler handles (with timeout)
-        let handles: Vec<(String, tokio::task::JoinHandle<()>)> = {
+        let handles: Vec<(String, tauri::async_runtime::JoinHandle<()>)> = {
             let mut h = self.scheduler_handles.write().await;
             h.drain().collect()
         };

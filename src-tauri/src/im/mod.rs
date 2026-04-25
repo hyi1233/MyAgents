@@ -71,7 +71,7 @@ pub(crate) struct ImConsumerHandle {
     pub(crate) sidecar_port: u16,
     /// Join handle is kept alive for the consumer task lifetime; we don't
     /// await it but holding it ensures the task isn't immediately dropped.
-    pub(crate) _join: tokio::task::JoinHandle<()>,
+    pub(crate) _join: tauri::async_runtime::JoinHandle<()>,
 }
 
 pub(crate) type ImConsumers = Arc<Mutex<HashMap<String, ImConsumerHandle>>>;
@@ -579,20 +579,20 @@ pub struct ImBotInstance {
     buffer: Arc<Mutex<MessageBuffer>>,
     started_at: Instant,
     /// JoinHandle for the message processing loop (awaited during graceful shutdown)
-    process_handle: tokio::task::JoinHandle<()>,
+    process_handle: tauri::async_runtime::JoinHandle<()>,
     /// JoinHandle for the platform listen loop (long-poll / WebSocket)
-    poll_handle: tokio::task::JoinHandle<()>,
+    poll_handle: tauri::async_runtime::JoinHandle<()>,
     /// JoinHandle for the approval callback handler
-    approval_handle: tokio::task::JoinHandle<()>,
+    approval_handle: tauri::async_runtime::JoinHandle<()>,
     /// JoinHandle for the health persist loop
-    health_handle: tokio::task::JoinHandle<()>,
+    health_handle: tauri::async_runtime::JoinHandle<()>,
     /// Random bind code for QR code binding flow
     bind_code: String,
     #[allow(dead_code)]
     pub(crate) config: ImConfig,
     // ===== Heartbeat (v0.1.21) =====
     /// Heartbeat runner background task handle
-    heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+    heartbeat_handle: Option<tauri::async_runtime::JoinHandle<()>>,
     /// Channel to send wake signals to heartbeat runner
     pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
     /// Shared heartbeat config (for hot updates)
@@ -653,7 +653,7 @@ pub struct AgentInstance {
     pub channels: HashMap<String, ChannelInstance>,
     pub last_active_channel: Arc<tokio::sync::RwLock<Option<LastActiveChannel>>>,
     // Agent-level heartbeat (shared across channels)
-    pub heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+    pub heartbeat_handle: Option<tauri::async_runtime::JoinHandle<()>>,
     pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
     pub heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
     // Agent-level hot-reloadable AI config (shared defaults)
@@ -1057,7 +1057,7 @@ async fn create_bot_instance<R: Runtime>(
     // Start platform listen loop (long-poll for Telegram, health watchdog for Bridge)
     let adapter_clone = Arc::clone(&adapter);
     let poll_shutdown_rx = shutdown_rx.clone();
-    let poll_handle = tokio::spawn(async move {
+    let poll_handle = tauri::async_runtime::spawn(async move {
         adapter_clone.listen_loop(poll_shutdown_rx).await;
     });
 
@@ -1066,10 +1066,12 @@ async fn create_bot_instance<R: Runtime>(
     {
         let health_for_watcher = health.clone();
         let mut watcher_shutdown_rx = shutdown_rx.clone();
-        let poll_handle_watcher = poll_handle.abort_handle();
+        // `abort_handle` lives on the inner `tokio::task::JoinHandle`; the
+        // tauri wrapper exposes `inner()` for cases like this.
+        let poll_handle_watcher = poll_handle.inner().abort_handle();
         let bot_id_for_watcher = bot_id.clone();
         let shutdown_tx_for_watcher = shutdown_tx.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             // Wait until either shutdown is signalled or the poll task finishes
             loop {
                 tokio::select! {
@@ -1095,7 +1097,7 @@ async fn create_bot_instance<R: Runtime>(
     let adapter_for_approval = Arc::clone(&adapter);
     let approval_client = crate::local_http::json_client(std::time::Duration::from_secs(30));
     let mut approval_shutdown_rx = shutdown_rx.clone();
-    let approval_handle = tokio::spawn(async move {
+    let approval_handle = tauri::async_runtime::spawn(async move {
         loop {
             let cb = tokio::select! {
                 msg = approval_rx.recv() => match msg {
@@ -1224,7 +1226,7 @@ async fn create_bot_instance<R: Runtime>(
     let agent_link: SharedAgentLink = Arc::new(RwLock::new(None));
     let agent_link_for_loop = Arc::clone(&agent_link);
 
-    let process_handle = tokio::spawn(async move {
+    let process_handle = tauri::async_runtime::spawn(async move {
         let mut in_flight: JoinSet<()> = JoinSet::new();
 
         // Media group buffering (Telegram albums)
@@ -2269,7 +2271,7 @@ async fn create_bot_instance<R: Runtime>(
                                 let bridge_clone = adapter_for_reply.clone();
                                 let chat_id_clone = chat_id.clone();
                                 let sender_id = msg.sender_id.clone();
-                                tokio::spawn(async move {
+                                tauri::async_runtime::spawn(async move {
                                     if let AnyAdapter::Bridge(ref b) = *bridge_clone {
                                         match b.execute_command(&cmd_name, &cmd_args, &sender_id, &chat_id_clone).await {
                                             Ok(result) => {
@@ -2458,7 +2460,7 @@ async fn create_bot_instance<R: Runtime>(
                                 let health = Arc::clone(&health);
                                 let agent_link = Arc::clone(&agent_link);
                                 let session_key = session_key_cap.clone();
-                                tokio::spawn(async move {
+                                tauri::async_runtime::spawn(async move {
                                     {
                                         let mut router_g = router.lock().await;
                                         router_g.record_response(&session_key, outcome.session_id.as_deref());
@@ -2887,7 +2889,7 @@ async fn create_bot_instance<R: Runtime>(
     let agent_id_for_idle = agent_id.clone();
     let consumers_for_idle = Arc::clone(&im_consumers);
 
-    let _idle_handle = tokio::spawn(async move {
+    let _idle_handle = tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             tokio::select! {
@@ -2971,7 +2973,7 @@ async fn create_bot_instance<R: Runtime>(
         let hb_peer_locks = Arc::clone(&peer_locks);
         let hb_agent_id = agent_id.clone().unwrap_or_else(|| bot_id.to_string());
         let hb_workspace = default_workspace_str.clone();
-        let handle = tokio::spawn(async move {
+        let handle = tauri::async_runtime::spawn(async move {
             runner.run_loop(
                 hb_shutdown_rx,
                 wake_rx,
@@ -4163,7 +4165,7 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                     }
                 };
 
-                let hb_handle = tokio::spawn(async move {
+                let hb_handle = tauri::async_runtime::spawn(async move {
                     use heartbeat::is_in_active_hours;
 
                     let initial_interval = {
@@ -5816,7 +5818,7 @@ pub async fn cmd_start_agent_channel(
         let hb_config_arc = Arc::new(RwLock::new(hb_config));
         let hb_config_for_loop = Arc::clone(&hb_config_arc);
 
-        let hb_handle = tokio::spawn(async move {
+        let hb_handle = tauri::async_runtime::spawn(async move {
             use heartbeat::is_in_active_hours;
 
             let initial_interval = {

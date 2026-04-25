@@ -98,6 +98,10 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 所有可能发起 HTTP 请求的 Rust 层子进程（Node Sidecar、Plugin Bridge、npm install 等）MUST 在 spawn 前调用 `crate::proxy_config::apply_to_subprocess(&mut cmd)`。该函数确保：用户配置代理时注入 `HTTP_PROXY` + `NO_PROXY`；未配置时继承系统网络行为但**始终注入 `NO_PROXY`** 保护 localhost。**禁止**手动 `cmd.env("HTTP_PROXY", ...)` 或 `cmd.env_remove("HTTP_PROXY")`。Node.js 20+ 的 `fetch()`（undici）会读取 `HTTP_PROXY` 环境变量，没有 `NO_PROXY` 的话，Sidecar 内部的 localhost 通信（admin-api、cron-tool、bridge-tools 等）会被系统代理拦截 → 502。
 
+### tauri::async_runtime::spawn 模块（macOS startup-abort 陷阱）
+
+所有 src-tauri 里的 async task 创建 MUST 用 `tauri::async_runtime::spawn` / `spawn_blocking`，**禁止**裸 `tokio::spawn` / `tokio::task::spawn`。`tokio::spawn` 在 Tauri 的 `.setup()` 回调（运行在 tao `did_finish_launching` ObjC FFI 边界内）没有 reactor，panic 跨 FFI 不能 unwind → `panic_cannot_unwind` → 进程 abort，crash 信号是 main thread + `Mutex::lock::fail` + `panic_in_cleanup`，无 panic 消息（panic 在 logger 起来之前就发生）。`tauri::async_runtime::spawn` 自带 lazy-init 全局 runtime + `enter()` guard，任何上下文都安全。`src-tauri/clippy.toml` 用 `disallowed-methods` 编译期硬封禁 — `cargo clippy` 直接拦下。两次踩坑历史：v0.1.65 的 `search/mod.rs::start_background_indexing`、v0.1.70 的 `logger::init_buffered_writer`（commit `da8a08b`）。`spawn_blocking` 不在禁单内（无需 reactor）。
+
 ### 零外部依赖与单一运行时（v0.2.0+）
 
 应用内置所有运行时依赖，用户无需自行安装任何东西：
@@ -241,6 +245,7 @@ v0.2.0 结构性重构落地了 7 个新的 helper 层模块，把"正确路径"
 | Sidecar 用 `__dirname` / `readFileSync` | esbuild 硬编码路径，生产环境出错 | 内联常量或 `fileURLToPath(import.meta.url)` / `getScriptDir()` |
 | 日志日期用 UTC `toISOString` | 与本地日期文件名不匹配 | 统一用 `localDate()`（`src/shared/logTime.ts`） |
 | Rust 日志用 `log::info!` | 不进统一日志 | MUST 用 `ulog_info!` / `ulog_error!` |
+| Rust 裸 `tokio::spawn` / `tokio::task::spawn` | 在 `.setup()` / tao ObjC 边界（`did_finish_launching`）触发 macOS startup-abort（panic 跨 FFI 不能 unwind → `panic_cannot_unwind`，crash 信号是 main thread + `Mutex::lock::fail`，无 panic 消息可见） | MUST 用 `tauri::async_runtime::spawn`。`src-tauri/clippy.toml` 的 `disallowed-methods` 已编译期硬封禁 — `cargo clippy` 直接拦下。`spawn_blocking` 不受限（无 reactor 也安全）。两次踩坑：v0.1.65 search、v0.1.70 logger（da8a08b 后改为 lint enforcement） |
 | 裸 `which::which()` 查找系统工具 | Finder 启动时 PATH 缺少 homebrew 等路径 | `crate::system_binary::find()` |
 | 前端 `@tauri-apps/plugin-fs` 读写工作区文件 | Tauri fs scope 仅覆盖 `~/.myagents/**` | `invoke('cmd_read_workspace_file')` / `invoke('cmd_write_workspace_file')` |
 | UI 硬编码颜色（`#fff`、`bg-blue-500`） | 破坏设计系统一致性 | 使用 CSS Token `var(--xxx)`，参考 specs/DESIGN.md |

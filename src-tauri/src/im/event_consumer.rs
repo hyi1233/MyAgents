@@ -20,7 +20,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
+use tauri::async_runtime::JoinHandle;
 
 use crate::{ulog_info, ulog_warn};
 use super::adapter::ImStreamAdapter;
@@ -59,7 +59,7 @@ pub fn spawn_consumer<A>(
 where
     A: ImStreamAdapter + Send + Sync + 'static,
 {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut last_seq: u64 = 0;
         let mut backoff_ms = RECONNECT_INITIAL_MS;
 

@@ -559,7 +559,7 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 
 ## Pit-of-Success 模块
 
-这五个模块构成"正确路径默认化"体系，消除 AI/新手反复踩的隐蔽陷阱：
+这些模块构成"正确路径默认化"体系，消除 AI/新手反复踩的隐蔽陷阱：
 
 | 模块 | 层 | 用途 | 防止的问题 |
 |------|----|----|-----------|
@@ -567,6 +567,7 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 | `process_cmd` (`src-tauri/src/process_cmd.rs`) | Rust | 所有 Rust 层子进程创建 | Windows GUI 弹黑色控制台窗口 |
 | `proxy_config` (`src-tauri/src/proxy_config.rs`) | Rust | 子进程代理环境变量注入 | Node.js `fetch()` 读取继承的 HTTP_PROXY → localhost 通信被代理拦截 |
 | `system_binary` (`src-tauri/src/system_binary.rs`) | Rust | 系统工具查找（pgrep/taskkill 等） | Tauri GUI 从 Finder 启动不继承 shell PATH |
+| **`tauri::async_runtime::spawn` + `clippy.toml` ban (v0.2.0+)** | Rust | 所有 async task 创建 | `tokio::spawn` 在 Tauri `.setup()` 回调 / tao ObjC FFI 边界（`did_finish_launching`）触发 panic — 没有 tokio reactor，panic 跨 FFI 不能 unwind → `panic_cannot_unwind` → 进程 abort。`tauri::async_runtime::spawn` 自带 lazy-init runtime + `enter()` guard，任何上下文都安全。`clippy.toml` 的 `disallowed-methods` 把规则编译期硬封禁。新代码不可能写错。 |
 | `fs-utils` (`src/server/utils/fs-utils.ts`, v0.1.69+) | Node.js | 目录创建 + 目录判定 helper（`ensureDirSync` / `ensureDir` / `isDirEntry`）。v0.1.69 引入时处理的 ① Bun-on-Windows `mkdirSync` EEXIST bug 在 v0.2.0 切 Node 后已消除；② `Dirent.isDirectory()` 在 Windows junction / POSIX symlink-to-dir 上返回 false 的坑仍在 Node 下存在，helper 继续兜底 | — |
 | `subprocess` (`src/server/utils/subprocess.ts`, v0.2.0+) | Node.js | `Bun.spawn` 兼容 adapter：`exited` Promise 在 `'close'` 而非 `'exit'`（stdio 已 drain）、stdin.write 用 Node callback 驱动避免背压 hang、保留 spawn error、cached Readable.toWeb stream；配套 `fireAndForget()` helper（open/explorer/xdg-open 等一次性 spawn） | callers 从 Bun API 平移到 Node 时不用每处重写 stream-shape 差异 |
 | `file-response` (`src/server/utils/file-response.ts`, v0.2.0+) | Node.js | `new Response(Bun.file(p))` 替代：`fileResponse(p, {contentType})` 用 `createReadStream + Readable.toWeb` 生成流式 Web Response；`sniffMime(path)` ext→MIME 映射 | HTTP 路由返回文件内容时不用各自内联 `fs.readFile + new Response` |
