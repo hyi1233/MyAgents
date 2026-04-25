@@ -31,6 +31,7 @@ import {
   normalizeUsage,
   restoreRuntimeUsageTotals,
 } from './usage-utils';
+import { imEventBus, type ImEventType } from '../utils/im-event-bus';
 
 // ─── Module state ───
 
@@ -368,13 +369,12 @@ function extractTextPreview(content: string, maxLen = 100): string {
   return content.slice(0, maxLen);
 }
 
-// IM stream callback — mirrors agent-session.ts pattern for IM Bot relay
-type ImStreamCallback = (
-  event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity',
-  data: string,
-) => void;
-let imStreamCallback: ImStreamCallback | null = null;
-let imCallbackNulledDuringTurn = false; // Prevents stale turn events leaking to new callback
+// Pattern B — IM Pipeline v2: ImEventBus replaces the legacy single-callback model.
+// `activeRequestId` is the trace ID of the user message currently being processed
+// by the external runtime; UnifiedEvent → ImEvent translation tags each event with
+// this ID so /api/im/chat subscribers can filter/route to the right reply slot.
+// Mirrors `agent-session.ts::activeRequestId` semantics — same bus instance.
+let activeRequestId: string | null = null;
 
 // Pending permission suggestions — keyed by requestId, consumed by respondExternalPermission.
 // CC sends permission_suggestions in control_request; we echo them back as updatedPermissions
@@ -406,10 +406,11 @@ function isAskUserQuestionInput(input: unknown): input is AskUserQuestionInput {
   });
 }
 
-/** Fire IM callback only if not stale (guard mirrors agent-session.ts pattern) */
-function fireImCallback(event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string): void {
-  if (imStreamCallback && !imCallbackNulledDuringTurn) {
-    imStreamCallback(event, data);
+/** Pattern B — emit per-request IM event. Subscribers in /api/im/chat filter
+ *  by matching requestId. No-op when no active IM trace (desktop / cron). */
+function fireImCallback(type: ImEventType, data: string): void {
+  if (activeRequestId !== null) {
+    imEventBus.emit(activeRequestId, type, data);
   }
 }
 
@@ -482,22 +483,10 @@ export function restoreExternalSessionState(
   console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages)`);
 }
 
-/**
- * Set IM stream callback for relaying CC events to Rust IM.
- * Mirrors agent-session.ts setImStreamCallback pattern.
- */
-export function setExternalImStreamCallback(cb: ImStreamCallback | null): void {
-  if (cb !== null && imStreamCallback !== null) {
-    imCallbackNulledDuringTurn = true;
-    try { imStreamCallback('error', '消息处理被新请求取代'); } catch { /* old stream may already be closed */ }
-  }
-  if (cb === null) {
-    imCallbackNulledDuringTurn = true;
-  } else {
-    imCallbackNulledDuringTurn = false;
-  }
-  imStreamCallback = cb;
-}
+// Pattern B — `setExternalImStreamCallback` removed. The /api/im/chat handler
+// in index.ts subscribes to `imEventBus` directly and filters by requestId.
+// This deletes the duplicate single-callback infrastructure that mirrored
+// agent-session.ts; both builtin and external runtimes now share the same bus.
 
 // ─── Config change handlers ───
 
@@ -961,6 +950,11 @@ export interface ExternalSendContext {
   scenario: InteractionScenario;
   permissionMode?: string;
   model?: string;  // Runtime-specific model (e.g., "sonnet", "opus")
+  // Pattern B — IM trace ID. Forwarded from /api/im/chat (Rust generates at edge).
+  // Tags every UnifiedEvent emitted to ImEventBus so the bus subscriber for this
+  // request can route delta/block-end/etc. to the correct reply slot.
+  // Desktop / cron callers omit (no IM identity) — events drop silently.
+  requestId?: string;
 }
 
 /**
@@ -994,6 +988,14 @@ export async function sendExternalMessage(
   context?: ExternalSendContext,
 ): Promise<{ queued: boolean; error?: string }> {
   const hasImages = images && images.length > 0;
+
+  // Pattern B — set the active IM trace ID before any UnifiedEvent fans out.
+  // No flag/null reset like the legacy callback path: each new send overrides;
+  // session-end (session_complete / stopExternalSession) clears.
+  // No-op when context.requestId is undefined (desktop / cron paths).
+  if (context?.requestId) {
+    activeRequestId = context.requestId;
+  }
 
   // Show user message immediately — don't block on pre-warm or turn serialization.
   // The message appears in the chat as soon as the user presses send, giving
@@ -1261,8 +1263,9 @@ export async function stopExternalSession(): Promise<boolean> {
     pendingExternalAskUserQuestions.clear();  // Stale AskUserQuestion requestIds would misroute to new session
     pendingExternalInteractiveRequests.clear();
     externalSystemInitPayload = null;
-    // Notify IM stream callback if active (prevents orphaned SSE streams on user-stop)
+    // Pattern B: notify IM bus subscribers (prevents orphaned SSE streams on user-stop) + clear active ID.
     fireImCallback('error', 'Session stopped');
+    activeRequestId = null;
     setExternalSessionState('idle');
   }
 }
@@ -1452,6 +1455,9 @@ async function persistTurnResult(): Promise<void> {
   });
   setExternalSessionState('idle');
   fireImCallback('complete', '');
+  // Pattern B: turn complete — clear active trace ID so subsequent SDK output
+  // (between turns or from a new session) won't leak to this turn's subscribers.
+  activeRequestId = null;
 }
 
 // ─── Private: UnifiedEvent → SSE broadcast ───
@@ -1612,7 +1618,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           previewFormat,
         });
         // IM/agent-channel bots can't render AskUserQuestion; claude-code.ts already
-        // puts it in --disallowed-tools for those scenarios, so no imStreamCallback fan-out here.
+        // puts it in --disallowed-tools for those scenarios, so no imEventBus fan-out here.
         break;
       }
 

@@ -238,7 +238,6 @@ import {
   setSessionModel,
   resetSession,
   waitForSessionIdle,
-  setImStreamCallback,
   setGroupToolsDeny,
   setInteractionScenario,
   resetInteractionScenario,
@@ -287,6 +286,7 @@ import {
 import { cleanupOldLogs } from './AgentLogger';
 import { cleanupOldUnifiedLogs, appendUnifiedLogBatch, getRecentLogLines } from './UnifiedLogger';
 import { broadcast, createSseClient, getClients } from './sse';
+import { imEventBus } from './utils/im-event-bus';
 import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifySubscription } from './provider-verify';
 // openai-bridge is lazy-loaded via ensureBridgeHandler() below — only users on
 // OpenAI-protocol providers (DeepSeek/Moonshot/etc.) ever hit /v1/messages, so
@@ -306,7 +306,6 @@ import {
   getRuntimePermissionModes,
   getActiveRuntimeType,
   restoreExternalSessionState,
-  setExternalImStreamCallback,
   waitForExternalSessionIdle,
   getLastExternalAssistantText,
   setExternalModel,
@@ -8464,6 +8463,7 @@ async function main() {
                 scenario: { type: 'agent-channel' as const, platform: imSource, sourceType: imSourceType, botName: payload.botName },
                 permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
                 model: getRuntimeConfigModel(runtimeConfig),
+                requestId: payload.requestId, // Pattern B — IM trace ID for bus event tagging
               },
             );
             if (!ccResult.queued) {
@@ -8503,13 +8503,20 @@ async function main() {
             content: payload.message,
           });
 
-          // === SSE Stream: stream text deltas to Rust IM for Telegram draft editing ===
+          // === SSE Stream: subscribe to ImEventBus, filter by requestId, forward to Rust ===
+          // Pattern B replaces the legacy single-callback model with a per-event bus.
+          // The handler subscribes from `currentSeq` (only future events) and filters
+          // by the requestId of THIS user message — events for other in-flight requests
+          // (mid-turn injection in Pattern C) get routed to their own subscribers,
+          // structurally preventing the "stale event leaks to wrong SSE" class of bugs.
+          const targetRequestId = payload.requestId ?? '';
           const encoder = new TextEncoder();
           let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
           let safetyTimer: ReturnType<typeof setTimeout> | null = null;
           let closed = false;
           let imAccText = ''; // Current block's accumulated text
           let lastBlockText = ''; // Preserved across block-end for NO_REPLY detection
+          let unsubscribe: (() => void) | null = null;
 
           const stream = new ReadableStream({
             start(controller) {
@@ -8527,17 +8534,18 @@ async function main() {
                 if (closed) return;
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
               };
-              const clearCallback = shouldUseExternalRuntime() ? setExternalImStreamCallback : setImStreamCallback;
               const closeStream = () => {
                 if (closed) return;
                 closed = true;
                 if (heartbeatTimer) clearInterval(heartbeatTimer);
                 if (safetyTimer) clearTimeout(safetyTimer);
-                clearCallback(null);
+                if (unsubscribe) { unsubscribe(); unsubscribe = null; }
                 try { controller.close(); } catch { /* already closed */ }
               };
 
-              // 3600s (60 min) safety timeout — aligned with cron task timeout
+              // 3600s (60 min) safety timeout — aligned with cron task timeout.
+              // Pattern C will delete this entirely (SDK has its own 10min watchdog
+              // in agent-session.ts:6304). Kept in Pattern B for behaviour parity.
               safetyTimer = setTimeout(() => {
                 if (!closed) {
                   // Flush any remaining text as final block
@@ -8551,20 +8559,26 @@ async function main() {
                 }
               }, 3_600_000);
 
-              // Route IM stream callback to the appropriate runtime's relay
-              const setCallback = shouldUseExternalRuntime() ? setExternalImStreamCallback : setImStreamCallback;
-              setCallback((event, data) => {
-                if (event === 'permission-request') {
+              // Subscribe from the latest seq so we only receive events emitted AFTER
+              // this point. Strict requestId match — null/mismatch events drop silently.
+              unsubscribe = imEventBus.subscribe(imEventBus.currentSeq(), (busEvent) => {
+                if (closed) return;
+                if (busEvent.requestId !== targetRequestId) return;
+
+                const data = typeof busEvent.data === 'string' ? busEvent.data : '';
+
+                if (busEvent.type === 'permission-request') {
                   // Forward permission request to Rust for interactive approval
-                  sendEvent({ type: 'permission-request', ...JSON.parse(data) });
-                } else if (event === 'delta') {
+                  try { sendEvent({ type: 'permission-request', ...JSON.parse(data) }); }
+                  catch { /* malformed payload — drop */ }
+                } else if (busEvent.type === 'delta') {
                   imAccText += data;
                   sendEvent({ type: 'partial', text: imAccText });
-                } else if (event === 'block-end') {
+                } else if (busEvent.type === 'block-end') {
                   lastBlockText = imAccText; // Preserve for NO_REPLY detection in 'complete'
                   sendEvent({ type: 'block-end', text: imAccText });
                   imAccText = ''; // Reset for next block
-                } else if (event === 'complete') {
+                } else if (busEvent.type === 'complete') {
                   // Group "always" mode: detect <NO_REPLY> → send silent complete
                   // Check lastBlockText because imAccText is already cleared by block-end
                   if (payload.sourceType === 'group' && payload.groupActivation === 'always') {
@@ -8584,24 +8598,23 @@ async function main() {
                   }
                   sendEvent({ type: 'complete', sessionId: getSessionId() });
                   // Notify Desktop: IM turn completed
-                  broadcast('im:response_sent', {
-                    sessionId: getSessionId(),
-                  });
+                  broadcast('im:response_sent', { sessionId: getSessionId() });
                   closeStream();
-                } else if (event === 'activity') {
+                } else if (busEvent.type === 'activity') {
                   // Non-text block started (thinking, tool_use) — Rust uses this for placeholder
                   sendEvent({ type: 'activity' });
-                } else if (event === 'error') {
+                } else if (busEvent.type === 'error' || busEvent.type === 'cancelled') {
                   sendEvent({ type: 'error', error: data });
                   closeStream();
                 }
+                // 'gap' events ignored at this layer — Pattern C will surface them to Rust
               });
             },
             cancel() {
               closed = true;
               if (heartbeatTimer) clearInterval(heartbeatTimer);
               if (safetyTimer) clearTimeout(safetyTimer);
-              (shouldUseExternalRuntime() ? setExternalImStreamCallback : setImStreamCallback)(null);
+              if (unsubscribe) { unsubscribe(); unsubscribe = null; }
             }
           });
 

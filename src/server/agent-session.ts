@@ -44,6 +44,7 @@ import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import type { ImagePayload } from './runtimes/types';
+import { imEventBus, type ImEventType } from './utils/im-event-bus';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -599,16 +600,32 @@ const streamIndexToToolId: Map<number, string> = new Map();
 const streamIndexToBlockType: Map<number, string> = new Map(); // Positive block type tracking for subagent content_block_stop
 const toolResultIndexToId: Map<number, string> = new Map();
 
-// IM Draft Stream: callback for streaming text to Telegram
-type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string) => void;
-let imStreamCallback: ImStreamCallback | null = null;
-// Cross-turn guard: set to true when imStreamCallback is nulled (timeout/error) or replaced
-// (defense-in-depth) during a turn. Reset to false by messageGenerator before each yield.
-// handleMessageComplete/Stopped only fires 'complete' when flag is false, preventing
-// a stale turn's completion from consuming a subsequent turn's SSE stream.
-// Race-safe: unlike a generation counter snapshot (which can run before setImStreamCallback),
-// this flag is set BY setImStreamCallback itself, so ordering is guaranteed.
-let imCallbackNulledDuringTurn = false;
+// IM Pipeline v2 — Pattern B: ImEventBus replaces the legacy single-callback model.
+//
+// `activeRequestId` is the trace ID of the user message currently being processed
+// by the SDK. SDK events (delta / block-end / complete / etc.) are tagged with
+// this ID and published to the bus; subscribers (one per /api/im/chat SSE) filter
+// by their target requestId so events route to the right reply slot.
+//
+// Replaces the legacy `imStreamCallback` singleton + `imCallbackNulledDuringTurn`
+// flag. The flag was needed to prevent stale events from a finished turn leaking
+// to a fresh callback (same global ref). With per-event requestId tagging, leakage
+// is structurally impossible — old events carry the old ID, new subscribers filter
+// them out. No flag, no race window.
+//
+// Set in messageGenerator on yield (= SDK starts processing this user message).
+// Cleared in handleMessageComplete / Stopped / Error / abortPersistentSession.
+let activeRequestId: string | null = null;
+
+/** Emit a per-request IM event. No-op when there's no active IM request
+ *  (mirrors legacy `imStreamCallback?.(...)` behaviour: events without an
+ *  active IM trace are dropped). System-level events (e.g. session-init in
+ *  Pattern C) call `imEventBus.emit(null, ...)` directly. */
+function emitImEvent(type: ImEventType, data?: unknown): void {
+  if (activeRequestId !== null) {
+    imEventBus.emit(activeRequestId, type, data);
+  }
+}
 // Group chat tool deny list (v0.1.28): set per IM message, cleared on next non-group request
 let currentGroupToolsDeny: string[] = [];
 // Flag: auto-reset session after image content pollutes conversation history
@@ -888,11 +905,9 @@ function abortPersistentSession(): void {
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
   rescuePendingToQueue();
-  // Notify IM stream callback before abort
-  if (imStreamCallback) {
-    imStreamCallback('error', '会话已中断，请重新发送');
-    imStreamCallback = null;
-  }
+  // Pattern B: notify IM event bus subscribers (per-requestId) before abort.
+  emitImEvent('error', '会话已中断，请重新发送');
+  activeRequestId = null;
   // 唤醒被阻塞的 generator（waitForMessage）
   if (messageResolver) {
     const resolve = messageResolver;
@@ -2413,10 +2428,8 @@ async function checkToolPermission(
     input: inputPreview,
   });
 
-  // Forward to IM stream if active (for interactive approval cards)
-  if (imStreamCallback) {
-    imStreamCallback('permission-request', JSON.stringify({ requestId, toolName, input: inputPreview }));
-  }
+  // Forward to IM event bus (subscribers route per-requestId for interactive approval cards)
+  emitImEvent('permission-request', JSON.stringify({ requestId, toolName, input: inputPreview }));
 
   // Wait for user response or abort
   return new Promise((resolve, reject) => {
@@ -2825,26 +2838,11 @@ export function setGroupToolsDeny(tools: string[]): void {
   currentGroupToolsDeny = tools;
 }
 
-export function setImStreamCallback(cb: ImStreamCallback | null): void {
-  // Defense-in-depth: if there's already an active callback when setting a new one,
-  // notify the old callback with an error so its SSE stream terminates cleanly.
-  // This should not happen when peer_locks are properly used, but guards against
-  // silent callback replacement that would leave the old SSE stream hanging.
-  if (cb !== null && imStreamCallback !== null) {
-    console.warn('[agent] setImStreamCallback: replacing active callback — notifying old stream');
-    imCallbackNulledDuringTurn = true;
-    try {
-      imStreamCallback('error', '消息处理被新请求取代');
-    } catch { /* old stream may already be closed */ }
-  }
-  // Mark callback as stale when it's being nulled (e.g., SSE safety timeout, closeStream).
-  // handleMessageComplete/Stopped checks this flag to avoid sending 'complete' to a
-  // replacement callback that belongs to a different turn.
-  if (cb === null && imStreamCallback !== null) {
-    imCallbackNulledDuringTurn = true;
-  }
-  imStreamCallback = cb;
-}
+// Pattern B — `setImStreamCallback` removed. Callers in /api/im/chat now
+// `imEventBus.subscribe(currentSeq, cb)` directly and filter by requestId.
+// Pattern C will replace the entire /api/im/chat protocol with /api/im/enqueue
+// + /api/im/events long-poll, at which point even the subscription site moves
+// out of agent-session.ts.
 
 function resetAbortFlag(): void {
   shouldAbortSession = false;
@@ -3827,13 +3825,12 @@ function handleMessageComplete(): void {
   // (idle / pre-warm / next turn) don't inherit the stale id.
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
-  // Notify IM stream: turn complete — only if callback was NOT nulled/replaced during this turn.
-  // A nulled callback means the SSE stream timed out and a new one may have been set for a
-  // subsequent queued message; firing 'complete' here would consume the wrong stream.
-  if (imStreamCallback && !imCallbackNulledDuringTurn) {
-    imStreamCallback('complete', '');
-    imStreamCallback = null;
-  }
+  // Pattern B: turn complete → notify per-request bus subscribers and clear active ID.
+  // Stale-event leakage that the legacy `imCallbackNulledDuringTurn` flag guarded against
+  // is now structurally impossible — events carry the requestId of their originating
+  // user message; subscribers filter strictly. No flag, no race.
+  emitImEvent('complete', '');
+  activeRequestId = null;
   // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
   // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
   streamIndexToToolId.clear();
@@ -3907,11 +3904,10 @@ function handleMessageStopped(): void {
   // Pattern 6: clear turnId on stop (mirror of handleMessageComplete).
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
-  // Notify IM stream: turn complete (stopped) — cross-turn guard prevents misfire
-  if (imStreamCallback && !imCallbackNulledDuringTurn) {
-    imStreamCallback('complete', '');
-    imStreamCallback = null;
-  }
+  // Pattern B: turn stopped → notify bus, clear active ID. Same rationale as
+  // handleMessageComplete (no flag needed, attribution via requestId).
+  emitImEvent('complete', '');
+  activeRequestId = null;
   // 跨回合状态清理（与 handleMessageComplete 保持一致）
   streamIndexToToolId.clear();
   streamIndexToBlockType.clear();
@@ -3957,11 +3953,9 @@ function handleMessageError(error: string): void {
   // Pattern 6: clear turnId on error too — turn is over either way.
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
-  // Notify IM stream: localized error
-  if (imStreamCallback) {
-    imStreamCallback('error', localizeImError(error));
-    imStreamCallback = null;
-  }
+  // Pattern B: error → notify per-request bus subscribers, clear active ID.
+  emitImEvent('error', localizeImError(error));
+  activeRequestId = null;
   setSessionState('idle');
 
   // Don't persist expected termination signals as errors
@@ -4330,6 +4324,11 @@ function clearMessageState(): void {
   // Reset browser tool tracking for new session
   sessionBrowserToolUsed = false;
   sessionStorageStateSaved = false;
+  // Pattern B: clear active IM trace ID — any in-flight bus subscribers for the
+  // old session belong to closed SSE streams; new SDK output for a new session
+  // should not be tagged with the old trace ID.
+  activeRequestId = null;
+  imEventBus.clear();
 }
 
 /**
@@ -6107,7 +6106,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
         // Headless IM fast-path: IM bridges (Telegram/Dingtalk builtin + all OpenClaw plugins
         // like weixin/feishu) have no permission approval UI. Routing Bash/WebSearch/etc. through
-        // checkToolPermission would forward a permission-request to imStreamCallback that no
+        // checkToolPermission would emit a permission-request event to the IM event bus that no
         // bridge can answer → 10-minute timeout per tool call → user sees endless loading.
         //
         // Sticky by design: `currentScenario = 'im'` is set at IM request entry (index.ts:7116)
@@ -6580,8 +6579,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   appendTextChunk(streamEvent.delta.text);
                   broadcast('chat:message-chunk', streamEvent.delta.text);
                   currentTurnHasOutput = true;
-                  // IM stream: forward non-subagent text delta (cross-turn guard)
-                  if (!imCallbackNulledDuringTurn) imStreamCallback?.('delta', streamEvent.delta.text);
+                  // IM stream: forward non-subagent text delta to event bus (Pattern B)
+                  emitImEvent('delta', streamEvent.delta.text);
                 } else {
                   console.log(`[agent] Filtered decorative text from stream (${decorativeCheck.reason})`);
                 }
@@ -6638,12 +6637,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           if (streamEvent.content_block.type === 'text' && !sdkMessage.parent_tool_use_id) {
             flushPendingMidTurnQueue();
           }
-          if (imStreamCallback && !sdkMessage.parent_tool_use_id && !imCallbackNulledDuringTurn) {
+          // Pattern B: forward non-subagent block-start activity to event bus.
+          if (!sdkMessage.parent_tool_use_id) {
             if (streamEvent.content_block.type === 'text') {
               imTextBlockIndices.add(streamEvent.index);
             } else {
               // Notify non-text block activity (thinking, tool_use) so IM can show placeholder
-              imStreamCallback('activity', streamEvent.content_block.type);
+              emitImEvent('activity', streamEvent.content_block.type);
             }
           }
           // Track block type by stream index for precise subagent content_block_stop handling
@@ -6810,9 +6810,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               toolId: toolId || undefined
             });
             handleContentBlockStop(streamEvent.index, toolId || undefined);
-            // IM stream: signal text block end (cross-turn guard)
-            if (imStreamCallback && !imCallbackNulledDuringTurn && imTextBlockIndices.has(streamEvent.index)) {
-              imStreamCallback('block-end', '');
+            // IM stream: signal text block end via event bus (Pattern B)
+            if (imTextBlockIndices.has(streamEvent.index)) {
+              emitImEvent('block-end', '');
               imTextBlockIndices.delete(streamEvent.index);
             }
           }
@@ -7073,7 +7073,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             appendTextChunk(nonStreamedText);
             broadcast('chat:message-chunk', nonStreamedText);
             currentTurnHasOutput = true;
-            if (!imCallbackNulledDuringTurn) imStreamCallback?.('delta', nonStreamedText);
+            emitImEvent('delta', nonStreamedText);
           }
         }
       } else if (sdkMessage.type === 'result') {
@@ -7137,11 +7137,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             shouldResetSessionAfterError = true;
             shouldResetReason = 'stale';
           }
-          if (imStreamCallback) {
+          if (activeRequestId) {
             const errorText = localizeImError(rawError);
-            console.warn('[agent] SDK result is_error, forwarding to IM:', errorText);
-            imStreamCallback('error', errorText);
-            imStreamCallback = null;
+            console.warn('[agent] SDK result is_error, forwarding to IM bus:', errorText);
+            emitImEvent('error', errorText);
+            activeRequestId = null;
           }
         }
 
@@ -7163,12 +7163,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             appendTextChunk(resultText);
             broadcast('chat:message-chunk', resultText);
           }
-          // Forward to IM callback (prevents "(No Response)" for SDK failures)
-          // Cross-turn guard: only forward if callback was not nulled/replaced
-          if (imStreamCallback && !imCallbackNulledDuringTurn) {
-            imStreamCallback('complete', resultText);
-            imStreamCallback = null;
-          }
+          // Forward to IM event bus (prevents "(No Response)" for SDK failures).
+          // Pattern B: subscribers filter by requestId — stale-event leakage from a
+          // finished turn to a fresh subscriber is structurally impossible.
+          emitImEvent('complete', resultText);
+          activeRequestId = null;
         }
 
         // Prefer modelUsage (per-model breakdown), fallback to aggregate usage
@@ -7652,18 +7651,16 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     }
 
     // Yield 消息到 SDK stdin
-    // Only reset cross-turn guards for NEW turns (not mid-turn injections).
     const isMidTurnInjection = isStreamingMessage;
     if (!isMidTurnInjection) {
-      // Reset cross-turn guard: this turn starts fresh, no timeout/replacement yet.
-      imCallbackNulledDuringTurn = false;
       isStreamingMessage = true;
-    } else if (imStreamCallback) {
-      // Mid-turn injection WITH an active IM callback: this is a new IM message that was
-      // queued during session restart (e.g., MCP config change). The flag may have been set
-      // to true during the restart. Reset it so delta/block-end events are forwarded.
-      imCallbackNulledDuringTurn = false;
     }
+    // Pattern B: tag SDK output with this user message's requestId. Mirrors the
+    // legacy `setImStreamCallback(cb_X)` semantics: the most recently-yielded
+    // user message owns subsequent SDK events until handleMessageComplete clears
+    // (or another yield overrides via mid-turn injection). Pattern G will refine
+    // attribution to advance per SDK `result` boundary instead of per yield.
+    activeRequestId = item.requestId ?? null;
 
     // Modality re-check at dequeue. The earlier filter in enqueueUserMessage
     // ran against the model active at enqueue time. If the user switched to a
