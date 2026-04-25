@@ -2279,6 +2279,24 @@ async fn create_bot_instance<R: Runtime>(
                     let task_allowed_users = Arc::clone(&allowed_users_for_loop);
 
                     in_flight.spawn(async move {
+                        // Pattern A — Per-Request Identity: assign request_id at the dispatch
+                        // boundary so every log line and downstream RPC carries the same trace
+                        // ID. Empty default from adapters means "not yet assigned"; generate
+                        // here. Buffered replays also start with empty → fresh ID per attempt
+                        // (each retry is its own logical request).
+                        let mut msg = msg;
+                        if msg.request_id.is_empty() {
+                            msg.request_id = uuid::Uuid::new_v4().to_string();
+                        }
+                        let request_id = msg.request_id.clone();
+                        ulog_info!(
+                            "[im] Dispatch requestId={} session_key={} sender={} chars={}",
+                            request_id,
+                            session_key,
+                            msg.sender_name.as_deref().unwrap_or("?"),
+                            msg.text.len(),
+                        );
+
                         // 1. Acquire per-peer lock FIRST (serialize requests to same Sidecar).
                         let peer_lock = {
                             let mut locks = task_locks.lock().await;
@@ -2376,7 +2394,7 @@ async fn create_bot_instance<R: Runtime>(
                         }
 
                         // 4c. Process attachments (File → save to workspace, Image → base64)
-                        let mut msg = msg; // make mutable for attachment processing
+                        // (msg is already declared `mut` at spawn entry for request_id assignment)
                         let workspace_path = {
                             let router = task_router.lock().await;
                             router
@@ -2475,7 +2493,8 @@ async fn create_bot_instance<R: Runtime>(
                         {
                             Ok(sid) => {
                                 ulog_info!(
-                                    "[im] Stream complete for {} (session={})",
+                                    "[im] Stream complete requestId={} session_key={} session={}",
+                                    request_id,
                                     session_key,
                                     sid.as_deref().unwrap_or("?"),
                                 );
@@ -2486,7 +2505,10 @@ async fn create_bot_instance<R: Runtime>(
                                 sid
                             }
                             Err(e) => {
-                                ulog_error!("[im] Stream error for {}: {}", session_key, e);
+                                ulog_error!(
+                                    "[im] Stream error requestId={} session_key={} err={}",
+                                    request_id, session_key, e,
+                                );
                                 // Clean up any active AI Card on error (prevent zombie cards)
                                 if let AnyAdapter::Dingtalk(ref dt) = *task_adapter {
                                     dt.post_stream_cleanup(&chat_id).await;
@@ -3130,6 +3152,9 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         "sourceId": msg.chat_id,
         "senderName": msg.sender_name,
         "permissionMode": permission_mode,
+        // Pattern A — Per-Request Identity. Sidecar threads it through
+        // enqueueUserMessage / messageQueue / SSE events for full-chain trace.
+        "requestId": msg.request_id,
     });
     if !is_external_runtime_type(runtime) {
         if let Some(env) = provider_env {
@@ -3208,10 +3233,15 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         ulog_info!("[im-stream] No bridge context (non-Bridge adapter)");
     }
     let url = format!("http://127.0.0.1:{}/api/im/chat", port);
-    ulog_info!("[im-stream] POST {} (SSE)", url);
+    ulog_info!("[im-stream] POST {} requestId={} (SSE)", url, msg.request_id);
 
+    // Pattern A — Per-Request Identity. Send the trace ID via header so the sidecar's
+    // HTTP middleware (`withLogContext` / Pattern 6 ALS pipeline in v0.2.0) auto-tags
+    // every console.* inside the handler. The body field below additionally persists
+    // the ID into messageQueue / SDK turn (where the ALS frame is no longer active).
     let response = client
         .post(&url)
+        .header("X-MyAgents-Request-Id", &msg.request_id)
         .json(&body)
         .send()
         .await

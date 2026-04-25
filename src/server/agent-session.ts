@@ -650,6 +650,10 @@ type MessageQueueItem = {
   wasQueued: boolean;             // true if added via non-blocking path (AI was busy)
   resolve: () => void;
   attachments?: MessageWire['attachments'];  // Saved attachments for deferred user message rendering
+  // Pattern A — Per-Request Identity (IM Pipeline v2). Carries the trace ID assigned
+  // at the IM edge (Rust mod.rs spawn entry → /api/im/chat payload).
+  // Empty string for desktop / cron / heartbeat paths (no IM identity).
+  requestId?: string;
 };
 const messageQueue: MessageQueueItem[] = [];
 // Pending attachments to persist with user messages
@@ -4929,6 +4933,9 @@ export async function enqueueUserMessage(
   model?: string,
   providerEnv?: ProviderEnv | 'subscription',
   metadata?: { source: SessionSource; sourceId?: string; senderName?: string },
+  // Pattern A — IM trace ID. Forwarded from /api/im/chat (Rust generates at edge).
+  // Desktop / cron / heartbeat callers omit this — those paths get no IM identity.
+  requestId?: string,
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
   // 这些函数是异步的（await sessionTerminationPromise 需要数秒），
@@ -5277,11 +5284,12 @@ export async function enqueueUserMessage(
       wasQueued: true,
       resolve: () => {},  // No-op: no one is awaiting
       attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
+      requestId,
     };
     // wakeGenerator delivers directly if generator is at waitForMessage (messageResolver set),
     // or buffers in messageQueue if generator is suspended at yield (SDK hasn't called next() yet).
     wakeGenerator(queueItem);
-    console.log(`[agent] Message queued (mid-turn injection): queueId=${queueId} text="${trimmed.slice(0, 50)}"`);
+    console.log(`[agent] Message queued (mid-turn injection): queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
     broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100) });
 
     // Safety net: if message was queued because shouldAbortSession is true but no session
@@ -5315,6 +5323,7 @@ export async function enqueueUserMessage(
     messageText: trimmed,
     wasQueued: false,
     resolve: () => {},  // No-op: no one is awaiting
+    requestId,
   };
 
   if (!isSessionActive()) {
@@ -7667,7 +7676,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     // common case; we only rewrite content here when modality drifted.
     const yieldedMessage = stripUnsupportedModalityBlocks(item.message, currentModel);
 
-    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}, midTurn=${isMidTurnInjection}`);
+    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}, midTurn=${isMidTurnInjection}, requestId=${item.requestId ?? '-'}`);
     yield {
       type: 'user' as const,
       message: yieldedMessage,

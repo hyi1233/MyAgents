@@ -994,6 +994,7 @@ async fn handle_bridge_message(
         hint_group_name: payload.group_name,
         reply_to_body: payload.reply_to_body,
         group_system_prompt: payload.group_system_prompt,
+        request_id: String::new(),
     };
 
     match sender.send(msg).await {

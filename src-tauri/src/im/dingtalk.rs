@@ -1082,6 +1082,7 @@ impl DingtalkAdapter {
             hint_group_name: None,
             reply_to_body: None,
             group_system_prompt: None,
+            request_id: String::new(),
         };
 
         let text_preview: String = msg.text.chars().take(100).collect();
