@@ -229,6 +229,7 @@ import {
   getSystemInitInfo,
   initializeAgent,
   interruptCurrentResponse,
+  isTurnInFlight,
   getStreamingAssistantId,
   switchToSession,
   setMcpServers,
@@ -1644,6 +1645,67 @@ async function main() {
   }
 
   /**
+   * Pattern 1 (last-consumer disconnect grace) state.
+   *
+   * Audit C: when the last renderer client closes its `/chat/stream` SSE while
+   * a turn is in flight, the SDK keeps generating into the void — burning
+   * tokens and queuing chunks no one reads. Counter-design: a 3-second grace
+   * window. If a new client connects within the window (renderer reload
+   * typically reconnects in ~1s), cancel the schedule. Otherwise, interrupt
+   * the SDK with reason 'shutdown'.
+   *
+   * Scoped to the sidecar process. IM/Cron/BackgroundCompletion sessions
+   * never have an SSE client connected in the first place, so the
+   * `clients.size === 0` check naturally excludes them — no interrupt fires
+   * for those owners.
+   */
+  const LAST_CONSUMER_GRACE_MS = 3000;
+  let lastConsumerGraceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function cancelLastConsumerGrace(): void {
+    if (lastConsumerGraceTimer) {
+      clearTimeout(lastConsumerGraceTimer);
+      lastConsumerGraceTimer = null;
+    }
+  }
+
+  function handleChatStreamClose(): void {
+    // Recompute on close — after our own client was removed in sse.ts, the
+    // remaining count is what matters.
+    const remainingClients = getClients().length;
+    if (remainingClients > 0) {
+      // Other tabs still watching; nothing to do.
+      return;
+    }
+    if (!isTurnInFlight()) {
+      // No active turn → no tokens being burned; nothing to do.
+      return;
+    }
+    if (lastConsumerGraceTimer) {
+      // Already armed — let the existing window run out.
+      return;
+    }
+    console.warn('[chat-stream] last consumer disconnected; arming 3s grace before interrupt (reason=shutdown)');
+    lastConsumerGraceTimer = setTimeout(() => {
+      lastConsumerGraceTimer = null;
+      // Re-check at fire time — a new client may have raced past our gate.
+      if (getClients().length > 0) {
+        console.warn('[chat-stream] grace fired but a client reconnected; skipping interrupt');
+        return;
+      }
+      if (!isTurnInFlight()) {
+        // Turn already finished naturally; nothing to interrupt.
+        return;
+      }
+      console.warn('[chat-stream] grace expired; interrupting SDK turn (reason=shutdown)');
+      interruptCurrentResponse().catch((err) => {
+        console.warn(`[chat-stream] interrupt after grace failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }, LAST_CONSUMER_GRACE_MS);
+    lastConsumerGraceTimer.unref?.();
+  }
+
+  /**
    * Original Hono fetch body, unchanged except for being moved into a named
    * function so the outer wrapper can run inside `withLogContext`.
    */
@@ -1803,7 +1865,11 @@ async function main() {
       }
 
       if (pathname === '/chat/stream' && request.method === 'GET') {
-        const { client, response } = createSseClient(() => { });
+        // Pattern 1: a new SSE consumer cancels any pending "last consumer
+        // disconnect" grace timer — the renderer just reconnected, no
+        // interrupt needed.
+        cancelLastConsumerGrace();
+        const { client, response } = createSseClient(handleChatStreamClose);
         const state = shouldUseExternalRuntime()
           ? { ...getAgentState(), sessionState: getExternalSessionState() }
           : getAgentState();

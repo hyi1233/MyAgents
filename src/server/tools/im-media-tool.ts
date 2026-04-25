@@ -3,6 +3,7 @@
 // SDK + zod loaded lazily inside createImMediaToolServer() — see
 // builtin-mcp-meta.ts for registration.
 import { assertSafeFilePath } from '../utils/safe-file-path';
+import { cancellableFetch } from '../utils/cancellation';
 
 // MCP Tool Result type
 type CallToolResult = {
@@ -60,7 +61,9 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
     options.body = JSON.stringify(body);
   }
 
-  const resp = await fetch(url, options);
+  // Pattern 1: 30s cap. Media send may transit larger payloads (file upload
+  // → IM platform → confirm), so a longer ceiling than the plain CRUD case.
+  const resp = await cancellableFetch(url, options, { timeoutMs: 30_000 });
   return resp.json();
 }
 

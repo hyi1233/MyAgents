@@ -5,9 +5,20 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
+
+/// Monotonically increasing connection id used to distinguish a "stale" task
+/// (one whose entry has already been replaced by a newer connection) from
+/// the live one. Pattern 1, audit A: SSE proxy task exits without clearing
+/// `running=true` → tab permanently muted on reconnect because new
+/// `start_sse_proxy` saw `running == true` and returned Ok early.
+static SSE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    SSE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 // Timeout constants (in seconds)
 //
@@ -26,6 +37,9 @@ const HTTP_PROXY_TIMEOUT_SECS: u64 = 120;
 
 /// Single SSE connection for a Tab
 struct SseConnection {
+    /// Generation id assigned at spawn time; spawned task captures this and
+    /// only clears its entry on exit if the entry's generation still matches.
+    generation: u64,
     /// Shared running flag - used to gracefully stop the SSE stream
     running: Arc<AtomicBool>,
     /// Task handle for aborting if graceful stop fails
@@ -33,13 +47,27 @@ struct SseConnection {
 }
 
 impl SseConnection {
-    fn new() -> Self {
+    fn new(generation: u64) -> Self {
         Self {
+            generation,
             running: Arc::new(AtomicBool::new(false)),
             abort_handle: None,
         }
     }
-    
+
+    /// Treat a connection whose task has finished (handle finished, or
+    /// running flag already cleared) as not-running. New `start_sse_proxy`
+    /// calls must proceed for these so a crashed task can be replaced.
+    fn is_alive(&self) -> bool {
+        if !self.running.load(Ordering::SeqCst) {
+            return false;
+        }
+        match &self.abort_handle {
+            Some(h) => !h.is_finished(),
+            None => false,
+        }
+    }
+
     fn stop(&mut self) {
         // Signal graceful stop first
         self.running.store(false, Ordering::SeqCst);
@@ -75,32 +103,44 @@ pub async fn start_sse_proxy(
     let tab_id = tab_id.unwrap_or_else(|| "__default__".to_string());
     
     let mut connections = state.connections.lock().await;
-    
-    // Check if already running for this tab
+
+    // Check if already running for this tab. Pattern 1, audit A: only
+    // short-circuit when the previous task is *actually* alive — a finished
+    // JoinHandle / cleared running flag means the prior task crashed without
+    // cleanup, and we must replace it (otherwise the tab stays muted forever).
     if let Some(conn) = connections.get(&tab_id) {
-        if conn.running.load(Ordering::SeqCst) {
+        if conn.is_alive() {
             log::debug!("[sse-proxy] Tab {} already has an active connection", tab_id);
             return Ok(());
         }
+        log::debug!(
+            "[sse-proxy] Tab {} prior task ended (gen={}); replacing",
+            tab_id, conn.generation
+        );
     }
-    
-    // Stop existing connection if any
+
+    // Stop existing connection if any (covers the "still alive but being
+    // replaced" path; the is_alive() short-circuit above already returned
+    // for the truly-running case).
     if let Some(mut conn) = connections.remove(&tab_id) {
         conn.stop();
     }
-    
-    // Create new connection with shared running flag
-    let mut conn = SseConnection::new();
+
+    // Allocate this connection's generation and create the entry.
+    let my_gen = next_generation();
+    let mut conn = SseConnection::new(my_gen);
     conn.running.store(true, Ordering::SeqCst);
-    
+
     let app_handle = app.clone();
     let tab_id_clone = tab_id.clone();
     // Share the same running flag with the spawned task
     let running = conn.running.clone();
-    
+    let state_for_task = (*state).clone();
+
     // Spawn async task to handle SSE stream
     let handle = tokio::spawn(async move {
-        match connect_sse(&app_handle, &url, &running, &tab_id_clone).await {
+        let outcome = connect_sse(&app_handle, &url, &running, &tab_id_clone).await;
+        match outcome {
             Ok(_) => {
                 log::debug!("[sse-proxy] Tab {} connection closed normally", tab_id_clone);
             }
@@ -110,13 +150,38 @@ pub async fn start_sse_proxy(
                 let _ = app_handle.emit(&format!("sse:{}:error", tab_id_clone), e.to_string());
             }
         }
+
+        // Pattern 1: on task exit, clear the running flag and remove the
+        // entry — but only if the entry still belongs to *this* generation
+        // (a newer start_sse_proxy may have already replaced us). Without
+        // this, audit A would still bite: stale `running=true` → next
+        // connect short-circuits and the tab is muted.
+        let mut connections = state_for_task.connections.lock().await;
+        match connections.get_mut(&tab_id_clone) {
+            Some(entry) if entry.generation == my_gen => {
+                entry.running.store(false, Ordering::SeqCst);
+                entry.abort_handle = None;
+                connections.remove(&tab_id_clone);
+                log::debug!(
+                    "[sse-proxy] Tab {} cleaned own entry (gen={})",
+                    tab_id_clone, my_gen
+                );
+            }
+            Some(entry) => {
+                log::debug!(
+                    "[sse-proxy] Tab {} task exit (gen={}) superseded by gen={}; not clearing",
+                    tab_id_clone, my_gen, entry.generation
+                );
+            }
+            None => { /* already removed elsewhere */ }
+        }
     });
-    
+
     conn.abort_handle = Some(handle);
     connections.insert(tab_id.clone(), conn);
-    
-    log::info!("[sse-proxy] Started connection for tab {}", tab_id);
-    
+
+    log::info!("[sse-proxy] Started connection for tab {} (gen={})", tab_id, my_gen);
+
     Ok(())
 }
 

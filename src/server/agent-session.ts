@@ -2460,14 +2460,51 @@ export function handlePermissionResponse(
 }
 
 /**
- * Clear session permission state (call when session ends)
+ * Clear session permission state (call when session ends).
+ *
+ * Pattern 1 cleanup contract: every pending request map holds (timer, resolve).
+ * If we just `.clear()` the maps, the timers fire later (logging stale state)
+ * and the resolve callbacks never run — leaving the SDK / tool turn waiting
+ * forever for a decision that will never come. We must:
+ *   1. clearTimeout each entry's timer
+ *   2. resolve each waiter with a "denied / cancelled" outcome
+ *      (deny for permission-style, null/false for question/plan-mode —
+ *       matches the timeout fallback paths above)
+ *
+ * Called from session reset / switch / fork / rewind paths.
  */
 export function clearSessionPermissions(): void {
-  sessionAlwaysAllowed.clear();
+  // Permission requests: resolve with 'deny' so any awaiting tool call
+  // surfaces as denied (the same behaviour as the per-entry 10-min timeout).
+  for (const [, p] of pendingPermissions) {
+    clearTimeout(p.timer);
+    try { p.resolve('deny'); } catch { /* swallow — never propagate from cleanup */ }
+  }
   pendingPermissions.clear();
+
+  // Ask-user-question: resolve with null (matches timeout path) → tool sees
+  // "user did not answer" and degrades gracefully.
+  for (const [, q] of pendingAskUserQuestions) {
+    clearTimeout(q.timer);
+    try { q.resolve(null); } catch { /* swallow */ }
+  }
   pendingAskUserQuestions.clear();
+
+  // Plan-mode entries resolve with `false` (mirrors the per-entry timeout
+  // semantics — request was not approved).
+  for (const [, p] of pendingExitPlanMode) {
+    clearTimeout(p.timer);
+    try { p.resolve(false); } catch { /* swallow */ }
+  }
   pendingExitPlanMode.clear();
+
+  for (const [, p] of pendingEnterPlanMode) {
+    clearTimeout(p.timer);
+    try { p.resolve(false); } catch { /* swallow */ }
+  }
   pendingEnterPlanMode.clear();
+
+  sessionAlwaysAllowed.clear();
   prePlanPermissionMode = null;
 }
 

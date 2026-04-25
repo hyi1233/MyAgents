@@ -7,6 +7,7 @@
 // setSessionCronContext / ...) don't pay the ~300-500ms SDK+zod eval cost.
 // Lazy instantiation wiring lives in builtin-mcp-meta.ts.
 import type { RuntimeConfig, RuntimeType } from '../../shared/types/runtime';
+import { cancellableFetch } from '../utils/cancellation';
 
 // MCP Tool Result type
 type CallToolResult = {
@@ -90,7 +91,9 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
     options.body = JSON.stringify(body);
   }
 
-  const resp = await fetch(url, options);
+  // Pattern 1: 15s cap on local management API calls. The Rust management
+  // server is co-resident; >15s means it's wedged.
+  const resp = await cancellableFetch(url, options, { timeoutMs: 15_000 });
   return resp.json();
 }
 

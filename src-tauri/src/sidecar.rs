@@ -3201,27 +3201,50 @@ fn poll_background_completion<R: Runtime>(
 }
 
 /// Cancel background completion for a session (e.g., when user reconnects).
-/// Simply removes the BackgroundCompletion owner; the polling thread will detect this and exit.
+///
+/// Pattern 1 (Unified Cancellation): goes through `release_session_sidecar`
+/// rather than mutating `sidecar.owners` directly. The release path is the
+/// canonical "owner removal + maybe-stop" entry — bypassing it left the
+/// "owners empty → stop sidecar" invariant unenforced (audit A: ownerless
+/// but live sidecar → orphan).
+///
+/// Pre-check whether the BackgroundCompletion owner exists before calling
+/// release (release returns Ok(false) for non-existent owners too, but we
+/// want to distinguish "no-op because nothing to cancel" from "released").
 pub fn cancel_background_completion(
     manager: &ManagedSidecarManager,
     session_id: &str,
 ) -> Result<bool, String> {
     let bg_owner = SidecarOwner::BackgroundCompletion(session_id.to_string());
-    let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
-    if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-        if sidecar.owners.contains(&bg_owner) {
-            sidecar.owners.remove(&bg_owner);
-            ulog_info!("[bg-completion] Cancelled background completion for session {}", session_id);
-            Ok(true)
-        } else {
-            ulog_debug!("[bg-completion] No BackgroundCompletion owner to cancel for session {}", session_id);
-            Ok(false)
-        }
-    } else {
-        ulog_debug!("[bg-completion] No sidecar found to cancel background completion for session {}", session_id);
-        Ok(false)
+    // Cheap probe: does this session have the BackgroundCompletion owner?
+    // Holding the lock only for the read keeps release_session_sidecar's
+    // own lock acquisition uncontested.
+    let has_bg_owner = {
+        let manager_guard = manager.lock().map_err(|e| e.to_string())?;
+        manager_guard
+            .sidecars
+            .get(session_id)
+            .map(|s| s.owners.contains(&bg_owner))
+            .unwrap_or(false)
+    };
+
+    if !has_bg_owner {
+        ulog_debug!(
+            "[bg-completion] No BackgroundCompletion owner to cancel for session {}",
+            session_id
+        );
+        return Ok(false);
     }
+
+    // Delegate to the canonical release path so the "owners empty → stop"
+    // invariant is enforced and any ancillary cleanup runs.
+    let stopped = release_session_sidecar(manager, session_id, &bg_owner)?;
+    ulog_info!(
+        "[bg-completion] Cancelled background completion for session {} (sidecar_stopped: {})",
+        session_id, stopped
+    );
+    Ok(true)
 }
 
 /// Start background completion for a session

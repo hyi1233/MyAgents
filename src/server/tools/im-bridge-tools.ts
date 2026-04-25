@@ -5,6 +5,8 @@
 // SDK + zod loaded lazily inside setImBridgeToolsContext() — plain IM sessions
 // never pull in this module's bulk unless a plugin bridge is actually attached.
 
+import { cancellableFetch } from '../utils/cancellation';
+
 type CallToolResult = {
   content: Array<{ type: 'text'; text: string }>;
   isError?: boolean;
@@ -16,16 +18,21 @@ type CallToolResult = {
 async function triggerAutoAuth(ctx: ImBridgeToolsContext): Promise<CallToolResult> {
   console.log('[im-bridge-tools] need_user_authorization detected, triggering auto-auth via feishu_auth command');
   try {
-    const resp = await fetch(`http://127.0.0.1:${ctx.bridgePort}/execute-command`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        command: 'feishu_auth',
-        args: '',
-        userId: ctx.senderId || '',
-        chatId: ctx.chatId || '',
-      }),
-    });
+    // Pattern 1: 15s cap on local 127.0.0.1 Bridge command call.
+    const resp = await cancellableFetch(
+      `http://127.0.0.1:${ctx.bridgePort}/execute-command`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command: 'feishu_auth',
+          args: '',
+          userId: ctx.senderId || '',
+          chatId: ctx.chatId || '',
+        }),
+      },
+      { timeoutMs: 15_000 },
+    );
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
       console.warn(`[im-bridge-tools] Auto-auth command failed (${resp.status}): ${errText}`);
@@ -115,7 +122,14 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
     const allGroups = [...new Set([...ctx.enabledToolGroups, 'interaction'])];
     const groups = allGroups.join(',');
     const url = `http://127.0.0.1:${ctx.bridgePort}/mcp/tools${groups ? `?groups=${groups}` : ''}`;
-    const resp = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
+    // Pattern 1: bound the local Bridge call. 15s = local 127.0.0.1 — anything
+    // longer means the Bridge is wedged. Without this an im-bridge tool turn
+    // could hang forever waiting on a stuck Bridge.
+    const resp = await cancellableFetch(
+      url,
+      { headers: { 'Content-Type': 'application/json' } },
+      { timeoutMs: 15_000 },
+    );
     if (!resp.ok) {
       console.warn(`[im-bridge-tools] Failed to fetch tools: ${resp.status}`);
       if (myGeneration === contextGeneration) dynamicServer = null;
@@ -155,21 +169,29 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
 
           try {
             const callUrl = `http://127.0.0.1:${bridgeToolsContext.bridgePort}/mcp/call-tool`;
-            const callResp = await fetch(callUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                toolName: pluginTool.name,
-                args: params.args,
-                userId: bridgeToolsContext.senderId,
-                isOwner: bridgeToolsContext.isOwner ?? false,
-                enabledGroups: [...new Set([...bridgeToolsContext.enabledToolGroups, 'interaction'])],
-                // Ticket context for LarkTicket injection (Feishu OAuth auto-auth)
-                chatId: bridgeToolsContext.chatId,
-                chatType: bridgeToolsContext.sourceType === 'group' ? 'group' : 'p2p',
-                accountId: bridgeToolsContext.accountId,
-              }),
-            });
+            // Pattern 1: 30s for plugin tool calls — they may hit remote APIs
+            // (Feishu, Lark, …) but should never hang indefinitely. The plugin
+            // itself is responsible for finer-grained timeouts; this is the
+            // outer guard.
+            const callResp = await cancellableFetch(
+              callUrl,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  toolName: pluginTool.name,
+                  args: params.args,
+                  userId: bridgeToolsContext.senderId,
+                  isOwner: bridgeToolsContext.isOwner ?? false,
+                  enabledGroups: [...new Set([...bridgeToolsContext.enabledToolGroups, 'interaction'])],
+                  // Ticket context for LarkTicket injection (Feishu OAuth auto-auth)
+                  chatId: bridgeToolsContext.chatId,
+                  chatType: bridgeToolsContext.sourceType === 'group' ? 'group' : 'p2p',
+                  accountId: bridgeToolsContext.accountId,
+                }),
+              },
+              { timeoutMs: 30_000 },
+            );
 
             if (!callResp.ok) {
               const text = await callResp.text();

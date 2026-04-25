@@ -16,6 +16,7 @@ import { fileURLToPath } from 'url';
 import { writeFile, readFile } from 'fs/promises';
 import { ensureDir } from '../utils/fs-utils';
 import { registerPendingDispatch, type PendingDispatchCallbacks } from './pending-dispatch';
+import { cancellableFetch } from '../utils/cancellation';
 
 // ===== Media extraction utilities =====
 
@@ -502,27 +503,36 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           console.log(`[compat-timing] dispatchReplyWithBufferedBlockDispatcher ENTER: sender=${senderId} chat=${chatId} len=${text.length} attachments=${mediaAttachments.length}`);
 
           try {
-            const resp = await fetch(`${rustBaseUrl}/api/im-bridge/message`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                botId,
-                pluginId: currentPluginId,
-                senderId,
-                senderName: senderName || undefined,
-                text,
-                chatType: chatType === 'group' ? 'group' : 'direct',
-                chatId,
-                messageId: messageId || undefined,
-                groupId: groupId || undefined,
-                isMention,
-                groupName: groupName || undefined,
-                threadId: threadId || undefined,
-                replyToBody: replyToBody || undefined,
-                groupSystemPrompt: groupSystemPrompt || undefined,
-                attachments: mediaAttachments.length > 0 ? mediaAttachments : undefined,
-              }),
-            });
+            // Pattern 1: 5s cap on the local management API call. Plugin
+            // dispatch is on the inbound-message hot path — a wedged Rust
+            // management API would otherwise hang the plugin's promise
+            // forever and back-pressure the channel. On timeout the plugin
+            // sees a structured error rather than a silent hang.
+            const resp = await cancellableFetch(
+              `${rustBaseUrl}/api/im-bridge/message`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  botId,
+                  pluginId: currentPluginId,
+                  senderId,
+                  senderName: senderName || undefined,
+                  text,
+                  chatType: chatType === 'group' ? 'group' : 'direct',
+                  chatId,
+                  messageId: messageId || undefined,
+                  groupId: groupId || undefined,
+                  isMention,
+                  groupName: groupName || undefined,
+                  threadId: threadId || undefined,
+                  replyToBody: replyToBody || undefined,
+                  groupSystemPrompt: groupSystemPrompt || undefined,
+                  attachments: mediaAttachments.length > 0 ? mediaAttachments : undefined,
+                }),
+              },
+              { timeoutMs: 5_000 },
+            );
 
             console.log(`[compat-timing] Rust POST completed (+${Date.now() - t0}ms) status=${resp.status}`);
             if (!resp.ok) {
@@ -533,7 +543,9 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
               (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt = Date.now();
             }
           } catch (err) {
-            console.error(`[compat-timing] Rust POST FAILED (+${Date.now() - t0}ms):`, err);
+            const isTimeout = err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+            const reason = isTimeout ? 'timeout' : 'error';
+            console.warn(`[compat-runtime] Rust POST FAILED (reason=${reason}, +${Date.now() - t0}ms): ${err instanceof Error ? err.message : String(err)}`);
           }
 
           // Do NOT call the deliver callback — AI reply comes back via /send-text

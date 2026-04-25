@@ -188,8 +188,34 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
     const upstreamUrl = isResponses
       ? `${baseUrl}/responses`
       : `${baseUrl}/chat/completions`;
+
+    // Pattern 1: the AbortController's lifetime now spans the entire stream,
+    // not just the headers-arrival phase. The previous code cleared the
+    // timeout (which also released our handle on the controller for any
+    // post-headers cancellation) right after `await fetch`, so neither a
+    // downstream cancel nor an idle timeout could reach the upstream socket
+    // mid-stream — we just kept reading until the body ended naturally.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
+    const headersTimer = setTimeout(
+      () => controller.abort(new Error(`Upstream headers timeout after ${timeout}ms`)),
+      timeout,
+    );
+
+    // Forward downstream request abort (renderer cancelled, /v1/messages
+    // request signal aborted) to the upstream fetch. The Hono handler's
+    // `request.signal` is the parent.
+    const onDownstreamAbort = (): void => {
+      try {
+        controller.abort(new Error('Downstream request aborted'));
+      } catch { /* ignore */ }
+    };
+    if (request.signal) {
+      if (request.signal.aborted) {
+        onDownstreamAbort();
+      } else {
+        request.signal.addEventListener('abort', onDownstreamAbort, { once: true });
+      }
+    }
 
     let upstreamResp: Response;
     try {
@@ -206,7 +232,10 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
         ...(proxyUrl ? { proxy: proxyUrl } : {}),
       } as RequestInit);
     } catch (err) {
-      clearTimeout(timer);
+      clearTimeout(headersTimer);
+      if (request.signal) {
+        request.signal.removeEventListener('abort', onDownstreamAbort);
+      }
       const isTimeout = err instanceof Error && err.name === 'AbortError';
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`[bridge] Upstream ${isTimeout ? 'timeout' : 'error'}: ${errMsg}`);
@@ -223,7 +252,10 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
 
     // 6. Handle upstream errors
     if (!upstreamResp.ok) {
-      clearTimeout(timer);
+      clearTimeout(headersTimer);
+      if (request.signal) {
+        request.signal.removeEventListener('abort', onDownstreamAbort);
+      }
       const errBody = await upstreamResp.text();
       log(`[bridge] Upstream error ${upstreamResp.status}: ${errBody.slice(0, 300)}`);
       const { status, body } = translateError(upstreamResp.status, errBody);
@@ -236,7 +268,10 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
       });
     }
 
-    clearTimeout(timer);
+    // Headers arrived → cancel the headers timeout (we now switch to per-read
+    // idle timeout inside the stream handler). The controller stays live for
+    // the stream's lifetime so cancel() can reach it.
+    clearTimeout(headersTimer);
 
     // 7. Detect Content-Type to handle unexpected SSE on non-stream requests
     const contentType = upstreamResp.headers.get('content-type') ?? '';
@@ -248,10 +283,20 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
       if (isSSEResponse && !anthropicReq.stream) {
         log('[bridge] Non-stream request received SSE response — auto-falling back to stream processing');
       }
+      // Hand off lifecycle ownership to the stream handler — it owns:
+      //  - controller (so stream.cancel() can abort upstream fetch)
+      //  - request.signal listener cleanup
+      //  - idle timeout enforcement (60s)
       return isResponses
-        ? handleResponsesStreamResponse(upstreamResp, anthropicReq.model, log)
-        : handleStreamResponse(upstreamResp, anthropicReq.model, translateReasoning, log, thoughtSignatureCache);
+        ? handleResponsesStreamResponse(upstreamResp, anthropicReq.model, log, controller, request.signal, onDownstreamAbort)
+        : handleStreamResponse(upstreamResp, anthropicReq.model, translateReasoning, log, thoughtSignatureCache, controller, request.signal, onDownstreamAbort);
     } else {
+      // Non-stream branch: response body is read with a single await; the
+      // request.signal listener can be detached now (controller lives only
+      // through the body read, which translateXxxResponse owns).
+      if (request.signal) {
+        request.signal.removeEventListener('abort', onDownstreamAbort);
+      }
       return isResponses
         ? handleResponsesNonStreamResponse(upstreamResp, anthropicReq.model, log)
         : handleNonStreamResponse(upstreamResp, anthropicReq.model, translateReasoning, log, thoughtSignatureCache);
@@ -300,31 +345,72 @@ async function handleNonStreamResponse(
   });
 }
 
+/**
+ * Pattern 1: idle timeout for upstream SSE. If no bytes arrive for this many
+ * milliseconds, the upstream fetch is aborted with reason='timeout'.
+ * Bridge-level safety net — providers occasionally drop the TCP socket
+ * silently mid-stream (no FIN), and without an idle bound we'd block on
+ * `reader.read()` forever.
+ */
+const UPSTREAM_IDLE_TIMEOUT_MS = 60_000;
+
 function handleStreamResponse(
   upstreamResp: Response,
   requestModel: string,
   translateReasoning: boolean,
   log: (msg: string) => void,
-  thoughtSignatureCache?: Map<string, string>,
+  thoughtSignatureCache: Map<string, string> | undefined,
+  upstreamController: AbortController,
+  downstreamSignal: AbortSignal | undefined,
+  onDownstreamAbort: () => void,
 ): Response {
   const translator = new StreamTranslator(requestModel, translateReasoning);
   const sseParser = new SSEParser();
 
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const armIdleTimer = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      log(`[bridge] Upstream idle ${UPSTREAM_IDLE_TIMEOUT_MS}ms — aborting (reason=timeout)`);
+      try { upstreamController.abort(new Error('Upstream idle timeout')); } catch { /* ignore */ }
+    }, UPSTREAM_IDLE_TIMEOUT_MS);
+    idleTimer.unref?.();
+  };
+  const cleanupIdleTimer = (): void => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+
+  const detachDownstream = (): void => {
+    if (downstreamSignal) {
+      try { downstreamSignal.removeEventListener('abort', onDownstreamAbort); } catch { /* ignore */ }
+    }
+  };
+
   const stream = new ReadableStream({
     async start(controller) {
-      const reader = upstreamResp.body?.getReader();
+      reader = upstreamResp.body?.getReader();
       if (!reader) {
         controller.close();
+        cleanupIdleTimer();
+        detachDownstream();
         return;
       }
 
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
 
+      armIdleTimer();
+
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          armIdleTimer(); // reset on every chunk
 
           const text = decoder.decode(value, { stream: true });
           const sseEvents = sseParser.feed(text);
@@ -374,6 +460,8 @@ function handleStreamResponse(
       } catch (err) {
         log(`[bridge] Stream error: ${err}`);
       } finally {
+        cleanupIdleTimer();
+        detachDownstream();
         // Emit closing events for incomplete streams (no-op if already finished)
         const finalEvents = translator.finalize();
         for (const event of finalEvents) {
@@ -381,6 +469,21 @@ function handleStreamResponse(
         }
         controller.close();
       }
+    },
+    /**
+     * Pattern 1: downstream consumer cancelled (renderer disconnected, Hono
+     * request aborted, etc). Forward to the upstream fetch via the persisted
+     * AbortController, cancel the reader, and clean up.
+     *
+     * NEVER throws — cancel is "best effort" per the protocol.
+     */
+    cancel(reason): void {
+      const reasonStr = reason instanceof Error ? reason.message : String(reason ?? 'unknown');
+      log(`[bridge] Downstream cancelled stream: ${reasonStr.slice(0, 200)}`);
+      cleanupIdleTimer();
+      detachDownstream();
+      try { upstreamController.abort(new Error('Downstream cancel')); } catch { /* ignore */ }
+      try { reader?.cancel().catch(() => { /* ignore */ }); } catch { /* ignore */ }
     },
   });
 
@@ -429,25 +532,56 @@ function handleResponsesStreamResponse(
   upstreamResp: Response,
   requestModel: string,
   log: (msg: string) => void,
+  upstreamController: AbortController,
+  downstreamSignal: AbortSignal | undefined,
+  onDownstreamAbort: () => void,
 ): Response {
   const translator = new ResponsesStreamTranslator(requestModel);
   const sseParser = new SSEParser();
 
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const armIdleTimer = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      log(`[bridge] Upstream Responses idle ${UPSTREAM_IDLE_TIMEOUT_MS}ms — aborting (reason=timeout)`);
+      try { upstreamController.abort(new Error('Upstream idle timeout')); } catch { /* ignore */ }
+    }, UPSTREAM_IDLE_TIMEOUT_MS);
+    idleTimer.unref?.();
+  };
+  const cleanupIdleTimer = (): void => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+  const detachDownstream = (): void => {
+    if (downstreamSignal) {
+      try { downstreamSignal.removeEventListener('abort', onDownstreamAbort); } catch { /* ignore */ }
+    }
+  };
+
   const stream = new ReadableStream({
     async start(controller) {
-      const reader = upstreamResp.body?.getReader();
+      reader = upstreamResp.body?.getReader();
       if (!reader) {
         controller.close();
+        cleanupIdleTimer();
+        detachDownstream();
         return;
       }
 
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
 
+      armIdleTimer();
+
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          armIdleTimer();
 
           const text = decoder.decode(value, { stream: true });
           const sseEvents = sseParser.feed(text);
@@ -470,12 +604,22 @@ function handleResponsesStreamResponse(
       } catch (err) {
         log(`[bridge] Responses stream error: ${err}`);
       } finally {
+        cleanupIdleTimer();
+        detachDownstream();
         const finalEvents = translator.finalize();
         for (const event of finalEvents) {
           controller.enqueue(encoder.encode(formatSSE(event)));
         }
         controller.close();
       }
+    },
+    cancel(reason): void {
+      const reasonStr = reason instanceof Error ? reason.message : String(reason ?? 'unknown');
+      log(`[bridge] Downstream cancelled Responses stream: ${reasonStr.slice(0, 200)}`);
+      cleanupIdleTimer();
+      detachDownstream();
+      try { upstreamController.abort(new Error('Downstream cancel')); } catch { /* ignore */ }
+      try { reader?.cancel().catch(() => { /* ignore */ }); } catch { /* ignore */ }
     },
   });
 

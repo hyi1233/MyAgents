@@ -12,6 +12,7 @@ import { homedir } from 'os';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import * as tls from 'tls';
 import { ensureDirSync } from '../utils/fs-utils';
+import { cancellableFetch } from '../utils/cancellation';
 
 // MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
 type CallToolResult = {
@@ -570,7 +571,10 @@ async function fetchVoices(): Promise<Voice[]> {
     return voicesCache.voices;
   }
   const url = `${VOICES_URL}?trustedclienttoken=${TRUSTED_CLIENT_TOKEN}`;
-  const res = await fetch(url);
+  // Pattern 1: 30s cap on remote Edge TTS voices API. Cached for 10 min so
+  // this only fires on cold cache; without a bound we'd hang the tool turn
+  // indefinitely if Microsoft's endpoint stalls.
+  const res = await cancellableFetch(url, undefined, { timeoutMs: 30_000 });
   if (!res.ok) {
     throw new Error(`Voices API returned ${res.status}: ${await res.text().catch(() => '')}`);
   }
