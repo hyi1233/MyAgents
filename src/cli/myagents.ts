@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * myagents — Self-Configuration CLI for MyAgents
  *
@@ -7,6 +6,13 @@
  *
  * Environment:
  *   MYAGENTS_PORT — Sidecar port (injected by buildClaudeSessionEnv)
+ *
+ * No shebang here. `npm run build:cli` (esbuild) injects `#!/usr/bin/env node`
+ * through `--banner:js` so the *built* `myagents.js` artifact is what carries
+ * the shebang. A leftover `#!/usr/bin/env bun` on this source file used to
+ * stack with the banner and produced a TWO-shebang artifact (issue #107):
+ * bun parses the first line as shebang, the second line `#!/usr/bin/env node`
+ * is then read as JS and rejected as a syntax error. Same outcome under node.
  */
 
 // ---------------------------------------------------------------------------
