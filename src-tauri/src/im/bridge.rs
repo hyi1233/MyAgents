@@ -21,6 +21,37 @@ use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
 // Note: ulog_* macros write to BOTH system log AND unified log (~/.myagents/logs/unified-*.log)
 // This is critical for bridge stdout/stderr — using log::info! only writes to system log.
 
+// ===== Per-plugin install/prepare mutex =====
+//
+// Multiple bots can share the same OpenClaw plugin_id (e.g. two Lark
+// accounts on `@larksuite/openclaw-lark`). On app startup auto-start
+// fans them out concurrently; the periodic monitor likewise restarts
+// dead channels in parallel. Their `spawn_plugin_bridge` paths each do:
+//   1. Shim integrity check → optional `install_sdk_shim` (rmtree + copy_dir_recursive)
+//   2. tsx-runtime resolve → spawn Node bridge
+//
+// Step 1's `rmtree + copy_dir_recursive` is NOT atomic — two callers
+// racing here can corrupt the shim tree (one's rmtree wins midway
+// through the other's copy). Codex Critical 3 / Agent A M2 flagged
+// this. The same risk applies to `install_plugin` (wizard-driven, but
+// nothing prevents the user from kicking off a re-install while a
+// bot using the same plugin spawns).
+//
+// In-process async mutex per `plugin_dir` is enough because:
+//   - Tauri single-instance plugin prevents cross-process MyAgents.
+//   - We only need to serialize *our own* mutations of `plugin_dir`.
+//
+// Keyed by canonicalised plugin_dir path so lexically-different paths
+// pointing at the same dir share a lock.
+fn plugin_install_lock(plugin_dir: &std::path::Path) -> std::sync::Arc<Mutex<()>> {
+    use std::sync::{Arc, OnceLock};
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let key = std::fs::canonicalize(plugin_dir).unwrap_or_else(|_| plugin_dir.to_path_buf());
+    let mut guard = map.lock().expect("plugin install lock map poisoned");
+    Arc::clone(guard.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+}
+
 // ===== Bridge Sender Registry =====
 // Lets management API route inbound messages from Bridge → processing loop.
 
@@ -886,8 +917,22 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     // wiped the shim). tsx is now bundled once into
     // `resources/tsx-runtime/` and passed to Node via absolute-path
     // `--import` below — see `find_tsx_runtime_loader`.
+    //
+    // Concurrency guard (Codex C3 / Agent A M2): hold per-plugin_dir
+    // mutex for the duration of the integrity-check + reinstall block.
+    // Two bots sharing the same OpenClaw plugin_id (e.g. two Lark
+    // accounts) can `spawn_plugin_bridge` in parallel during auto-start
+    // or monitor-driven restart, and concurrent `install_sdk_shim`
+    // (which `rmtree`s and re-`copy_dir_recursive`s) corrupts the
+    // shim tree. Lock serialises ours; we don't hold it across the
+    // actual node spawn — bridges run independently after the prep
+    // phase.
+    let plugin_dir_buf = std::path::PathBuf::from(plugin_dir);
     {
-        let openclaw_pkg = std::path::Path::new(plugin_dir)
+        let lock_arc = plugin_install_lock(&plugin_dir_buf);
+        let _lock_guard = lock_arc.lock().await;
+
+        let openclaw_pkg = plugin_dir_buf
             .join("node_modules").join("openclaw").join("package.json");
         let needs_repair = if openclaw_pkg.exists() {
             std::fs::read_to_string(&openclaw_pkg)
@@ -906,10 +951,11 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         };
         if needs_repair {
             ulog_warn!("[bridge] Shim integrity/freshness check failed for {}, re-installing", plugin_dir);
-            if let Err(e) = install_sdk_shim(app_handle, &std::path::PathBuf::from(plugin_dir)).await {
+            if let Err(e) = install_sdk_shim(app_handle, &plugin_dir_buf).await {
                 ulog_error!("[bridge] SDK shim re-install FAILED for {}: {} — bridge will fail to load openclaw plugins", plugin_dir, e);
             }
         }
+        // _lock_guard drops here, releasing the mutex before Node spawn.
     }
 
     ulog_info!(
@@ -1227,6 +1273,15 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     tokio::fs::create_dir_all(&base_dir)
         .await
         .map_err(|e| format!("Failed to create plugin dir: {}", e))?;
+
+    // Concurrency guard: serialise installs against a per-plugin_dir mutex
+    // shared with `spawn_plugin_bridge`'s shim integrity check. Without
+    // this lock, a wizard-driven re-install racing with an auto-start
+    // bot's spawn-time shim repair could interleave `rmtree` + `npm
+    // install` + `copy_dir_recursive` and corrupt `node_modules/`.
+    // Lock is held for the rest of the install body; dropped on return.
+    let _install_guard_arc = plugin_install_lock(&base_dir);
+    let _install_guard = _install_guard_arc.lock().await;
 
     if trimmed != npm_spec.trim() {
         ulog_info!("[bridge] Sanitized npm spec: '{}' → '{}'", npm_spec.trim(), trimmed);
