@@ -9,103 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-04-26
 
-### Fixed（Windows / Linux 启动 + IM 插件可靠性）
-
-- **Windows 安装后能正常启动**：之前 Windows 用户装好 0.2.0 打开应用，会卡在「正在加载历史会话」永远进不去（Sidecar 启动时模块加载报 `createRequire 重复声明` 直接退出）。现在 Windows 一键启动，和 macOS 一样开箱即用。
-- **Linux 上 `myagents` CLI 能直接执行**：之前在 Linux 装完应用后跑 `myagents --help` 会被系统拒绝（脚本头部多了一行 Bun 时代留下的 shebang），现在恢复正常。
-- **IM Bot 自动启动稳定**：飞书 / 企业微信 / 微信 / QQ 等 OpenClaw 插件之前偶发「启动失败 → 自动重试 → 又失败」的循环（多个 Bot 同时启动时会互相破坏对方的依赖目录）。现在多个 Bot 并发启动彼此隔离，重启 / 切工作区不再触发这个 race。
-- **应用闪退后 `myagents` CLI 不再损坏**：极端情况下应用进程被强杀的瞬间正好在同步 CLI，会把 `~/.myagents/bin/myagents` 写到一半，下次开机用户在终端调用 CLI 直接报「文件损坏」。现在采用原子替换，要么旧版本要么新版本，不会卡在中间态。
-- **Windows 上保存配置 / 项目列表 / 启动页历史不再失败**：之前在 Windows 上偶尔出现「拒绝访问」的红色错误（杀软 / OneDrive / Backblaze 在我们写完文件的瞬间扫描占用），导致刚切换的工作区下次打开应用就丢了。现在自动等开扫窗口过去再写盘，用户感知不到。
-- **任务中心「想法」输入光标位置精确**：在想法输入框打 `#标签` 时，标签的高亮位置偶尔会跟实际文字错开半个字符，长内容下越走越偏。修复后高亮、光标、文本三层永远对齐。
-- **AI 实时输出更稳**：少数情况下 AI 的实时事件（外部 Runtime 状态切换、turn 完成等）在网络抖动时会被静默丢弃，前端看到「打字打了一半就停了」。所有结构性事件现在都标记为关键优先级，背压时优先送达。
-
-### Internal（不影响用户行为）
-
-- 构建工具链合并：esbuild 打包逻辑统一到 `scripts/esbuild-bundle.mjs`，Windows 上不再因 shell 引号差异导致构建失败；mac / Linux / Windows / dev 五个构建脚本不再互相抄。
-- Plugin Bridge tsx 加载方式重写：tsx 改为应用包内置（每平台版本随构建器一次性打入 `resources/tsx-runtime/`），插件目录不再做 `npm install`。这是上面「IM Bot 自动启动稳定」的根因修复。
-- Rust 端 `cmd_fsync_path` 在 Windows 上的实现重写（写权限 + 短暂打开冲突重试），上面「Windows 保存不再失败」的支撑代码。
-- 第三轮 cross-review 收尾：clippy 干净 / typecheck 干净 / lint 干净，没有遗留已知 tech debt。
-
-### Hardening (post-cross-review pass before tag)
-
-Pre-ship cross-review (`/cross-review-code` × 3 agents: review-by-cc / review-by-codex / review-architecture) surfaced a focused set of correctness gaps from the Bun→Node migration sweep. All blockers and high-priority items fixed in this pass:
-
-- **`bridge.rs` Bun-fallback installer removed**: legacy code ran literal `node add <pkg>` / `node install --ignore-scripts` (those were Bun subcommands, never Node). With Bun gone the path could never succeed; bundled / system npm now hard-fail with a clear error if both are unavailable.
-- **`openai-bridge/handler.ts` proxy field**: `{ proxy: proxyUrl }` is Bun-only; Node undici needs `dispatcher: new ProxyAgent(url)`. Users behind system / SOCKS5 proxies on OpenAI-compatible providers were silently bypassing their proxy. New `getDispatcherForProxy()` caches one ProxyAgent per URL and threads it through the upstream `fetch` via `RequestInit.dispatcher`.
-- **`subprocess.ts` Windows `.cmd` spawn**: Node ≥20.12 (CVE-2024-27980) refuses to spawn `.cmd` / `.bat` shims without `shell: true`. The Bun→Node adapter now auto-sets `shell: true` for those extensions, so npm-installed CLI binaries (`codex.cmd`, `gemini.cmd`, `npx.cmd`) work on Windows again.
-- **MSRV bump 1.77.2 → 1.81**: Rust 1.81 documents `std::fs::rename` as atomic replace-on-existing across all platforms (Windows uses `MoveFileExW(REPLACE_EXISTING)` underneath). Pre-1.81 toolchains kept the historical Windows behavior of failing when the destination exists, corrupting every tmp+rename path in the crate (config.json, cron tasks, Task Center storage, IM bot state, …). Tauri 2.9 already required ≥1.78, so this only formalizes reality.
-- **`engines.node ≥ 22.0.0`**: `src/server/index.ts` value-imports `fs/promises.glob` (Node 22+) at module load. Older Node would fail at startup before `/health` could bind.
-- **`utils/file_lock.rs` release-race**: `with_file_lock_blocking` now reads the owner sentinel and verifies it matches our token before `remove_dir_all`. Previously, a stalled writer paused past `staleMs` could resume and delete a foreign holder's lock that had taken the path during the pause. Mirrors the existing Node helper's release-race fix (Pattern 5 fix #4).
-- **`utils/file-lock.ts` + `file_lock.rs` stale-break race-safety**: stale-recovery now atomically renames the lockdir to a per-process tombstone before deleting, so two waiters detecting the same lock as stale can't both call `rm`. The Node helper additionally refuses to age-only break a live pid on Windows when the start-time check is unsupported (no second signal to distinguish "long-running legitimate writer" from "pid recycled").
-- **`tools/builtin-mcp-*` per-request identity (W9)**: `im-bridge-tools` / `im-cron-tool` / `im-media-tool` snapshot the IM context at the start of each tool call. Module-global context could otherwise be overwritten by a concurrent `/api/im/enqueue` from a different chat (Pipeline v2 protocol-split allows back-to-back same-peer enqueues), causing a Feishu OAuth ticket to execute as the wrong user, a cron task to be tagged with the wrong chatId, or media to be sent to the wrong peer.
-- **External-runtime IM `requestId` mid-turn race**: `external-session.ts::sendExternalMessage` now sets the active `requestId` *after* `waitForExternalSessionIdle()`, not before. Previously the queued turn B's id was applied during the wait window — turn A's tail deltas/complete events got mis-routed to B's IM subscriber.
-- **`/api/mcp/set` + `/api/agents/set` external-runtime gate**: server-side belt for the front-end gate (`Chat.tsx`). When external runtime is active, both endpoints return `{ skipped: 'external-runtime' }` instead of churning the builtin SDK pre-warm fingerprint.
-- **`large-value-store.maybeSpill` fail-closed**: if disk spill fails, the helper now throws instead of returning `{ inline: value }`. The old fallback re-entered the SSE/IPC channel with the very payload the 256KB protection was supposed to keep out (multi-MB tool result on a full disk → flooded renderer queue / IPC bridge).
-- **`kill-with-escalation` tree kill**: optional `killTree: true` causes the helper to signal the process group on POSIX (negative-PGID, requires `detached: true` at spawn) or invoke `taskkill /F /T` on Windows. Runtime CLIs (claude-code / codex / gemini / external-session catch-fallback) now spawn detached and pass `killTree: true`, so model/tool subprocesses no longer outlive the wrapper.
-- **`turn-abort.getCurrentTurnSignal()` invariant guard**: optional `sessionId` parameter for explicit lookup; the no-arg fallback now warns once if the stack ever holds more than one entry, surfacing future regressions to multi-session-per-Sidecar instead of silently routing tool fetches to the wrong AbortController.
-- **`compat-runtime` register-then-POST**: pending dispatch is registered before the Rust POST so the bridge's `/start-stream` callback can never beat us into `getPendingDispatch`. POST failures explicitly reject the dispatch instead of waiting for the 10-min timeout.
-- **`im-event-bus` gap replay**: subscribers resuming inside a previously-evicted seq range now correctly receive the gap marker (was: only when sinceSeq < gap.seq, missing every "resumed mid-range" case). Cross-generation and in-generation gaps are now independent (sequential `if`s instead of `else if`).
-- **`model-capabilities.buildRegistry()` cache**: hot-path callers (`enqueueUserMessage`, pre-warm, model switch, provider-verify) used to pay an unbounded sync `readdirSync` + N×`readFileSync` + `config.json` read every call. New mtime-keyed cache invalidates by stat'ing two paths; mid-session edits still propagate at the next call.
-- **`/health/ready/retry` endpoint removed**: the route announced retry capability that was never wired to a real re-runner; users got a 202 then watched `/health/ready` stay at `pending` forever. Restart is the actual recovery today.
-- **`/refs/:id` route regex**: tightened to `^[a-f0-9]{8,32}$` to mirror the strict shape inside `large-value-store.getRefStreamPath`. Defense-in-depth for path-traversal probes.
-- **SSE unknown-event default → critical**: events not registered in `SSE_EVENT_PRIORITIES` no longer default to `coalescible` (silent drop under backpressure). They now take `critical` priority and emit a one-shot warning naming the unregistered event.
-- **`im-event-bus.clear()` clears subscribers**: on session reset, dropped subscribers no longer survive into the next generation; long-poll consumers re-`subscribe()` cleanly.
-- **`cancellation.withAbortSignal` synchronous-throw cleanup**: wrapped in `Promise.resolve().then(...)` so a synchronous throw inside `op` still flows through the cleanup path and releases the parent-abort listener + timer.
-- **HZ=100 → `getconf CLK_TCK` / `sysconf(_SC_CLK_TCK)`**: Linux file-lock pid start-time conversion now reads the actual clock-tick frequency once (cached), instead of assuming 100. HZ=250 / HZ=1000 kernels would otherwise skew enough to falsely break long-running live config-write holders under the 60s age fallback.
-- **`title-generator` lazy import (Tier 0)**: `index.ts` no longer value-imports `title-generator` at module load. The latter pulls in the Claude Agent SDK + claude-code/codex/gemini runtime classes — pulling that into the cold-start graph delayed `/health` bind and could crash the sidecar before it served a 503 if the SDK native binary failed to load.
-- **`admin-api` localhost loopback timeout**: `callRustApi` and `sidecarSelf` now go through `cancellableFetch` with a 10s timeout. CLI calls no longer hang when the management or sidecar HTTP server is wedged.
-- **Cluster B sweep**: stale Bun comments rewrote across `agent-session.ts` × 4, `im-bridge-tools.ts` × 1, `sse.ts` × 1; dead `chat:thinking-delta` priority entry removed; dead `im:message_received` SSE broadcast (no consumer / no priority registration) removed.
-
-### Known limitations (deferred to 0.2.1)
-
-- **OpenClaw `pending-dispatch` keyed by `chatId` only**: concurrent same-chat group messages clash via supersede; first dispatcher rejects with "Superseded by new dispatch". Fix requires keying by `requestId` + threading it through the Rust → Bridge protocol.
-- **`SessionStore` per-process line-count cache**: cross-process appenders can get out of sync after another process appends. Local-only impact today (MyAgents writes from one process at a time); Pattern 5 file-locking already covers correctness, this is a count-cache freshness optimization.
-- **Cron → IM delivery is fire-and-forget at three hops**: Sidecar→Sidecar POST has no retry; if the IM peer Sidecar is restarting / 502, the result is logged but not delivered. End-to-end ack-with-redrain semantics deferred.
-- **`reply_router` adapter HTTP I/O held under mutex**: documented as intentional in `src-tauri/src/im/reply_router.rs` (single consumer task per peer-session anyway). Throttled-edit cadence keeps the contention bounded; per-slot dispatch tasks would be the proper architectural answer if real-world group-chat burstiness ever triggers ring eviction.
+> 本版本紧接 0.1.70。底层运行时从 Bun 切到 Node.js v24，外加一批 Windows / Linux 平台问题修复和启动加速。
 
 ### Breaking
-- **`agent-browser` CLI 不再 bundle**：DMG 体积 -84 MB。改由 `bundled-skills/agent-browser/SKILL.md` 教 AI 在首次浏览器自动化任务时通过 `npm install -g agent-browser@<pinned>` 自装；agent-session 注入 `npm_config_prefix=~/.myagents/npm-global` 锁定安装位置，PATH 上比 `~/.myagents/bin/` 优先级更高，自然屏蔽老版本残留 wrapper。Skill 升格为 system skill（`SYSTEM_SKILLS_VERSION` 7→8）确保现有用户能拿到新指引。**首次浏览器自动化会多花 ~10s 装包，之后即时**；网络受限环境可用 `npx -y agent-browser@<pinned> ...` inline fallback。
-- **运行时统一为 Node.js v24**：MyAgents 自己的 Sidecar、Plugin Bridge、`myagents` CLI 全部切到 bundled Node.js v24；Bun 从应用包中彻底移除（`src-tauri/binaries/bun-*` 删除，体积减少 ~120 MB）。用户侧无需操作；开发者 `npm install` 代替 `bun install`。
-- **Claude Agent SDK 升级到 0.2.119**：新版 SDK 不再 bundle `cli.js`，改为 per-platform native binary（`bun build --compile` 产物，SDK team 自带 Bun runtime）。`resources/claude-agent-sdk/cli.js` 替换为 `claude[.exe]`（macOS arm64 约 213 MB）。
-- **开发依赖收敛**：`@types/bun` 移除，`tsconfig.json` types 只保留 `node`；新增 `esbuild` / `tsx` / `@hono/node-server` / `vitest` 等 npm 依赖。
 
-### Added
-- **`subprocess.ts` / `file-response.ts` 两个新的 pit-of-success helper**：`Bun.spawn` / `Bun.file(p) + new Response(file)` 的 Node 对应，封装了 Node 与 Bun 在 stdio 流语义 / exit 时序 / 背压处理上的差异，调用点保持原状。
-- **SDK native binary 跨平台支持**：构建脚本按目标架构从 `@anthropic-ai/claude-agent-sdk-<triple>` 自动拷贝 + codesign（macOS）。`package.json optionalDependencies` 声明全部 8 个平台，跨架构 DMG 构建可用。
-- **多文件上传改为流式**：`/agent/upload-files` 现直接 `Readable.fromWeb(file.stream()) → createWriteStream` pipeline，大视频 / 图片上传不再占满 Node heap。
+- **`agent-browser` 浏览器自动化 CLI 不再随应用打包**：DMG / 安装包体积减少 ~84 MB。首次让 AI 做浏览器自动化任务时，会自动用 `npm install -g` 装一次（约 10 秒），之后即时可用。网络受限环境也可临时让 AI 用 `npx` 顶替。
+- **少数从 v0.1.x 直接跨级升级用户首次访问网站需要重新登录**：旧的浏览器 Cookie 持久化迁移随同 `agent-browser` bundle 一起清理。如果你之前一直跟着小版本升级（0.1.65 → 0.1.66 → … → 0.1.70 → 0.2.0），不会受影响。
+- **运行时切到 Node.js v24，Bun 移除**：用户侧完全无感（应用启动方式 / 配置 / 数据都不变）。开发者从此用 `npm install` / `npm run` 代替 `bun install` / `bun run`；同步把 Claude Agent SDK 升到 0.2.119（按平台 native binary 分发，安装包随之变大但跨架构兼容性更好）。
 
 ### Improved
-- **Plugin Bridge 兼容性跃升**：切到 Node.js 后，之前社区 OpenClaw 插件在 Bun 下用 axios 静默挂起的地雷消失，新插件接入不再需要逐个验证 HTTP 行为。
-- **Sidecar 长 session 稳定性**：V8 GC 对 "大量短命对象 + 少量长命对象" 场景成熟度优于 JSC，30 min+ 对话的 RSS 单调增长受到抑制。
-- **zip / PowerShell 日志导出不再卡死**：修复了 Bun→Node 迁移中 `stdout/stderr: 'pipe'` 默认值导致的 64 KB 管道死锁（大日志集触发）。
-- **测试框架从 `bun:test` 迁到 `vitest`**：7 个测试文件无语义变更；`npm run test` / `npm run test:watch` 替代 `bun test`。
+
+- **Plugin Bridge 兼容性跃升**：飞书 / QQ / 微信 / 企业微信等 OpenClaw 插件之前偶发 30 秒挂起 / 静默连不上的问题彻底消失。社区新插件接入不再需要一个一个验证 HTTP 行为是否兼容。
+- **长对话稳定性提升**：30 分钟以上的连续对话内存增长被显著抑制，长 session 不再越用越卡。
+- **大文件上传不再吃光内存**：长视频 / 大图片改为流式上传，单文件几百 MB 也不会让 Sidecar 内存爆掉。
+- **错误信息更清晰**：以前看到孤单的 `exit code -1`，现在直接告诉你「找不到可执行文件」/「CPU 架构不匹配」等真实原因。
 
 ### Fixed
-- **SDK 升级 → `resolveClaudeCodeCli()` 重写**：按 platform triple 在 `node_modules/@anthropic-ai/claude-agent-sdk-<triple>/claude` 和 `resources/claude-agent-sdk/claude` 两处定位，支持 Linux glibc/musl 检测。
-- **`options.executable: 'bun'` 清理**：5 处 SDK query option 移除（native binary 路径下该选项为 no-op）。
-- **删除 `migrateProfileToStorageState`（v0.1.x → v0.1.30 Cookie 迁移）**：随 agent-browser bundle 一起清掉 `better-sqlite3` 依赖。该迁移在 commit 5cf027f 后才合入 v0.2.0 dev 分支，没有发布版用户跑过它，可安全移除。极少数 v0.1.x 直接升级到 v0.2.0 的用户可能需要重登录浏览器站点（持久 profile cookie 不再自动迁出）。
-- **中止 stdio 竞态**：`subprocess.ts` 的 `exited` Promise 在 Node `'close'` 事件（stdio drained）而非 `'exit'` resolve，匹配 Bun.spawn 原语义。Codex / Gemini adapter 不再有 stdout reader 被抢跑的风险。
-- **Spawn 错误不再被吞**：ENOENT / "bad CPU type" 等现在带完整 error 信息暴露给调用方，不再显示孤单的 "exit code -1"。
 
-### Architecture
-- **单一 JS runtime 原则**：CLAUDE.md / ARCHITECTURE.md 的"双运行时策略"节改写为"单一 Node.js runtime"。SDK 子进程内部的 Bun 是 SDK team 静态链接实现细节，我们不感知。
-- **Entitlements 注释刷新**：`allow-jit` 等 entitlement 适用于任何 JS 引擎（Node V8 / SDK 内嵌 Bun），不再是 "for Bun" 专属。
+- **Windows 安装后能正常启动**：之前 Windows 用户装好 0.2.0 打开应用，会卡在「正在加载历史会话」永远进不去。现在 Windows 一键启动，和 macOS 一样开箱即用。
+- **Linux 上 `myagents` CLI 能直接执行**：之前在 Linux 装完应用后跑 `myagents --help` 会被系统拒绝（脚本头部多了一行旧时代留下的 shebang），现在恢复正常。
+- **Windows 上保存配置 / 项目列表 / 启动页历史不再失败**：之前在 Windows 上偶尔出现「拒绝访问」的红色错误（杀软 / OneDrive / Backblaze 在我们写完文件的瞬间扫描占用），导致刚切换的工作区下次打开应用就丢了。现在自动等开扫窗口过去再写盘，用户感知不到。
+- **Windows 上 npm 安装的 CLI 工具能正常调用**：之前从 npm 装的 `codex` / `gemini` / `npx` 等带 `.cmd` 后缀的命令在 Windows 上启动失败，现在恢复正常。
+- **Windows 大日志导出不再卡死**：之前在 Windows 上用 zip 打包大日志或者 PowerShell 命令输出大量内容时偶尔会无限挂起，已修复。
+- **IM Bot 自动启动稳定**：飞书 / 企业微信 / 微信 / QQ 等 OpenClaw 插件之前偶发「启动失败 → 自动重试 → 又失败」的循环（多个 Bot 同时启动时会互相破坏对方的依赖目录）。现在多个 Bot 并发启动彼此隔离，重启 / 切工作区不再触发这个问题。
+- **应用闪退后 `myagents` CLI 不再损坏**：极端情况下应用进程被强杀的瞬间正好在同步 CLI，会把 `~/.myagents/bin/myagents` 写到一半，下次终端调用直接报「文件损坏」。现在采用原子替换，要么旧版本要么新版本，不会卡在中间态。
+- **任务中心「想法」输入光标位置精确**：在想法输入框打 `#标签` 时，标签的高亮位置偶尔会跟实际文字错开半个字符，长内容下越走越偏。修复后高亮、光标、文本三层永远对齐。
+- **AI 实时输出更稳**：少数情况下 AI 的实时事件（外部 Runtime 状态切换、turn 完成等）在网络抖动时会被静默丢弃，前端看到「打字打了一半就停了」。所有结构性事件现在都标记为关键优先级，背压时优先送达。
+- **OpenAI 兼容供应商在系统代理后面能正常走代理**：之前接 OpenAI 兼容供应商时系统代理 / SOCKS5 会被静默绕过，请求直连，现在严格走代理。
+- **磁盘满时大工具结果不再连累界面**：以前磁盘满时前端会被大块工具结果直接灌爆 UI，现在直接告失败而不是把整个会话拖下水。
+- **外部 Runtime 子进程不再变僵尸**：终止 Claude Code / Codex / Gemini 时模型 / 工具子进程会随之退出，不会留在后台。
+- **多个 IM Bot 并发时身份不再串线**：之前在同一时间多个 IM 入口同时触达时，偶发把 A 用户的 OAuth 票据 / cron 任务 / 媒体投递错给 B 的极小概率问题修复。
 
-### Performance (post-migration perf sweep)
+### Performance
 
-Sidecar 冷启动从 v0.2.0-rc 的 5-7s 降到 ~2-3s，Tab 打开的用户感知明显提速。
-
-- **Rust TCP health check**：固定 500ms 轮询 → 指数退避 50→500ms（前 5 次累计 1.25s 覆盖常见冷启动窗口）；删除 spawn 后 50ms guard sleep。节省 200-550ms/次。
-- **Node `main()` 重排序**：HTTP listen 提前到 `initializeAgent` / migration / skill seed / agent-browser wrapper 之前，Rust health check 几十 ms 就通过；重活移入 IIFE，通过 `globalThis.__myagentsDeferredInit` gate 等待所有非 `/health` route。节省 400-1200ms TCP accept 阻塞。
-- **异步 shell PATH 检测**：`execSync('/bin/zsh -i -l')` → `execFile` 异步；原来 3-5s 阻塞事件循环、让 TCP accept 饿死 → 背景完成，fallback PATH 立即可用。
-- **Tab MCP 快路径**：`resolveWorkspaceConfig({ includeMcp: false })` 对 Tab session 跳过 MCP 磁盘扫描（Tab 由前端 `/api/mcp/set` 下发，self-resolve 白做）；`getSessionMetadata` 从 3 次合并成 1 次 memo。
-- **重组件懒加载（Tier 2）**：`admin-api`（~2900 行）、`openai-bridge`（~2660 行）、`adm-zip` 改为 route 内 `await import()` 懒加载。只有实际使用者付代价。
-- **内置 MCP 懒加载（Tier 3）**：6 个 in-process MCP（cron-tools / im-cron / im-media / generative-ui / gemini-image / edge-tts）改为 META + 实例缓存两层设计（`src/server/tools/builtin-mcp-meta.ts` + `builtin-mcp-registry.ts`）。SDK + zod + schema 构造从模块加载挪到首次使用，冷启动少付 ~500-1000ms；失败自动 evict 防 poisoned cache；ESLint `@typescript-eslint/no-restricted-imports` 规则结构性禁止 tool 文件顶层 value-import SDK/zod。
-- **Plugin Bridge 入口解析重写**：按 OpenClaw 上游规范读 `package.json["openclaw"].extensions`，不再信任 `main` / `exports`（社区插件常 `main: "dist/index.js"` 但发布包不带 `dist/`）。
-- **CJS + ESM 混用插件运行时补丁**：`@larksuite/openclaw-lark` 等用 TS 编译到 CJS 但引用了 `import.meta.url` 的插件，通过 `module.registerHooks()` 同步 loader 运行时改写入 `__filename`。Bun 原本静默容忍，Node 严格拒绝，此补丁让 4 个主流 bot 插件（飞书/QQ/企业微信/微信）在 Node 下重新可用。
-- **better-sqlite3 ABI 自动 rebuild**：`setup.sh` / `build_dev.sh` 检测到系统 npm 与 bundled Node.js ABI 不匹配时自动 `npm rebuild`，避免 `ERR_DLOPEN_FAILED`。
-- **Windows 构建脚本 bun→npm**：`build_dev_win.ps1` / `build_windows.ps1` / `rebuild_clean.ps1` 全部切到 `npm`；`setup_windows.ps1` 与构建脚本工具链统一，新 Windows 开发者不再遇到「setup 装 npm，build 要 bun」的割裂。
-- **agent-browser-cli lockfile 迁移**：`bun.lock` → `package-lock.json`，macOS + Windows 构建改用 `npm ci --ignore-scripts`。
+- **Sidecar 冷启动从 ~5-7 秒降到 ~2-3 秒**：新开 Tab / 唤起对话的等待感显著缩短。多处优化叠加的结果——HTTP 服务器优先就绪、内置 MCP 懒加载（首次用到才加载）、Tab 切换跳过不必要的磁盘扫描，以及 Rust 端 health check 改成指数退避。
 
 ---
 
