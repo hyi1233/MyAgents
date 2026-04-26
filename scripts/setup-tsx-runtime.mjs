@@ -76,8 +76,18 @@ await writeFile(
 
 console.log(`→ npm install tsx@${tsxVersion} --os=${os} --cpu=${cpu} into ${RUNTIME_DIR}`);
 
+// Node ≥20.12 (CVE-2024-27980) refuses to spawn `.cmd` / `.bat` shims
+// without `shell: true`, returning `EINVAL`. `npm` on Windows is `npm.cmd`,
+// so we have to opt in. On POSIX `npm` is a real script with a shebang
+// and `shell: true` would just add a wasted /bin/sh hop — keep it off.
+//
+// `shell: true` means args are concatenated and re-parsed by cmd.exe,
+// so any value containing whitespace or shell metacharacters would need
+// quoting. Our args are all `--flag=value` with no spaces, so this is
+// safe; revisit if anyone adds an arg with user-supplied content.
+const isWindows = process.platform === 'win32';
 execFileSync(
-  process.platform === 'win32' ? 'npm.cmd' : 'npm',
+  isWindows ? 'npm.cmd' : 'npm',
   [
     'install',
     '--no-audit',
@@ -85,7 +95,7 @@ execFileSync(
     `--os=${os}`,
     `--cpu=${cpu}`,
   ],
-  { cwd: RUNTIME_DIR, stdio: 'inherit' },
+  { cwd: RUNTIME_DIR, stdio: 'inherit', shell: isWindows },
 );
 
 // Sanity check: the platform binary must end up under @esbuild/<triple>.
