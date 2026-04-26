@@ -28,6 +28,13 @@ import {
   type AgentConfigSlim,
   type ChannelConfigSlim,
 } from './utils/admin-config';
+import { cancellableFetch } from './utils/cancellation';
+
+// Localhost loopback timeout for management / sidecar self-calls.
+// 10s is generous for an in-process Rust handler or a same-process Hono
+// route — anything slower means the backend is wedged, in which case we'd
+// rather surface a CLI error than hang the user's terminal indefinitely.
+const ADMIN_LOOPBACK_TIMEOUT_MS = 10_000;
 import { existsSync , writeFileSync, unlinkSync } from 'fs';
 import { ensureDirSync } from './utils/fs-utils';
 import { resolve } from 'path';
@@ -106,7 +113,7 @@ async function managementApi(
     options.body = JSON.stringify(body);
   }
   try {
-    const resp = await fetch(url, options);
+    const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
     return resp.json() as Promise<Record<string, unknown>>;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -143,7 +150,7 @@ async function sidecarSelf(
     options.body = JSON.stringify(body);
   }
   try {
-    const resp = await fetch(url, options);
+    const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
     const json = await resp.json() as Record<string, unknown>;
     return { status: resp.status, json };
   } catch (err) {

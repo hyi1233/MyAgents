@@ -38,10 +38,18 @@ export type SseEventPriority = 'critical' | 'coalescible' | 'droppable';
 
 /**
  * Default priority used when an event isn't listed in `SSE_EVENT_PRIORITIES`.
- * Coalescible is the safe choice: replaces same-type tail entries on pressure
- * (no data loss for streaming-style events) but isn't blocking like critical.
+ *
+ * Codex M9 fix: defaulting unknown events to 'coalescible' silently dropped
+ * unregistered structural / control events (`chat:tool-use-start`,
+ * `chat:content-block-stop`, `chat:message-sdk-uuid`, queue events…) under
+ * backpressure — invisible data loss for anything someone forgot to
+ * register. We now fail closed: unregistered events take the same priority
+ * as critical events and emit a one-shot warning with the event name so the
+ * regression is loud. Existing registered streaming deltas keep their
+ * 'coalescible' priority via SSE_EVENT_PRIORITIES below.
  */
-const DEFAULT_PRIORITY: SseEventPriority = 'coalescible';
+const DEFAULT_PRIORITY: SseEventPriority = 'critical';
+const unknownEventWarned = new Set<string>();
 
 /**
  * Data-driven priority table. Each callsite of `broadcast(event, ...)` picks
@@ -57,7 +65,6 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   // Streaming deltas — coalescible.
   'chat:message-chunk': 'coalescible',
   'chat:thinking-chunk': 'coalescible',
-  'chat:thinking-delta': 'coalescible',
   'chat:tool-input-delta': 'coalescible',
   'chat:tool-result-delta': 'coalescible',
   'chat:subagent-tool-input-delta': 'coalescible',
@@ -90,7 +97,16 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
 });
 
 function resolvePriority(event: string): SseEventPriority {
-  return SSE_EVENT_PRIORITIES[event] ?? DEFAULT_PRIORITY;
+  const explicit = SSE_EVENT_PRIORITIES[event];
+  if (explicit) return explicit;
+  if (!unknownEventWarned.has(event)) {
+    unknownEventWarned.add(event);
+    console.warn(
+      `[sse] event "${event}" missing from SSE_EVENT_PRIORITIES — treating as critical. ` +
+        `Register it in src/server/sse.ts to silence and pick the correct priority.`,
+    );
+  }
+  return DEFAULT_PRIORITY;
 }
 
 const MAX_QUEUE_PER_CLIENT = 1000;
@@ -334,7 +350,6 @@ function flushStreamingLogsForBoundary(event: string, data: unknown): void {
     }
     if ((type === 'thinking' || (!hasToolId && hasIndex)) && hasIndex) {
       flushStreamingLogAggregate(`chat:thinking-chunk|index:${index}`, event);
-      flushStreamingLogAggregate(`chat:thinking-delta|index:${index}`, event);
     }
     return;
   }
@@ -395,7 +410,7 @@ function heartbeatChunk(): Uint8Array {
 // High-frequency streaming events — aggregate console.log to reduce unified log noise.
 // These events fire per-token/per-delta and produce thousands of lines with little diagnostic value.
 const AGGREGATED_EVENTS = new Set([
-  'chat:message-chunk', 'chat:thinking-chunk', 'chat:thinking-delta',
+  'chat:message-chunk', 'chat:thinking-chunk',
   'chat:tool-input-delta', 'chat:tool-result-delta',
   'chat:subagent-tool-input-delta', 'chat:subagent-tool-result-delta',
 ]);

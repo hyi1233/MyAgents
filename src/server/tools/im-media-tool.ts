@@ -86,7 +86,13 @@ async function sendMediaHandler(args: {
     };
   }
 
-  if (!imMediaContext) {
+  // W9 fix: snapshot the IM context once at the start of the handler. The
+  // module-global `imMediaContext` is overwritten on every /api/im/enqueue
+  // (incl. multi-chat bots), so two reads inside this handler can otherwise
+  // observe different (botId, chatId) pairs and deliver the file to the
+  // wrong peer.
+  const ctx = imMediaContext;
+  if (!ctx) {
     return {
       content: [{ type: 'text', text: 'Error: No IM context available. This tool can only be used within an IM Bot session.' }],
       isError: true,
@@ -98,10 +104,10 @@ async function sendMediaHandler(args: {
   // for older call sites that haven't been updated yet. Prompt-injected AI
   // must not exfiltrate ~/.ssh/id_rsa etc. through an IM chat peer.
   let safeFilePath = args.file_path;
-  if (imMediaContext.workspacePath) {
+  if (ctx.workspacePath) {
     try {
       safeFilePath = assertSafeFilePath(args.file_path, {
-        workspacePath: imMediaContext.workspacePath,
+        workspacePath: ctx.workspacePath,
       });
     } catch (err) {
       return {
@@ -113,9 +119,9 @@ async function sendMediaHandler(args: {
 
   try {
     const result = await managementApi('/api/im/send-media', 'POST', {
-      botId: imMediaContext.botId,
-      chatId: imMediaContext.chatId,
-      platform: imMediaContext.platform,
+      botId: ctx.botId,
+      chatId: ctx.chatId,
+      platform: ctx.platform,
       filePath: safeFilePath,
       caption: args.caption,
     }) as { ok: boolean; fileName?: string; fileSize?: number; error?: string };

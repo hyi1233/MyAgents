@@ -1,5 +1,6 @@
 // Bridge HTTP handler: receives Anthropic requests, translates to OpenAI, forwards, translates back
 
+import { ProxyAgent, type Dispatcher } from 'undici';
 import type { BridgeConfig, UpstreamConfig } from './types/bridge';
 import type { AnthropicRequest } from './types/anthropic';
 import type { OpenAIRequest, OpenAIResponse, OpenAIStreamChunk } from './types/openai';
@@ -66,6 +67,30 @@ export function getProxyForUrl(url: string): string | undefined {
   }
 
   return proxy;
+}
+
+/**
+ * Per-proxy-URL dispatcher cache.
+ *
+ * Node.js `fetch()` is undici under the hood, and undici routes upstream HTTP
+ * traffic via the `dispatcher` field — NOT a `proxy` string (that's Bun-only).
+ * Each `ProxyAgent` carries its own connection pool, so we keep one per URL
+ * and reuse it across requests rather than creating one per fetch.
+ *
+ * Note: SOCKS5 is handled upstream by `setProxyConfig()` (agent-session.ts) —
+ * it spins up a local HTTP-to-SOCKS5 bridge and sets `HTTP_PROXY` to the
+ * bridge's HTTP URL, so by the time we read `getProxyForUrl()` here the URL
+ * is always plain http://.
+ */
+const proxyDispatchers = new Map<string, Dispatcher>();
+
+function getDispatcherForProxy(proxyUrl: string): Dispatcher {
+  let agent = proxyDispatchers.get(proxyUrl);
+  if (!agent) {
+    agent = new ProxyAgent(proxyUrl);
+    proxyDispatchers.set(proxyUrl, agent);
+  }
+  return agent;
 }
 
 export interface BridgeHandler {
@@ -221,7 +246,7 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
     try {
       // Detect proxy for upstream URL (reads from sidecar's process.env, respects no_proxy)
       const proxyUrl = getProxyForUrl(upstreamUrl);
-      upstreamResp = await fetch(upstreamUrl, {
+      const fetchInit: RequestInit & { dispatcher?: Dispatcher } = {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -229,8 +254,11 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
         },
         body: JSON.stringify(translatedReq),
         signal: controller.signal,
-        ...(proxyUrl ? { proxy: proxyUrl } : {}),
-      } as RequestInit);
+      };
+      if (proxyUrl) {
+        fetchInit.dispatcher = getDispatcherForProxy(proxyUrl);
+      }
+      upstreamResp = await fetch(upstreamUrl, fetchInit);
     } catch (err) {
       clearTimeout(headersTimer);
       if (request.signal) {

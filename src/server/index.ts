@@ -276,15 +276,13 @@ import { initLogger, getLoggerDiagnostics, withLogContext } from './logger';
 import {
   buildGateResponseBody,
   buildReadyResponseBody,
-  getDeferredInitState,
   markDeferredInitFailed,
   markDeferredInitReady,
-  resetDeferredInitForRetry,
   setDeferredInitPhase,
 } from './readiness-state';
 import { cleanupOldLogs } from './AgentLogger';
 import { cleanupOldUnifiedLogs, appendUnifiedLogBatch, getRecentLogLines } from './UnifiedLogger';
-import { broadcast, createSseClient, getClients } from './sse';
+import { createSseClient, getClients } from './sse';
 import { imEventBus } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
 import type { CancelReason } from './utils/cancellation';
@@ -294,7 +292,13 @@ import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifyS
 // most sessions never need to pay the 2.6k-line module's init cost.
 import type { BridgeHandler } from './openai-bridge/handler';
 import { registerBridgeSeedFn } from './bridge-cache';
-import { generateTitle, generateTitleExternal } from './title-generator';
+// title-generator is dynamically imported in the /api/title-generate handler
+// below — it value-imports the Claude Agent SDK + claude-code/codex/gemini
+// runtime classes, all of which are large. Pulling that into the Tier 0
+// startup graph delayed `/health` bind on cold start (cf. v0.2.0 Tier 0
+// goals) and crashed the sidecar before it could serve a 503 if the SDK
+// native binary failed to load. The handler is in the post-bind path, so
+// dynamic-import there is free.
 import {
   shouldUseExternalRuntime,
   sendExternalMessage,
@@ -1436,23 +1440,12 @@ async function main() {
         const { status, body } = buildReadyResponseBody();
         return jsonResponse(body, status);
       }
-      if (pathname === '/health/ready/retry' && request.method === 'POST') {
-        // Optional retry endpoint. We can re-arm the state machine; the
-        // caller (renderer / external script) is responsible for asking the
-        // process to restart deferred init. Today we don't have an in-process
-        // re-runner — surface that honestly with a 501-ish 503 message.
-        // TODO(pattern-4): wire to a real re-run of the deferred init block
-        // once it's extracted into a re-callable function.
-        const s = getDeferredInitState();
-        if (s.kind !== 'failed') {
-          return jsonResponse({ ok: false, reason: 'no failed state to retry', state: s.kind }, 409);
-        }
-        resetDeferredInitForRetry();
-        return jsonResponse({
-          ok: true,
-          message: 'state reset to pending; restart sidecar process to re-run deferred init',
-        }, 202);
-      }
+      // (removed) `POST /health/ready/retry` — pre-0.2.0 endpoint that reset
+      // DeferredInitState to `pending` and returned 202 promising a re-run,
+      // but no in-process re-runner exists (the deferred init block is a
+      // single IIFE). The renderer never observed progress and was misled.
+      // Retry today is a process restart; if/when an extracted re-callable
+      // init lands we can reintroduce a real retry endpoint.
 
       // 📦 Pattern 2 §2.3.1 — Large-value ref retrieval. SSE / IPC payloads
       // over the spill threshold leave a `{kind:'ref', id, ...}` placeholder
@@ -1462,7 +1455,13 @@ async function main() {
       // state, and the /chat/* SSE consumer may be mid-replay during init.
       if (pathname.startsWith('/refs/') && request.method === 'GET') {
         const id = decodeURIComponent(pathname.slice('/refs/'.length));
-        if (!id || !/^[a-f0-9]+$/i.test(id)) {
+        // Mirror the strict regex inside large-value-store.getRefStreamPath:
+        // 8–32 lowercase hex (uuid-prefix shape). The route check used to be
+        // looser (`/^[a-f0-9]+$/i`, no length cap, case-insensitive), which
+        // meant attacker-style upper-case probes returned 404 from the inner
+        // store after also satisfying the route — defense-in-depth without
+        // observable behavior change for legitimate refs.
+        if (!id || !/^[a-f0-9]{8,32}$/.test(id)) {
           return jsonResponse({ error: 'invalid ref id' }, 400);
         }
         const { getRefStreamPath } = await import('./utils/large-value-store');
@@ -3163,6 +3162,7 @@ async function main() {
         // short-lived CLI process of the same runtime so the title respects the
         // session's actual model + CLI auth. See title-generator.ts for rationale.
         const activeRuntime = getActiveRuntimeType();
+        const { generateTitle, generateTitleExternal } = await import('./title-generator');
         let title: string | null;
         if (activeRuntime === 'builtin') {
           title = await generateTitle(
@@ -4686,6 +4686,15 @@ async function main() {
         try {
           const payload = await request.json() as { servers?: McpServerDefinition[] };
           const servers = payload?.servers ?? [];
+          // Multi-Agent Runtime gate (defense-in-depth): builtin SDK pre-warm
+          // path is irrelevant for external runtimes (Claude Code CLI / Codex /
+          // Gemini), which carry their own MCP config via their CLI flags.
+          // Driving setMcpServers() here would only trigger noisy fingerprint-
+          // diff + 500ms-debounced pre-warm in the builtin path. Renderer-side
+          // gate exists in Chat.tsx; this is the server-side belt.
+          if (shouldUseExternalRuntime()) {
+            return jsonResponse({ success: true, servers: servers.map(s => s.id), skipped: 'external-runtime' });
+          }
           setMcpServers(servers);
           return jsonResponse({ success: true, servers: servers.map(s => s.id) });
         } catch (error) {
@@ -7673,6 +7682,16 @@ async function main() {
       if (pathname === '/api/agents/set' && request.method === 'POST') {
         try {
           const payload = await request.json() as { agents: Record<string, unknown> };
+          // Multi-Agent Runtime gate (mirrors /api/mcp/set above): external
+          // runtimes don't consume the SDK AgentDefinition map, so forwarding
+          // to setAgents() in builtin agent-session would just churn the
+          // pre-warm fingerprint without effect. The renderer should not be
+          // posting here when external runtime is active; this is the
+          // server-side belt for the cases when it does (heartbeat, IM Cron,
+          // tooling that hasn't been migrated).
+          if (shouldUseExternalRuntime()) {
+            return jsonResponse({ success: true, skipped: 'external-runtime' });
+          }
           // The payload.agents is already in SDK AgentDefinition format
           setAgents(payload.agents as Record<string, import('@anthropic-ai/claude-agent-sdk').AgentDefinition>);
           return jsonResponse({ success: true });
@@ -8193,12 +8212,6 @@ async function main() {
               await updateSessionMetadata(currentSessionId, { source: payload.source as SessionSource });
             }
           }
-          broadcast('im:message_received', {
-            sessionId: currentSessionId,
-            source: payload.source,
-            senderName: payload.senderName ?? payload.sourceId,
-            content: payload.message,
-          });
 
           return jsonResponse({
             success: true,

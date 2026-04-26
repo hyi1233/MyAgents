@@ -5,6 +5,9 @@
   "version": "0.2.0",
   "license": "Apache-2.0",
   "packageManager": "npm@10.8.2",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "author": "MyAgents Team <myagents.io@gmail.com>",
   "homepage": "https://myagents.io",
   "repository": {
@@ -27,9 +30,9 @@
     "dev": "./start_dev.sh",
     "dev:web": "vite",
     "build:web": "vite build",
-    "build:server": "esbuild src/server/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=src-tauri/resources/server-dist.js --sourcemap --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);'",
-    "build:bridge": "esbuild src/server/plugin-bridge/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=src-tauri/resources/plugin-bridge-dist.js --sourcemap --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);' --external:openclaw",
-    "build:cli": "esbuild src/cli/myagents.ts --bundle --platform=node --format=cjs --target=node20 --outfile=src-tauri/resources/cli/myagents.js --banner:js='#!/usr/bin/env node'",
+    "build:server": "esbuild src/server/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=src-tauri/resources/server-dist.js --sourcemap --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);'",
+    "build:bridge": "esbuild src/server/plugin-bridge/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=src-tauri/resources/plugin-bridge-dist.js --sourcemap --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);' --external:openclaw",
+    "build:cli": "esbuild src/cli/myagents.ts --bundle --platform=node --format=cjs --target=node22 --outfile=src-tauri/resources/cli/myagents.js --banner:js='#!/usr/bin/env node'",
     "server": "node --import tsx/esm src/server/index.ts",
     "start": "npm run build:web && npm run server",
     "tauri": "tauri",
@@ -85,7 +88,8 @@
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
     "sharp": "0.34.5",
-    "socks": "^2.8.7"
+    "socks": "^2.8.7",
+    "undici": "^8.1.0"
   },
   "optionalDependencies": {
     "@anthropic-ai/claude-agent-sdk-darwin-arm64": "0.2.119",

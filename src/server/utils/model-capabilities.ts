@@ -194,9 +194,59 @@ function loadPresetCustomModels(home: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * Mtime-keyed cache for `buildRegistry()`.
+ *
+ * Hot-path callers — every `enqueueUserMessage`, every pre-warm, every model
+ * switch, every provider-verify — used to pay an unbounded sync `readdirSync`
+ * + N×`readFileSync` (capped at 256 files / 1 MB each) + a `config.json`
+ * read. On a busy IM bot this stalls the event loop 50–500ms per turn and
+ * undoes the v0.2.0 cold-start work.
+ *
+ * The cache is invalidated by stat-checking just two paths:
+ *   - `~/.myagents/providers/`  (mtime changes when a file is created /
+ *     deleted / replaced via tmp+rename — the canonical edit pattern)
+ *   - `~/.myagents/config.json` (mtime changes on `presetCustomModels` edits)
+ *
+ * A miss costs 2 `statSync`s + 1 Map alloc; a hit costs 2 `statSync`s. Mid-
+ * session edits propagate by the next call after the file system records the
+ * change, preserving the "no invalidate hook required" guarantee from the
+ * original design comment.
+ */
+interface RegistryCacheEntry {
+  map: Map<string, ModelCapability>;
+  providersDirMtimeMs: number;     // -1 when dir absent
+  configMtimeMs: number;           // -1 when file absent
+  homeAtBuild: string | null;      // re-keyed on home change (test isolation)
+}
+let registryCache: RegistryCacheEntry | null = null;
+
+function statMtimeMs(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return -1; // missing dir/file is a valid state — cache it as such.
+  }
+}
+
 function buildRegistry(): Map<string, ModelCapability> {
-  const map = new Map<string, ModelCapability>();
   const home = getHomeDirOrNull();
+
+  const providersDir = home ? resolve(home, '.myagents', 'providers') : '';
+  const configPath = home ? resolve(home, '.myagents', 'config.json') : '';
+  const providersDirMtimeMs = providersDir ? statMtimeMs(providersDir) : -1;
+  const configMtimeMs = configPath ? statMtimeMs(configPath) : -1;
+
+  if (
+    registryCache &&
+    registryCache.homeAtBuild === home &&
+    registryCache.providersDirMtimeMs === providersDirMtimeMs &&
+    registryCache.configMtimeMs === configMtimeMs
+  ) {
+    return registryCache.map;
+  }
+
+  const map = new Map<string, ModelCapability>();
 
   // 1) Custom providers from ~/.myagents/providers/*.json — disk-first override.
   if (home) {
@@ -227,7 +277,16 @@ function buildRegistry(): Map<string, ModelCapability> {
   //    discovery has filled the same modelId.
   ingestProviderList(PRESET_PROVIDERS, map, 'preset');
 
+  registryCache = { map, providersDirMtimeMs, configMtimeMs, homeAtBuild: home };
   return map;
+}
+
+/**
+ * Test-only: drop the cached registry. Real callers don't need to invoke this
+ * — the mtime check inside `buildRegistry` picks up provider edits naturally.
+ */
+export function __resetModelCapabilityCacheForTests(): void {
+  registryCache = null;
 }
 
 /**

@@ -118,6 +118,10 @@ where
                 let _ = fs::copy(&config_path_owned, bak_path);
             }
 
+            // Rust ≥1.81 (our MSRV) documents `fs::rename` as atomic
+            // replace-on-existing across all platforms; the previous
+            // `atomic_replace` shim that called MoveFileExW directly is no
+            // longer needed.
             fs::rename(&tmp_path, &config_path_owned).map_err(|e| {
                 to_io_err(format!("[config-io] Cannot rename tmp config: {}", e))
             })?;

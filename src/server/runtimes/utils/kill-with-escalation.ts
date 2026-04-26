@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
+import { spawn as nodeSpawn } from 'node:child_process';
 
 type KillSignal = NodeJS.Signals | number;
 
@@ -8,6 +9,22 @@ export interface KillEscalationOptions {
   gracefulMs: number;
   hardSignal?: NodeJS.Signals;
   hardMs: number;
+  /**
+   * When `true`, escalate to the **process tree** rather than the root pid:
+   *
+   *   - POSIX: `process.kill(-pid, signal)` to signal the entire process group.
+   *     This requires the runtime child to have been spawned with
+   *     `detached: true` so it became the leader of a new group; otherwise the
+   *     negative-pid signal would be delivered to our *own* group too.
+   *   - Windows: spawn `taskkill /F /T /PID <pid>` which terminates the child
+   *     and all of its descendants regardless of process-group state.
+   *
+   * Required for runtime CLIs (Claude Code / Codex / Gemini) that fork their
+   * own model / tool subprocesses — without tree-kill those subprocesses
+   * outlive the runtime parent and the helper would falsely report
+   * `exited: true, orphanRisk: false`.
+   */
+  killTree?: boolean;
   onStep?: (step: 'graceful' | 'hard' | 'orphan', info: { pid: number }) => void;
 }
 
@@ -39,6 +56,44 @@ function waitForProcessExit(proc: EscalatableProcess): Promise<unknown> {
     return proc.waitForExit();
   }
   return once(proc as ChildProcess, 'exit');
+}
+
+/**
+ * Best-effort tree kill — POSIX via process-group signal, Windows via
+ * `taskkill /T`. Falls back to single-pid `proc.kill()` if the platform-
+ * specific path fails. Never throws.
+ */
+function killTreeBestEffort(proc: EscalatableProcess, signal: NodeJS.Signals | number): void {
+  if (process.platform === 'win32') {
+    // taskkill: /F = force, /T = terminate child tree.
+    // Spawn detached + unref so taskkill itself doesn't hold the event loop.
+    try {
+      const tk = nodeSpawn('taskkill', ['/F', '/T', '/PID', String(proc.pid)], {
+        stdio: 'ignore',
+        windowsHide: true,
+        detached: true,
+      });
+      tk.unref();
+    } catch {
+      // taskkill not on PATH (extremely rare on Windows); fall through to
+      // the single-pid kill below as a last resort.
+      try { proc.kill(signal); } catch { /* ignore */ }
+    }
+    return;
+  }
+  // POSIX: signal the process group. proc.pid here MUST be the pgid
+  // (i.e. the child must have been spawned with `detached: true` so it
+  // became its own group leader) — otherwise the negative-pid signal
+  // targets our own group too and we'd kill the sidecar.
+  try {
+    process.kill(-proc.pid, signal as NodeJS.Signals);
+  } catch (err) {
+    // ESRCH = group already gone. Anything else (EPERM / EINVAL): fall
+    // back to a direct single-pid signal.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return;
+    try { proc.kill(signal); } catch { /* ignore */ }
+  }
 }
 
 async function waitForExitWithin(proc: EscalatableProcess, timeoutMs: number): Promise<boolean> {
@@ -78,10 +133,14 @@ export async function killWithEscalation(
 
     opts.onStep?.('graceful', { pid: proc.pid });
     signalUsed = 'graceful';
-    try {
-      proc.kill(gracefulSignal);
-    } catch {
-      /* ignore kill failures; exit wait below remains bounded */
+    if (opts.killTree) {
+      killTreeBestEffort(proc, gracefulSignal);
+    } else {
+      try {
+        proc.kill(gracefulSignal);
+      } catch {
+        /* ignore kill failures; exit wait below remains bounded */
+      }
     }
 
     if (await waitForExitWithin(proc, opts.gracefulMs)) {
@@ -90,10 +149,14 @@ export async function killWithEscalation(
 
     opts.onStep?.('hard', { pid: proc.pid });
     signalUsed = 'hard';
-    try {
-      proc.kill(hardSignal);
-    } catch {
-      /* ignore kill failures; exit wait below remains bounded */
+    if (opts.killTree) {
+      killTreeBestEffort(proc, hardSignal);
+    } else {
+      try {
+        proc.kill(hardSignal);
+      } catch {
+        /* ignore kill failures; exit wait below remains bounded */
+      }
     }
 
     if (await waitForExitWithin(proc, opts.hardMs)) {

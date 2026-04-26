@@ -1023,14 +1023,6 @@ export async function sendExternalMessage(
 ): Promise<{ queued: boolean; error?: string }> {
   const hasImages = images && images.length > 0;
 
-  // Pattern B — set the active IM trace ID before any UnifiedEvent fans out.
-  // No flag/null reset like the legacy callback path: each new send overrides;
-  // session-end (session_complete / stopExternalSession) clears.
-  // No-op when context.requestId is undefined (desktop / cron paths).
-  if (context?.requestId) {
-    activeRequestId = context.requestId;
-  }
-
   // Show user message immediately — don't block on pre-warm or turn serialization.
   // The message appears in the chat as soon as the user presses send, giving
   // responsive feedback even when the runtime takes 10-15s to cold-start.
@@ -1065,6 +1057,17 @@ export async function sendExternalMessage(
   // resetTurnAccumulators(), so this gate doesn't spuriously trip.
   if (!turnCompleted && currentTurnStartTime !== 0 && activeProcess && !activeProcess.exited) {
     await waitForExternalSessionIdle(5 * 60 * 1000, 100);
+  }
+
+  // Pattern B — set the active IM trace ID *after* the previous turn has
+  // settled. Setting it earlier (pre-fix) caused tail deltas/complete events
+  // from the running turn A to be tagged with turn B's requestId during the
+  // wait window, mis-routing them to the wrong IM subscriber and breaking
+  // cancellation attribution. session-end (session_complete /
+  // stopExternalSession) clears it again. No-op when context.requestId is
+  // undefined (desktop / cron paths).
+  if (context?.requestId) {
+    activeRequestId = context.requestId;
   }
 
   // Case 1: No previous session — start fresh
@@ -1295,6 +1298,7 @@ export async function stopExternalSession(): Promise<boolean> {
       {
         gracefulMs: 2000,
         hardMs: 1000,
+        killTree: true,
         onStep: (step, info) => {
           if (step === 'orphan') console.warn(`[external-session] catch fallback orphan pid=${info.pid}`);
         },

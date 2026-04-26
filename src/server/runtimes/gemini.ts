@@ -682,6 +682,10 @@ export class GeminiRuntime implements AgentRuntime {
       stdin: 'pipe',
       cwd: options.workspacePath,
       env: spawnEnv,
+      // Detached → child becomes its own pgroup leader on POSIX so
+      // killWithEscalation({ killTree: true }) below can reach all of
+      // gemini's tool-call subprocesses, not just the wrapper.
+      detached: true,
     });
 
     const geminiProc = new GeminiProcess(proc);
@@ -1042,6 +1046,7 @@ export class GeminiRuntime implements AgentRuntime {
       await killWithEscalation(geminiProc, {
         gracefulMs: 3_000,
         hardMs: 2_000,
+        killTree: true,
         onStep: (step, info) => {
           if (step === 'orphan') {
             console.warn(`[gemini] Process pid=${info.pid} did not exit after SIGKILL; continuing with orphan risk`);

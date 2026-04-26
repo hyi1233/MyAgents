@@ -16,6 +16,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -79,6 +80,29 @@ function delay(ms: number): Promise<void> {
  *   - macOS: `ps -p <pid> -o lstart=` (string date), parse via Date.
  *   - Windows: skipped (no cheap way without extra deps; rely on age alone).
  */
+/** Linux clock-tick frequency (CLK_TCK). Read once via `getconf` and cached
+ *  for the process lifetime. Falls back to 100 (the default on every Linux
+ *  distribution we ship to) if `getconf` isn't on PATH or the value is
+ *  unparseable. Without this lookup, an HZ=250 / HZ=1000 kernel would skew
+ *  our derived start-time enough to falsely break a long-running live
+ *  config-write holder under the 60s age fallback. */
+let cachedLinuxClkTck: number | null = null;
+function getLinuxClkTck(): number {
+  if (cachedLinuxClkTck !== null) return cachedLinuxClkTck;
+  try {
+    const out = execSync('getconf CLK_TCK', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    const n = Number(out);
+    if (Number.isFinite(n) && n > 0 && n <= 10_000) {
+      cachedLinuxClkTck = n;
+      return n;
+    }
+  } catch {
+    /* fall through */
+  }
+  cachedLinuxClkTck = 100;
+  return 100;
+}
+
 function getPidStartTimeMs(pid: number): number | null {
   try {
     if (process.platform === 'linux') {
@@ -95,10 +119,7 @@ function getPidStartTimeMs(pid: number): number | null {
       const uptimeStr = readFileSync('/proc/uptime', 'utf-8').split(' ')[0];
       const uptimeSec = Number(uptimeStr);
       if (!Number.isFinite(uptimeSec)) return null;
-      // Hertz is typically 100 on Linux; we don't have a portable way to
-      // read it from Node, so assume 100. The check is for "matches" so
-      // a few-tick error is fine.
-      const HZ = 100;
+      const HZ = getLinuxClkTck();
       const startSecAgo = uptimeSec - startticks / HZ;
       return Math.round(Date.now() - startSecAgo * 1000);
     }
@@ -131,6 +152,36 @@ function getPidStartTimeMs(pid: number): number | null {
  *
  * Returns true if we forcibly removed the lockdir (caller should retry mkdir immediately).
  */
+/**
+ * Race-safe break: atomically `renameSync` the lockdir to a per-process
+ * tombstone path before `rmSync`. Two waiters simultaneously detecting the
+ * lock as stale can't both succeed — only the rename winner ends up holding
+ * a tombstone, and even if a third process has by then taken a fresh lock
+ * under the original path, it stays untouched. Mirrors the Rust release-race
+ * fix in `crate::utils::file_lock` (Pattern 5 fix #4).
+ */
+function breakLockSafely(lockPath: string): boolean {
+  const tombstone = `${lockPath}.stale-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  try {
+    renameSync(lockPath, tombstone);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      // Another waiter already broke (and possibly re-acquired) the lock — that
+      // is success from our perspective: caller should retry mkdir.
+      return true;
+    }
+    // EBUSY / EACCES / etc. — surface failure so the caller polls again.
+    return false;
+  }
+  // We own the tombstone exclusively. Best-effort cleanup; if it fails the
+  // GC sweep elsewhere (or a manual rm) handles it.
+  try {
+    rmSync(tombstone, { recursive: true, force: true });
+  } catch { /* ignore */ }
+  return true;
+}
+
 function tryBreakStaleLock(lockPath: string, staleMs: number): boolean {
   let ageMs: number;
   try {
@@ -190,33 +241,33 @@ function tryBreakStaleLock(lockPath: string, staleMs: number): boolean {
               console.warn(
                 `[file-lock] pid ${pid} reused (declaredStart=${declaredStart} liveStart=${liveStart} skew=${skew}ms); breaking lock ${lockPath}`,
               );
-              try {
-                rmSync(lockPath, { recursive: true, force: true });
-                return true;
-              } catch {
-                return false;
-              }
+              return breakLockSafely(lockPath);
             }
             // start_time matches — owner is genuinely alive, refuse to break.
             return false;
           }
-          // start_time check unsupported on this platform — fall through to
-          // age-only override below.
+          // start_time check unsupported on this platform.
+          //
+          // Windows is the only platform where `getPidStartTimeMs` returns
+          // null for an alive pid (Linux uses /proc, macOS uses `ps -p
+          // -o lstart=`). On Windows we therefore have no second signal to
+          // distinguish "legitimate long-running writer" from "pid-recycled
+          // by an unrelated process". Refusing to age-only break is the
+          // conservative choice — Codex flagged the previous behavior as a
+          // potential silent eviction of long-config-write holders. The Rust
+          // helper has full Windows pid+start-time support; once Node grows
+          // an equivalent (e.g. via PowerShell or wmic), we can lift this.
+          if (process.platform === 'win32') return false;
         }
 
-        // Age-only override: require >60s to break a pid-alive lock (gives
-        // breathing room over the default 30s staleMs which is just for
-        // pid-dead refusal).
+        // Age-only override (POSIX legacy path / no declared start_time):
+        // require >60s to break a pid-alive lock — breathing room over the
+        // default 30s staleMs which is just for pid-dead refusal.
         if (ageMs <= 60_000) return false;
         console.warn(
           `[file-lock] lock ${lockPath} held by pid ${pid} for ${ageMs}ms (>60s) — breaking despite live pid (cross-user / start-time-unverifiable)`,
         );
-        try {
-          rmSync(lockPath, { recursive: true, force: true });
-          return true;
-        } catch {
-          return false;
-        }
+        return breakLockSafely(lockPath);
       }
     }
   }
@@ -225,12 +276,7 @@ function tryBreakStaleLock(lockPath: string, staleMs: number): boolean {
   console.warn(
     `[file-lock] Breaking stale lock ${lockPath} (age=${ageMs}ms owner=${owner || 'unknown'})`
   );
-  try {
-    rmSync(lockPath, { recursive: true, force: true });
-    return true;
-  } catch {
-    return false;
-  }
+  return breakLockSafely(lockPath);
 }
 
 /**

@@ -7,7 +7,13 @@ license = "Apache-2.0"
 repository = "https://github.com/hAcKlyc/MyAgents"
 homepage = "https://myagents.io"
 edition = "2021"
-rust-version = "1.77.2"
+# MSRV note: 1.81 documents `std::fs::rename` as atomic replace-on-existing
+# across all platforms (Windows uses MoveFileExW(REPLACE_EXISTING) under the
+# hood). Pre-1.81 toolchains keep the historical Windows behavior of failing
+# when the destination exists, which corrupts every tmp+rename path in this
+# crate (config.json, cron tasks, Task Center storage, IM bot state, …).
+# Tauri 2.9 already requires ≥ 1.78, so this bump only formalizes reality.
+rust-version = "1.81"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

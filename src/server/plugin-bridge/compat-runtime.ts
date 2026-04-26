@@ -15,7 +15,7 @@ import { join, basename, extname } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFile, readFile } from 'fs/promises';
 import { ensureDir } from '../utils/fs-utils';
-import { registerPendingDispatch, type PendingDispatchCallbacks } from './pending-dispatch';
+import { registerPendingDispatch, rejectPendingDispatch, type PendingDispatchCallbacks } from './pending-dispatch';
 import { cancellableFetch } from '../utils/cancellation';
 
 // ===== Media extraction utilities =====
@@ -371,8 +371,16 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
 
           console.log(`[compat-timing] dispatchReplyFromConfig PROTOCOL path: chatId=${chatId} len=${text.length} attachments=${mediaAttachments.length}`);
 
-          // POST the inbound message to Rust BEFORE registering pending dispatch,
-          // so that if the POST fails we don't leave an orphaned pending dispatch
+          // Codex H12 fix: register the pending dispatch BEFORE POSTing to
+          // Rust. The previous order (POST → register) had a race window —
+          // if Rust accepted the message and the bridge started emitting
+          // /start-stream / /stream-chunk faster than this Node task could
+          // re-enter the event loop, those callbacks hit `getPendingDispatch`
+          // before our register completed → fell into the fallback CardKit
+          // path → orphaned stream / mismatched output. Tradeoff: a POST
+          // failure now leaves a transient pending dispatch, which we
+          // explicitly reject below.
+          const completionPromise = registerPendingDispatch(chatId, callbacks);
           try {
             const resp = await fetch(`${rustBaseUrl}/api/im-bridge/message`, {
               method: 'POST',
@@ -403,11 +411,11 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
             (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt = Date.now();
           } catch (err) {
             console.error(`[compat-timing] Rust POST FAILED in protocol path (+${Date.now() - t0}ms):`, err);
+            // POST failed — explicitly reject the dispatch we just registered
+            // so it doesn't sit in the map until its 10-minute timeout.
+            rejectPendingDispatch(chatId, err instanceof Error ? err : new Error(String(err)));
             throw err;
           }
-
-          // Register pending dispatch AFTER successful POST (no leak on failure)
-          const completionPromise = registerPendingDispatch(chatId, callbacks);
 
           // Block until AI response completes (resolved by /finalize-stream or /abort-stream)
           try {

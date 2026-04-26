@@ -333,12 +333,18 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
     // Augment PATH with user-level directories (e.g. ~/.local/bin where `claude` lives).
     // NOTE: Also inherits NO_PROXY from Sidecar (injected by proxy_config::apply_to_subprocess()).
+    //
+    // `detached: true` puts the runtime CLI in its own process group on POSIX so
+    // we can later kill the entire tree via `process.kill(-pid, signal)`. Pre-fix,
+    // `proc.kill()` only signalled the wrapper and orphaned model/tool subprocesses
+    // (see killWithEscalation `killTree`).
     const proc = spawn([resolveCommand('claude'), ...args], {
       cwd: options.workspacePath,
       env: augmentedProcessEnv(),
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',
+      detached: true,
     });
 
     const handle = new ClaudeCodeProcess(proc);
@@ -465,6 +471,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     await killWithEscalation(process as ClaudeCodeProcess, {
       gracefulMs: 5000,
       hardMs: 2000,
+      killTree: true,
       onStep: (step, info) => {
         if (step === 'orphan') {
           console.warn(`[claude-code] Process pid=${info.pid} did not exit after SIGKILL; continuing with orphan risk`);

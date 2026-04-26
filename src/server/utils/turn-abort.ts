@@ -138,11 +138,42 @@ export function abortTurn(sessionId: string, reason: CancelReason): void {
 }
 
 /**
- * Return the AbortSignal for the most recently begun, not-yet-ended turn, or
- * `undefined` if no turn is active. Used by tool fetches to plumb the turn
- * signal as `parentSignal` into `cancellableFetch` / `withAbortSignal`.
+ * Return the AbortSignal for the active turn.
+ *
+ * Pattern A Wave 4 fragility guard: under the documented Sidecar:Session = 1:1
+ * invariant the stack holds at most one entry, so the "most recently begun"
+ * choice is unambiguous. If a future change ever multiplexes sessions inside
+ * one Sidecar (sub-agent tool execution, parallel turns, …), the stack would
+ * grow beyond one and tool fetches could silently route to the *wrong*
+ * AbortController. The optional `sessionId` parameter lets a caller that
+ * does know its own session ask explicitly; the invariant warning below
+ * surfaces an unexpected multi-session state in logs so the regression is
+ * loud rather than silent.
+ *
+ * Returns `undefined` when no turn is active (or the requested session has
+ * no live turn).
  */
-export function getCurrentTurnSignal(): AbortSignal | undefined {
+export function getCurrentTurnSignal(sessionId?: string): AbortSignal | undefined {
+  if (sessionId) {
+    const state = turnAbortBySession.get(sessionId);
+    return state?.controller.signal;
+  }
+  if (currentTurnStack.length > 1) {
+    // Stack overflow vs. design invariant — log once per process spike. In
+    // practice this fires only if someone added a new owner type that calls
+    // beginTurn() without endTurn() before another beginTurn(). The "most
+    // recently begun" fallback below is the legacy behavior; the invariant
+    // warning is what flags the regression.
+    if (!multiSessionWarned) {
+      multiSessionWarned = true;
+      console.warn(
+        `[turn-abort] currentTurnStack length=${currentTurnStack.length} ` +
+          `(expected ≤1 under Sidecar:Session = 1:1). Active sessions: ${currentTurnStack.join(',')}. ` +
+          `Tool fetches may attach to the wrong AbortController — pass sessionId to ` +
+          `getCurrentTurnSignal() or fix the missing endTurn() at the source.`,
+      );
+    }
+  }
   for (let i = currentTurnStack.length - 1; i >= 0; i--) {
     const sid = currentTurnStack[i];
     const state = turnAbortBySession.get(sid);
@@ -150,6 +181,7 @@ export function getCurrentTurnSignal(): AbortSignal | undefined {
   }
   return undefined;
 }
+let multiSessionWarned = false;
 
 /**
  * Test-only: clear all registrations. Useful between unit tests to avoid
@@ -158,4 +190,5 @@ export function getCurrentTurnSignal(): AbortSignal | undefined {
 export function __resetTurnAbortRegistryForTests(): void {
   turnAbortBySession.clear();
   currentTurnStack.length = 0;
+  multiSessionWarned = false;
 }

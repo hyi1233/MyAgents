@@ -2943,29 +2943,31 @@ function getPlatformTriple(): string {
  * @param providerEnv - Optional provider environment override (for verification or external calls)
  */
 /**
- * Auth env vars that the Claude Code CLI reads at startup. Any one of these
- * left unset (after `{...process.env}` spread + our provider branches) becomes
- * a hole that Bun's auto-dotenv loader can fill from the project workspace's
- * `.env` — for example a `.env.example`-style placeholder
+ * Auth env vars that the Claude Code CLI / SDK native binary reads at startup.
+ * Any one of these left unset (after `{...process.env}` spread + our provider
+ * branches) becomes a hole that the SDK's "fall back to whatever I find" path
+ * can fill from a stale source — typically a `.env.example`-style placeholder
  * `ANTHROPIC_API_KEY=sk-ant-your-anthropic-key-here` that an AI helpfully
- * copied over. The polluted value then reaches cli.js and surfaces as
- * "Not logged in · Please run /login".
+ * copied into the workspace. The polluted value reaches the SDK auth layer
+ * and surfaces as "Not logged in · Please run /login".
  *
  * Fix: after all provider branches run, any var in this list that's still
  * absent gets sealed to an empty string. Verified by reading claude-code
  * source (utils/auth.ts, utils/authFileDescriptor.ts, services/api/filesApi.ts)
  * — every check is a JS truthy test (`if (process.env.X)` or
  * `process.env.X || fallback`), so empty string is semantically identical to
- * unset: OAuth keychain fallback, apiKeyHelper, and Bedrock/Vertex paths all
- * continue to work. Empty strings block Bun's dotenv merge because Bun treats
- * "key explicitly present in spawn env" as parent-wins even when the value
- * happens to be "". Smoke-tested with Bun 1.3.6 (see PR discussion).
+ * unset for the SDK's purposes: OAuth keychain fallback, apiKeyHelper, and
+ * Bedrock/Vertex paths all continue to work.
+ *
+ * v0.2.0 status: under bundled Node + native-binary SDK we no longer have a
+ * runtime that auto-loads `.env` from cwd, so the active pollution vector is
+ * gone. The seal stays as defense-in-depth: cheap (a handful of `in` checks),
+ * documents the auth-env contract, and protects against future SDK runtimes
+ * (or shell wrappers) that might re-introduce auto-dotenv behavior.
  *
  * NOT included: CLAUDE_CONFIG_DIR — claude-code/src/utils/envUtils.ts:10 reads
  * it with `??` (nullish coalescing), so an empty string would fall through as
  * "" (not as the homedir fallback) and break the keychain service-name hash.
- * `.env` pollution of CLAUDE_CONFIG_DIR is also essentially impossible — no
- * project template ever sets a CC-internal var like that.
  */
 const CC_AUTH_ENV_VARS_TO_SEAL = [
   'ANTHROPIC_API_KEY',
@@ -2976,10 +2978,11 @@ const CC_AUTH_ENV_VARS_TO_SEAL = [
 ] as const;
 
 /**
- * Seal CC auth env vars against Bun dotenv auto-load pollution.
- * Only fills in empty strings for vars that are currently ABSENT from env —
- * preserves any real value we or the parent shell explicitly set. See
- * `CC_AUTH_ENV_VARS_TO_SEAL` above for the full rationale.
+ * Seal SDK auth env vars against environment-pollution sources (legacy Bun
+ * auto-dotenv, future shell wrappers, anything that might fill an absent var
+ * with a stale value). Only fills empty strings for vars currently ABSENT
+ * from env — preserves any real value we or the parent shell explicitly
+ * set. See `CC_AUTH_ENV_VARS_TO_SEAL` above for the full rationale.
  */
 function sealCcAuthEnv(env: NodeJS.ProcessEnv): void {
   for (const key of CC_AUTH_ENV_VARS_TO_SEAL) {
@@ -3331,11 +3334,9 @@ export function buildClaudeSessionEnv(
     console.log(`[env] OpenAI bridge: ANTHROPIC_BASE_URL → loopback :${sidecarPort}, upstream → ${effectiveProviderEnv.baseUrl}, proxy vars stripped`);
     // Seal any auth var not explicitly set above (e.g. ANTHROPIC_AUTH_TOKEN
     // was deleted, CLAUDE_CODE_OAUTH_TOKEN was never touched) to an empty
-    // string so Bun's auto-dotenv loader can't backfill them from the
-    // workspace's .env at subprocess spawn time. See CC_AUTH_ENV_VARS_TO_SEAL
-    // above for full rationale — this is the "Not logged in · Please run
-    // /login" bug that triggers when a user (or an AI helping them) fills
-    // out a project's .env.example with placeholder Anthropic credentials.
+    // string. Defense-in-depth against stale `.env` placeholders surfacing
+    // as "Not logged in · Please run /login" — see CC_AUTH_ENV_VARS_TO_SEAL
+    // above for full rationale.
     sealCcAuthEnv(env);
     return env;
   }
@@ -3396,23 +3397,23 @@ export function buildClaudeSessionEnv(
     }
   } else {
     // Subscription mode: clear any previously inherited third-party apiKey so
-    // the SDK falls through to keychain OAuth. NOTE: `delete` alone is NOT
-    // enough — when the SDK subprocess (bun cli.js) starts with cwd set to
-    // the project workspace, Bun's auto-dotenv loader will happily refill
-    // any deleted key from the project's .env. `sealCcAuthEnv(env)` below
-    // plugs that hole by converting the deletes into explicit empty strings,
-    // which Bun treats as "parent already set this, don't override".
+    // the SDK falls through to keychain OAuth. `sealCcAuthEnv(env)` below
+    // converts the deletes into explicit empty strings — defense-in-depth
+    // against any spawning runtime that auto-loads `.env` from cwd and would
+    // otherwise refill the keys from a placeholder template.
     delete env.ANTHROPIC_AUTH_TOKEN;
     delete env.ANTHROPIC_API_KEY;
     console.log('[env] ANTHROPIC_AUTH_TOKEN cleared (using default auth)');
   }
 
-  // Block Bun auto-dotenv pollution of CC auth env vars before handing the
-  // env off to sdk.mjs. This is the last-line-of-defense for anything the
-  // branches above either deleted (subscription mode) or never set at all
-  // (CLAUDE_CODE_OAUTH_TOKEN{,_FILE_DESCRIPTOR}). See CC_AUTH_ENV_VARS_TO_SEAL
-  // above for the full rationale — triggering symptom is "Not logged in"
-  // after a user (or an AI) fills out a project's .env.example.
+  // Seal CC auth env vars before handing the env off to the SDK subprocess
+  // (defense-in-depth against `.env`-style pollution). Last-line-of-defense
+  // for anything the branches above either deleted (subscription mode) or
+  // never set at all (CLAUDE_CODE_OAUTH_TOKEN{,_FILE_DESCRIPTOR}). See
+  // CC_AUTH_ENV_VARS_TO_SEAL above for the full rationale — the triggering
+  // symptom was "Not logged in · Please run /login" after a user (or an AI
+  // helping them) filled out a project's .env.example with placeholder
+  // Anthropic credentials.
   sealCcAuthEnv(env);
   return env;
 }

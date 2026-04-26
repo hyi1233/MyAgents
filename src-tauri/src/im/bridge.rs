@@ -1334,35 +1334,16 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         }
     }
 
-    // --- Bun fallback: if both system and bundled npm failed ---
+    // Both system npm and bundled npm failed — there is no further fallback.
+    // (The pre-0.2.0 "Bun fallback" branch ran `node add` / `node install`,
+    // which are not valid Node subcommands; with Bun removed it could never
+    // succeed.)
     if !npm_succeeded {
-        use crate::sidecar::find_node_executable_pub;
-        // find_node_executable_pub searches bundled bun first, then system bun (PATH, ~/.bun, etc.)
-        let node_path = find_node_executable_pub(app_handle)
-            .ok_or_else(|| format!("Plugin install failed: no npm (bundled/system) and no Bun found. Please install Node.js or Bun."))?;
-
-        ulog_warn!("[bridge] Falling back to Bun for plugin install: {}", npm_spec);
-
-        let node_for_add = node_path;
-        let base_for_add = base_dir.clone();
-        let npm_spec_owned = install_spec.clone();
-        let add_output = tokio::task::spawn_blocking(move || {
-            let mut cmd = crate::process_cmd::new(&node_for_add);
-            cmd.args(["add", npm_spec_owned.as_str()])
-                .current_dir(&base_for_add);
-            apply_proxy_env(&mut cmd);
-            cmd.output()
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking: {}", e))?
-        .map_err(|e| format!("bun add failed: {}", e))?;
-
-        if !add_output.status.success() {
-            let stderr = String::from_utf8_lossy(&add_output.stderr);
-            ulog_error!("[bridge] Bun fallback also failed for {}: {}", npm_spec, stderr.trim());
-            return Err(format!("Plugin install failed (npm + bun all failed). Please install Node.js or Bun.\nLast error: {}", stderr));
-        }
-        ulog_info!("[bridge] Bun fallback install {} succeeded", npm_spec);
+        return Err(format!(
+            "Plugin install failed for {}: bundled npm unavailable and system npm not found in PATH. \
+             Install Node.js, or reinstall MyAgents to restore the bundled runtime.",
+            npm_spec
+        ));
     }
 
     // Dependency repair + shim install (order matters: repair FIRST, shim LAST).
@@ -1401,23 +1382,9 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
                 _ => { ulog_warn!("[bridge] Dependency repair: spawn failed"); }
             }
         } else {
-            // Bun fallback
-            use crate::sidecar::find_node_executable_pub;
-            if let Some(node_path) = find_node_executable_pub(app_handle) {
-                let bun_repair_dir = base_dir.clone();
-                match tokio::task::spawn_blocking(move || {
-                    let mut cmd = crate::process_cmd::new(&node_path);
-                    cmd.args(["install", "--ignore-scripts"])
-                        .current_dir(&bun_repair_dir);
-                    apply_proxy_env(&mut cmd);
-                    cmd.output()
-                }).await {
-                    Ok(Ok(output)) if output.status.success() => {
-                        ulog_info!("[bridge] Dependency repair (bun) succeeded");
-                    }
-                    _ => { ulog_warn!("[bridge] Dependency repair (bun) failed"); }
-                }
-            }
+            // No bundled npm — initial plugin install above must have used system
+            // npm; rely on that path's transitive dep resolution. No fallback runner.
+            ulog_warn!("[bridge] Skipping dependency repair: bundled npm unavailable");
         }
     }
 

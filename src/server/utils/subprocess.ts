@@ -71,6 +71,25 @@ export interface SpawnOptions {
   detached?: boolean;
 }
 
+const IS_WINDOWS = process.platform === 'win32';
+
+/**
+ * Windows-only: `child_process.spawn` cannot execute `.cmd` / `.bat` shims
+ * directly without `shell: true` (Node ≥20.12 hard-rejects this since
+ * CVE-2024-27980). npm-installed CLI binaries — `codex.cmd`, `gemini.cmd`,
+ * `npx.cmd`, plugin-bridge launchers — are exactly these shims, so they
+ * silently fail to spawn unless we route them through cmd.exe.
+ *
+ * Bun.spawn handled this internally pre-migration; the Bun→Node adapter
+ * needs to do the same. Returns the cmd-extension test result so callers
+ * (`spawn`, `fireAndForget`) can opt into shell mode automatically.
+ */
+function needsWindowsShell(cmd: string): boolean {
+  if (!IS_WINDOWS) return false;
+  const lower = cmd.toLowerCase();
+  return lower.endsWith('.cmd') || lower.endsWith('.bat');
+}
+
 export function spawn(argv: string[], options: SpawnOptions = {}): SubprocessHandle {
   if (!argv.length) throw new Error('spawn: argv must be non-empty');
   const [cmd, ...args] = argv;
@@ -88,6 +107,12 @@ export function spawn(argv: string[], options: SpawnOptions = {}): SubprocessHan
     windowsHide: options.windowsHide,
     detached: options.detached,
   };
+
+  // CVE-2024-27980 / Node ≥20.12 hardening: .cmd/.bat must be invoked through
+  // a shell. Node's own quoting under `shell: true` handles the trailing args.
+  if (needsWindowsShell(cmd)) {
+    nodeOpts.shell = true;
+  }
 
   const child = nodeSpawn(cmd, args, nodeOpts);
   return wrapChildProcess(child);

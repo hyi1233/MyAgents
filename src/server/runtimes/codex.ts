@@ -426,6 +426,10 @@ export class CodexRuntime implements AgentRuntime {
       stdin: 'pipe',
       cwd: options.workspacePath,
       env: augmentedProcessEnv(),
+      // Detached → child becomes its own process-group leader on POSIX so
+      // killWithEscalation({ killTree: true }) below can take down the entire
+      // model/tool tree, not just the wrapper.
+      detached: true,
     });
 
     const codexProc = new CodexProcess(proc);
@@ -675,6 +679,7 @@ export class CodexRuntime implements AgentRuntime {
       await killWithEscalation(codexProc, {
         gracefulMs: 3_000,
         hardMs: 2_000,
+        killTree: true,
         onStep: (step, info) => {
           if (step === 'orphan') {
             console.warn(`[codex] Process pid=${info.pid} did not exit after SIGKILL; continuing with orphan risk`);

@@ -106,7 +106,14 @@ export function withAbortSignal<T>(
     timer.unref?.();
   }
 
-  return op(ctrl.signal).finally(cleanup);
+  // Wrap synchronously-throwing op() in Promise.resolve().then(...) so a
+  // synchronous throw in `op` still flows through `.finally(cleanup)`. The
+  // pre-fix `op(ctrl.signal).finally(cleanup)` only registered cleanup once
+  // op() returned a Promise — a synchronous throw bypassed it and leaked the
+  // parent-abort listener + timer.
+  return Promise.resolve()
+    .then(() => op(ctrl.signal))
+    .finally(cleanup);
 }
 
 /**

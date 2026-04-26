@@ -105,6 +105,9 @@ class ImEventBusImpl {
    *  (Codex W3 fix). */
   subscribe(sinceSeq: number, cb: ImEventSubscriber): () => void {
     // Cross-generation: subscriber's `since` is older than our last reset.
+    // Independent from the in-generation eviction gap below — both can apply
+    // (a subscriber that resumed across a reset AND inside an eviction range
+    // needs both markers, hence sequential `if`s instead of `else if`).
     if (sinceSeq > 0 && sinceSeq < this.generationStartSeq) {
       try {
         cb({
@@ -118,9 +121,17 @@ class ImEventBusImpl {
           ts: Date.now(),
         });
       } catch (e) { console.error('[im-bus] subscriber threw on generation-gap', e); }
-    } else if (this.gap && sinceSeq < this.gap.seq) {
-      // In-generation eviction gap.
-      try { cb(this.gap); } catch (e) { console.error('[im-bus] subscriber threw on gap', e); }
+    }
+    // In-generation eviction gap — fire whenever the subscriber's `sinceSeq`
+    // is below the END of the dropped range, not just below its start.
+    // Codex W3 fix: the previous `sinceSeq < this.gap.seq` (where `seq`
+    // tracks the FIRST dropped event) silently lost events for any
+    // subscriber that resumed inside a dropped range.
+    if (this.gap) {
+      const range = (this.gap.data as { droppedSeqs: [number, number] }).droppedSeqs;
+      if (sinceSeq < range[1]) {
+        try { cb(this.gap); } catch (e) { console.error('[im-bus] subscriber threw on gap', e); }
+      }
     }
 
     for (const event of this.buffer) {
@@ -149,9 +160,15 @@ class ImEventBusImpl {
   }
 
   /** Reset bus state. Called on session reset / sidecar shutdown.
-   *  Subscribers are NOT removed automatically — they can still receive
-   *  fresh events; the unsubscribe handle remains the canonical lifecycle
-   *  controller (caller-owned).
+   *
+   *  Subscriber semantics (Codex M3 fix): on shutdown the caller wants the
+   *  bus to stop forwarding — long-poll consumers / SSE bridges / Pattern C
+   *  ImEventConsumer tasks have no way to reach back and `unsubscribe()`.
+   *  Pre-fix the subscriber set survived `clear()` and stale registrants
+   *  kept receiving events from the next generation, retaining each one's
+   *  closure (and any per-subscriber buffer it captured) until process
+   *  exit. We now drop them: a subscriber that survives across a session
+   *  reset has to re-`subscribe()`, which is the right contract.
    *
    *  We do NOT reset `nextSeq` (Codex W3): a Rust consumer that reconnects
    *  with `since=<old high seq>` against a freshly-reset bus would otherwise
@@ -163,6 +180,7 @@ class ImEventBusImpl {
     this.buffer.length = 0;
     this.gap = null;
     this.generationStartSeq = this.nextSeq; // future events live in new generation
+    this.subscribers.clear();
     // nextSeq is intentionally NOT reset.
   }
 }

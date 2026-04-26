@@ -213,11 +213,17 @@ export async function maybeSpill(
       throw metaErr;
     }
   } catch (err) {
-    console.warn(`[refs] spill failed id=${id}: ${err instanceof Error ? err.message : String(err)}`);
-    // On failure, fall back to inline so the caller still has data — better
-    // than dropping. Caller's SSE pipeline will deal with the size; logs will
-    // surface the failure.
-    return { inline: value };
+    // Pattern 2 contract: oversize values MUST NOT travel inline through
+    // SSE / IPC. The previous `return { inline: value }` fallback defeated
+    // the entire 256KB protection — a multi-MB tool result on a full disk
+    // would silently flood the renderer queue, OOM the IPC bridge, or
+    // wedge a slow client. Fail closed: surface the spill failure so the
+    // caller's try/catch turns it into a tool-error instead.
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(`[refs] spill failed id=${id} sizeBytes=${sizeBytes}: ${reason}`);
+    throw new Error(
+      `large-value-store: failed to spill ${sizeBytes} bytes (id=${id}): ${reason}`,
+    );
   }
   return ref;
 }

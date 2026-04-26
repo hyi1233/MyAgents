@@ -148,8 +148,8 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
 
     if (!data.ok || !data.tools || data.tools.length === 0) {
       // Not an error — some plugins (e.g. WeChat) don't provide MCP tools.
-      // Use console.log instead of console.warn to avoid misleading [ERROR] in unified log
-      // (Bun stderr capture marks all console.warn output as ERROR level).
+      // Use console.log so the unified-log INFO/WARN/ERROR mapping matches
+      // intent (an empty tool list isn't a fault).
       console.log('[im-bridge-tools] No tools available from Bridge (plugin may not provide tools, this is normal)');
       if (myGeneration === contextGeneration) dynamicServer = null;
       return;
@@ -157,6 +157,16 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
 
     // Create one MCP tool per plugin tool — transparent passthrough
     // Filter out tools with missing names, and ensure description is always a string
+    //
+    // W9 fix: capture the *current* context as `localCtx` at server-build time
+    // rather than dereferencing the module-global `bridgeToolsContext` inside
+    // each tool callback. Concurrent IM turns (Pipeline v2 protocol-split
+    // allows two messages from the same peer to be enqueued back-to-back) can
+    // overwrite the module-global with the next turn's identity while the
+    // previous turn's tool calls are still resolving — without per-server
+    // capture, an in-flight Feishu OAuth call could end up using the wrong
+    // sender open_id / chat_id / account_id.
+    const localCtx: ImBridgeToolsContext = ctx;
     const dynamicTools = data.tools.filter(t => t.name).map(pluginTool =>
       tool(
         pluginTool.name,
@@ -165,15 +175,8 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
         // The plugin's description already documents the expected parameters.
         { args: z.record(z.string(), z.any()).describe('Tool arguments as key-value pairs') },
         async (params: { args: Record<string, unknown> }): Promise<CallToolResult> => {
-          if (!bridgeToolsContext) {
-            return {
-              content: [{ type: 'text', text: 'Error: No Bridge context available.' }],
-              isError: true,
-            };
-          }
-
           try {
-            const callUrl = `http://127.0.0.1:${bridgeToolsContext.bridgePort}/mcp/call-tool`;
+            const callUrl = `http://127.0.0.1:${localCtx.bridgePort}/mcp/call-tool`;
             // Pattern 1: 30s for plugin tool calls — they may hit remote APIs
             // (Feishu, Lark, …) but should never hang indefinitely. The plugin
             // itself is responsible for finer-grained timeouts; this is the
@@ -188,13 +191,13 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
                 body: JSON.stringify({
                   toolName: pluginTool.name,
                   args: params.args,
-                  userId: bridgeToolsContext.senderId,
-                  isOwner: bridgeToolsContext.isOwner ?? false,
-                  enabledGroups: [...new Set([...bridgeToolsContext.enabledToolGroups, 'interaction'])],
+                  userId: localCtx.senderId,
+                  isOwner: localCtx.isOwner ?? false,
+                  enabledGroups: [...new Set([...localCtx.enabledToolGroups, 'interaction'])],
                   // Ticket context for LarkTicket injection (Feishu OAuth auto-auth)
-                  chatId: bridgeToolsContext.chatId,
-                  chatType: bridgeToolsContext.sourceType === 'group' ? 'group' : 'p2p',
-                  accountId: bridgeToolsContext.accountId,
+                  chatId: localCtx.chatId,
+                  chatType: localCtx.sourceType === 'group' ? 'group' : 'p2p',
+                  accountId: localCtx.accountId,
                 }),
               },
               { timeoutMs: 30_000, parentSignal: getCurrentTurnSignal() },
@@ -211,8 +214,8 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
             const result = await callResp.json() as { ok: boolean; result?: unknown; error?: string };
             if (!result.ok) {
               // Auto-trigger OAuth for need_user_authorization (may come as Bridge-level error)
-              if (result.error?.includes('need_user_authorization') && bridgeToolsContext?.chatId) {
-                return await triggerAutoAuth(bridgeToolsContext);
+              if (result.error?.includes('need_user_authorization') && localCtx.chatId) {
+                return await triggerAutoAuth(localCtx);
               }
               return {
                 content: [{ type: 'text', text: `Tool error: ${result.error || 'unknown'}` }],
@@ -236,8 +239,8 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
             }
 
             // Auto-trigger OAuth when Feishu returns need_user_authorization.
-            if (resultText.includes('need_user_authorization') && bridgeToolsContext?.chatId) {
-              return await triggerAutoAuth(bridgeToolsContext);
+            if (resultText.includes('need_user_authorization') && localCtx.chatId) {
+              return await triggerAutoAuth(localCtx);
             }
 
             // Pattern 2 §F — Cap large tool results. Anything over 256KB is
@@ -247,7 +250,7 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
             // disk in one go.
             const spilled = await maybeSpill(resultText, {
               mimetype: 'text/plain; charset=utf-8',
-              sessionId: bridgeToolsContext?.pluginId,
+              sessionId: localCtx.pluginId,
             });
             if ('inline' in spilled) {
               return { content: [{ type: 'text', text: resultText }] };

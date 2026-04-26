@@ -150,6 +150,23 @@ fn get_pid_start_time_ms(pid: i32) -> Option<u64> {
     parse_lstart_to_epoch_ms(&s)
 }
 
+/// Linux CLK_TCK lookup, cached for the process lifetime. Read at first
+/// call via `sysconf(_SC_CLK_TCK)` (libc::sysconf), falling back to 100
+/// (universal default) if the lookup fails. Without this, an HZ=250 /
+/// HZ=1000 kernel would skew our derived start-time enough to false-break
+/// a long-running live config-write holder under the 60s age fallback.
+#[cfg(target_os = "linux")]
+fn linux_clk_tck() -> f64 {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<f64> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        // SAFETY: sysconf is a thread-safe libc function. _SC_CLK_TCK is the
+        // standard sysconf constant for the clock-tick frequency.
+        let v = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if v > 0 && v <= 10_000 { v as f64 } else { 100.0 }
+    })
+}
+
 #[cfg(target_os = "linux")]
 fn get_pid_start_time_ms(pid: i32) -> Option<u64> {
     let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
@@ -162,9 +179,8 @@ fn get_pid_start_time_ms(pid: i32) -> Option<u64> {
     let startticks: u64 = fields.get(19)?.parse().ok()?;
     let uptime_str = fs::read_to_string("/proc/uptime").ok()?;
     let uptime_sec: f64 = uptime_str.split_whitespace().next()?.parse().ok()?;
-    // HZ assumed 100 — matches Node helper.
-    const HZ: f64 = 100.0;
-    let start_sec_ago = uptime_sec - (startticks as f64) / HZ;
+    let hz = linux_clk_tck();
+    let start_sec_ago = uptime_sec - (startticks as f64) / hz;
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
     let offset_ms = (start_sec_ago * 1000.0).round() as i128;
     let result = now_ms as i128 - offset_ms;
@@ -267,6 +283,47 @@ fn our_start_time_ms() -> u64 {
     })
 }
 
+/// Race-safe break: atomically rename the lockdir to a per-process tombstone
+/// path and then `remove_dir_all`. Two concurrent waiters detecting the lock
+/// as stale can't both succeed — only the rename winner ends up with a
+/// tombstone, so a third process that has by then taken a fresh lock under
+/// the original path stays untouched. Mirrors `breakLockSafely` in
+/// `src/server/utils/file-lock.ts`.
+fn break_lock_safely(lock_path: &Path) -> bool {
+    let nonce: u32 = {
+        // Cheap, unique enough for collision avoidance between waiters in the
+        // same millisecond — combine with our pid + a wall-clock millis stamp.
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        now_ns ^ (std::process::id() as u32)
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let tombstone = lock_path.with_file_name(format!(
+        "{}.stale-{}-{}-{:08x}",
+        lock_path.file_name().and_then(|n| n.to_str()).unwrap_or("lock"),
+        std::process::id(),
+        now_ms,
+        nonce,
+    ));
+    match fs::rename(lock_path, &tombstone) {
+        Ok(()) => {
+            let _ = fs::remove_dir_all(&tombstone);
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Another waiter already broke (and may have re-acquired) it. From
+            // our perspective the stale state is gone — caller should retry.
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Try to break a stale lockdir if its owner pid is dead and age > `stale`.
 /// Returns `true` if we removed it (caller should retry mkdir immediately).
 fn try_break_stale_lock(lock_path: &Path, stale: Duration) -> bool {
@@ -317,7 +374,7 @@ fn try_break_stale_lock(lock_path: &Path, stale: Duration) -> bool {
                                         "[file-lock] pid {} reused (declaredStart={} liveStart={} skew={}ms); breaking lock {}",
                                         pid, declared, live, skew, lock_path.display()
                                     );
-                                    // Fall through to remove_dir_all below.
+                                    // Fall through to break_lock_safely below.
                                 } else {
                                     // start_time matches → owner genuinely alive.
                                     return false;
@@ -346,7 +403,14 @@ fn try_break_stale_lock(lock_path: &Path, stale: Duration) -> bool {
         age.as_millis(),
         if owner.is_empty() { "unknown" } else { &owner }
     );
-    fs::remove_dir_all(lock_path).is_ok()
+    break_lock_safely(lock_path)
+}
+
+/// Build our own owner token: `rust:<pid>:<startMs>`. Used at acquisition
+/// time to write the sentinel and at release time to verify we still own
+/// the lock dir (cf. release-race fix below).
+fn our_owner_token() -> String {
+    format!("rust:{}:{}", std::process::id(), our_start_time_ms())
 }
 
 /// Synchronous lock acquisition + release wrapping `mutator`. Designed to be
@@ -364,18 +428,19 @@ where
         fs::create_dir_all(parent).map_err(FileLockError::Io)?;
     }
 
+    let our_token = our_owner_token();
+
     let start = Instant::now();
     loop {
         match fs::create_dir(lock_path) {
             Ok(()) => {
                 let owner_path = lock_path.join("owner");
-                let start_ms = our_start_time_ms();
                 let _ = fs::OpenOptions::new()
                     .create(true)
                     .write(true)
                     .truncate(true)
                     .open(&owner_path)
-                    .and_then(|mut f| writeln!(f, "rust:{}:{}", std::process::id(), start_ms));
+                    .and_then(|mut f| writeln!(f, "{}", our_token));
                 break;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -396,7 +461,30 @@ where
 
     let result = mutator();
 
-    let _ = fs::remove_dir_all(lock_path);
+    // Release-race guard (Pattern 5 fix #4): another process may have broken
+    // our lock as stale (e.g. we paused past stale_ms) and acquired its own
+    // lock under the same path. Verify ownership before removing — mirror of
+    // Node `file-lock.ts` and required for cross-process parity.
+    let owner_path = lock_path.join("owner");
+    match fs::read_to_string(&owner_path) {
+        Ok(s) if s.trim() == our_token => {
+            let _ = fs::remove_dir_all(lock_path);
+        }
+        Ok(other) => {
+            ulog_warn!(
+                "[file-lock] our lock at {} was broken as stale; not deleting current holder's lock (owner={})",
+                lock_path.display(),
+                other.trim()
+            );
+        }
+        Err(_) => {
+            // Owner file missing or unreadable (lock dir may already be gone or
+            // another process is mid-write). Treat as ours — best-effort cleanup
+            // so we don't leak the dir. If the dir was already removed,
+            // remove_dir_all returns NotFound which we ignore.
+            let _ = fs::remove_dir_all(lock_path);
+        }
+    }
     result
 }
 

@@ -118,7 +118,24 @@ where
                 if cancel.load(Ordering::SeqCst) {
                     return;
                 }
-                let chunk_result = byte_stream.next().await;
+                // W8a fix: race the stream read against a periodic cancel
+                // poll. Without this, a quiet stream (no events for tens of
+                // seconds) leaves us blocked on `byte_stream.next()` until
+                // the next byte arrives — flipping `cancel` from outside
+                // takes effect only when the upstream reconnect happens.
+                // 1s tick is fine; bus produces deltas << 1s apart in
+                // active turns, and idle is the case we're optimizing.
+                let chunk_result = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        // Tick: check cancel and continue waiting for the next byte.
+                        if cancel.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        continue 'inner;
+                    }
+                    res = byte_stream.next() => res,
+                };
                 match chunk_result {
                     Some(Ok(chunk)) => {
                         let bytes_ref: &[u8] = chunk.as_ref();

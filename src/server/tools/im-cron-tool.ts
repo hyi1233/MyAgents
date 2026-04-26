@@ -111,7 +111,11 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
  * Returns an error CallToolResult if verification fails, or null if OK.
  */
 async function verifyTaskOwnership(taskId: string, action: string): Promise<CallToolResult | null> {
-  const ctx = imCronContext || sessionCronContext;
+  // W9 fix: snapshot the IM context once per ownership check — see comment in
+  // imCronToolHandler. Two reads of `imCronContext` could observe different
+  // values if a concurrent /api/im/enqueue ran between them.
+  const im = imCronContext;
+  const ctx = im || sessionCronContext;
   if (!ctx) {
     return {
       content: [{ type: 'text', text: `Error: No cron context available. Cannot ${action} tasks without session context.` }],
@@ -120,8 +124,8 @@ async function verifyTaskOwnership(taskId: string, action: string): Promise<Call
   }
 
   // Build query: IM sessions filter by botId, desktop sessions by workspace
-  const query = imCronContext
-    ? `?sourceBotId=${encodeURIComponent(imCronContext.botId)}`
+  const query = im
+    ? `?sourceBotId=${encodeURIComponent(im.botId)}`
     : `?workspacePath=${encodeURIComponent(ctx.workspacePath)}`;
 
   const result = await managementApi(`/api/cron/list${query}`) as {
@@ -176,6 +180,15 @@ async function imCronToolHandler(args: {
     };
   }
 
+  // W9 fix: take a single snapshot of the IM context at the top of the
+  // handler. The module-global `imCronContext` is overwritten on every
+  // /api/im/enqueue, so for a multi-chat bot a concurrent enqueue from a
+  // different chat can change the context between two field reads inside
+  // this handler — leading to the cron task being tagged with one chat's
+  // botId and another chat's chatId. The local snapshot is stable for the
+  // duration of this tool call regardless of what the next enqueue does.
+  const im = imCronContext;
+
   try {
     switch (args.action) {
       case 'add': {
@@ -186,8 +199,9 @@ async function imCronToolHandler(args: {
           };
         }
 
-        // Resolve context: prefer IM context, fall back to session context
-        const addCtx = imCronContext || sessionCronContext;
+        // Resolve context: prefer IM context (snapshot taken above), fall
+        // back to session context.
+        const addCtx = im || sessionCronContext;
         if (!addCtx) {
           return {
             content: [{ type: 'text', text: 'Error: No cron context available. Cannot create scheduled tasks without session context.' }],
@@ -232,8 +246,8 @@ async function imCronToolHandler(args: {
         // --- Delivery resolution (3-tier priority) ---
         // Always set sourceBotId when in IM context, regardless of deliverTo target.
         // This ensures IM-created tasks remain listable/updatable from the originating IM session.
-        if (imCronContext) {
-          createPayload.sourceBotId = imCronContext.botId;
+        if (im) {
+          createPayload.sourceBotId = im.botId;
         }
 
         let deliveryDesc = '';
@@ -258,12 +272,12 @@ async function imCronToolHandler(args: {
             platform: target.platform,
           };
           deliveryDesc = ` Results will be delivered to ${target.name} (${target.platform}).`;
-        } else if (imCronContext) {
+        } else if (im) {
           // 2. Auto: IM session → deliver back to source chat
           createPayload.delivery = {
-            botId: imCronContext.botId,
-            chatId: imCronContext.chatId,
-            platform: imCronContext.platform,
+            botId: im.botId,
+            chatId: im.chatId,
+            platform: im.platform,
           };
           deliveryDesc = ` Results will be delivered to this chat.`;
         }
@@ -282,7 +296,7 @@ async function imCronToolHandler(args: {
             schedule: args.job.schedule,
             scheduleDesc: scheduleDescription,
             nextExecutionAt: result.nextExecutionAt,
-            deliverTo: args.job.deliverTo || (imCronContext ? imCronContext.botId : null),
+            deliverTo: args.job.deliverTo || (im ? im.botId : null),
             message: `Scheduled task created. ${scheduleDescription}${deliveryDesc}`,
           };
           return {
@@ -297,9 +311,9 @@ async function imCronToolHandler(args: {
 
       case 'list': {
         // Filter by sourceBotId for IM sessions, by workspace for desktop sessions
-        const listCtx = imCronContext || sessionCronContext;
-        const query = imCronContext
-          ? `?sourceBotId=${encodeURIComponent(imCronContext.botId)}`
+        const listCtx = im || sessionCronContext;
+        const query = im
+          ? `?sourceBotId=${encodeURIComponent(im.botId)}`
           : listCtx?.workspacePath
             ? `?workspacePath=${encodeURIComponent(listCtx.workspacePath)}`
             : '';
@@ -470,9 +484,9 @@ async function imCronToolHandler(args: {
 
       case 'status': {
         // For IM sessions, filter by botId; for desktop sessions, filter by workspace
-        const statusCtx = imCronContext || sessionCronContext;
-        const statusQuery = imCronContext
-          ? `?botId=${encodeURIComponent(imCronContext.botId)}`
+        const statusCtx = im || sessionCronContext;
+        const statusQuery = im
+          ? `?botId=${encodeURIComponent(im.botId)}`
           : statusCtx?.workspacePath
             ? `?workspacePath=${encodeURIComponent(statusCtx.workspacePath)}`
             : '';
@@ -491,14 +505,14 @@ async function imCronToolHandler(args: {
       }
 
       case 'wake': {
-        if (!imCronContext) {
+        if (!im) {
           return {
             content: [{ type: 'text', text: 'Error: "wake" action is only available in IM Bot sessions.' }],
             isError: true,
           };
         }
         const resp = await managementApi('/api/im/wake', 'POST', {
-          botId: imCronContext.botId,
+          botId: im.botId,
           text: args.text || undefined,
         }) as { ok: boolean; error?: string };
 
