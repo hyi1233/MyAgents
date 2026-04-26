@@ -8,7 +8,7 @@
 //! Pattern 5 (Single-Writer Invariant) — lock acquisition + stale-recovery now
 //! lives in `crate::utils::file_lock`; this module just composes it.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -55,16 +55,27 @@ fn write_all_synced(path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// fsync the directory holding `path` so a fresh tmp+rename is durable across
+/// crashes. POSIX-only — Windows' `FlushFileBuffers` on a directory handle is
+/// a documented no-op (and would require `FILE_FLAG_BACKUP_SEMANTICS` just to
+/// open the handle), so the platform's own NTFS journaling is what we rely on
+/// there. Splitting unix/non-unix into two functions instead of cfg-gating the
+/// body keeps `path` from being flagged as unused on Windows.
+#[cfg(unix)]
 fn fsync_parent_dir(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        if let Some(parent) = path.parent() {
-            let dir = File::open(parent)
-                .map_err(|e| format!("[config-io] Cannot open config dir for fsync: {}", e))?;
-            dir.sync_all()
-                .map_err(|e| format!("[config-io] Cannot fsync config dir: {}", e))?;
-        }
+    if let Some(parent) = path.parent() {
+        let dir = OpenOptions::new()
+            .read(true)
+            .open(parent)
+            .map_err(|e| format!("[config-io] Cannot open config dir for fsync: {}", e))?;
+        dir.sync_all()
+            .map_err(|e| format!("[config-io] Cannot fsync config dir: {}", e))?;
     }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn fsync_parent_dir(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
@@ -155,7 +166,9 @@ pub async fn cmd_fsync_path(path: String, directory: bool) -> Result<(), String>
         if directory {
             #[cfg(unix)]
             {
-                let dir = File::open(&p)
+                let dir = OpenOptions::new()
+                    .read(true)
+                    .open(&p)
                     .map_err(|e| format!("[config-io] Cannot open dir for fsync: {}", e))?;
                 dir.sync_all()
                     .map_err(|e| format!("[config-io] Cannot fsync dir: {}", e))?;
@@ -164,14 +177,16 @@ pub async fn cmd_fsync_path(path: String, directory: bool) -> Result<(), String>
             // FlushFileBuffers on a directory handle is a no-op. Skip.
             Ok(())
         } else {
+            // Build the OpenOptions per platform: Windows requires write
+            // access for FlushFileBuffers; Unix's fsync(2) is happy with
+            // read-only. Constructing one OpenOptions and branching on
+            // `.write(...)` keeps the import set minimal (no `File`).
+            let mut opts = OpenOptions::new();
+            opts.read(true);
             #[cfg(windows)]
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
+            opts.write(true);
+            let file = opts
                 .open(&p)
-                .map_err(|e| format!("[config-io] Cannot open file for fsync: {}", e))?;
-            #[cfg(not(windows))]
-            let file = File::open(&p)
                 .map_err(|e| format!("[config-io] Cannot open file for fsync: {}", e))?;
             file.sync_all()
                 .map_err(|e| format!("[config-io] Cannot fsync file: {}", e))
