@@ -99,9 +99,17 @@ execFileSync(
 );
 
 // Sanity check: the platform binary must end up under @esbuild/<triple>.
-const triple = `${os === 'win32' ? 'win32' : os}-${cpu}`;
-const binaryName = os === 'win32' ? 'esbuild.exe' : 'esbuild';
-const platformBinary = resolve(RUNTIME_DIR, 'node_modules/@esbuild', triple, 'bin', binaryName);
+//
+// Layout differs by platform — POSIX puts the binary in `bin/esbuild`
+// (so npm's bin-symlink machinery works), Windows ships it at the
+// package root as `esbuild.exe` (Windows has no symlink-bin convention,
+// just a plain "package.json bin field points to a sibling file"
+// arrangement). Verified against the upstream tarball, not a guess.
+const triple = `${os}-${cpu}`;
+const platformBinary =
+  os === 'win32'
+    ? resolve(RUNTIME_DIR, 'node_modules/@esbuild', triple, 'esbuild.exe')
+    : resolve(RUNTIME_DIR, 'node_modules/@esbuild', triple, 'bin/esbuild');
 if (!existsSync(platformBinary)) {
   console.error(`✘ Platform binary not produced at ${platformBinary}`);
   console.error(`  npm install --os=${os} --cpu=${cpu} did not pull @esbuild/${triple}.`);
