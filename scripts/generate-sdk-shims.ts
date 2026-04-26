@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * SDK Shim Stub Generator
  *
@@ -7,10 +6,15 @@
  * shim.  This prevents "Cannot find module" crashes when plugins import
  * modules we haven't manually implemented.
  *
+ * Run via `npm run generate:sdk-shims` (which expands to
+ * `node --import tsx/esm scripts/generate-sdk-shims.ts`). No shebang on
+ * this file: the script isn't `chmod +x`'d in the repo and the v0.2.0
+ * runtime is bundled Node, not Bun.
+ *
  * Usage:
- *   bun scripts/generate-sdk-shims.ts                       # default
- *   bun scripts/generate-sdk-shims.ts --openclaw-dir ../oc   # custom path
- *   bun scripts/generate-sdk-shims.ts --dry-run              # preview only
+ *   npm run generate:sdk-shims                                  # default
+ *   npm run generate:sdk-shims -- --openclaw-dir ../oc          # custom path
+ *   npm run generate:sdk-shims -- --dry-run                     # preview only
  */
 
 import fs from "node:fs";
