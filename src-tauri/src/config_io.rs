@@ -79,6 +79,17 @@ fn fsync_parent_dir(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Per-platform OpenOptions for the fsync handler — Windows needs
+/// `GENERIC_WRITE` for `FlushFileBuffers`, Unix is fine with read-only
+/// (`fsync(2)` accepts a read-only fd).
+fn opts_for_fsync() -> OpenOptions {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(windows)]
+    opts.write(true);
+    opts
+}
+
 /// Re-read `config.json` under lock, apply `mutator`, and atomically publish it.
 ///
 /// `keep_backup` preserves existing `.bak` behavior for call sites that already
@@ -181,12 +192,48 @@ pub async fn cmd_fsync_path(path: String, directory: bool) -> Result<(), String>
             // access for FlushFileBuffers; Unix's fsync(2) is happy with
             // read-only. Constructing one OpenOptions and branching on
             // `.write(...)` keeps the import set minimal (no `File`).
-            let mut opts = OpenOptions::new();
-            opts.read(true);
-            #[cfg(windows)]
-            opts.write(true);
-            let file = opts
-                .open(&p)
+            //
+            // Windows AV / search-indexer race (review-by-cc H3): a process
+            // we can't see — Defender real-time scan, OneDrive syncer,
+            // Backblaze indexer — sometimes opens a file we just wrote
+            // with `FILE_SHARE_NONE` for a brief window. Our open then
+            // returns `ERROR_SHARING_VIOLATION` (os error 32) or
+            // `ERROR_ACCESS_DENIED` (5). The contended window is ms-scale,
+            // so a small backoff loop transparently rides through it. Unix
+            // doesn't have this class of failure (fcntl LOCK_EX would, but
+            // we don't take it).
+            let open_with_retry = || -> std::io::Result<std::fs::File> {
+                #[cfg(windows)]
+                {
+                    let mut last: Option<std::io::Error> = None;
+                    for attempt in 0..4 {
+                        match opts_for_fsync().open(&p) {
+                            Ok(f) => return Ok(f),
+                            Err(e) => {
+                                let code = e.raw_os_error().unwrap_or(0);
+                                let transient = code == 32 || code == 5;
+                                if transient && attempt < 3 {
+                                    std::thread::sleep(std::time::Duration::from_millis(
+                                        25u64 << attempt, // 25, 50, 100ms
+                                    ));
+                                    last = Some(e);
+                                    continue;
+                                }
+                                return Err(e);
+                            }
+                        }
+                    }
+                    Err(last.unwrap_or_else(|| std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "fsync open: exhausted retries",
+                    )))
+                }
+                #[cfg(not(windows))]
+                {
+                    opts_for_fsync().open(&p)
+                }
+            };
+            let file = open_with_retry()
                 .map_err(|e| format!("[config-io] Cannot open file for fsync: {}", e))?;
             file.sync_all()
                 .map_err(|e| format!("[config-io] Cannot fsync file: {}", e))

@@ -1728,17 +1728,22 @@ async fn install_sdk_shim<R: tauri::Runtime>(
     ulog_info!("[bridge] SDK shim installed from {:?} → {:?}", shim_src, shim_dst);
 
     // Patch @larksuiteoapi/node-sdk to use a fetch-based axios adapter.
-    // Bun's default axios http adapter has a bug where socket connections are
-    // silently closed, causing 30s hangs. This patch replaces the SDK's
-    // defaultHttpInstance with one using native fetch (252ms vs 30278ms).
-    patch_lark_sdk_for_bun(plugin_dir).await;
+    // Originally added (pre-0.2.0) for Bun, where the default axios http
+    // adapter silently closed socket connections and produced 30s hangs.
+    // The patch (252ms vs 30278ms) is also strictly faster on Node — fetch
+    // routes through undici's connection pool instead of axios's
+    // per-request Node http connection — so we keep it. Function renamed
+    // from `..._for_bun` to drop the misleading runtime-specific suffix.
+    patch_lark_sdk_use_fetch_adapter(plugin_dir).await;
 
     Ok(())
 }
 
-/// Patch @larksuiteoapi/node-sdk's defaultHttpInstance to use a fetch-based
-/// axios adapter instead of the default Node.js http adapter (incompatible with Bun).
-async fn patch_lark_sdk_for_bun(plugin_dir: &std::path::Path) {
+/// Replace `@larksuiteoapi/node-sdk`'s default axios HTTP adapter with a
+/// fetch-based one. Originally a Bun-incompatibility workaround
+/// (`patch_lark_sdk_for_bun`); kept on Node because the fetch adapter is
+/// also a 100× latency win on the cold-handshake path.
+async fn patch_lark_sdk_use_fetch_adapter(plugin_dir: &std::path::Path) {
     let sdk_file = plugin_dir
         .join("node_modules")
         .join("@larksuiteoapi")

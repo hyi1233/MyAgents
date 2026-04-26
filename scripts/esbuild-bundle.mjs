@@ -53,7 +53,11 @@ const TARGETS = {
      */
     postBuild: async (outfile) => {
       const code = await readFile(outfile, 'utf8');
-      const m = code.match(/var __dirname = "((?:\/Users|\/home|[A-Z]:\\)[^"]+)"/);
+      // Match Mac/Linux absolute (`/Users/...`, `/home/...`) and Windows
+      // (`C:\...` or forward-slash form `C:/...`, both upper- and lower-
+      // case drives) — esbuild has been observed to emit either slash
+      // style on Windows depending on path-normalize internals.
+      const m = code.match(/var __dirname = "((?:\/Users|\/home|[A-Za-z]:[\\/])[^"]+)"/);
       if (m) {
         console.error(
           `✘ ${outfile}: hardcoded __dirname → ${m[1]}\n` +

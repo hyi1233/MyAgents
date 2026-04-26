@@ -806,8 +806,22 @@ pub fn cmd_sync_cli<R: Runtime>(
     if !src_script.exists() {
         return Err(format!("CLI script not found: {:?} (run `npm run build:cli`?)", src_script));
     }
-    fs::copy(&src_script, &dst_script)
-        .map_err(|e| format!("Failed to copy CLI script: {}", e))?;
+    // Atomic-replace via tmp + rename, so a `myagents` process currently
+    // executing the old binary doesn't block the upgrade. On Windows
+    // `fs::copy` directly to a path held open by another process returns
+    // ERROR_SHARING_VIOLATION; the tmp+rename pattern dodges this since
+    // rename atomically swaps inodes (or, on Windows ≥1.81, calls
+    // `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` which works even when the
+    // destination is open). Codex C6 from cross-review.
+    let tmp_script = dst_script.with_extension("tmp.new");
+    fs::copy(&src_script, &tmp_script)
+        .map_err(|e| format!("Failed to copy CLI script tmp: {}", e))?;
+    if let Err(e) = fs::rename(&tmp_script, &dst_script) {
+        // Best-effort tmp cleanup so a stale `myagents.tmp.new` doesn't
+        // pile up on every failed sync.
+        let _ = fs::remove_file(&tmp_script);
+        return Err(format!("Failed to install CLI script: {}", e));
+    }
     // Ensure executable permission on Unix
     #[cfg(unix)]
     {
@@ -854,8 +868,16 @@ pub fn cmd_sync_cli<R: Runtime>(
                 Err(e) => return Err(format!("Failed to read source myagents.cmd: {}", e)),
             }
         };
-        fs::write(&dst_cmd, cmd_contents)
-            .map_err(|e| format!("Failed to write myagents.cmd: {}", e))?;
+        // Same tmp+rename atomic-replace pattern as above (an open
+        // myagents.cmd shell window would otherwise block the upgrade
+        // with ERROR_SHARING_VIOLATION).
+        let tmp_cmd = dst_cmd.with_extension("cmd.tmp.new");
+        fs::write(&tmp_cmd, cmd_contents)
+            .map_err(|e| format!("Failed to write myagents.cmd tmp: {}", e))?;
+        if let Err(e) = fs::rename(&tmp_cmd, &dst_cmd) {
+            let _ = fs::remove_file(&tmp_cmd);
+            return Err(format!("Failed to install myagents.cmd: {}", e));
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {

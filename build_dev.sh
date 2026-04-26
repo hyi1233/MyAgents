@@ -75,16 +75,16 @@ echo ""
 # 清理旧构建（包括 Rust 缓存的 resources）
 echo -e "${BLUE}[准备] 清理旧构建...${NC}"
 rm -rf "${PROJECT_DIR}/dist"
-# 创建占位符资源 (关键: 满足 tauri build 需求，但 sidecar.rs 在 debug 模式下会忽略它们)
+# Tauri bundle 阶段需要 resources/ 下被引用的目录都存在（即使是空的——dev 模式
+# 下 Rust 端会 fallback 到顶层 node_modules）。文件级 resource（server-dist.js
+# / plugin-bridge-dist.js / cli/myagents.js）则由 tauri:build 的
+# beforeBuildCommand 通过 `npm run build:server/bridge/cli` 在构建期间生成，
+# 不需要额外占位文件。
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/claude-agent-sdk"
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/sharp-runtime"
-# sharp 在 dev 模式下从顶层 node_modules/sharp 加载（getBundledSharpEntryPoint 的 walk-up 分支）
-# 这里只是给 Tauri bundler 一个存在的目录指针，防止 resources 配置校验失败
 [ -f "${PROJECT_DIR}/src-tauri/resources/sharp-runtime/.dev-placeholder" ] || \
     echo "dev mode: sharp loads from top-level node_modules/sharp; this dir is prod-only" \
     > "${PROJECT_DIR}/src-tauri/resources/sharp-runtime/.dev-placeholder"
-echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/server-dist.js"
-echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/plugin-bridge-dist.js"
 
 # 填充 tsx-runtime（dev 模式 bridge.rs::find_tsx_runtime_loader 优先 fallback
 # 到项目根 node_modules/tsx，但 Tauri bundler 仍要求资源目录存在；填一个最小
@@ -189,15 +189,11 @@ if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
 fi
 echo -e "  ${GREEN}✓ claude (${SDK_TRIPLE}) 已就绪${NC}"
 
-# 打包 myagents CLI（resources/cli/myagents.js，shebang 由 esbuild
-# banner 注入为 node）。统一走 `npm run build:cli` →
-# `scripts/esbuild-bundle.mjs cli` —— 与 build_macos.sh / build_linux.sh
-# / build_windows.ps1 共享同一份配置。
-echo -e "  ${CYAN}打包 myagents CLI...${NC}"
+# myagents CLI 的打包不在这里——`npm run tauri:build` 的 beforeBuildCommand
+# (tauri.conf.json) 已包含 `npm run build:cli`，由 `scripts/esbuild-bundle.mjs`
+# 的 post-build hook 同步把 myagents.cmd 拷贝到 resources/cli/。dev 脚本只需
+# 保证目录存在，避免 Tauri bundle 阶段的 resource 校验报错。
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/cli"
-(cd "${PROJECT_DIR}" && npm run build:cli)
-cp "${PROJECT_DIR}/src/cli/myagents.cmd" "${PROJECT_DIR}/src-tauri/resources/cli/myagents.cmd"
-echo -e "  ${GREEN}✓ myagents CLI 已打包${NC}"
 
 # Debug 模式签名 (optional — build_macos.sh per-TARGET loop 已处理 Node + Claude)
 # build_dev.sh 只构建 host arch 单个，本段处理该情况下的 Node + Claude 签名。

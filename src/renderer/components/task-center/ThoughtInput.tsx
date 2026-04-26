@@ -102,6 +102,37 @@ const VARIANTS: Record<ThoughtInputVariant, {
   },
 };
 
+/**
+ * Single source of truth for every CSS class that decides where a glyph
+ * lands. The mirror `<div>` and the user-facing `<textarea>` MUST have
+ * identical wrap geometry — if any of these tokens drift between the
+ * two layers (e.g. someone adds `tracking-tight` to the textarea but
+ * forgets the mirror), text wraps at a different character and the
+ * textarea's caret floats into "mystery whitespace" after the last
+ * visible mirror glyph (regression scenario from cross-review M9).
+ *
+ * Pulled out into a function so both call sites pass the same `theme`
+ * + `showExpandToggle` and end up with byte-equivalent output.
+ */
+function MIRROR_TEXTAREA_SHARED_CLASS(
+  theme: (typeof VARIANTS)[ThoughtInputVariant],
+  showExpandToggle: boolean,
+): string {
+  return `${theme.innerPaddingClass} ${theme.textareaClass}${showExpandToggle ? ' pr-10' : ''}`;
+}
+
+/**
+ * Inline styles whose presence (or absence) likewise affects wrap
+ * geometry. Both layers spread this object so the textarea can
+ * additionally pin `WebkitTextFillColor: 'transparent'` and its
+ * own min/maxHeight without forking the shared keys.
+ */
+const MIRROR_TEXTAREA_SHARED_STYLE = {
+  fontFamily: 'inherit',
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'break-word',
+} as const;
+
 interface Props {
   onCreated?: (t: Thought) => void;
   placeholder?: string;
@@ -437,12 +468,17 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             <div className={theme.outerPaddingClass}>
               <div
                 ref={overlayInnerRef}
-                className={`${theme.innerPaddingClass} ${theme.textareaClass} text-[var(--ink)] ${showExpandToggle ? 'pr-10' : ''}`}
+                // `MIRROR_TEXTAREA_SHARED_CLASS` carries every Tailwind/
+                // CSS-token decision that affects glyph layout — padding
+                // inside the box, font size, line-height, conditional
+                // `pr-10` for the expand toggle. The textarea below
+                // applies the EXACT same class (plus its own appearance/
+                // background overrides) so any future style change here
+                // hits both layers in lockstep.
+                className={`${MIRROR_TEXTAREA_SHARED_CLASS(theme, showExpandToggle)} text-[var(--ink)]`}
                 style={{
-                  fontFamily: 'inherit',
-                  whiteSpace: 'pre-wrap',
-                  overflowWrap: 'break-word',
-                  willChange: 'transform',
+                  ...MIRROR_TEXTAREA_SHARED_STYLE,
+                  willChange: 'transform', // mirror translateY(-scrollTop) GPU hint
                 }}
               >
                 {segments.map((seg, i) =>
@@ -502,11 +538,16 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             // click area so content can't overlap the toggle button
             // (matches SimpleChatInput's `pr-8` but one size larger to
             // accommodate the toggle's larger hit box).
-            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-muted)] placeholder:[-webkit-text-fill-color:var(--ink-muted)] focus:outline-none ${theme.innerPaddingClass} ${theme.textareaClass} ${showExpandToggle ? 'pr-10' : ''}`}
+            // Textarea-specific classes (block layout, transparency to let
+            // the mirror layer show through, caret/placeholder colour) +
+            // `MIRROR_TEXTAREA_SHARED_CLASS` so geometry stays pinned to
+            // the mirror. Editing the geometry props here without also
+            // updating the shared helper would re-create the wrap-mismatch
+            // / caret-floating-on-mystery-whitespace bug.
+            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-muted)] placeholder:[-webkit-text-fill-color:var(--ink-muted)] focus:outline-none ${MIRROR_TEXTAREA_SHARED_CLASS(theme, showExpandToggle)}`}
             style={{
-              fontFamily: 'inherit',
+              ...MIRROR_TEXTAREA_SHARED_STYLE,
               WebkitTextFillColor: 'transparent',
-              overflowWrap: 'break-word',
               minHeight: `${textareaMinHeightPx}px`,
               maxHeight: `${textareaMaxHeightPx}px`,
             }}
