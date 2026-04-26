@@ -69,6 +69,10 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   'chat:tool-result-delta': 'coalescible',
   'chat:subagent-tool-input-delta': 'coalescible',
   'chat:subagent-tool-result-delta': 'coalescible',
+  // Debounced refresh signals — only the latest one matters, so safe
+  // to coalesce. Prevents file-watcher bursts (e.g. `git checkout`,
+  // `npm install` in workspace) from filling the critical queue.
+  'workspace:files-changed': 'coalescible',
   // Logs / telemetry — droppable.
   'chat:log': 'droppable',
   'chat:logs': 'droppable',
@@ -113,7 +117,6 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   'queue:added': 'critical',
   'queue:started': 'critical',
   'queue:cancelled': 'critical',
-  'workspace:files-changed': 'critical',
 });
 
 function resolvePriority(event: string): SseEventPriority {

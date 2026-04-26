@@ -872,9 +872,38 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         .map(|v| v.to_string())
         .unwrap_or_else(|| "{}".to_string());
 
+    // Self-heal: pre-0.2.0 installs don't have tsx in their plugin
+    // directory (the install_tsx_into_plugin_dir step was added in
+    // 0.2.0 to support `.ts`-shipped plugins like the WeChat / Lark /
+    // QQBot OpenClaw modules). If the user already had a plugin
+    // installed before this app version, calling install_plugin from
+    // the wizard would be required to bring tsx in — instead we
+    // populate it on-demand here, so existing users don't need to
+    // re-install. install_tsx_into_plugin_dir is idempotent (skips
+    // when node_modules/tsx already exists), so the cost on the
+    // happy path is one disk stat.
+    //
+    // CRITICAL ORDER: this MUST run BEFORE the shim integrity check
+    // below. `install_tsx_into_plugin_dir` runs `npm install tsx --no-save`
+    // which (despite --no-save) reconciles `node_modules/` against
+    // package.json — npm's prune step deletes packages not in the dep
+    // tree, and the SDK shim is a manually-copied dir not declared in
+    // package.json, so it gets pruned away on every spawn under the
+    // previous order. Running tsx install first lets the shim integrity
+    // check observe the pruned state and restore the shim before the
+    // bridge tries to import it. (Codex / review-by-cc cross-review
+    // 2026-04-27 Critical 1: weak idempotency marker; the architectural
+    // fix — bundling tsx into resources/ — is tracked for v0.2.1.)
+    install_tsx_into_plugin_dir(app_handle, &std::path::PathBuf::from(plugin_dir)).await;
+
     // ── Shim integrity + freshness check ──
-    // 1. If node_modules/openclaw/ is the real npm package (not our shim) → re-install
-    // 2. If shim version doesn't match SHIM_COMPAT_VERSION → re-install (shim content updated)
+    // 1. If node_modules/openclaw/ is missing (e.g. just pruned by npm
+    //    install above, or never installed in a pre-0.2.0 plugin) →
+    //    re-install
+    // 2. If node_modules/openclaw/ is the real npm package (not our
+    //    shim) → re-install
+    // 3. If shim version doesn't match SHIM_COMPAT_VERSION → re-install
+    //    (shim content updated)
     {
         let openclaw_pkg = std::path::Path::new(plugin_dir)
             .join("node_modules").join("openclaw").join("package.json");
@@ -895,21 +924,11 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         };
         if needs_repair {
             ulog_warn!("[bridge] Shim integrity/freshness check failed for {}, re-installing", plugin_dir);
-            let _ = install_sdk_shim(app_handle, &std::path::PathBuf::from(plugin_dir)).await;
+            if let Err(e) = install_sdk_shim(app_handle, &std::path::PathBuf::from(plugin_dir)).await {
+                ulog_error!("[bridge] SDK shim re-install FAILED for {}: {} — bridge will fail to load openclaw plugins", plugin_dir, e);
+            }
         }
     }
-
-    // Self-heal: pre-0.2.0 installs don't have tsx in their plugin
-    // directory (the install_tsx_into_plugin_dir step was added in
-    // 0.2.0 to support `.ts`-shipped plugins like the WeChat / Lark /
-    // QQBot OpenClaw modules). If the user already had a plugin
-    // installed before this app version, calling install_plugin from
-    // the wizard would be required to bring tsx in — instead we
-    // populate it on-demand here, so existing users don't need to
-    // re-install. install_tsx_into_plugin_dir is idempotent (skips
-    // when node_modules/tsx already exists), so the cost on the
-    // happy path is one disk stat.
-    install_tsx_into_plugin_dir(app_handle, &std::path::PathBuf::from(plugin_dir)).await;
 
     ulog_info!(
         "[bridge] Spawning bridge: node={:?} script={:?} plugin_dir={} port={} rust_port={}",
@@ -1425,30 +1444,36 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         }
     }
 
-    // Install plugin-sdk shim as the FINAL step (after dependency repair).
-    // This MUST be last — npm/bun install above may overwrite node_modules/openclaw/
-    // with the real package from the registry. Our shim must always win.
-    install_sdk_shim(app_handle, &base_dir).await?;
-
     // Install tsx into plugin_dir so the bridge's `--import tsx/esm` can
-    // resolve in **production**.
+    // resolve in **production**. OpenClaw plugins routinely ship raw `.ts`
+    // source (qqbot/lark/weixin all do — the `openclaw.extensions` field
+    // points at `index.ts`). Node ≥22 has built-in TS support but
+    // explicitly refuses to strip types from files under `node_modules/`
+    // (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so without a
+    // loader hook the bridge dies on plugin import.
     //
-    // Why this is needed: OpenClaw plugins routinely ship raw `.ts` source
-    // (qqbot/lark/weixin all do — the `openclaw.extensions` field points at
-    // `index.ts`). Node ≥22 has built-in TS support but explicitly refuses
-    // to strip types from files under `node_modules/` (`ERR_UNSUPPORTED_
-    // NODE_MODULES_TYPE_STRIPPING`), so without a loader hook the bridge
-    // dies on plugin import. tsx is the standard ESM loader hook used by
-    // the OpenClaw ecosystem.
+    // CRITICAL ORDER: tsx install BEFORE shim install. `npm install tsx
+    // --no-save` (despite --no-save) reconciles `node_modules/` against
+    // package.json — its prune step removes packages not in the dep
+    // tree, and the SDK shim is a manually-copied dir not declared in
+    // package.json, so it would get pruned away if installed first.
+    // Doing tsx first then shim makes the shim genuinely "last
+    // write wins" against npm's prune. Spawn-time integrity check
+    // catches any future drift.
     //
-    // We install tsx into the plugin dir (not into Tauri resources) so
-    // (a) we don't bloat the installer with esbuild's per-platform binary,
-    // and (b) plugins that don't need tsx never pay the cost — uninstalling
-    // a plugin nukes its tree including tsx. The bridge's `current_dir`
-    // (set in spawn_plugin_bridge below) lets Node's module resolver
-    // walk up from the plugin dir to find tsx via the standard `tsx/esm`
-    // specifier. Dev mode finds tsx via repo-root node_modules, same flow.
+    // KNOWN LIMITATION: per-plugin tsx is wasteful (~10MB × N plugins)
+    // and requires network at install time. v0.2.1 will replace this
+    // with a shared `~/.myagents/runtime-tsx/` dir + absolute-path
+    // `--import` — see review-by-cc / Codex cross-review 2026-04-27.
     install_tsx_into_plugin_dir(app_handle, &base_dir).await;
+
+    // Install plugin-sdk shim as the FINAL step (after dependency repair
+    // AND after tsx install). This MUST be last — npm/bun install above
+    // may overwrite node_modules/openclaw/ with the real package from
+    // the registry, AND the tsx install's prune step actively deletes
+    // any dir not in package.json deps (including our shim). Our shim
+    // must always win.
+    install_sdk_shim(app_handle, &base_dir).await?;
 
     // Try to read plugin manifest
     let manifest = read_plugin_manifest(&base_dir, trimmed).await;
@@ -1649,6 +1674,7 @@ async fn install_tsx_into_plugin_dir<R: tauri::Runtime>(
             "install",
             "tsx",
             "--no-save",
+            "--no-package-lock",
             "--no-audit",
             "--no-fund",
         ])
