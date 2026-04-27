@@ -426,6 +426,39 @@ for TARGET in "${BUILD_TARGETS[@]}"; do
     echo -e "  ${CYAN}填充 tsx-runtime (darwin-${NODE_TARGET_ARCH})...${NC}"
     npm run build:tsx-runtime -- darwin "$NODE_TARGET_ARCH"
 
+    # ---- 签名 tsx-runtime 内的 esbuild 原生二进制 ----
+    # esbuild 是 Go 静态编译，没有 JIT 需求；跟 ripgrep / sharp 一样只要
+    # `--options runtime --timestamp`，不需要 entitlements。
+    # npm 安装后两处 path 都有 binary：
+    #   - node_modules/esbuild/bin/esbuild              (npm postinstall 拷贝/硬链接)
+    #   - node_modules/@esbuild/<triple>/bin/esbuild    (per-platform optional dep)
+    # 两者通常共享同一个 inode（hardlink），但 codesign 路径独立，必须各签一次；
+    # node_modules/.bin/esbuild 是 symlink，notarizer 跟随符号链接验证，所以签源
+    # 文件就够了，不必单独处理。
+    TSX_RUNTIME_DIR="${PROJECT_DIR}/src-tauri/resources/tsx-runtime"
+    TSX_SIGNED_COUNT=0
+    TSX_FAILED_COUNT=0
+    while IFS= read -r binary; do
+        echo -e "    ${CYAN}签名: $(echo "$binary" | sed "s|.*/tsx-runtime/||")${NC}"
+        xattr -d com.apple.quarantine "$binary" 2>/dev/null || true
+        if codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" "$binary" 2>/dev/null; then
+            ((TSX_SIGNED_COUNT++))
+        else
+            echo -e "    ${RED}✗ 签名失败 - $binary${NC}"
+            ((TSX_FAILED_COUNT++))
+        fi
+    done < <(find "${TSX_RUNTIME_DIR}/node_modules" -type f -path "*/bin/esbuild" 2>/dev/null)
+    if [ $TSX_FAILED_COUNT -gt 0 ]; then
+        echo -e "${RED}✗ tsx-runtime esbuild 签名失败 (${TSX_FAILED_COUNT} 个)，公证必定失败${NC}"
+        exit 1
+    fi
+    if [ $TSX_SIGNED_COUNT -eq 0 ]; then
+        echo -e "${RED}✗ 未签名任何 esbuild 二进制，setup-tsx-runtime 可能没装上 native dep${NC}"
+        exit 1
+    fi
+    echo -e "    ${GREEN}✓ tsx-runtime esbuild 签名完成 (${TSX_SIGNED_COUNT} 个)${NC}"
+
     # 签名 Node.js 二进制 (TCC / notarization 需要统一签名)
     NODE_BINARY="${NODEJS_DIR}/bin/node"
     if [ -f "$NODE_BINARY" ]; then
