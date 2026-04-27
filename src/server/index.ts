@@ -1470,8 +1470,24 @@ async function main() {
           return jsonResponse({ error: 'ref not found or expired' }, 404);
         }
         // Stream from disk so multi-MB bodies don't buffer into memory.
+        //
+        // `Access-Control-Allow-Origin: *` is the load-bearing header here
+        // (issue #109 root cause). The renderer's proxyFetch pulls this URL
+        // via WebKit's native `fetch()` (the spill path bypasses Tauri IPC
+        // because the body is too large to ship through the invoke channel).
+        // Without an explicit ACAO header, WebKit/WKWebView silently rejects
+        // the response as opaque cross-origin and surfaces it to JS as the
+        // notoriously diagnostic-free `TypeError: Load failed`. Other
+        // sidecar paths skip CORS because they go through Tauri IPC, which
+        // bypasses the browser's same-origin machinery entirely; this one
+        // doesn't, so it must opt in. Use `*` (not the renderer's origin)
+        // because the sidecar is bound to 127.0.0.1 and trusts everything
+        // on loopback already.
         const fr = await fileResponse(refInfo.path, {
           contentType: refInfo.mimetype,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+          },
         });
         if (!fr) {
           return jsonResponse({ error: 'ref body missing' }, 404);

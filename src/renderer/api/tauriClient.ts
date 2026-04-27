@@ -399,6 +399,14 @@ export async function proxyFetch(
         // /refs/:id route is keep-alive and streams from disk). This path
         // skips the atob-byte-loop completely — the browser's native Response
         // does the binary decode on its own thread.
+        //
+        // CRITICAL: this is a NATIVE WebKit fetch, not Tauri IPC. That means
+        // the sidecar's `/refs/:id` response MUST include
+        // `Access-Control-Allow-Origin: *` — without it, WKWebView treats the
+        // response as opaque cross-origin and rejects with the notoriously
+        // diagnostic-free `TypeError: Load failed`, which previously broke
+        // every >1MB workspace load (issue #109). Verified at
+        // src/server/index.ts (the `/refs/:id` handler).
         if (result.ref_url) {
             const refResp = await fetch(result.ref_url);
             // Re-stamp headers from the original upstream so callers that
