@@ -239,7 +239,6 @@ export default function MonacoEditor({
         readOnly,
         minimap: { enabled: false },
         lineNumbers: 'on' as const,
-        lineNumbersMinChars: 4,
         scrollBeyondLastLine: false,
         wordWrap: 'on' as const,
         wrappingStrategy: 'advanced' as const,
@@ -249,14 +248,21 @@ export default function MonacoEditor({
         // - Single-line: line bounces vertically during composition
         // See: https://github.com/microsoft/monaco-editor/issues/4270
         accessibilitySupport: 'off' as const,
-        fontSize: 13,
-        lineHeight: 20,
+        fontSize: 14,
+        lineHeight: 22,
         // Use expanded font stack for Chinese character support in comments
         // Note: Monaco doesn't support CSS variables, so we inline the --font-code equivalent
         fontFamily: "ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Fira Code', 'PingFang SC', 'Microsoft YaHei', monospace",
         tabSize: 2,
         automaticLayout: true,
         padding: { top: 16, bottom: 16 },
+        // Tighten the left gutter. `lineNumbersMinChars: 4` keeps room for up-to-9999-line
+        // files without recomputing layout when the file grows; `lineDecorationsWidth: 2`
+        // pulls content close to the line numbers (default 10 leaves a wasteful gap, especially
+        // since `glyphMargin: false` already removed the breakpoint column).
+        lineNumbersMinChars: 4,
+        lineDecorationsWidth: 2,
+        glyphMargin: false,
         scrollbar: {
             vertical: 'auto' as const,
             horizontal: 'auto' as const,
@@ -283,10 +289,33 @@ export default function MonacoEditor({
         parameterHints: { enabled: false },
         // Prevent long lines (e.g., minified JSON/JS) from freezing the tokenizer
         maxTokenizationLineLength: 10000,
+        // Don't highlight every occurrence of the word under the cursor — feels like
+        // a flicker storm on hover/click and adds no value when LSP is disabled anyway.
+        // `selectionHighlight` (default true) is kept: explicitly selecting a word still
+        // highlights its other occurrences, which is a useful cross-reference.
+        occurrencesHighlight: 'off' as const,
+        // Tame Monaco's "ambiguous Unicode" flagging for CJK content. The default boxes
+        // every full-width punctuation mark (`，` `。` `；` etc.) because they look like
+        // ASCII counterparts — useless noise for Chinese notes. We keep `invisibleCharacters`
+        // on (catches zero-width sneak-ins) and turn off the comments/strings inclusions.
+        unicodeHighlight: {
+            ambiguousCharacters: false,
+            invisibleCharacters: true,
+            includeComments: false,
+            includeStrings: false,
+        },
+        // Extend wordSeparators with CJK full-width punctuation so double-click in Chinese
+        // text stops at `，` `。` etc. instead of swallowing whole paragraphs. Monaco's
+        // default list only includes ASCII punctuation, which never appears mid-Chinese.
+        wordSeparators: '~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?，。！？；：""‘’「」『』（）【】《》、…—·',
     }), [readOnly]);
 
+    // Wrapper class `monaco-editor-host` is targeted by index.css to add visual right
+    // padding inside Monaco's content area. Monaco's own `padding` option only supports
+    // top/bottom — for horizontal breathing room (and to keep text out from under the
+    // overlay vertical scrollbar) we pad via CSS on the inner `.view-lines`.
     return (
-        <div className={`relative h-full w-full overflow-hidden ${className}`}>
+        <div className={`monaco-editor-host relative h-full w-full overflow-hidden ${className}`}>
             <Editor
                 height="100%"
                 language={language}
