@@ -405,6 +405,42 @@ echo ""
 echo -e "${BLUE}[7/7] 构建 Tauri 应用 (Release + 签名 + 公证)...${NC}"
 echo -e "${YELLOW}这可能需要 5-10 分钟 (包含公证等待时间)...${NC}"
 
+# ---- 补齐 Claude Agent SDK 的跨架构 native 包 ----
+# `@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64}` 在 package.json 里
+# 是 optionalDependencies；npm 默认只装匹配 host 架构的那一份，所以
+# arm64 Mac 上 `npm install` 后只有 darwin-arm64，build "Both" 模式跑到
+# 第二轮（x64）就会在下面 per-TARGET loop 里报「Claude native binary
+# 不存在」。
+#
+# 强制安装非 host 架构 optional dep 的关键是 npm 的 `--os` / `--cpu`
+# 覆写——这两个 flag 是 npm 用来判断"该不该跳过这个 optional"的输入，
+# 单纯的 `--force` 不会绕过这个过滤（experimental verified：在 arm64
+# host 上 `npm install --force <darwin-x64-pkg>` 报 "up to date" 但其
+# 实没装）。每个 arch 必须用各自的 flag 单独装一次。
+#
+# `--no-save` 不写回 package.json（仓库 optionalDeps 形态保持不变）；
+# `--ignore-scripts` 同 setup-tsx-runtime 的逻辑（避免跨平台 postinstall
+# 触发自检失败）。
+SDK_VERSION=$(grep '"@anthropic-ai/claude-agent-sdk-darwin-arm64"' "${PROJECT_DIR}/package.json" | sed 's/.*: "\([0-9][0-9.]*\)".*/\1/')
+if [ -z "$SDK_VERSION" ]; then
+    echo -e "${RED}✗ 无法从 package.json 解析 Claude SDK 版本号${NC}"
+    exit 1
+fi
+for ARCH in arm64 x64; do
+    SDK_PKG_BIN="${PROJECT_DIR}/node_modules/@anthropic-ai/claude-agent-sdk-darwin-${ARCH}/claude"
+    if [ ! -f "$SDK_PKG_BIN" ]; then
+        echo -e "${BLUE}[7.0/7] 补齐 Claude SDK darwin-${ARCH}@${SDK_VERSION}...${NC}"
+        (cd "${PROJECT_DIR}" && npm install --no-save --no-audit --no-fund --ignore-scripts \
+            --os=darwin --cpu="$ARCH" \
+            "@anthropic-ai/claude-agent-sdk-darwin-${ARCH}@${SDK_VERSION}")
+        if [ ! -f "$SDK_PKG_BIN" ]; then
+            echo -e "${RED}✗ darwin-${ARCH} 安装后仍未找到 binary: $SDK_PKG_BIN${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}  ✓ darwin-${ARCH} 就绪${NC}"
+    fi
+done
+
 for TARGET in "${BUILD_TARGETS[@]}"; do
     echo ""
     echo -e "${YELLOW}━━━ 构建目标: $TARGET ━━━${NC}"
