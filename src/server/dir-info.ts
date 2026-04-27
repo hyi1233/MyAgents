@@ -24,8 +24,31 @@ const DEFAULT_IGNORES = new Set(['.git', 'node_modules', 'out', 'dist', 'tmp']);
 // Default limits for directory scanning
 const DEFAULT_INFO_MAX_DEPTH = 3;
 const DEFAULT_INFO_MAX_ENTRIES = 500;
-const DEFAULT_TREE_MAX_DEPTH = 6;
-const DEFAULT_TREE_MAX_ENTRIES = 50000;
+// Initial /agent/dir tree caps — bounding the eager walk on first paint.
+// Older defaults (depth=6, entries=50000) walked every reachable file in
+// the workspace before responding. For a multi-thousand-file workspace
+// that's hundreds of ms of fs.readdir + JSON.stringify on the sidecar
+// event loop and a multi-MB response body for no UX benefit (the user
+// can only see the visible viewport at a time). The UI (DirectoryPanel)
+// already lazy-loads via /agent/dir/expand when a directory marked
+// `loaded: false` is clicked, so capping the initial walk doesn't hide
+// content — it just defers the cost to "you actually clicked it".
+//
+// `maxEntries` stays generous (10000) because the breadth-first walk
+// does NOT mark width-truncated dirs with `loaded: false` — it just
+// `break`s out of the loop when entriesCount hits the cap, so children
+// past that point become invisible with no expand affordance. Holding
+// the cap well above any realistic single-directory fanout avoids that
+// edge case until per-directory pagination is added; the depth bound is
+// already enough to cap response size and event-loop time.
+//
+// (The actual root cause of #109's `TypeError: Load failed` was a
+// missing `Access-Control-Allow-Origin` header on the sidecar's
+// `/refs/:id` route — WKWebView blocked the cross-origin response as
+// opaque. Fixed in src/server/index.ts. These caps are an independent
+// perf improvement, not a workaround for that bug.)
+const DEFAULT_TREE_MAX_DEPTH = 4;
+const DEFAULT_TREE_MAX_ENTRIES = 10000;
 const DEFAULT_EXPAND_MAX_DEPTH = 3;
 const DEFAULT_EXPAND_MAX_ENTRIES = 1000;
 

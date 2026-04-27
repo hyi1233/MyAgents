@@ -531,30 +531,54 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
         req_builder = req_builder.body(body.clone());
     }
     
-    // Send request with detailed error logging
+    // Send request with detailed error logging.
+    //
+    // Log severity is classified by error kind because localhost connections
+    // come and go with normal Sidecar lifecycle (Tab close → Sidecar killed,
+    // BackgroundCompletion finishes → Sidecar reaped, runtime restart, etc.).
+    // Connection / send-side failures during those windows are EXPECTED, not
+    // bugs — emitting them at ERROR drowns real issues in the unified log.
+    // Timeouts, in contrast, mean the Sidecar is alive but stuck — that IS a
+    // bug worth surfacing loudly.
     let response = req_builder.send().await.map_err(|e| {
         let mut err = format!("[proxy] Request failed: {}", e);
 
-        // Add detailed error information for debugging
-        if e.is_connect() {
+        let is_connect = e.is_connect();
+        let is_request = e.is_request();
+        let is_timeout = e.is_timeout();
+        let is_body = e.is_body();
+
+        if is_connect {
             err.push_str(" (Connection error - cannot establish connection)");
         }
-        if e.is_timeout() {
+        if is_timeout {
             err.push_str(" (Timeout error - request took too long)");
         }
-        if e.is_request() {
+        if is_request {
             err.push_str(" (Request error - invalid request)");
         }
-        if e.is_body() {
+        if is_body {
             err.push_str(" (Body error - failed to read response body)");
         }
-
-        // Try to get the source error
         if let Some(source) = e.source() {
             err.push_str(&format!(" | Source: {}", source));
         }
 
-        logger::error(&app, &err);
+        // Classify: lifecycle (WARN) vs genuine fault (ERROR).
+        // Connection refused / send-error to a localhost port → WARN: the
+        // peer Sidecar is gone, almost certainly because its owner released
+        // it. The renderer's `tauriClient::stopSseProxy` + Tab close already
+        // race against in-flight requests; this is the cleanup tail.
+        // Timeout → ERROR: Sidecar is alive (TCP open) but unresponsive,
+        // which means a hang or deadlock worth investigating.
+        let is_localhost = request.url.starts_with("http://127.0.0.1:")
+            || request.url.starts_with("http://localhost:");
+        let is_lifecycle_class = (is_connect || is_request) && !is_timeout;
+        if is_localhost && is_lifecycle_class {
+            logger::warn(&app, &err);
+        } else {
+            logger::error(&app, &err);
+        }
         e.to_string()
     })?;
     
@@ -637,7 +661,13 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
             }
         }
         StreamOutcome::Failed(err) => {
-            logger::error(&app, &err);
+            // Don't re-log here — `stream_or_spill_response_body` already
+            // emitted the fine-grained `[proxy] upstream stream error: …`
+            // at the appropriate level (warn for transient stream tear-down
+            // when the Sidecar is killed mid-response, which is the common
+            // case during Tab close / cron task end). A duplicate log line
+            // at ERROR was creating "WARN+ERROR same event" pairs that
+            // ate space and made real issues harder to find.
             return Err(err);
         }
     };
