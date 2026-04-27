@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.2] - 2026-04-27
+
+### Fixed
+
+- **统一日志中再降一层噪音**：v0.2.1 已经把 Rust 侧「关 tab 时还有飞行请求」一类的事件从 ERROR 降到 WARN，但渲染器侧还在把同一事件记成 ERROR，统一日志里两条信号互相矛盾。现在渲染器侧也按相同规则分类——生命周期事件 console.warn，真正的错误才 console.error。
+
+---
+
 ## [0.2.1] - 2026-04-27
 
 ### Fixed
