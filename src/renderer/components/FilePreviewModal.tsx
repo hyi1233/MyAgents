@@ -176,7 +176,21 @@ export default function FilePreviewModal({
 }: FilePreviewModalProps) {
     // Cmd+W dismissal: only register for fullscreen mode (z-[210]).
     // Embedded mode (split-panel) has no z-index overlay and is handled separately.
-    useCloseLayer(() => { if (embedded) return false; onClose(); return true; }, 210);
+    // Routes through `handleCloseRef` (latest-ref pattern) so Cmd+W respects the same
+    // `flushAndClose` autosave drain that the X button uses — without this, edits made
+    // after the last debounce fire would be silently lost on Cmd+W.
+    const handleCloseRef = useRef<() => void>(onClose);
+    useCloseLayer(() => { if (embedded) return false; handleCloseRef.current(); return true; }, 210);
+
+    // Mounted guard for async autosave callbacks. Project convention requires this on any
+    // setState that runs after `await`; without it, an in-flight save resolving after
+    // unmount produces React "set state on unmounted component" warnings and may shadow
+    // the next mount's state.
+    const isMountedRef = useRef(true);
+    useEffect(() => {
+        isMountedRef.current = true;
+        return () => { isMountedRef.current = false; };
+    }, []);
 
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -210,16 +224,20 @@ export default function FilePreviewModal({
     const inFlightPromiseRef = useRef<Promise<void> | null>(null); // track in-flight save for close coordination
     const savedIndicatorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // Sync content when prop changes (e.g., when file is reloaded externally)
+    // Sync content when prop changes (e.g., when file is reloaded externally OR when the
+    // viewer switches to a different file in-place). MUST depend on `path`/`name` too:
+    // without those, switching from `a.md` to `b.md` whose disk content happens to match
+    // the cached `editContent` would let a still-pending debounce write `a.md` edits into
+    // `b.md`'s path (pathRef updates synchronously below). Adding `path`/`name` to deps
+    // forces the timer-clear + state-reset on file switch even when content is identical.
     useEffect(() => {
-        // Cancel any pending auto-save — the external content is now the source of truth
         if (debounceTimerRef.current) {
             clearTimeout(debounceTimerRef.current);
             debounceTimerRef.current = null;
         }
         setEditContent(content);
         setSavedContent(content);
-    }, [content]);
+    }, [content, path, name]);
 
     // Large files: force plaintext to skip tokenization
     const effectiveMonacoLanguage = useMemo(() => {
@@ -277,22 +295,27 @@ export default function FilePreviewModal({
         const savePromise = (async () => {
             try {
                 await executeSave(contentToSave);
-                setSavedContent(contentToSave);
+                // Always update the ref (drives `flushAndClose`'s dirty check); only touch
+                // React state if still mounted to avoid setState-after-unmount warnings.
                 savedContentRef.current = contentToSave;
-                setAutoSaveStatus('saved');
+                if (isMountedRef.current) {
+                    setSavedContent(contentToSave);
+                    setAutoSaveStatus('saved');
+                    if (savedIndicatorTimerRef.current) clearTimeout(savedIndicatorTimerRef.current);
+                    savedIndicatorTimerRef.current = setTimeout(() => {
+                        if (isMountedRef.current) setAutoSaveStatus('idle');
+                    }, 2000);
+                }
                 onSavedRef.current?.();
-                // Clear "saved" indicator after 2s
-                if (savedIndicatorTimerRef.current) clearTimeout(savedIndicatorTimerRef.current);
-                savedIndicatorTimerRef.current = setTimeout(() => setAutoSaveStatus('idle'), 2000);
                 // After save completes, check if content changed during the save (user kept typing)
-                if (editContentRef.current !== contentToSave) {
+                if (isMountedRef.current && editContentRef.current !== contentToSave) {
                     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
                     debounceTimerRef.current = setTimeout(() => {
                         void doAutoSave(editContentRef.current);
                     }, AUTO_SAVE_DELAY);
                 }
             } catch {
-                setAutoSaveStatus('error');
+                if (isMountedRef.current) setAutoSaveStatus('error');
             } finally {
                 isSavingRef.current = false;
                 inFlightPromiseRef.current = null;
@@ -327,8 +350,13 @@ export default function FilePreviewModal({
         }
         // If there are STILL unsaved direct-edit changes after in-flight completed, save now
         if (isDirectEdit && editContentRef.current !== savedContentRef.current) {
+            const toSave = editContentRef.current;
             try {
-                await executeSave(editContentRef.current);
+                await executeSave(toSave);
+                // Update the dirty baseline so the unmount-cleanup effect below does NOT
+                // fire a second redundant save against the same content. Setting the ref
+                // (not React state) is sufficient because the component is about to unmount.
+                savedContentRef.current = toSave;
                 onSavedRef.current?.();
             } catch {
                 // Save failed on close — don't block the close
@@ -370,6 +398,10 @@ export default function FilePreviewModal({
             onClose();
         }
     }, [isDirectEdit, flushAndClose, onClose]);
+
+    // Keep the ref pointed at the latest handleClose so the Cmd+W layer (registered above
+    // at module-top, before handleClose existed) routes through the autosave-aware path.
+    handleCloseRef.current = handleClose;
 
 
     const handleOpenInFinder = useCallback(async () => {

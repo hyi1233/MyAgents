@@ -2510,25 +2510,6 @@ async function main() {
 
           const sessions = allSessions.filter(s => new Date(s.lastActiveAt).getTime() >= cutoff);
 
-          // Aggregate summary from metadata.stats (fast, no JSONL reads)
-          const totalSessions = sessions.length;
-          let messageCount = 0;
-          let totalInputTokens = 0;
-          let totalOutputTokens = 0;
-          let totalCacheReadTokens = 0;
-          let totalCacheCreationTokens = 0;
-
-          for (const s of sessions) {
-            const stats = s.stats;
-            if (stats) {
-              messageCount += stats.messageCount ?? 0;
-              totalInputTokens += stats.totalInputTokens ?? 0;
-              totalOutputTokens += stats.totalOutputTokens ?? 0;
-              totalCacheReadTokens += stats.totalCacheReadTokens ?? 0;
-              totalCacheCreationTokens += stats.totalCacheCreationTokens ?? 0;
-            }
-          }
-
           // Helper: convert ISO timestamp to local date string "YYYY-MM-DD"
           const toLocalDate = (isoStr: string): string => {
             const d = new Date(isoStr);
@@ -2538,13 +2519,23 @@ async function main() {
             return `${y}-${mo}-${day}`;
           };
 
-          // Cutoff as a YYYY-MM-DD string so we can do cheap string comparison against
-          // each message's local date below. Without this, sessions whose `lastActiveAt`
-          // is recent leak ALL of their historical messages into the daily chart — that
-          // was the cause of "selected 7 days but the chart shows 60+ bars".
+          // Cutoff as YYYY-MM-DD for cheap string comparison against each message's local
+          // date. Pre-2026-04 the summary numbers came from session-lifetime `s.stats` and
+          // ignored cutoff entirely — that produced "summary says 31.5M tokens, daily chart
+          // says 5M" mismatches because the summary leaked all historical totals from any
+          // recently-active session. Now ALL summary/daily/byModel aggregations are derived
+          // from the same in-range message walk so they stay consistent.
           const cutoffDateStr = toLocalDate(new Date(cutoff).toISOString());
 
-          // Single pass through messages: aggregate both daily + byModel
+          const totalSessions = sessions.length;
+          let messageCount = 0;
+          let totalInputTokens = 0;
+          let totalOutputTokens = 0;
+          let totalCacheReadTokens = 0;
+          let totalCacheCreationTokens = 0;
+
+          // Single pass through messages: aggregate summary + daily + byModel together so
+          // they're guaranteed to agree about what falls inside the range.
           const dailyMap: Record<string, { inputTokens: number; outputTokens: number; messageCount: number }> = {};
           const byModel: Record<string, {
             inputTokens: number;
@@ -2554,7 +2545,6 @@ async function main() {
             count: number;
           }> = {};
 
-          // Track the current user message date for daily bucketing
           for (const s of sessions) {
             const sessionData = getSessionData(s.id);
             if (!sessionData) continue;
@@ -2562,45 +2552,58 @@ async function main() {
             let lastUserDate = toLocalDate(s.createdAt); // fallback date for first assistant msg
 
             for (const msg of sessionData.messages) {
+              // Determine each message's local date so summary and chart agree on cutoff.
+              let msgDate: string;
               if (msg.role === 'user') {
-                // Use user message timestamp for the date of this conversation turn
-                lastUserDate = msg.timestamp ? toLocalDate(msg.timestamp) : lastUserDate;
-              } else if (msg.role === 'assistant' && msg.usage) {
-                // Daily aggregation: attribute tokens to the date of the preceding user message
-                const date = msg.timestamp ? toLocalDate(msg.timestamp) : lastUserDate;
-                // Honor the selected range — drop messages older than the cutoff so the
-                // chart shows exactly the active days within the window.
-                if (date < cutoffDateStr) continue;
-                if (!dailyMap[date]) {
-                  dailyMap[date] = { inputTokens: 0, outputTokens: 0, messageCount: 0 };
-                }
-                dailyMap[date].inputTokens += msg.usage.inputTokens ?? 0;
-                dailyMap[date].outputTokens += msg.usage.outputTokens ?? 0;
-                dailyMap[date].messageCount++;
+                msgDate = msg.timestamp ? toLocalDate(msg.timestamp) : lastUserDate;
+                lastUserDate = msgDate;
+              } else if (msg.role === 'assistant') {
+                msgDate = msg.timestamp ? toLocalDate(msg.timestamp) : lastUserDate;
+              } else {
+                continue;
+              }
+              if (msgDate < cutoffDateStr) continue;
 
-                // byModel aggregation
-                if (msg.usage.modelUsage) {
-                  for (const [model, mu] of Object.entries(msg.usage.modelUsage)) {
-                    if (!byModel[model]) {
-                      byModel[model] = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, count: 0 };
-                    }
-                    byModel[model].inputTokens += mu.inputTokens ?? 0;
-                    byModel[model].outputTokens += mu.outputTokens ?? 0;
-                    byModel[model].cacheReadTokens += mu.cacheReadTokens ?? 0;
-                    byModel[model].cacheCreationTokens += mu.cacheCreationTokens ?? 0;
-                    byModel[model].count++;
-                  }
-                } else {
-                  const model = msg.usage.model || 'unknown';
+              messageCount++;
+
+              if (msg.role !== 'assistant' || !msg.usage) continue;
+
+              const date = msgDate;
+              totalInputTokens += msg.usage.inputTokens ?? 0;
+              totalOutputTokens += msg.usage.outputTokens ?? 0;
+              totalCacheReadTokens += msg.usage.cacheReadTokens ?? 0;
+              totalCacheCreationTokens += msg.usage.cacheCreationTokens ?? 0;
+
+              // Daily aggregation
+              if (!dailyMap[date]) {
+                dailyMap[date] = { inputTokens: 0, outputTokens: 0, messageCount: 0 };
+              }
+              dailyMap[date].inputTokens += msg.usage.inputTokens ?? 0;
+              dailyMap[date].outputTokens += msg.usage.outputTokens ?? 0;
+              dailyMap[date].messageCount++;
+
+              // byModel aggregation
+              if (msg.usage.modelUsage) {
+                for (const [model, mu] of Object.entries(msg.usage.modelUsage)) {
                   if (!byModel[model]) {
                     byModel[model] = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, count: 0 };
                   }
-                  byModel[model].inputTokens += msg.usage.inputTokens ?? 0;
-                  byModel[model].outputTokens += msg.usage.outputTokens ?? 0;
-                  byModel[model].cacheReadTokens += msg.usage.cacheReadTokens ?? 0;
-                  byModel[model].cacheCreationTokens += msg.usage.cacheCreationTokens ?? 0;
+                  byModel[model].inputTokens += mu.inputTokens ?? 0;
+                  byModel[model].outputTokens += mu.outputTokens ?? 0;
+                  byModel[model].cacheReadTokens += mu.cacheReadTokens ?? 0;
+                  byModel[model].cacheCreationTokens += mu.cacheCreationTokens ?? 0;
                   byModel[model].count++;
                 }
+              } else {
+                const model = msg.usage.model || 'unknown';
+                if (!byModel[model]) {
+                  byModel[model] = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, count: 0 };
+                }
+                byModel[model].inputTokens += msg.usage.inputTokens ?? 0;
+                byModel[model].outputTokens += msg.usage.outputTokens ?? 0;
+                byModel[model].cacheReadTokens += msg.usage.cacheReadTokens ?? 0;
+                byModel[model].cacheCreationTokens += msg.usage.cacheCreationTokens ?? 0;
+                byModel[model].count++;
               }
             }
           }

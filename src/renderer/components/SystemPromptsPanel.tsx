@@ -679,8 +679,14 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                         agentDir={agentDir}
                         onClose={() => setTemplateDialogOpen(false)}
                         onApplied={() => {
-                            // Refresh CLAUDE.md content + rule file list so the panel reflects
-                            // the newly merged template files.
+                            // Force-switch to CLAUDE.md before reloading: today the dialog can
+                            // only be opened from the CLAUDE.md empty state, but `loadFileContent`
+                            // writes into the shared `content`/`editContent` state that's keyed
+                            // off `activeFile`. If a future entry point opens the dialog while a
+                            // rule tab is active, an unguarded reload would silently overwrite
+                            // the rule's content with CLAUDE.md text. Setting activeFile first
+                            // makes the load self-consistent.
+                            setActiveFile({ type: 'claude-md' });
                             void loadFileContent({ type: 'claude-md' });
                             void loadRuleFiles();
                             toastRef.current.success('模板已应用到当前工作区');

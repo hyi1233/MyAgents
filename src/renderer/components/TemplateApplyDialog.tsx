@@ -14,7 +14,7 @@
  *
  * Same-name files in the workspace are overwritten; everything else is preserved.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, AlertCircle, FilePlus, FileWarning, ArrowLeft } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -41,7 +41,23 @@ interface ApplyPreview {
 type Step = 'pick' | 'confirm';
 
 export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: TemplateApplyDialogProps) {
-    useCloseLayer(() => { onClose(); return true; }, 220);
+    // Block dismissal (Cmd+W / backdrop / Esc) while an apply is in flight — letting the
+    // component unmount mid-merge would invoke `onApplied` after unmount AND leave the
+    // user without feedback while files keep being written. `applyInFlightRef` is consulted
+    // by `handleClose` below.
+    const applyInFlightRef = useRef(false);
+    const isMountedRef = useRef(true);
+    useEffect(() => {
+        isMountedRef.current = true;
+        return () => { isMountedRef.current = false; };
+    }, []);
+
+    const handleClose = useCallback(() => {
+        if (applyInFlightRef.current) return; // ignore while applying
+        onClose();
+    }, [onClose]);
+
+    useCloseLayer(() => { handleClose(); return true; }, 220);
 
     const [step, setStep] = useState<Step>('pick');
     const [templates, setTemplates] = useState<WorkspaceTemplate[]>([...PRESET_TEMPLATES]);
@@ -56,7 +72,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
         void (async () => {
             try {
                 const userTemplates = await loadUserTemplates();
-                if (!cancelled) setTemplates([...PRESET_TEMPLATES, ...userTemplates]);
+                if (!cancelled && isMountedRef.current) setTemplates([...PRESET_TEMPLATES, ...userTemplates]);
             } catch (err) {
                 console.warn('[TemplateApply] Failed to load user templates:', err);
             }
@@ -66,55 +82,64 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
 
     const selectedTemplate = templates.find(t => t.id === selectedId) ?? null;
 
+    /** Build the invoke args object for both preview and apply commands. Single source of
+     *  truth for the bundled (`templateId`) vs user (`sourcePath`) branch. */
+    const buildInvokeArgs = useCallback((tpl: WorkspaceTemplate): Record<string, unknown> => {
+        const args: Record<string, unknown> = { destPath: agentDir };
+        if (tpl.isBuiltin) {
+            args.templateId = tpl.id;
+        } else if (tpl.path) {
+            args.sourcePath = tpl.path;
+        } else {
+            throw new Error('Template has no source path');
+        }
+        return args;
+    }, [agentDir]);
+
     /** Step 1 → 2: ask the backend which files would be overwritten. */
     const handleRequestApply = useCallback(async () => {
         if (!selectedTemplate) return;
         setLoading(true);
         setError(null);
         try {
-            const args: Record<string, unknown> = { destPath: agentDir };
-            if (selectedTemplate.isBuiltin) {
-                args.templateId = selectedTemplate.id;
-            } else if (selectedTemplate.path) {
-                args.sourcePath = selectedTemplate.path;
-            } else {
-                throw new Error('Template has no source path');
-            }
-            const result = await invoke<ApplyPreview>('cmd_template_apply_preview', args);
+            const result = await invoke<ApplyPreview>('cmd_template_apply_preview', buildInvokeArgs(selectedTemplate));
+            if (!isMountedRef.current) return;
             setPreview(result);
             setStep('confirm');
         } catch (err) {
-            setError(err instanceof Error ? err.message : String(err));
+            if (isMountedRef.current) setError(err instanceof Error ? err.message : String(err));
         } finally {
-            setLoading(false);
+            if (isMountedRef.current) setLoading(false);
         }
-    }, [selectedTemplate, agentDir]);
+    }, [selectedTemplate, buildInvokeArgs]);
 
-    /** Step 2: user confirmed — perform the merge. */
+    /** Step 2: user confirmed — perform the merge. Guarded against double-submit by
+     *  `applyInFlightRef` (synchronous, unlike the async `loading` state which doesn't
+     *  disable the button until the next render). */
     const handleConfirmApply = useCallback(async () => {
         if (!selectedTemplate) return;
+        if (applyInFlightRef.current) return;
+        applyInFlightRef.current = true;
         setLoading(true);
         setError(null);
         try {
-            const args: Record<string, unknown> = { destPath: agentDir };
-            if (selectedTemplate.isBuiltin) {
-                args.templateId = selectedTemplate.id;
-            } else if (selectedTemplate.path) {
-                args.sourcePath = selectedTemplate.path;
-            } else {
-                throw new Error('Template has no source path');
-            }
-            await invoke('cmd_apply_template_to_workspace', args);
+            await invoke('cmd_apply_template_to_workspace', buildInvokeArgs(selectedTemplate));
             onApplied?.();
+            // Don't gate `onClose` on mount — even if the parent unmounted us, calling
+            // onClose is a no-op on a stale handler.
             onClose();
         } catch (err) {
-            setError(err instanceof Error ? err.message : String(err));
-            setLoading(false);
+            if (isMountedRef.current) {
+                setError(err instanceof Error ? err.message : String(err));
+                setLoading(false);
+            }
+        } finally {
+            applyInFlightRef.current = false;
         }
-    }, [selectedTemplate, agentDir, onApplied, onClose]);
+    }, [selectedTemplate, buildInvokeArgs, onApplied, onClose]);
 
     return (
-        <OverlayBackdrop onClose={onClose} className="z-[220]">
+        <OverlayBackdrop onClose={handleClose} className="z-[220]">
             <div className="flex w-[560px] max-h-[78vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
@@ -135,8 +160,9 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                     </div>
                     <button
                         type="button"
-                        onClick={onClose}
-                        className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                        onClick={handleClose}
+                        disabled={loading}
+                        className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                         <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M18 6 6 18M6 6l12 12" />
@@ -229,7 +255,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                 <div className="flex items-center justify-end gap-2 border-t border-[var(--line)] px-6 py-3">
                     <button
                         type="button"
-                        onClick={onClose}
+                        onClick={handleClose}
                         disabled={loading}
                         className="rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-3 py-1.5 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
                     >

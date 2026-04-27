@@ -641,10 +641,8 @@ pub fn cmd_create_workspace_from_bundled_template<R: Runtime>(
     template_id: String,
     dest_path: String,
 ) -> Result<(), String> {
-    // Sanitize template_id: reject path separators and traversal components
-    if template_id.contains('/') || template_id.contains('\\') || template_id.contains("..") || template_id.is_empty() {
-        return Err("Invalid template ID".to_string());
-    }
+    // Sanitize template_id (single source of truth in `validate_template_id`).
+    validate_template_id(&template_id)?;
 
     let dst = PathBuf::from(&dest_path);
     if dst.exists() {
@@ -682,30 +680,61 @@ pub fn cmd_create_workspace_from_bundled_template<R: Runtime>(
     Err(format!("Template '{}' not found in bundled resources or local copies", template_id))
 }
 
+/// Validate a bundled template_id — rejects path separators, traversal, and empty IDs.
+/// Single source of truth so all template-using commands inherit the same rules.
+fn validate_template_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+    {
+        return Err("Invalid template ID".to_string());
+    }
+    Ok(())
+}
+
+/// Validate a workspace destination path for template apply. Reuses `validate_file_path`'s
+/// system/credential blacklist (so we can't accidentally write template files into `~/.ssh`,
+/// `/etc`, or other protected dirs) AND requires the path to exist as a real directory.
+/// Returns the resolved (`..`-free) absolute path so the caller uses a single canonical form.
+fn validate_workspace_dest(dest_path: &str) -> Result<PathBuf, String> {
+    let resolved = validate_file_path(dest_path)?;
+    if !resolved.exists() {
+        return Err(format!("Workspace does not exist: {}", dest_path));
+    }
+    if !resolved.is_dir() {
+        return Err(format!("Workspace path is not a directory: {}", dest_path));
+    }
+    Ok(resolved)
+}
+
 /// Resolve a template source directory from either a bundled template_id or a user
-/// template source_path. Used by preview + apply commands so callers don't duplicate
-/// the bundled-vs-user lookup logic.
+/// template source_path. Returns the CANONICAL path (symlinks resolved) — callers must
+/// use this exact path for any subsequent reads/copies, otherwise a TOCTOU window opens
+/// where an attacker could replace the validated source with a symlink to elsewhere
+/// between this validation and the later read.
 fn resolve_template_source<R: Runtime>(
     app_handle: &AppHandle<R>,
     template_id: Option<String>,
     source_path: Option<String>,
 ) -> Result<PathBuf, String> {
     if let Some(id) = template_id.as_deref() {
-        if id.contains('/') || id.contains('\\') || id.contains("..") || id.is_empty() {
-            return Err("Invalid template ID".to_string());
-        }
+        validate_template_id(id)?;
         let resource_dir = app_handle
             .path()
             .resource_dir()
             .map_err(|e| format!("Failed to get resource dir: {}", e))?;
         let bundled = resource_dir.join(id);
         if bundled.exists() && bundled.join("CLAUDE.md").exists() {
-            return Ok(bundled);
+            // Canonicalize so subsequent reads can't be redirected via symlink swap.
+            return bundled.canonicalize()
+                .map_err(|e| format!("Failed to resolve bundled template path: {}", e));
         }
         let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
         let local = home_dir.join(".myagents").join("projects").join(id);
         if local.exists() && local.join("CLAUDE.md").exists() {
-            return Ok(local);
+            return local.canonicalize()
+                .map_err(|e| format!("Failed to resolve local template path: {}", e));
         }
         return Err(format!("Bundled template '{}' not found", id));
     }
@@ -728,7 +757,9 @@ fn resolve_template_source<R: Runtime>(
         if !canon_src.starts_with(&canon_templates) {
             return Err("Source path must be inside ~/.myagents/templates/".to_string());
         }
-        return Ok(src);
+        // Return canonical path (not the original `src`) — closes the TOCTOU between
+        // validation and consumption, since the caller will read from canon_src directly.
+        return Ok(canon_src);
     }
     Err("Either template_id or source_path is required".to_string())
 }
@@ -777,13 +808,10 @@ pub fn cmd_template_apply_preview<R: Runtime>(
     source_path: Option<String>,
     dest_path: String,
 ) -> Result<TemplateApplyPreview, String> {
-    let dst = PathBuf::from(&dest_path);
-    if !dst.exists() {
-        return Err(format!("Workspace does not exist: {}", dest_path));
-    }
-    if !dst.is_dir() {
-        return Err(format!("Workspace path is not a directory: {}", dest_path));
-    }
+    // `validate_workspace_dest` forbids system/credential dirs (mirroring the
+    // file-read/write commands' blacklist) so a misbehaving renderer can't redirect a
+    // template apply at e.g. `~/.ssh` or `/etc`.
+    let dst = validate_workspace_dest(&dest_path)?;
     let src = resolve_template_source(&app_handle, template_id, source_path)?;
     let files = list_template_files_rel(&src)
         .map_err(|e| format!("Failed to walk template: {}", e))?;
@@ -813,13 +841,7 @@ pub fn cmd_apply_template_to_workspace<R: Runtime>(
     source_path: Option<String>,
     dest_path: String,
 ) -> Result<(), String> {
-    let dst = PathBuf::from(&dest_path);
-    if !dst.exists() {
-        return Err(format!("Workspace does not exist: {}", dest_path));
-    }
-    if !dst.is_dir() {
-        return Err(format!("Workspace path is not a directory: {}", dest_path));
-    }
+    let dst = validate_workspace_dest(&dest_path)?;
     let src = resolve_template_source(&app_handle, template_id, source_path)?;
     ulog_info!("[template] Merging template from {:?} into existing workspace {:?}", src, dst);
     merge_dir_recursive(&src, &dst)

@@ -307,13 +307,14 @@ export default function MonacoEditor({
         // Extend wordSeparators with CJK full-width punctuation so double-click in Chinese
         // text stops at `，` `。` etc. instead of swallowing whole paragraphs. Monaco's
         // default list only includes ASCII punctuation, which never appears mid-Chinese.
-        wordSeparators: '~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?，。！？；：""‘’「」『』（）【】《》、…—·',
+        wordSeparators: '~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?，。！？；：“”‘’「」『』（）【】《》、…—·',
     }), [readOnly]);
 
     // Wrapper class `monaco-editor-host` is targeted by index.css to add visual right
-    // padding inside Monaco's content area. Monaco's own `padding` option only supports
-    // top/bottom — for horizontal breathing room (and to keep text out from under the
-    // overlay vertical scrollbar) we pad via CSS on the inner `.view-lines`.
+    // padding on the wrapper itself; Monaco's `automaticLayout: true` watches the
+    // wrapper's content box via ResizeObserver and lays out the editor (and its overlay
+    // scrollbar) within the reduced area. Monaco's own `padding` option only supports
+    // top/bottom — wrapper padding is the supported workaround for horizontal padding.
     return (
         <div className={`monaco-editor-host relative h-full w-full overflow-hidden ${className}`}>
             <Editor
