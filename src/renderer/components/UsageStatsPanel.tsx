@@ -224,15 +224,23 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
 
     const chartHeight = 200;
     const chartPaddingTop = 16;
-    const chartPaddingBottom = 28;
     const chartPaddingX = 12;
-    const barAreaHeight = chartHeight - chartPaddingTop - chartPaddingBottom;
 
     // Use a fixed viewBox width; bars scale proportionally with xMidYMax meet
     const svgWidth = 800;
     const dayCount = daily.length;
     const barGap = Math.max(2, Math.min(8, (svgWidth - chartPaddingX * 2) / dayCount * 0.15));
     const barWidth = Math.max(4, ((svgWidth - chartPaddingX * 2) - (dayCount - 1) * barGap) / dayCount);
+
+    // X-axis label rotation — degrades gracefully when bars get tight:
+    //   • barSlot ≥ 26 (~7-day range): horizontal, anchor middle
+    //   • 16 ≤ barSlot < 26 (~30-day range): tilt -45°, anchor end
+    //   • barSlot < 16 (~60-day range): vertical -90°, anchor end
+    // Bottom padding grows with rotation so rotated labels don't get clipped.
+    const barSlot = barWidth + barGap;
+    const labelAngle = barSlot >= 26 ? 0 : barSlot >= 16 ? -45 : -90;
+    const chartPaddingBottom = labelAngle === 0 ? 28 : labelAngle === -45 ? 44 : 56;
+    const barAreaHeight = chartHeight - chartPaddingTop - chartPaddingBottom;
 
     return (
         <div>
@@ -299,11 +307,15 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
                                     pointerEvents="none"
                                     style={{ transition: 'opacity 0.15s' }}
                                 />
-                                {/* X-axis label */}
+                                {/* X-axis label — rotates when bars get crowded.
+                                    Pivot is the bar's bottom-center; with `textAnchor="end"`
+                                    the rotated label hangs down-left from that point, which
+                                    reads naturally for both -45° tilt and -90° vertical. */}
                                 <text
                                     x={x + barWidth / 2}
                                     y={chartHeight - 6}
-                                    textAnchor="middle"
+                                    textAnchor={labelAngle === 0 ? 'middle' : 'end'}
+                                    transform={labelAngle ? `rotate(${labelAngle} ${x + barWidth / 2} ${chartHeight - 6})` : undefined}
                                     fill="var(--ink-muted)"
                                     fontSize="9"
                                     fontFamily="inherit"

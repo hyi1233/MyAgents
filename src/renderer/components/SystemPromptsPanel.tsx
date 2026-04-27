@@ -4,7 +4,7 @@
  *
  * Uses Tab-scoped API when in Tab context, falls back to global API otherwise.
  */
-import { Save, Edit2, X, Plus, FileText, AlertCircle, Loader2, Trash2 } from 'lucide-react';
+import { Save, Edit2, X, Plus, FileText, AlertCircle, Loader2, Trash2, Sparkles, FolderArchive } from 'lucide-react';
 import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useMemo, useRef } from 'react';
 
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost, apiPutJson as globalApiPut, apiDelete as globalApiDelete } from '@/api/apiFetch';
@@ -13,9 +13,14 @@ import { useToast } from '@/components/Toast';
 import Markdown from '@/components/Markdown';
 import MonacoEditor from '@/components/MonacoEditor';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import TemplateApplyDialog from '@/components/TemplateApplyDialog';
 
 interface SystemPromptsPanelProps {
     agentDir: string;
+    /** Optional callback for the empty-state "智能生成 (/init)" card. Sends `/init` to the
+     *  current Tab's chat session. Caller is expected to also close the settings overlay
+     *  so the user can see the AI generation. If omitted, the card is hidden. */
+    onRequestInit?: () => void;
 }
 
 export interface SystemPromptsPanelRef {
@@ -41,7 +46,7 @@ interface RuleContentResponse {
 }
 
 const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelProps>(
-    function SystemPromptsPanel({ agentDir }, ref) {
+    function SystemPromptsPanel({ agentDir, onRequestInit }, ref) {
         const toast = useToast();
         // Stabilize toast reference to avoid unnecessary effect re-runs (project convention)
         const toastRef = useRef(toast);
@@ -93,6 +98,9 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
 
         // Delete confirmation
         const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+
+        // Empty-state "从模板库添加" dialog
+        const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
 
         // Double-submit guard for inline inputs (Enter + blur race)
         const submittingRef = useRef(false);
@@ -549,25 +557,87 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                             <Loader2 className="h-8 w-8 animate-spin text-[var(--ink-muted)]" />
                         </div>
                     ) : !exists && !isEditing ? (
-                        <div className="flex h-full flex-col items-center justify-center gap-4 p-6">
-                            <FileText className="h-16 w-16 text-[var(--ink-muted)]/30" />
-                            <div className="text-center">
-                                <p className="text-sm font-medium text-[var(--ink-muted)]">
-                                    {activeFilename} 文件不存在
-                                </p>
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    点击「编辑」按钮创建内容
-                                </p>
+                        isClaudeMd ? (
+                            // CLAUDE.md empty state — 3 visually identical cards (matches the
+                            // SkillCard treatment: paper-elevated bg, rounded-xl, hover:shadow-sm,
+                            // no border). Primary action is signaled by the "推荐" pill, not by
+                            // a different card surface.
+                            <div className="flex h-full flex-col items-center justify-center gap-6 p-6">
+                                <div className="text-center">
+                                    <p className="text-lg font-semibold text-[var(--ink)]">
+                                        还没有 CLAUDE.md
+                                    </p>
+                                    <p className="mt-1.5 text-sm text-[var(--ink-muted)]">
+                                        系统提示词决定 Agent 在工作区里的行为风格——选一种方式开始：
+                                    </p>
+                                </div>
+                                <div className="flex w-full max-w-xl flex-col gap-3">
+                                    {onRequestInit && (
+                                        <button
+                                            type="button"
+                                            onClick={onRequestInit}
+                                            className="group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-4 py-3.5 text-left transition-shadow hover:shadow-sm"
+                                        >
+                                            <div className="flex items-center gap-2">
+                                                <Sparkles className="h-4 w-4 shrink-0 text-amber-500" />
+                                                <h4 className="text-[15px] font-semibold text-[var(--ink)]">智能生成</h4>
+                                                <span className="rounded-full bg-[var(--accent-warm-subtle)] px-2 py-0.5 text-[11px] font-medium text-[var(--accent)]">推荐</span>
+                                            </div>
+                                            <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                                                AI 分析当前项目结构，自动生成贴合的 CLAUDE.md（运行 <code className="rounded bg-[var(--paper-inset)] px-1 text-[12px]">/init</code>）
+                                            </p>
+                                        </button>
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => setTemplateDialogOpen(true)}
+                                        className="group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-4 py-3.5 text-left transition-shadow hover:shadow-sm"
+                                    >
+                                        <div className="flex items-center gap-2">
+                                            <FolderArchive className="h-4 w-4 shrink-0 text-amber-500" />
+                                            <h4 className="text-[15px] font-semibold text-[var(--ink)]">从模板库添加</h4>
+                                        </div>
+                                        <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                                            挑一个内置或自定义的 Agent 模板，合并到当前工作区（同名文件覆盖）
+                                        </p>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleEdit}
+                                        className="group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-4 py-3.5 text-left transition-shadow hover:shadow-sm"
+                                    >
+                                        <div className="flex items-center gap-2">
+                                            <Edit2 className="h-4 w-4 shrink-0 text-amber-500" />
+                                            <h4 className="text-[15px] font-semibold text-[var(--ink)]">手动创建</h4>
+                                        </div>
+                                        <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                                            自己写一份 CLAUDE.md，进入编辑器从空白开始
+                                        </p>
+                                    </button>
+                                </div>
                             </div>
-                            <button
-                                type="button"
-                                onClick={handleEdit}
-                                className="mt-2 flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
-                            >
-                                <Edit2 className="h-4 w-4" />
-                                创建 {activeFilename}
-                            </button>
-                        </div>
+                        ) : (
+                            // Rule file empty state — single create button (no /init or template options)
+                            <div className="flex h-full flex-col items-center justify-center gap-4 p-6">
+                                <FileText className="h-16 w-16 text-[var(--ink-muted)]/30" />
+                                <div className="text-center">
+                                    <p className="text-sm font-medium text-[var(--ink-muted)]">
+                                        {activeFilename} 文件不存在
+                                    </p>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                        点击「编辑」按钮创建内容
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={handleEdit}
+                                    className="mt-2 flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
+                                >
+                                    <Edit2 className="h-4 w-4" />
+                                    创建 {activeFilename}
+                                </button>
+                            </div>
+                        )
                     ) : isEditing ? (
                         <div className="h-full bg-[var(--paper)]">
                             <MonacoEditor
@@ -600,6 +670,27 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                         confirmVariant="danger"
                         onConfirm={handleDeleteConfirm}
                         onCancel={() => setDeleteTarget(null)}
+                    />
+                )}
+
+                {/* Template apply dialog (CLAUDE.md empty state → "从模板库添加") */}
+                {templateDialogOpen && (
+                    <TemplateApplyDialog
+                        agentDir={agentDir}
+                        onClose={() => setTemplateDialogOpen(false)}
+                        onApplied={() => {
+                            // Force-switch to CLAUDE.md before reloading: today the dialog can
+                            // only be opened from the CLAUDE.md empty state, but `loadFileContent`
+                            // writes into the shared `content`/`editContent` state that's keyed
+                            // off `activeFile`. If a future entry point opens the dialog while a
+                            // rule tab is active, an unguarded reload would silently overwrite
+                            // the rule's content with CLAUDE.md text. Setting activeFile first
+                            // makes the load self-consistent.
+                            setActiveFile({ type: 'claude-md' });
+                            void loadFileContent({ type: 'claude-md' });
+                            void loadRuleFiles();
+                            toastRef.current.success('模板已应用到当前工作区');
+                        }}
                     />
                 )}
             </div>

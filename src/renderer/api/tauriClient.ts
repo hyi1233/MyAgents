@@ -439,7 +439,27 @@ export async function proxyFetch(
             headers: result.headers,
         });
     } catch (error) {
-        console.error('[proxyFetch] Error:', error);
+        // Classify lifecycle vs genuine fault — mirrors the Rust side
+        // (sse_proxy.rs `proxy_http_request`), which already downgrades
+        // localhost connect/send-class errors from ERROR to WARN. Without
+        // this symmetric classification on the renderer side, every Tab
+        // close / Sidecar replace produces a "REACT ERROR" line in the
+        // unified log even though the matching Rust line is WARN, undoing
+        // the noise reduction. The substring match leans on reqwest's
+        // stable error format ("error sending request for url ..."),
+        // which is what surfaces here via Tauri invoke's error
+        // serialization.
+        const msg = error instanceof Error ? error.message : String(error);
+        const isLifecycleClass =
+            msg.includes('error sending request') ||
+            msg.includes('Connection refused') ||
+            msg.includes('Connection reset') ||
+            msg.includes('SendRequest');
+        if (isLifecycleClass) {
+            console.warn('[proxyFetch] (lifecycle) Sidecar gone:', msg);
+        } else {
+            console.error('[proxyFetch] Error:', error);
+        }
         throw error;
     }
 }

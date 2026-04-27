@@ -999,3 +999,21 @@ code {
  * and emits build-time warnings when it sees the literal in a static
  * stylesheet. Runtime injection keeps the build clean.
  */
+
+/*
+ * Monaco editor — horizontal breathing room.
+ *
+ * Monaco's `padding` config only supports top/bottom. We pad the wrapper element
+ * instead; Monaco's `automaticLayout: true` watches the wrapper's size via a
+ * ResizeObserver and re-lays out within the reduced content box. Result: the
+ * editor surface (including its overlay scrollbar) sits inset from the modal
+ * edge, leaving a clean gutter on the right.
+ *
+ * Scoped to `.monaco-editor-host` so other Monaco mounts (if any) are unaffected.
+ * Note: this can't fully prevent text from sliding under the overlay vertical
+ * scrollbar within Monaco's own viewport — that's a Monaco limitation. The padding
+ * here addresses the dominant complaint (text touching the modal/panel boundary).
+ */
+.monaco-editor-host {
+  padding-right: 16px;
+}

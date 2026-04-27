@@ -1898,6 +1898,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const handleSendMessageRef = useRef(handleSendMessage);
   handleSendMessageRef.current = handleSendMessage;
 
+  // Triggered from the SystemPromptsPanel empty state ("智能生成" card). Closes the
+  // workspace settings overlay and dispatches `/init` to the current Tab so the user
+  // sees the Claude Code SDK builtin slash command run in the chat surface.
+  const handleRequestInitFromSettings = useCallback(() => {
+    setShowWorkspaceConfig(false);
+    setWorkspaceConfigInitialTab(undefined);
+    void handleSendMessageRef.current('/init');
+  }, []);
+
   // Cancel a queued message and restore its text (and images if any) to the input box
   const handleCancelQueued = useCallback(async (queueId: string) => {
     // Snapshot the queued message info before it's removed (for image restore)
@@ -3053,6 +3062,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           }}
           refreshKey={workspaceRefreshKey}
           initialTab={workspaceConfigInitialTab}
+          onRequestInit={handleRequestInitFromSettings}
         />
       )}
 

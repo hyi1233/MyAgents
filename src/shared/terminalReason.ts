@@ -93,19 +93,26 @@ const MAP: Record<TerminalReason, TerminalReasonInfo> = {
 
 /**
  * 解析 SDK `terminal_reason`。对未知值做兜底，避免 SDK 扩展枚举时前端 crash。
- * 返回 `null` 表示该原因无需展示（`completed` / `aborted_streaming` / 字段缺失）。
+ * 返回 `null` 表示该原因无需展示（`completed` / `aborted_*` / 字段缺失）。
  *
  * Banner 抑制清单：
  * - `completed` — 正常结束
- * - `aborted_streaming` — 绝大多数情况是用户主动点停止 / 配置变更触发 abort /
- *   Tab-IM 会话接管重启，都是用户的预期行为或系统内部状态变化，不应该打扰。
+ * - `aborted_*`（`aborted_streaming` / `aborted_tools` / 任何未来新增的 `aborted_xxx`）
+ *   — 都是同一个 abort 信号，只是命中时机不同（一个在文本流式阶段，一个在工具
+ *   调用阶段）。触发源永远是三类：用户主动点停止 / 配置变更触发 session 重启 /
+ *   Tab-IM 会话接管重启。三类都是用户预期或系统内部状态变化，不应打扰。消息流
+ *   里已有"已停止"的内联反馈（红字 abort marker），banner 是冗余二次提示。
+ *
+ *   用 `startsWith('aborted_')` 而不是逐条罗列 — 未来 SDK 加 `aborted_init` 之类
+ *   也自动覆盖，跟"对称抑制"的设计意图一致。
+ *
  *   需要排查时看 unified logs 里的 `[agent][terminal_reason]` 行（agent-session.ts
  *   在每次非 completed 的 result 消息上都会记一行）。
  */
 export function describeTerminalReason(reason: unknown): TerminalReasonInfo | null {
   if (typeof reason !== 'string' || reason.length === 0) return null;
   if (reason === 'completed') return null;
-  if (reason === 'aborted_streaming') return null;
+  if (reason.startsWith('aborted_')) return null;
   const info = MAP[reason as TerminalReason];
   if (info) return info;
   // 未知 reason — 返回通用占位，避免前端 switch 穷举
