@@ -32,6 +32,10 @@ interface WorkspaceConfigPanelProps {
     refreshKey?: number;
     /** Initial tab to show when opening */
     initialTab?: Tab;
+    /** Called when the user clicks "智能生成" in the system-prompts empty state. The
+     *  parent (Chat) is expected to close this overlay and dispatch `/init` to its
+     *  current Tab session. Omit to hide the action. */
+    onRequestInit?: () => void;
 }
 
 export type Tab = 'general' | 'system-prompts' | 'introduction' | 'skills' | 'agent';
@@ -48,7 +52,7 @@ const TAB_ITEMS: { key: Tab; label: string }[] = [
     { key: 'skills', label: '技能 Skills' },
 ];
 
-export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0, initialTab }: WorkspaceConfigPanelProps) {
+export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0, initialTab, onRequestInit }: WorkspaceConfigPanelProps) {
     useCloseLayer(() => { onClose(); return true; }, 200);
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -249,7 +253,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                                 <WorkspaceGeneralTab agentDir={agentDir} />
                             )}
                             {activeTab === 'system-prompts' && (
-                                <SystemPromptsPanel ref={systemPromptsRef} agentDir={agentDir} />
+                                <SystemPromptsPanel ref={systemPromptsRef} agentDir={agentDir} onRequestInit={onRequestInit} />
                             )}
                             {activeTab === 'introduction' && (
                                 <IntroductionPanel ref={introductionRef} agentDir={agentDir} />

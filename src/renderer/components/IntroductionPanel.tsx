@@ -201,24 +201,32 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
               <Loader2 className="h-8 w-8 animate-spin text-[var(--ink-muted)]" />
             </div>
           ) : !exists && !isEditing ? (
-            <div className="flex h-full flex-col items-center justify-center gap-4 p-6">
-              <FileText className="h-16 w-16 text-[var(--ink-muted)]/30" />
+            // Mirrors the SystemPromptsPanel CLAUDE.md empty state — single "手动创建"
+            // card here since INTRODUCTION.md has no AI-generation or template paths.
+            <div className="flex h-full flex-col items-center justify-center gap-6 p-6">
               <div className="text-center">
-                <p className="text-sm font-medium text-[var(--ink-muted)]">
+                <p className="text-lg font-semibold text-[var(--ink)]">
                   暂无使用指南
                 </p>
-                <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                  创建 INTRODUCTION.md 为你的 Agent 编写使用说明，用户打开新对话时将看到此内容
+                <p className="mt-1.5 text-sm text-[var(--ink-muted)]">
+                  使用指南是用户打开 Agent 时看到的欢迎页——告诉他们这个 Agent 能做什么。
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={handleCreate}
-                className="mt-2 flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
-              >
-                <Edit2 className="h-4 w-4" />
-                创建使用指南
-              </button>
+              <div className="flex w-full max-w-xl flex-col gap-3">
+                <button
+                  type="button"
+                  onClick={handleCreate}
+                  className="group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-4 py-3.5 text-left transition-shadow hover:shadow-sm"
+                >
+                  <div className="flex items-center gap-2">
+                    <Edit2 className="h-4 w-4 shrink-0 text-amber-500" />
+                    <h4 className="text-[15px] font-semibold text-[var(--ink)]">手动创建</h4>
+                  </div>
+                  <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                    自己写一份 INTRODUCTION.md，进入编辑器从空白开始
+                  </p>
+                </button>
+              </div>
             </div>
           ) : isEditing ? (
             <div className="h-full bg-[var(--paper)]">

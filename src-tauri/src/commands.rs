@@ -682,6 +682,151 @@ pub fn cmd_create_workspace_from_bundled_template<R: Runtime>(
     Err(format!("Template '{}' not found in bundled resources or local copies", template_id))
 }
 
+/// Resolve a template source directory from either a bundled template_id or a user
+/// template source_path. Used by preview + apply commands so callers don't duplicate
+/// the bundled-vs-user lookup logic.
+fn resolve_template_source<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    template_id: Option<String>,
+    source_path: Option<String>,
+) -> Result<PathBuf, String> {
+    if let Some(id) = template_id.as_deref() {
+        if id.contains('/') || id.contains('\\') || id.contains("..") || id.is_empty() {
+            return Err("Invalid template ID".to_string());
+        }
+        let resource_dir = app_handle
+            .path()
+            .resource_dir()
+            .map_err(|e| format!("Failed to get resource dir: {}", e))?;
+        let bundled = resource_dir.join(id);
+        if bundled.exists() && bundled.join("CLAUDE.md").exists() {
+            return Ok(bundled);
+        }
+        let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
+        let local = home_dir.join(".myagents").join("projects").join(id);
+        if local.exists() && local.join("CLAUDE.md").exists() {
+            return Ok(local);
+        }
+        return Err(format!("Bundled template '{}' not found", id));
+    }
+    if let Some(p) = source_path.as_deref() {
+        let src = PathBuf::from(p);
+        if !src.exists() {
+            return Err(format!("Template source not found: {}", p));
+        }
+        let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
+        let templates_dir = home_dir.join(".myagents").join("templates");
+        if !templates_dir.exists() {
+            return Err("Templates directory does not exist".to_string());
+        }
+        let canon_templates = templates_dir
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve templates dir: {}", e))?;
+        let canon_src = src
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve source path: {}", e))?;
+        if !canon_src.starts_with(&canon_templates) {
+            return Err("Source path must be inside ~/.myagents/templates/".to_string());
+        }
+        return Ok(src);
+    }
+    Err("Either template_id or source_path is required".to_string())
+}
+
+/// Walk a template directory and collect relative file paths (skipping .git / node_modules /
+/// symlinks). Used by the preview command to compute overwrite vs add classifications.
+fn list_template_files_rel(src: &Path) -> std::io::Result<Vec<PathBuf>> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name == ".git" || name == "node_modules" {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let p = entry.path();
+            if file_type.is_dir() {
+                walk(root, &p, out)?;
+            } else if let Ok(rel) = p.strip_prefix(root) {
+                out.push(rel.to_path_buf());
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(src, src, &mut out)?;
+    Ok(out)
+}
+
+#[derive(serde::Serialize)]
+pub struct TemplateApplyPreview {
+    pub overwrite: Vec<String>,
+    pub add: Vec<String>,
+}
+
+/// Command: Preview which files a template would overwrite vs add when applied to an
+/// existing workspace. Used to drive the confirmation UI before the destructive merge.
+/// Either `template_id` (bundled) or `source_path` (user template) must be provided.
+#[tauri::command]
+pub fn cmd_template_apply_preview<R: Runtime>(
+    app_handle: AppHandle<R>,
+    template_id: Option<String>,
+    source_path: Option<String>,
+    dest_path: String,
+) -> Result<TemplateApplyPreview, String> {
+    let dst = PathBuf::from(&dest_path);
+    if !dst.exists() {
+        return Err(format!("Workspace does not exist: {}", dest_path));
+    }
+    if !dst.is_dir() {
+        return Err(format!("Workspace path is not a directory: {}", dest_path));
+    }
+    let src = resolve_template_source(&app_handle, template_id, source_path)?;
+    let files = list_template_files_rel(&src)
+        .map_err(|e| format!("Failed to walk template: {}", e))?;
+    let mut overwrite = Vec::new();
+    let mut add = Vec::new();
+    for rel in files {
+        let target = dst.join(&rel);
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if target.exists() {
+            overwrite.push(rel_str);
+        } else {
+            add.push(rel_str);
+        }
+    }
+    overwrite.sort();
+    add.sort();
+    Ok(TemplateApplyPreview { overwrite, add })
+}
+
+/// Command: Apply a template to an EXISTING workspace by merging files (same-name overwrite,
+/// other files preserved). This is the destructive counterpart to `cmd_template_apply_preview`
+/// — callers should always preview + confirm with the user before invoking apply.
+#[tauri::command]
+pub fn cmd_apply_template_to_workspace<R: Runtime>(
+    app_handle: AppHandle<R>,
+    template_id: Option<String>,
+    source_path: Option<String>,
+    dest_path: String,
+) -> Result<(), String> {
+    let dst = PathBuf::from(&dest_path);
+    if !dst.exists() {
+        return Err(format!("Workspace does not exist: {}", dest_path));
+    }
+    if !dst.is_dir() {
+        return Err(format!("Workspace path is not a directory: {}", dest_path));
+    }
+    let src = resolve_template_source(&app_handle, template_id, source_path)?;
+    ulog_info!("[template] Merging template from {:?} into existing workspace {:?}", src, dst);
+    merge_dir_recursive(&src, &dst)
+        .map_err(|e| format!("Failed to apply template: {}", e))?;
+    Ok(())
+}
+
 /// Command: Copy a local folder into the templates library (~/.myagents/templates/<name>/).
 /// Returns the destination path.
 #[tauri::command]

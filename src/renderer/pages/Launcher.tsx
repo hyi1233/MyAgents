@@ -518,6 +518,28 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     }, []);
     const handleCloseAgentOverlay = useCallback(() => setAgentOverlay(null), []);
 
+    // SystemPromptsPanel "智能生成" → close the overlay and launch the workspace into
+    // a Chat tab with `/init` as the initial message. Reuses the same Launcher-wide
+    // provider/model/permission selection that the brand-section send uses.
+    const handleRequestInitFromAgentOverlay = useCallback(() => {
+        if (!agentOverlay) return;
+        const project = projects.find(p => p.path === agentOverlay.workspacePath);
+        if (!project) return;
+        const effectiveProvider = launcherProvider ?? providers[0];
+        if (!effectiveProvider) {
+            toastRef.current.error('没有可用的 Provider，请先在设置中配置');
+            return;
+        }
+        setAgentOverlay(null);
+        const initialMessage: InitialMessage = {
+            text: '/init',
+            permissionMode: launcherPermissionMode,
+            model: launcherSelectedModel,
+            providerId: effectiveProvider.id,
+        };
+        onLaunchProject(project, effectiveProvider, undefined, initialMessage);
+    }, [agentOverlay, projects, launcherProvider, providers, launcherPermissionMode, launcherSelectedModel, onLaunchProject]);
+
     return (
         <div className="flex h-full flex-col overflow-hidden bg-[var(--paper)] text-[var(--ink)]">
             {/* Path Input Dialog (browser dev mode) */}
@@ -709,6 +731,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     agentDir={agentOverlay.workspacePath}
                     onClose={handleCloseAgentOverlay}
                     initialTab={agentOverlay.initialTab}
+                    onRequestInit={handleRequestInitFromAgentOverlay}
                 />
             )}
         </div>
