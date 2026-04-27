@@ -560,7 +560,7 @@ installer.ts         — 扫描 SKILL.md / marketplace.json → InstallAnalysis
 | 用户名 | `USER` | `USERNAME` |
 | 临时目录 | `TMPDIR` | `TEMP` / `TMP` |
 
-详见 `platforms/windows.md` / `platforms/linux.md`。
+详见 `tech_docs/windows_platform.md` / `guides/linux_build_guide.md`。
 
 ---
 
@@ -684,10 +684,10 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 - [`canUseTool` 回调指南](./tech_docs/sdk_canUseTool_guide.md) — 人工干预工具权限的实现要点
 - [自定义 Tools 指南](./tech_docs/sdk_custom_tools_guide.md) — `createSdkMcpServer` + `tool` 用法、当前 SDK 工具清单
 
-### 平台
-- [Windows 平台适配](./platforms/windows.md)
-- [Linux 平台适配](./platforms/linux.md)
-- [构建问题排查](./platforms/build_troubleshooting.md) — Windows 构建 / CSP / Resources 缓存 / 代理
+### 平台与构建
+- [Windows 编码约束](./tech_docs/windows_platform.md) — 路径前缀 / 进程 / 环境变量 / CSP（写代码时查）
+- [Linux 构建与分发](./guides/linux_build_guide.md) — AppImage / deb / 支持矩阵
+- [构建问题排查](./guides/build_troubleshooting.md) — Windows 构建 / CSP / Resources 缓存 / 代理
 
 ### 前端
 - [设计系统](./DESIGN.md) — Token / 组件 / 页面规范
@@ -695,6 +695,3 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 
 ### CLI
 - [CLI 架构](./tech_docs/cli_architecture.md) — 自配置 CLI 设计、版本门控、Admin API、PATH 注入
-
-### 决策记录（ADR）
-- [Logger 选型](./decisions/logger_library.md) — 不替换为 pino / tracing 的决策依据

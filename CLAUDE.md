@@ -62,8 +62,9 @@
 | 三方供应商 / OpenAI Bridge | `tech_docs/third_party_providers.md` |
 | 系统代理 / SOCKS5 桥接 | `tech_docs/proxy_config.md` |
 | 统一日志 | `tech_docs/unified_logging.md` |
-| Windows / Linux 平台 | `platforms/windows.md` / `platforms/linux.md` |
-| 构建问题排查 | `platforms/build_troubleshooting.md` |
+| Windows 编码约束（路径前缀 / 进程 / CSP） | `tech_docs/windows_platform.md` |
+| Linux 构建与分发 | `guides/linux_build_guide.md` |
+| 构建问题排查 | `guides/build_troubleshooting.md` |
 | 自动更新机制 | `tech_docs/auto_update.md` |
 | SDK `canUseTool` / 工具权限回调 | `tech_docs/sdk_canUseTool_guide.md` |
 | SDK 自定义 Tool / `createSdkMcpServer` | `tech_docs/sdk_custom_tools_guide.md` |
