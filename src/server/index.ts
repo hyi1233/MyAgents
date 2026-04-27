@@ -2538,6 +2538,12 @@ async function main() {
             return `${y}-${mo}-${day}`;
           };
 
+          // Cutoff as a YYYY-MM-DD string so we can do cheap string comparison against
+          // each message's local date below. Without this, sessions whose `lastActiveAt`
+          // is recent leak ALL of their historical messages into the daily chart — that
+          // was the cause of "selected 7 days but the chart shows 60+ bars".
+          const cutoffDateStr = toLocalDate(new Date(cutoff).toISOString());
+
           // Single pass through messages: aggregate both daily + byModel
           const dailyMap: Record<string, { inputTokens: number; outputTokens: number; messageCount: number }> = {};
           const byModel: Record<string, {
@@ -2562,6 +2568,9 @@ async function main() {
               } else if (msg.role === 'assistant' && msg.usage) {
                 // Daily aggregation: attribute tokens to the date of the preceding user message
                 const date = msg.timestamp ? toLocalDate(msg.timestamp) : lastUserDate;
+                // Honor the selected range — drop messages older than the cutoff so the
+                // chart shows exactly the active days within the window.
+                if (date < cutoffDateStr) continue;
                 if (!dailyMap[date]) {
                   dailyMap[date] = { inputTokens: 0, outputTokens: 0, messageCount: 0 };
                 }
