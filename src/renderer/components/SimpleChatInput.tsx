@@ -16,6 +16,7 @@ import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../sh
 import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
+import { stripMacFunctionKeys } from '@/utils/macFunctionKeyFilter';
 import { isProviderAvailable } from '@/config/configService';
 import { modelSupportsModality } from '@/config/services/providerService';
 import RuntimeSelector from '@/components/RuntimeSelector';
@@ -985,7 +986,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
   // Handle text input change (detect @ and / and backspace)
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newValue = e.target.value;
+    // Strip macOS function-key private-use codepoints (-) that
+    // WebKit leaks into the value when an arrow key is pressed at the
+    // textarea boundary. See utils/macFunctionKeyFilter.ts.
+    const newValue = stripMacFunctionKeys(e.target.value);
     const cursorPos = e.target.selectionStart;
 
     // Track current state locally to avoid stale closure issues
