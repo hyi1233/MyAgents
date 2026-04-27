@@ -53,8 +53,8 @@ src-tauri/target/
 src-tauri/binaries/
 src-tauri/resources/server-dist.js
 src-tauri/resources/server-dist.js.map
-src-tauri/resources/plugin-bridge-dist.js
-src-tauri/resources/plugin-bridge-dist.js.map
+src-tauri/resources/plugin-bridge-dist.mjs
+src-tauri/resources/plugin-bridge-dist.mjs.map
 src-tauri/resources/claude-agent-sdk
 src-tauri/resources/cli/myagents.js
 src-tauri/resources/cli/myagents.cmd
